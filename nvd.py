@@ -514,7 +514,6 @@ def main():
             if len(cve_info) <= 0:
                 continue
             cve=cve_info[0]
-            print(cve)
             upsert_in_folder(cve)
             if has_exploit(cve)==True:
                 upsert_in_folder(cve)
