@@ -1,11 +1,13 @@
 # Low Hanging Vulns
 
+![Telegram Logo](tg.png)
+
 Yet another automated monitor for **Critical** and **High** severity **Web** vulnerabilities published at [NVD (National Vulnerability Database)](https://nvd.nist.gov/).
 
 ## Features
 - **Updated every 6 hours**
 - **Web Vulnerability Focus**: Filters vulnerabilities to include only:
-  - High and Critical severity.
+  - **High** and **Critical** severity.
   - Low attack complexity.
   - Exploitable via network
 - **Automated Monitoring**: Uses GitHub Actions to monitor and fetch data.
