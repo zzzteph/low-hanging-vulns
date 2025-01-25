@@ -30,6 +30,9 @@ def format_cve_for_telegram(cve):
     if has_exploit(cve)==True:
         message+=f'#exploit '
 
+    if "wordpress" in description.lower():
+        message+=f'#Wordpress '
+
     message+=f'#{base_severity.lower()} '
 
     for cwe in cve['weakness']:
@@ -151,6 +154,8 @@ def convert_to_markdown(data):
     for cwe in data['weakness']:
         if map_cwe_tags(cwe)!=False:
             markdown+=f'![](https://img.shields.io/static/v1?label=CWE&message={map_cwe_tags(cwe)}&color=green)'
+    if "wordpress" in data.get('description'):
+        markdown+=f'![](https://img.shields.io/static/v1?label=System&message=Wordpress&color=red)'
     markdown += f"\n\n"
 
     markdown += "## Links\n"
