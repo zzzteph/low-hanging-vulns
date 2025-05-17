@@ -5,6 +5,7 @@ import csv
 import os
 import re
 import time
+import sys
 DB_FILE = "vuln.csv"
 
 def format_cve_for_telegram(cve):
@@ -479,6 +480,9 @@ def request_cve(cve):
 
 
 def main():
+    update=False
+    if len(sys.argv) > 1:
+        update = sys.argv[1].lower() == "true"
     initialize_db()
     try:
         cve_data = fetch_cve_data()
@@ -490,7 +494,8 @@ def main():
                 send_telegram_message(format_cve_for_telegram(cve))
     except Exception as e:
         print(f"Error: {e}")
-
+    if update != True:
+        return
     #loading all files    
     root_directory = "nvd" 
     json_paths = get_all_json_file_paths(root_directory)
