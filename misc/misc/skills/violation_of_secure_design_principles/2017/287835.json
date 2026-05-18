@@ -1,0 +1,106 @@
+{
+  "id": 287835,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yODc4MzU=",
+  "url": "https://hackerone.com/reports/287835",
+  "title": "Resolv::getaddresses bug that can be abused to bypass security measures. ",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2017-11-06T19:44:58.500Z",
+  "submitted_at": "2017-11-06T19:44:58.500Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "edoverflow",
+    "url": "/edoverflow",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/116/374/9a3cf4d62b2f507a0d33808aacbad863ec4455ac_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7724,
+    "url": "https://hackerone.com/ruby",
+    "handle": "ruby",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/724/bb067434deef370d6a0b16c2cbbc030b57c75e92_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/724/bb067434deef370d6a0b16c2cbbc030b57c75e92_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby",
+      "twitter_handle": "",
+      "website": "https://www.ruby-lang.org",
+      "about": "A Programmer's Best Friend"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2018-02-23T07:19:19.776Z",
+  "bug_reporter_agreed_on_going_public_at": "2017-11-10T09:34:10.401Z",
+  "team_member_agreed_on_going_public_at": "2018-02-23T07:19:19.683Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Description\n\n`Resolv::getaddresses` is OS-dependent, therefore by playing around with different IP formats one can return blank values. This bug can be abused to bypass exclusion lists often used to protect against SSRF.\n\n| 💻 Machine 1 | \t💻 Machine 2 | \n|--------------|---------------| \n| ruby 2.3.3p222 (2016-11-21) [x86_64-linux-gnu] | ruby 2.3.1p112 (2016-04-26) [x86_64-linux-gnu] |\n\n💻 Machine 1\n\n```\nirb(main):002:0> Resolv.getaddresses(\"127.0.0.1\")\n=> [\"127.0.0.1\"]\nirb(main):003:0> Resolv.getaddresses(\"localhost\")\n=> [\"127.0.0.1\"]\nirb(main):004:0> Resolv.getaddresses(\"127.000.000.1\")\n=> [\"127.0.0.1\"]\n```\n💻 Machine 2\n\n```\nirb(main):008:0> Resolv.getaddresses(\"127.0.0.1\")\n=> [\"127.0.0.1\"]\nirb(main):009:0> Resolv.getaddresses(\"localhost\")\n=> [\"127.0.0.1\"]\nirb(main):010:0> Resolv.getaddresses(\"127.000.000.1\")\n=> []\n```\n\n# Proof of concept\n\n```\nirb(main):001:0> require 'resolv'\n=> true\nirb(main):002:0> uri = \"0x7f.1\"\n=> \"0x7f.1\"\nirb(main):003:0> server_ips = Resolv.getaddresses(uri)\n=> [] # The bug!\nirb(main):004:0> blocked_ips = [\"127.0.0.1\", \"::1\", \"0.0.0.0\"]\n=> [\"127.0.0.1\", \"::1\", \"0.0.0.0\"]\nirb(main):005:0> (blocked_ips & server_ips).any?\n=> false # Bypass\n```\n\n# Mitigation\n\nCurrently I have been suggesting that the affected vendors stay away from `Resolv::getaddresses` altogether and use the `Socket` class.\n\n```\nirb(main):002:0> Resolv.getaddresses(\"127.1\")\n=> []\nirb(main):003:0> Socket.getaddrinfo(\"127.1\", nil).sample[3]\n=> \"127.0.0.1\"\n```\n\n# Affected vendors and gems\n\nBy abusing this bug I was able to bypass GitLab, HackerOne and [private_address_check](https://github.com/jtdowney/private_address_check/)'s [SSRF](https://www.owasp.org/index.php/Server_Side_Request_Forgery) filters.\n\nThe `private_address_check` gem, for instance, relied on `Resolv::getaddresses` in `lib/private_address_check.rb`:\n\n```ruby\ndef resolves_to_private_address?(hostname)\n    ips = Resolv.getaddresses(hostname)\n    ips.any? do |ip| \n      private_address?(ip)\n    end\nend\n```\n\n```\nirb(main):001:0> require 'private_address_check'\n=> true\nirb(main):002:0> PrivateAddressCheck.resolves_to_private_address?(\"127.1\")\n=> false # Bypass\n```\n\nThe author of this gem has provided a [patch](https://github.com/jtdowney/private_address_check/commit/58a0d7fe31de339c0117160567a5b33ad82b46af) for this issue and I can confirm that I am unable to bypass the fix.\n\nGitLab and HackerOne have also been notified and plan on releasing a fix this week.\n\n",
+  "weakness": {
+    "id": 57,
+    "name": "Violation of Secure Design Principles"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 4,
+  "voters": [
+    "jokebookservice1",
+    "003random",
+    "khizer47",
+    "666reda"
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

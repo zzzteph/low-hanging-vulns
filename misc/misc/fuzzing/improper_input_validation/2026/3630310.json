@@ -1,0 +1,132 @@
+{
+  "id": 3630310,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjMwMzEw",
+  "url": "https://hackerone.com/reports/3630310",
+  "title": "HTTP/2 server push accepts a non-authoritative :scheme=https over cleartext h2c, enabling HTTPS cache-key poisoning",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "high",
+  "readable_substate": "Informative",
+  "created_at": "2026-03-26T18:56:06.510Z",
+  "submitted_at": "2026-03-26T18:56:06.933Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "argareksapatii",
+    "url": "/argareksapatii",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fpm7e6yjpfqe99ev12r8d0l8fr16/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-03-29T16:44:13.585Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-03-27T21:26:13.006Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nI found that libcurl 8.19.0 accepts an HTTP/2 pushed stream on a cleartext h2c connection even when the server sends `:scheme=https` in `PUSH_PROMISE`. In `lib/http2.c`, `set_transfer_url()` builds the pushed handle URL from the server-supplied `:scheme`, `:authority`, and `:path`, but `PUSH_PROMISE` validation only checks `:authority` and does not reject a non-authoritative pushed `https` origin. The accepted pushed handle is then exposed to the application and processed on the existing connection, and `CURLINFO_EFFECTIVE_URL` later returns the pushed URL from `data->state.url`. As a result, a cleartext h2c server can cause a pushed transfer to appear as `https://...` to the application even though the bytes arrived over cleartext HTTP/2. In the attached cache PoC, a libcurl-based application that opts into push stores attacker-controlled cleartext content under a trusted HTTPS cache key and later serves it from cache without a network fetch.\n\n## Affected version\nOfficial `curl 8.19.0` source release on Linux/Kali, built locally with HTTP/2 enabled.\n\n`curl 8.19.0 (Linux) libcurl/8.19.0 OpenSSL/3.5.5 zlib/1.3.1 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.2 libssh2/1.11.1 nghttp2/1.64.0 OpenLDAP/2.6.10`\n`Release-Date: 2026-03-11`\n\nRelevant source locations in the official 8.19.0 source tree:\n- `lib/http2.c:716` `set_transfer_url()` starts building the pushed URL\n- `lib/http2.c:728` `:scheme` is copied into the pushed URL\n- `lib/http2.c:1424` `PUSH_PROMISE` validation checks only `:authority`\n- `lib/http2.c:819` the pushed handle is exposed to the application callback\n- `lib/http2.c:839` the accepted pushed handle is added for processing\n- `lib/multi.c:1676` the pushed handle is attached to the existing connection\n- `lib/multi.c:934` `data->conn = conn`\n- `lib/getinfo.c:91` `CURLINFO_EFFECTIVE_URL` returns `data->state.url`\n\n## Steps To Reproduce:\n1. Attach and extract the provided PoC bundle.\n2. Run the cache-poisoning server:\n   `python3 h2_push_cache_server.py 18080`\n3. Run the cache-poisoning client:\n   `./h2_push_cache_client_8190 http://trusted.example:18080/ trusted.example:18080:127.0.0.1`\n4. Observe that the main request is cleartext HTTP/2 to `http://trusted.example:18080/`, but the push callback reports:\n   `effective_url=https://trusted.example:18080/pushed`\n5. Observe the cache evidence:\n   `https://trusted.example:18080/pushed => ATTACKER-CONTROLLED-CLEARTEXT-PUSH`\n6. Observe the final poisoned-cache reuse:\n   `POISONED CACHE HIT for trusted HTTPS key https://trusted.example:18080/pushed`\n   and\n   `TRUSTED PROCESSING of cached body: ATTACKER-CONTROLLED-CLEARTEXT-PUSH`\n\nThe attached bundle also contains a simpler PoC that demonstrates the same primitive without the cache layer.\n\n## Impact\n\n## Summary:\nBy accepting a non-authoritative pushed HTTPS origin over cleartext h2c and surfacing it as an effective HTTPS URL, libcurl enables applications that opt into HTTP/2 push and cache pushed responses by `CURLINFO_EFFECTIVE_URL` to store attacker-controlled cleartext content under a trusted HTTPS cache key and later serve it without a network fetch. This is a concrete integrity impact, not just cosmetic metadata confusion. Server push is opt-in, but once enabled libcurl should enforce the HTTP/2 authority/origin boundary before exposing the pushed transfer to the application. I am requesting High severity because the attached PoC demonstrates concrete cache poisoning of a trusted HTTPS cache key, although I understand a more conservative Medium assessment.",
+  "weakness": {
+    "id": 107,
+    "name": "Improper Input Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5615543,
+      "file_name": "curl-h2-push-scheme-confusion-evidence-20260327-final.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/hmag3u7bf0hvrsgy1vtt46hxxlq5?response-content-disposition=attachment%3B%20filename%3D%22curl-h2-push-scheme-confusion-evidence-20260327-final.zip%22%3B%20filename%2A%3DUTF-8%27%27curl-h2-push-scheme-confusion-evidence-20260327-final.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ6SGBDK5D%2F20260518%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260518T222144Z&X-Amz-Expires=1183&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPj%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDsfCqnrzBagzRV2r3kberYfhUgfSdE3%2BSALnl1VOgtKwIhAMMWo9WT7BA8CFn3I%2FMAsrNg6PSy22EjxNrbUDjTgGupKroFCMH%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5Igw8l%2FsANPKQXQiBOTsqjgUJMUfQYrI%2Ble%2FBLpTCBiODBe3Pjj%2B8l2%2BUOv8hydmgs1xo3iP76%2BXmbBb6YHQssLUN5vh6sOkJaInijgImjfjSc4eLRgvhEDYKZt%2Fwku3s9IQHuM7T06J%2BF35ChwVQdTgSKlehRe8tNwF8U3t7cj1eQ%2Fka74%2FbI9gJCZLComfnQzqJLhBTgxCipKnlYXJHvzkDUi%2Bdc6M6MxJ%2BrjT0zIe4JvDVis2jeui3mrYZzlv1kI4RRuAdUT3sNrN8nsrw6Gevt6LWuUT4zodgk9EnUqzN8O43BT1Nk0uIqb3HOXLiESn3cPGcGeBwJrH21rKCsfJsJG6Uz7MA8eOcB8pE%2FDtt3VEW62d9M%2FmpdQ0qkuCH2KdIcm%2F04oeLx4de9iRoGvwB%2BL%2FG3xegO69AydG9T7Orbd3v3BxEb4bTxkZRGLjh9UYoDZsR%2B0COOSGuneHlNKBuNzuon4urifCmjoRsKaq6yIS8ifhgkjGaaqX2uPq8RwnXhZV%2B1ASpKJ3S5WgOGa9RbvKOTdDpGRNgqpqa6VJughv6tkDB5LNjevNZaqC%2F9SccmNLm7SpUL4QeCHYr38C4yEFAFI1IgCEPRDMF%2BU5g9XMgK31WwV8mDvh20Rhhp1ZUbx0FYlkVCJoBS5Q3d2Y5VGt4sZQQX3PhJYAshbVRF3Ld%2FxKnAEXSMAjYfhCooyAAnO5x2tvRFb62gm%2FCoLXjhMSpj%2FEUSMccE9OMJcQ9JBDJVp5F61ZTmgrS8ol%2Ff8V4Z%2FSkMpgpVllxF9rRB2InL0CB361MbnyZ9X6UPULfMaUp68p90z7CCrA1Zgu5OWK63BLtcGivOTdBYSIJ8Ri4CEoeXN96PXvIHQ6Y5tmZC98J5ETEghZV1WvYfU8wyfWs0AY6sAEgrzAGpf6m4wQc8Ta33zBa%2BbS%2Bm%2FVFOt1hJ2eWKO3ucSYQBmXc5C3aVcLubLfxs3s0nffhlsw12jbP089GNXvn%2BHFuAMdLLW1JX5G56mU77AJZ5XlIEEsOG1pnYMUjZwaKwNVa9PfGW6TqOUNZNDDe8dNmHA3qDFkCVVogqnWoIv%2B6JDPEY9XMUl5kqmbh0GAB8aCVaVMhrz4xfNGbd0jVwOwam8ru0B5LgK4d2q0FuQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=970335b42f3335856d8ce6bc3c98ce907a99b3d2a4644da599e2b3bfcb1197bc",
+      "file_size": 1103462,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 24,
+  "voters": [
+    "zywac",
+    "2026",
+    "a__a__fd",
+    "srtok12",
+    "deepresearch",
+    "iteryx",
+    "atl_oceans",
+    "hybirdss",
+    "itejiemmanuel",
+    "pwnm4n",
+    "and 14 more..."
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
