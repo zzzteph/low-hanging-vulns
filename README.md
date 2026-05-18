@@ -1,32 +1,40 @@
-# Bugbounty monitor
+# Low Hanging Vulns
 
-Yet another automated intelligence feed for **real-world** vulnerabilities disclosed on [HackerOne](https://hackerone.com/hacktivity).
+![Telegram Logo](tg.png)
+
+Two automated intelligence feeds for **real-world, low-complexity** vulnerabilities — one
+from [NVD](https://nvd.nist.gov/) (critical/high web CVEs) and one from
+[HackerOne Hacktivity](https://hackerone.com/hacktivity) (disclosed bug bounty reports).
+
+All findings are published on the Telegram channel 👉 [https://t.me/lowhangingvulns](https://t.me/lowhangingvulns)
 
 ## What's inside
 
-| Directory | Contents |
-|-----------|----------|
-| `reports/` | Full HackerOne report JSONs, organised by category → weakness → year |
-| `skills/` | AI-generated hunter playbooks (one per vuln class) + `bughunter.md` master |
-| `fuzzing/` | Per-category payload wordlists — one payload per line, ready for fuzzing tools |
+| Path | Contents |
+|------|----------|
+| `nvd/` | NVD CVEs, organised `nvd/{year}/{SEVERITY}/{CVE-ID}/` — each folder holds the raw NVD JSON and a generated `README.md` |
+| `bugbounty/H1/reports/` | Full HackerOne report JSONs, organised `{category}/{weakness}/{year}/{id}.json` |
+| `bugbounty/H1/reports.json` | Flat stub index of every known disclosed report |
+| `bugbounty/H1/reports/**/README.md` | Auto-generated index tables, per weakness class and per category, sorted by bounty |
 
-## Features
 
-- **Hourly updates** - GitHub Actions fetches newly disclosed reports every hour and rebuilds the index.
-- **Hunter playbooks** - each `skills/*.md` file covers root causes, attack surface, recon checklist, hunt methodology, payload library, WAF bypass tips, triage guidance, and real bounty examples.
-- **Fuzzing payloads** - extracted and curated from real reports.
-- **Telegram notifications** 👉 [https://t.me/lowhangingvulns](https://t.me/lowhangingvulns)
+## Stay updated
 
-## Telegram channel
-
-Join to get notified about freshly disclosed bug bounty reports:
+Join the Telegram channel for the latest low-complexity, high-impact vulnerabilities:
 
 👉 [https://t.me/lowhangingvulns](https://t.me/lowhangingvulns)
 
-## Vulnerability categories
+## Data sources
 
-`xss` · `sqli` · `rce` · `ssrf` · `idor` · `lfi` · `csrf` · `authn` · `privesc` · `info_disclosure` · `memory` · `dos` · `business_logic` · `secrets` · `open_redirect` · `http_injection` · `deserialization` · `injection` · `xxe` · `crypto` · `tls` · `race_condition` · `clickjacking` · `cors` · `file_upload` · `llm` · `supply_chain` · `misc`
+- [National Vulnerability Database (NVD)](https://nvd.nist.gov/)
+- [HackerOne Hacktivity](https://hackerone.com/hacktivity)
 
-## Data source
+---
 
- [HackerOne Hacktivity](https://hackerone.com/hacktivity)
+### Contribution
+
+Contributions, feedback, and suggestions are welcome — open an issue or submit a pull request.
+
+### License
+
+This project is open-source and licensed under the [GNU GPL v3](LICENSE).
