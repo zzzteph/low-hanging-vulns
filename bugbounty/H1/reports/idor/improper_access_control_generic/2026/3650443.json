@@ -1,0 +1,121 @@
+{
+  "id": 3650443,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjUwNDQz",
+  "url": "https://hackerone.com/reports/3650443",
+  "title": "no_proxy IDN mismatch: Unicode hostnames bypass proxy exclusion list",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-04-05T06:16:59.523Z",
+  "submitted_at": "2026-04-05T06:17:00.621Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "mzfr",
+    "url": "/mzfr",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/CZ4mNkJx5M8NjMUmtCyoypuA/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-42916",
+    "CVE-2022-43551"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-07T06:24:27.881Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-06T09:43:20.314Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nUnicode (IDN) hostnames in `no_proxy` are never converted to punycode before comparison, so they never match the request hostname (which curl has already converted to punycode). A user who types `no_proxy=\"bücher.de\"` and requests `http://bücher.de/` expects the proxy to be bypassed. Instead curl converts the URL to `xn--bcher-kva.de`, compares it raw against `bücher.de`, fails to match, and sends the request through the proxy. Same string typed by the user in both places, two different internal representations. This is the same class of bug as CVE-2022-42916 and CVE-2022-43551 (HSTS bypass via IDN confusion).\n\n```bash\nLANG=C.UTF-8 http_proxy=http://127.0.0.1:18877 no_proxy=\"bücher.de\" ./curl -v \"http://bücher.de/\"\n# Output: \"Failed to connect to xn--bcher-kva.de port 80 via 127.0.0.1\"\n# curl tried the proxy despite no_proxy matching the URL hostname\n```\n\n## Affected version\n\n```\ncurl 8.20.0-DEV (Darwin) libcurl/8.20.0-DEV OpenSSL/3.6.1 zlib/1.2.12 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 nghttp2/1.68.0\nFeatures: alt-svc AsynchDNS brotli HSTS HTTP2 HTTPS-proxy IDN IPv6 Largefile libz SSL threadsafe TLS-SRP UnixSockets zstd\n```\n- Git HEAD `38b626e790`. Also confirmed on 8.19.0 stable. Requires IDN support (libidn2).\n\n## Steps To Reproduce\n\n1. Start a listener: `nc -l 18877`\n\n2. In another terminal:\n```bash\nLANG=C.UTF-8 \\\nhttp_proxy=http://127.0.0.1:18877 \\\nno_proxy=\"bücher.de\" \\\n./curl -v \"http://bücher.de/\"\n```\n\n3. The netcat listener receives the request. Verbose output shows:\n```\n* Uses proxy env variable no_proxy == 'bücher.de'\n* Uses proxy env variable http_proxy == 'http://127.0.0.1:18877'\n*   Trying 127.0.0.1:18877...\n* Failed to connect to xn--bcher-kva.de port 80 via 127.0.0.1\n```\n\nThe request should go direct (bypassing the proxy) because `bücher.de` is in `no_proxy`. Instead curl converts the URL hostname to punycode (`xn--bcher-kva.de`) before calling `Curl_check_noproxy()` at `lib/noproxy.c:188`, but never converts the `no_proxy` entries. `match_host()` at line 124 compares raw `bücher.de` against `xn--bcher-kva.de` and fails.\n\n## Impact\n\nTraffic the user explicitly excluded from the proxy via `no_proxy` is sent through the proxy, leaking request URLs, headers, and bodies to the proxy operator",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 15,
+  "voters": [
+    "2026",
+    "idkruan",
+    "catalysed",
+    "hndrrrxx4l",
+    "pegasus96",
+    "hash_security",
+    "linderricky",
+    "3ammak",
+    "ehax0x",
+    "logzzz",
+    "and 5 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

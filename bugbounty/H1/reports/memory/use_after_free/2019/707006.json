@@ -1,0 +1,113 @@
+{
+  "id": 707006,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC83MDcwMDY=",
+  "url": "https://hackerone.com/reports/707006",
+  "title": "use after free in cookie.c",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2019-10-03T09:46:43.827Z",
+  "submitted_at": "2019-10-03T09:46:43.827Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "pauldreik",
+    "url": "/pauldreik",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2021-02-08T07:54:25.821Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2021-01-08T08:21:37.427Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "I ran fuzzing with the internal fuzzer at https://github.com/pauldreik/curl-fuzzer/blob/paul/localfuzz_public0/intree_fuzzer/src/insidefuzzers/fuzz_cookies.cc\n\nIt seems like the following sequence of events trigger the use after free:\n\n```c\n        #include \"cookie.h\"\n        #include <curl/curl.h>\n        curl_global_init(CURL_GLOBAL_DEFAULT);\n        CURL*  handle=curl_easy_init();\n        CookieInfo* info=Curl_cookie_init(handle,NULL,NULL,false);\n        curl_easy_setopt(handle, CURLOPT_COOKIEJAR, \"/dev/null\");\n        Curl_flush_cookies(handle, true);\n        Curl_cookie_cleanup(info);\n        curl_easy_cleanup(handle); // <--------- this is where it happens\n        curl_global_cleanup();\n```\nEven if the program above is a \"fuzz only\" type of use case, I am not sure\nif a real user would be able to trigger this situation.\nAnyway, the following seems to fix it:\n```diff\ndiff --git a/lib/cookie.c b/lib/cookie.c\nindex f6b52df2f..c17340029 100644\n--- a/lib/cookie.c\n+++ b/lib/cookie.c\n@@ -1646,6 +1646,7 @@ void Curl_flush_cookies(struct Curl_easy *data, int cleanup)\n \n   if(cleanup && (!data->share || (data->cookies != data->share->cookies))) {\n     Curl_cookie_cleanup(data->cookies);\n+    data->cookies=NULL;\n   }\n   Curl_share_unlock(data, CURL_LOCK_DATA_COOKIE);\n }\n\n```\n\nAddress sanitizer gets this output, without the fix (line numbers are not accurate, they refer to a temporary branch):\n```\n==31195==ERROR: AddressSanitizer: heap-use-after-free on address 0x61d000001e88 at pc 0x0000005d64c4 bp 0x7ffc983b1b00 sp 0x7ffc983b1af8\nREAD of size 8 at 0x61d000001e88 thread T0\n    #0 0x5d64c3 in remove_expired /home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/../lib/cookie.c:386:10\n    #1 0x5e49c5 in cookie_output /home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/../lib/cookie.c:1516:3\n    #2 0x5e379a in Curl_flush_cookies /home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/../lib/cookie.c:1635:8\n    #3 0x95b602 in Curl_close /home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/../lib/url.c:377:3\n    #4 0x61d7ee in curl_easy_cleanup /home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/../lib/easy.c:734:3\n    #5 0x5b0e12 in CurlInitializer::~CurlInitializer() /home/paul/code/delaktig/curl-fuzzer/intree_fuzzer/src/insidefuzzers/CurlInitializer.h:18:5\n    #6 0x5afa57 in LLVMFuzzerTestOneInput /home/paul/code/delaktig/curl-fuzzer/intree_fuzzer/src/insidefuzzers/fuzz_cookies.cc:97:1\n    #7 0x47be0d in fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long) (/home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/tests/internalfuzzer_fuzz_cookies+0x47be0d)\n    #8 0x46b87a in fuzzer::RunOneTest(fuzzer::Fuzzer*, char const*, unsigned long) (/home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/tests/internalfuzzer_fuzz_cookies+0x46b87a)\n    #9 0x4767b8 in fuzzer::FuzzerDriver(int*, char***, int (*)(unsigned char const*, unsigned long)) (/home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/tests/internalfuzzer_fuzz_cookies+0x4767b8)\n    #10 0x4684e2 in main (/home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/tests/internalfuzzer_fuzz_cookies+0x4684e2)\n    #11 0x7f9bfc727b96 in __libc_start_main /build/glibc-OTsEL5/glibc-2.27/csu/../csu/libc-start.c:310\n    #12 0x468519 in _start (/home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/tests/internalfuzzer_fuzz_cookies+0x468519)\n\n0x61d000001e88 is located 8 bytes inside of 2096-byte region [0x61d000001e80,0x61d0000026b0)\nfreed by thread T0 here:\n    #0 0x568e48 in __interceptor_free (/home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/tests/internalfuzzer_fuzz_cookies+0x568e48)\n    #1 0x63636d in curl_dbg_free /home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/../lib/memdebug.c:328:5\n    #2 0x5d78e4 in Curl_cookie_cleanup /home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/../lib/cookie.c:1463:5\n    #3 0x5e4907 in Curl_flush_cookies /home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/../lib/cookie.c:1650:5\n    #4 0x5afa10 in LLVMFuzzerTestOneInput /home/paul/code/delaktig/curl-fuzzer/intree_fuzzer/src/insidefuzzers/fuzz_cookies.cc:92:5\n    #5 0x47be0d in fuzzer::Fuzzer::ExecuteCallback(unsigned char const*, unsigned long) (/home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/tests/internalfuzzer_fuzz_cookies+0x47be0d)\n    #6 0x46b87a in fuzzer::RunOneTest(fuzzer::Fuzzer*, char const*, unsigned long) (/home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/tests/internalfuzzer_fuzz_cookies+0x46b87a)\n    #7 0x4767b8 in fuzzer::FuzzerDriver(int*, char***, int (*)(unsigned char const*, unsigned long)) (/home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/tests/internalfuzzer_fuzz_cookies+0x4767b8)\n    #8 0x4684e2 in main (/home/paul/code/delaktig/curl/build-fuzz-clang7-asan-ubsan/tests/internalfuzzer_fuzz_cookies+0x4684e2)\n    #9 0x7f9bfc727b96 in __libc_start_main /build/glibc-OTsEL5/glibc-2.27/csu/../csu/libc-start.c:310\n\n\n```\n\n## Impact\n\nNo idea.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "monke"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

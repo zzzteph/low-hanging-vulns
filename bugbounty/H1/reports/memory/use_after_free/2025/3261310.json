@@ -1,0 +1,118 @@
+{
+  "id": 3261310,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMjYxMzEw",
+  "url": "https://hackerone.com/reports/3261310",
+  "title": "OpenSSL HTTP/3 bogus CURLINFO_TLS_SSL_PTR",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2025-07-20T05:10:29.785Z",
+  "submitted_at": "2025-07-20T05:10:29.983Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "nyymi",
+    "url": "/nyymi",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-07-28T22:48:50.310Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-07-28T22:48:50.175Z",
+  "team_member_agreed_on_going_public_at": "2025-07-28T20:55:24.339Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n`curl_easy_getinfo` `CURLINFO_TLS_SSL_PTR` appears to return invalid `SSL` connection pointer for OpenSSL HTTP/3 connections. Using this `SSL`  connection results in a crash, and potential other impacts. \n\nThis issue does not happen with libcurl 8.14.1, suggesting that the bug is in libcurl itself (or libcurl 8.14.1 somehow didn't trigger a bug in the other support libraries).\n\nSome debug output suggest that this *could* be a use after free / dangling pointer issue. If so, the issue might lead to remote code execution. This has not been confirmed at time of writing this report.\n\n## Affected version\n8.15.0 (release)\n8.15.1-DEV (7c23e88d17e0939b4e01c8d05f430e167e148f4b)\n\n## Steps To Reproduce:\n  1. Compile libcurl again OpenSSL 3.5.1, and fresh enough nghttp2, nghttp3 and ngtcp2 (`--with-openssl --with-nghttp2 --with-ngtcp2 --with-nghttp3`)\n  2. Compile the following Proof of Concept app with `-fsanitize=address`:\n```\n#include <curl/curl.h>\n#include <openssl/ssl.h>\n#include <stdio.h>\n\nstatic size_t header_callback(char *buffer, size_t size,\n                              size_t nitems, void *userdata)\n{\n  size_t actual = nitems * size;\n  CURL *curl = (CURL *) userdata;\n  size_t printactual = actual;\n\n  if (printactual && buffer[printactual - 1] == '\\n')\n  {\n    printactual--;\n    if (printactual && buffer[printactual - 1] == '\\r')\n      printactual--;\n  }\n  printf(\"H: %.*s\\n\", (int) printactual, buffer);\n\n  if ((actual == 1 && buffer[0] == '\\n') ||\n      (actual == 2 && buffer[0] == '\\r' && buffer[1] == '\\n'))\n  {\n    const struct curl_tlssessioninfo *info = NULL;\n    CURLcode res = curl_easy_getinfo(curl, CURLINFO_TLS_SSL_PTR, &info);\n    printf(\"D: headers completed, res %d info %p\\n\", res, info);\n    if (info && !res)\n    {\n      printf(\"D: backend %d internals %p\\n\", info->backend,  info->internals);\n      if(CURLSSLBACKEND_OPENSSL == info->backend)\n      {\n        SSL *ssl = info->internals;\n        printf(\"D: OpenSSL ver. %s\\n\", SSL_get_version(ssl));\n        STACK_OF(X509)* chain = SSL_get_peer_cert_chain(ssl);\n        printf(\"D: chain %p\\n\", chain);\n      }\n    }\n  }\n  return actual;\n}\n\nint main(void)\n{\n  printf(\"libcurl version: %s\\n\", curl_version());\n\n  CURL *curl = curl_easy_init();\n  if (curl)\n  {\n    curl_easy_setopt(curl, CURLOPT_URL, \"https://curl.se\");\n    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, (long)CURL_HTTP_VERSION_3ONLY);\n    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_callback);\n    curl_easy_setopt(curl, CURLOPT_HEADERDATA, curl);\n    curl_easy_perform(curl);\n    curl_easy_cleanup(curl);\n  }\n\n  return 0;\n}\n```\n  3. Execute the poc:\n```\n$ ./curlpoc\nlibcurl version: libcurl/8.15.1-DEV OpenSSL/3.5.1 zlib/1.3.1 brotli/1.1.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.5 nghttp2/1.66.0 ngtcp2/1.14.0-DEV nghttp3/1.1 OpenLDAP/2.6.10\nH: HTTP/3 200\nH: content-length: 11441\nH: server: nginx/1.27.5\nH: content-type: text/html\nH: x-frame-options: SAMEORIGIN\nH: last-modified: Sun, 20 Jul 2025 02:11:09 GMT\nH: etag: \"2cb1-63a52df596e87\"\nH: cache-control: max-age=60\nH: expires: Sun, 20 Jul 2025 02:14:40 GMT\nH: x-content-type-options: nosniff\nH: content-security-policy: default-src 'self' curl.haxx.se www.curl.se curl.se; style-src 'unsafe-inline' 'self' curl.haxx.se www.curl.se curl.se; require-trusted-types-for 'script';\nH: strict-transport-security: max-age=31536000\nH: via: 1.1 varnish, 1.1 varnish\nH: accept-ranges: bytes\nH: date: Sun, 20 Jul 2025 04:44:47 GMT\nH: age: 69\nH: x-served-by: cache-bma-essb1270054-BMA, cache-hel1410021-HEL\nH: x-cache: HIT, HIT\nH: x-cache-hits: 1, 15\nH: x-timer: S1752986688.638651,VS0,VE0\nH: vary: Accept-Encoding\nH: alt-svc: h3=\":443\";ma=86400,h3-29=\":443\";ma=86400,h3-27=\":443\";ma=86400\nH:\nD: headers completed, res 0 info 0x622000010600\nD: backend 1 internals 0x61c000001080\nD: OpenSSL ver. unknown\nAddressSanitizer:DEADLYSIGNAL\n=================================================================\n==81895==ERROR: AddressSanitizer: SEGV on unknown address 0x0000000005c9 (pc 0x00010472785c bp 0x00016b6ed690 sp 0x00016b6ed690 T0)\n==81895==The signal is caused by a READ memory access.\n==81895==Hint: address points to the zero page.\n    #0 0x00010472785c in SSL_get_peer_cert_chain+0x28 (libssl.3.dylib:arm64+0x1385c)\n    #1 0x000104700c5c in header_callback+0x2d0 (curlpoc:arm64+0x100000c5c)\n    #2 0x00010488a494 in cw_out_ptr_flush+0x10c (libcurl.4.dylib:arm64+0x1a494)\n    #3 0x00010488a000 in cw_out_do_write+0xa8 (libcurl.4.dylib:arm64+0x1a000)\n    #4 0x000104889c74 in cw_out_write+0x70 (libcurl.4.dylib:arm64+0x19c74)\n    #5 0x00010488a870 in cw_pause_write+0x200 (libcurl.4.dylib:arm64+0x1a870)\n    #6 0x0001048c6d1c in cw_download_write+0x94 (libcurl.4.dylib:arm64+0x56d1c)\n    #7 0x0001048c59cc in Curl_client_write+0x48 (libcurl.4.dylib:arm64+0x559cc)\n    #8 0x0001048a3180 in http_write_header+0x54 (libcurl.4.dylib:arm64+0x33180)\n    #9 0x0001048a2068 in http_rw_hd+0x1598 (libcurl.4.dylib:arm64+0x32068)\n    #10 0x00010489dfac in Curl_http_write_resp_hd+0x28 (libcurl.4.dylib:arm64+0x2dfac)\n    #11 0x0001048f55ac in cb_h3_end_headers+0xe0 (libcurl.4.dylib:arm64+0x855ac)\n    #12 0x00010497ecd8 in nghttp3_conn_read_bidi nghttp3_conn.c\n    #13 0x00010497e4c4 in nghttp3_conn_read_stream nghttp3_conn.c:526\n    #14 0x0001048f4790 in cb_recv_stream_data+0x4c (libcurl.4.dylib:arm64+0x84790)\n    #15 0x000104a2c4dc in conn_recv_stream ngtcp2_conn.c:7103\n    #16 0x000104a2b178 in conn_recv_pkt ngtcp2_conn.c:9077\n    #17 0x000104a1fcc4 in ngtcp2_conn_read_pkt_versioned ngtcp2_conn.c:9855\n    #18 0x0001048f5cb8 in recv_pkt+0x80 (libcurl.4.dylib:arm64+0x85cb8)\n    #19 0x0001048f67c4 in vquic_recv_packets+0x12c (libcurl.4.dylib:arm64+0x867c4)\n    #20 0x0001048f34cc in cf_ngtcp2_recv+0xe8 (libcurl.4.dylib:arm64+0x834cc)\n    #21 0x0001048d5730 in Curl_sendrecv+0x254 (libcurl.4.dylib:arm64+0x65730)\n    #22 0x0001048b96d8 in multi_runsingle+0x980 (libcurl.4.dylib:arm64+0x496d8)\n    #23 0x0001048b8b68 in curl_multi_perform+0x200 (libcurl.4.dylib:arm64+0x48b68)\n    #24 0x00010488db84 in curl_easy_perform+0x188 (libcurl.4.dylib:arm64+0x1db84)\n    #25 0x00010470096c in main+0x84 (curlpoc:arm64+0x10000096c)\n    #26 0x0001991feb94 in start+0x17b8 (dyld:arm64e+0xfffffffffff3ab94)\n\n==81895==Register values:\n x[0] = 0x000061c000001080   x[1] = 0x0000000000000000   x[2] = 0x00000000000120a8   x[3] = 0x0000000000000002\n x[4] = 0x0000000104700fa0   x[5] = 0x000000016b6ed690   x[6] = 0x000000016af04000   x[7] = 0x0000000000000001\n x[8] = 0x0000000000000301   x[9] = 0x00000002076b8588  x[10] = 0x0000000000000002  x[11] = 0x0000010000000000\nx[12] = 0x00000000fffffffd  x[13] = 0x0000000000000000  x[14] = 0x0000000000000000  x[15] = 0x0000000000000000\nx[16] = 0x0000000104727834  x[17] = 0x00000002086fde70  x[18] = 0x0000000000000000  x[19] = 0x000000016b6ed6e0\nx[20] = 0x0000000000000000  x[21] = 0x0000000000000002  x[22] = 0x000061c000001080  x[23] = 0x000000016b6ed6c0\nx[24] = 0x0000000000000001  x[25] = 0x000000016b6ed6a0  x[26] = 0x000000702d6fdad4  x[27] = 0x0000007000020000\nx[28] = 0x000000010470098c     fp = 0x000000016b6ed690     lr = 0x0000000104700c60     sp = 0x000000016b6ed690\nAddressSanitizer can not provide additional info.\nSUMMARY: AddressSanitizer: SEGV (libssl.3.dylib:arm64+0x1385c) in SSL_get_peer_cert_chain+0x28\n==81895==ABORTING\nAbort trap: 6\n```\n\n## Supporting Material/References:\n* This report is AI free for your pleasure. Stop the slop!\n\n## Impact\n\n## Summary:\n- At least: Denial of service when accessing HTTP/3 sites.\n- Potential: Memory corruption if the returned pointer points to already free memory. Possible remote code execution, depending on the target platform.  Further analysis needed to determine the full impact.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 21,
+  "voters": [
+    "thalaivar304",
+    "2026",
+    "mai91",
+    "adce626q",
+    "georgecurious",
+    "henrify",
+    "sudo_er",
+    "harshakp06",
+    "joe-zy",
+    "electr0nex",
+    "and 11 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,139 @@
+{
+  "id": 3403880,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDAzODgw",
+  "url": "https://hackerone.com/reports/3403880",
+  "title": "Logical Flaw in curl_url_set Leads to Inconsistent Query Parameter Encoding",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2025-10-29T10:51:20.103Z",
+  "submitted_at": "2025-10-29T10:51:20.418Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "exploitguru101",
+    "url": "/exploitguru101",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/jb0d6t4v30dfh0bxo3ithgf1kgbs/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-10-29T12:19:30.135Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-10-29T12:18:10.783Z",
+  "comments_closed?": true,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hello curl security team,\n\nFirst, thank you for your incredible work on maintaining such a critical and robust piece of software. We have been conducting a deep-dive source code audit of libcurl and believe we have identified a subtle logical flaw in the curl_url_set API that has security implications.\n\n## Summary\n\nThe curl_url_set() function in lib/urlapi.c exhibits inconsistent URL encoding behavior for the CURLUPART_QUERY part. The logic that determines whether to percent-encode the = character is incorrectly tied to the CURLU_APPENDQUERY flag, rather than being based purely on the CURLU_URLENCODE flag.\n\nThis causes the exact same input string to be encoded in two different ways depending on whether the query is being replaced or appended, which can lead to HTTP Parameter Pollution (HPP) vulnerabilities in applications that rely on libcurl.\n\n## Affected Code\n\nlib/urlapi.c, function curl_url_set(), specifically:\n\n1. Line ~1832: equalsencode = appendquery;\n\n   * This logic incorrectly bases the equalsencode flag on whether an append operation is happening.\n\n2. Line ~1868: ((*i == '=') && equalsencode)\n\n   * This line later uses equalsencode to decide whether to skip encoding the = character.\n\nBecause equalsencode is only true during an append operation, a replace operation (even with CURLU_URLENCODE) will result in equalsencode being false, causing it to incorrectly encode the = character.\n\n## Proof of Concept (PoC)\n\nIn the interest of full transparency, an AI assistant was utilized to help write and refine the C code for the accompanying Proof of Concept.\n\nTo confirm this inconsistent behavior, we wrote the following C program. It tests the exact same input string (\"a=b&c=d\") under three different scenarios using the curl_url_set API.\n\n\n\nPoC Code (poc.c):\n```\n/*\n * ===================================================================\n * PoC: Inconsistent URL Query Encoding in curl_url_set (v3.1 Final)\n * ===================================================================\n *\n * - Target: libcurl / lib/urlapi.c / curl_url_set()\n * - Vulnerability: CWE-20: Improper Input Validation\n * (leading to CWE-436: Interpretation Conflict)\n *\n * - Analysis:\n * We discovered a logical flaw in how curl_url_set() handles URL\n * encoding for the CURLUPART_QUERY part. The logic that skips\n * encoding the '=' character (`equalsencode`) is only activated\n * if the `CURLU_APPENDQUERY` flag is present.\n *\n * This PoC demonstrates that the *exact same input* (\"a=b&c=d\")\n * is encoded differently based on whether the flag is used for\n * replacing or appending, which can lead to HTTP Parameter Pollution\n * vulnerabilities in applications that rely on libcurl.\n *\n */\n\n#include <stdio.h>\n#include <string.h>\n#include <curl/curl.h>\n\n/**\n * @brief Helper function to run a single test case.\n * @return 0 on success (behavior matches expectation), 1 on failure.\n */\nint run_test_case(const char *scenario_name,\n                    const char *base_url,\n                    const char *query_to_set,\n                    unsigned int flags,\n                    const char *expected_url)\n{\n  CURLU *u = curl_url();\n  CURLUcode rc;\n  char *result_url = NULL;\n  int test_failed = 0;\n\n  printf(\"---[ %s ]---\\n\", scenario_name);\n  \n  if(!u) {\n    printf(\" [!] FAILED: curl_url() returned NULL.\\n\");\n    return 1;\n  }\n\n  // Set the base URL so we have a valid host\n  rc = curl_url_set(u, CURLUPART_URL, base_url, 0);\n  if(rc) {\n    printf(\" [!] FAILED: Base URL set failed: %d\\n\", rc);\n    curl_url_cleanup(u);\n    return 1;\n  }\n\n  // Run the function we are testing\n  rc = curl_url_set(u, CURLUPART_QUERY, query_to_set, flags);\n  if(rc) {\n    printf(\" [!] FAILED: curl_url_set(QUERY) failed: %d\\n\", rc);\n    curl_url_cleanup(u);\n    return 1;\n  }\n\n  // Get the final URL string\n  rc = curl_url_get(u, CURLUPART_URL, &result_url, 0);\n  if(rc) {\n    printf(\" [!] FAILED: curl_url_get(URL) failed: %d\\n\", rc);\n    curl_url_cleanup(u);\n    return 1;\n  }\n\n  // Print results\n  printf(\"  Input Query: \\\"%s\\\"\\n\", query_to_set);\n  printf(\"  Actual URL:   %s\\n\", result_url);\n  printf(\"  Expected URL: %s\\n\", expected_url);\n\n  // Compare actual vs. expected\n  if(strcmp(result_url, expected_url) != 0) {\n    printf(\"  [!] VERDICT: [ FAIL ]\\n\\n\");\n    test_failed = 1;\n  }\n  else {\n    printf(\"  [+] VERDICT: [ PASS ]\\n\\n\");\n  }\n\n  curl_free(result_url);\n  curl_url_cleanup(u);\n  return test_failed;\n}\n\nint main(void)\n{\n  int failures = 0;\n  const char *base = \"http://example.com/api\";\n  const char *query = \"a=b&c=d\";\n\n  printf(\"========================================================\\n\");\n  printf(\"  libcurl Inconsistent Query Encoding PoC\\n\");\n  printf(\"  Goal: Prove that CURLU_URLENCODE behaves differently\\n\");\n  printf(\"        depending on CURLU_APPENDQUERY.\\n\");\n  printf(\"========================================================\\n\\n\");\n\n  /*\n   * This is our control test. No encoding.\n   * We expect \"a=b&c=d\" to be appended as-is.\n   */\nfailures += run_test_case(\n    \"Test 1: Control (Append, No-Encode)\",\n    base,\n    query,\n    CURLU_APPENDQUERY,\n    \"http://example.com/api?a=b&c=d\"\n  );\n\n  /*\n   * This is Bug Part A. We REPLACE the query and ask for encoding.\n   * Because `equalsencode` is FALSE, it will (incorrectly) encode the '='.\n   */\nfailures += run_test_case(\n    \"Test 2: Bug Part A (Replace + URL-Encode)\",\n    base,\n    query,\n    CURLU_URLENCODE,\n    \"http://example.com/api?a%3db%26c%3dd\"\n  );\n\n  /*\n   * This is Bug Part B. We APPEND the query and ask for encoding.\n   * Because `equalsencode` is TRUE, it will (correctly) skip the first '='.\n   * But this behavior is INCONSISTENT with Test 2.\n   */\nfailures += run_test_case(\n    \"Test 3: Bug Part B (Append + URL-Encode)\",\n    base,\n    query,\n    CURLU_URLENCODE | CURLU_APPENDQUERY,\n    \"http://example.com/api?a=b%26c%3dd\"\n  );\n\n\n  /* --- Final Verdict --- */\n  printf(\"========================================================\\n\");\n  printf(\"  PoC Verdict:\\n\");\n  printf(\"========================================================\\n\\n\");\n  if(failures == 0) {\n    printf(\"  [+] VULNERABILITY CONFIRMED!\\n\\n\");\n    printf(\"  Reasoning: All tests passed as expected.\\n\");\n    printf(\"  Test 2 resulted in: \\\"...a%%3db&c%%3dd\\\"\\n\");\n    printf(\"  Test 3 resulted in: \\\"...a=b&c%%3dd\\\"\\n\");\n    printf(\"  This proves that curl_url_set() produces two different\\n\");\n    printf(\"  outputs for the exact same input string (\\\"a=b&c=d\\\"),\\n\");\n    printf(\"  based *only* on the presence of the APPEND flag.\\n\");\n    printf(\"  This is inconsistent behavior that can lead to HPP.\\n\\n\");\n  }\n  else {\n    printf(\"  [!] PoC FAILED.\\n\\n\");\n    printf(\"  Reasoning: One or more tests failed, meaning the observed\\n\");\n    printf(\"  behavior did not match our analysis (it was %d failures).\\n\", failures);\n    printf(\"  Check the 'Actual URL' vs 'Expected URL' above.\\n\");\n    printf(\"  The logic may have been fixed in this version of libcurl.\\n\\n\");\n  }\n  \n  return 0;\n}\n```\n\nCompilation and Output (The Evidence):\nThis PoC was compiled against libcurl (system version 8.5.0) and confirmed the vulnerability:\n\n```\n$gcc -o poc poc.c -lcurl\n$ ./poc\n========================================================\n  libcurl Inconsistent Query Encoding PoC\n  Goal: Prove that CURLU_URLENCODE behaves differently\n        depending on CURLU_APPENDQUERY.\n========================================================\n\n---[ Test 1: Control (Append, No-Encode) ]---\n  Input Query: \"a=b&c=d\"\n  Actual URL:   http://example.com/api?a=b&c=d\n  Expected URL: http://example.com/api?a=b&c=d\n  [+] VERDICT: [ PASS ]\n\n---[ Test 2: Bug Part A (Replace + URL-Encode) ]---\n  Input Query: \"a=b&c=d\"\n  Actual URL:   http://example.com/api?a%3db%26c%3dd\n  Expected URL: http://example.com/api?a%3db%26c%3dd\n  [+] VERDICT: [ PASS ]\n\n---[ Test 3: Bug Part B (Append + URL-Encode) ]---\n  Input Query: \"a=b&c=d\"\n  Actual URL:   http://example.com/api?a=b%26c%3dd\n  Expected URL: http://example.com/api?a=b%26c%3dd\n  [+] VERDICT: [ PASS ]\n\n========================================================\n  PoC Verdict:\n========================================================\n\n  [+] VULNERABILITY CONFIRMED!\n\n  Reasoning: All tests passed as expected.\n  Test 2 resulted in: \"...a%3db&c%3dd\"\n  Test 3 resulted in: \"...a=b&c%3dd\"\n  This proves that curl_url_set() produces two different\n  outputs for the exact same input string (\"a=b&c=d\"),\n  based *only* on the presence of the APPEND flag.\n  This is inconsistent behavior that can lead to HPP.\n```\n\n## Remediation\n\nThe logic for equalsencode in lib/urlapi.c (around line 1832) should not be tied to appendquery. The decision to encode = in a query string should be based only on whether CURLU_URLENCODE is set. A simple fix would be to change equalsencode = appendquery; to equalsencode = urlencode; (or similar logic) within the CURLUPART_QUERY case block.\n\n## Impact\n\nThis inconsistent encoding behavior breaks the API contract and can lead to security vulnerabilities in applications that rely on libcurl.\n\nA developer might reasonably expect CURLU_URLENCODE to encode all query parameters consistently. However, if their application logic changes from replacing a query to appending to it, the encoding behavior silently changes.\n\n## Attack Scenario (HTTP Parameter Pollution):\n\n1. An application builds a request:\ncurl_url_set(u, CURLUPART_QUERY, \"user=guest\", CURLU_URLENCODE);\n\n\n2. Later, it appends a user-controlled parameter:\ncurl_url_set(u, CURLUPART_QUERY, \"callback=http://attacker.com\", CURLU_URLENCODE | CURLU_APPENDQUERY);\n\n\n3. Because of this bug, the application might incorrectly construct a query like: ...&callback=http://attacker.com instead of the expected ...&callback=http%3A%2F%2Fattacker.com.\n\n\nThis allows an attacker to inject unencoded characters (=, &, /, :) into query parameters, leading to HTTP Parameter Pollution (HPP), WAF bypasses, and potential SSRF or XSS vulnerabilities, depending on how the server-side application interprets the malformed query string.",
+  "weakness": {
+    "id": 107,
+    "name": "Improper Input Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4945075,
+      "file_name": "1-curl_url_set_logic_flaw_output.jpg",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/u2wqf94ejsz7mij48s7q7xq06gf9?response-content-disposition=attachment%3B%20filename%3D%221-curl_url_set_logic_flaw_output.jpg%22%3B%20filename%2A%3DUTF-8%27%271-curl_url_set_logic_flaw_output.jpg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163137Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6b81a846a4d5ce5580cde03292c0a9b840051e3d3f48207459862a623e25e457",
+      "file_size": 197912,
+      "type": "image/jpeg",
+      "moderated": false
+    },
+    {
+      "id": 4945076,
+      "file_name": "2-curl_url_set_logic_flaw_output.jpg",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fqn0gru6ezh1koyrjgxcsnzk2bq0?response-content-disposition=attachment%3B%20filename%3D%222-curl_url_set_logic_flaw_output.jpg%22%3B%20filename%2A%3DUTF-8%27%272-curl_url_set_logic_flaw_output.jpg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163137Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=79b98da9c4fb43b0f7ad9ae876ab6c5a7d5a244243282097666f29ef6ccb129c",
+      "file_size": 197971,
+      "type": "image/jpeg",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 10,
+  "voters": [
+    "thalaivar304",
+    "fbettag",
+    "2026",
+    "mirceaqq",
+    "stackraid",
+    "shaykhul",
+    "salman1377",
+    "sshabib",
+    "elliot-007",
+    "vipshakh"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

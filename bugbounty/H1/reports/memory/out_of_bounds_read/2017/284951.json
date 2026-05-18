@@ -1,0 +1,115 @@
+{
+  "id": 284951,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yODQ5NTE=",
+  "url": "https://hackerone.com/reports/284951",
+  "title": "Out-of-bounds read when importing corrupt blockchain with monero-blockchain-import",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2017-10-31T20:50:31.348Z",
+  "submitted_at": "2017-10-31T20:50:31.348Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "sybr",
+    "url": "/sybr",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2018-04-25T05:49:59.363Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2018-04-25T05:31:00.769Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "It is possible to trigger an *out-of-bounds read* in *monero-blockchain-import* when importing a corrupt blockchain and not verifying blocks and transitions during import (--verify 0).\n\nUsing a corrupt import_file, the attacker has full control over *buffer_block* in import_from_file (blockchain_import.cpp). As shown in the following lines of code (blockchain_import.cpp:404-407), this also enables the attacker to craft a corrupt bootstrap::block_package bp at will:\n```\nstr1.assign(buffer_block, chunk_size);\nbootstrap::block_package bp;\nif (! ::serialization::parse_binary(str1, bp))\n    throw std::runtime_error(\"Error in deserialization of chunk\");\n```\n\nIf verification is turned off (opt_verify = false), the following line of code (blockchain_import.cpp:484) is executed, where all arguments in the function call are extracted from the corrupt *bp*, hence, controlled by the attacker:\n```\ncore.get_blockchain_storage().get_db().add_block(b, block_size, cumulative_difficulty, coins_generated, txs);\n```\nThe executed function *BlockchainLMDB::add_block* then executes the following line of code (db_lmdb.cpp:2850), which passes the same (corrupt) arguments to the function *BlockchainDB::add_block*, where the actual memory corruption finally happens:\n```\nBlockchainDB::add_block(blk, block_size, cumulative_difficulty, coins_generated, txs);\n```\nIn *BlockchainDB::add_block*, there is unfortunately no sanity check about the passed arguments and the following lines are executed (blockchain_db:210-217):\n```\nint tx_i = 0;\ncrypto::hash tx_hash = null_hash;\nfor (const transaction& tx : txs)\n{\n    tx_hash = blk.tx_hashes[tx_i];                   // here the out-of-bounds read happens\n    add_transaction(blk_hash, tx, &tx_hash);\n    ++tx_i;\n}\n```\nAs *txs* as well as *blk* originate from the *bootstrap::block_package bp* generated in blockchain_import, they can be set to arbitrary values by the attacker. In particular, if *bp* is crafted such that *bp.txs.size() > bp.block.tx_hashes.size()*, then an out-of-bounds memory corruption happens in the for loop when accessing *blk.tx_hashes*.\n\nI have not yet examined whether the bug can be exploited in any malicious way, but I think it needs to be fixed anyways. Further, as the bug happens in the database outside of blockchain_import.cpp, it may also affect other code in monero, not only *monero-blockchain-import*. I have also not checked that. The bug can be easily fixed by introducing additional sanity checks, such as, whether *bp.txs.size() != bp.block.tx_hashes.size()*.\n\nI'll be happy to answer any further questions regarding the bug. Thank you!",
+  "weakness": {
+    "id": 8,
+    "name": "Out-of-bounds Read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2018-05-25T05:31:00.853Z",
+  "allow_singular_disclosure_after": -250522599.81381178,
+  "singular_disclosure_allowed": true,
+  "vote_count": 6,
+  "voters": [
+    "muon4",
+    "apapedulimu",
+    "geeknik",
+    "r3y",
+    "eveeez",
+    "apehex"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

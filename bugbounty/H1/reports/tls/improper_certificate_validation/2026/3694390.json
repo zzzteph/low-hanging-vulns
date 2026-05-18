@@ -1,0 +1,127 @@
+{
+  "id": 3694390,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjk0Mzkw",
+  "url": "https://hackerone.com/reports/3694390",
+  "title": "CVE-2026-7009: OCSP stapling bypass with Apple SecTrust",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-25T00:11:18.898Z",
+  "submitted_at": "2026-04-25T00:18:49.056Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "3lcarry",
+    "url": "/3lcarry",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2024-8096",
+    "CVE-2024-0853",
+    "CVE-2026-7009"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-29T07:15:33.577Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-29T06:09:43.976Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWhen curl is built with `--with-apple-sectrust` (or `-DUSE_APPLE_SECTRUST=ON`) and OpenSSL, the `--cert-status` / `CURLOPT_SSL_VERIFYSTATUS` option is silently bypassed when Apple SecTrust handles certificate chain verification instead of OpenSSL.\n\nThe user explicitly requests OCSP stapling enforcement, but the connection succeeds even when the server provides no OCSP staple — violating the documented guarantee that curl \"aborts the connection\" when no OCSP response is received.\n\n## Root Cause\n\nIn `lib/vtls/openssl.c`, `Curl_ossl_check_peer_cert()`, commit `b4630ed8fa` (2025-10-31, fixing #19307) introduced a `sectrust_verified` flag that skips OpenSSL's `verifystatus()` call when Apple SecTrust verified the certificate chain:\n\n```c\n#ifdef USE_APPLE_SECTRUST\n  if(!verified && conn_config->verifypeer && ssl_config->native_ca_store) {\n    result = ossl_apple_verify(cf, data, octx, peer, &verified);\n    if(verified) {\n      sectrust_verified = TRUE;\n    }\n  }\n#endif\n  ...\n  if(conn_config->verifystatus &&\n#ifdef USE_APPLE_SECTRUST\n     !sectrust_verified &&  /* <-- skips the OCSP check */\n#endif\n     !octx->reused_session) {\n    result = verifystatus(cf, data, octx);  /* never reached */\n  }\n```\n\nThe assumption is \"SecTrust already handled OCSP.\" But SecTrust only receives a stapled OCSP response when `ocsp_len > 0` (in `ossl_apple_verify`). If the server doesn't staple, `SSL_get_tlsext_status_ocsp_resp()` returns -1, which is clamped to 0, and `SecTrustSetOCSPResponse()` is never called. SecTrust's default revocation policy (`kSecRevocationUseAnyAvailableMethod`) is best-effort — `kSecRevocationRequirePositiveResponse` is explicitly `#if 0` in `apple.c`.\n\nResult: no OCSP enforcement happens at all.\n\n## Affected Versions\n\nIntroduced in commit `b4630ed8fa` (2025-10-31). Present in curl 8.17.0, 8.18.0, 8.19.0, and current master.\n\n## Steps To Reproduce\n\n### Step 1: Build two versions of curl\n\nTested on curl master at commit `bfcc1c6eb4`. The bug was introduced in commit `b4630ed8fa` (2025-10-31), so any version >= 8.17.0 is affected.\n\n**Build A — OpenSSL only (control):**\n```\ncmake -DCURL_USE_OPENSSL=ON -DUSE_APPLE_SECTRUST=OFF\n```\n\n```\ncurl --version\ncurl 8.20.0-DEV (Darwin) libcurl/8.20.0-DEV OpenSSL/3.6.1 zlib/1.2.12 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.5 nghttp2/1.68.0\nRelease-Date: [unreleased]\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns ldap ldaps mqtt mqtts pop3 pop3s rtsp smb smbs smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS brotli HSTS HTTP2 HTTPS-proxy IDN IPv6 Largefile libz NTLM PSL SSL threadsafe TLS-SRP UnixSockets zstd\n```\n\n**Build B — OpenSSL + Apple SecTrust (test):**\n```\ncmake -DCURL_USE_OPENSSL=ON -DUSE_APPLE_SECTRUST=ON\n```\n\n```\ncurl --version\ncurl 8.20.0-DEV (Darwin) libcurl/8.20.0-DEV OpenSSL/3.6.1 zlib/1.2.12 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.5 nghttp2/1.68.0\nRelease-Date: [unreleased]\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns mqtt mqtts pop3 pop3s rtsp smtp smtps telnet tftp ws wss\nFeatures: alt-svc AppleSecTrust AsynchDNS brotli HSTS HTTP2 HTTPS-proxy IDN IPv6 Largefile libz PSL SSL threadsafe TLS-SRP UnixSockets zstd\n```\n\nNote `AppleSecTrust` in the Features line of Build B.\n\n### Step 2: Generate test certificates\n\n```bash\n# Generate CA\nopenssl req -x509 -newkey rsa:2048 -days 30 -nodes \\\n  -keyout ca-key.pem -out ca.pem -subj \"/CN=PoC Test CA\"\n\n# Generate server cert signed by CA (SAN=localhost)\nopenssl req -newkey rsa:2048 -nodes \\\n  -keyout server-key.pem -out server.csr -subj \"/CN=localhost\"\nopenssl x509 -req -days 30 -in server.csr \\\n  -CA ca.pem -CAkey ca-key.pem -CAcreateserial \\\n  -out server.pem -extfile <(printf \"subjectAltName=DNS:localhost\")\n```\n\n### Step 3: Add CA to macOS Keychain\n\nAdd the CA to the macOS login keychain as trusted:\n\n```bash\nsecurity add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db ca.pem\n```\n\n### Step 4: Start test server (no OCSP stapling)\n\n`openssl s_server` does not staple OCSP by default:\n\n```bash\nopenssl s_server -cert server.pem -key server-key.pem -accept 4433 -www\n```\n\n### Step 5: Run the three tests\n\n**Test 1 — Control (Build A, OpenSSL only):**\n```bash\ncurl -v --cert-status --cacert ca.pem https://localhost:4433/\n```\n\n**Test 2 — Bug (Build B, SecTrust):**\n```bash\ncurl -v --cert-status --ca-native https://localhost:4433/\n```\n\n**Test 3 — Sanity (Build B, SecTrust, no --cert-status):**\n```bash\ncurl -v --ca-native https://localhost:4433/\n```\n\nClean up when done:\n```bash\nsecurity delete-certificate -c \"PoC Test CA\" ~/Library/Keychains/login.keychain-db\n```\n\n## Results\n\n| Test | Build | Flags | Result | Expected |\n|------|-------|-------|--------|----------|\n| 1 | OpenSSL only | `--cert-status --cacert ca.pem` | **FAIL (exit 91)**: \"No OCSP response received\" | Correct — OCSP enforced |\n| 2 | OpenSSL + SecTrust | `--cert-status --ca-native` | **SUCCESS (exit 0)** | WRONG — OCSP bypassed |\n| 3 | OpenSSL + SecTrust | `--ca-native` | **SUCCESS (exit 0)** | Correct — no OCSP requested |\n\nTest 1 verbose output (relevant lines):\n```\n* OpenSSL verify result: 0\n* SSL certificate verified via OpenSSL.\n* No OCSP response received\n* closing connection #0\ncurl: (91) No OCSP response received\n```\n\nTest 2 verbose output (relevant lines):\n```\n* OpenSSL verify result: 14\n* SSL certificate verified via Apple SecTrust.\n* Established connection to localhost (::1 port 4433) from ::1 port 49751\n```\n\nNo OCSP check occurs. The connection succeeds despite `--cert-status` being set and the server providing no OCSP staple.\n\n## Impact\n\n## Summary:\n\nA user who sets `--cert-status` / `CURLOPT_SSL_VERIFYSTATUS` expects curl to abort the connection if the server does not provide a valid OCSP stapled response. This is documented behavior: \"If this option is enabled and the server sends an invalid response, or no response at all is received, the verification fails.\"\n\nWhen Apple SecTrust handles verification (build with `USE_APPLE_SECTRUST`, runtime with `--ca-native`), this guarantee is silently violated. The OCSP stapling check is skipped entirely, and the connection proceeds as if `--cert-status` was never set.\n\nThis is the same vulnerability class as CVE-2024-8096 (OCSP stapling bypass with GnuTLS) and CVE-2024-0853 (OCSP verification bypass with TLS session reuse).",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 17,
+  "voters": [
+    "2026",
+    "0xterrifier",
+    "clayynh",
+    "jayanto_kumar_roy9",
+    "yapex7k",
+    "biassoraoul",
+    "kaitanai",
+    "mazennafe",
+    "hanselwhispered",
+    "ogspacejam22",
+    "and 7 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

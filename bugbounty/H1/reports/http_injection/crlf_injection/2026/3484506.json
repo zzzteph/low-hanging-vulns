@@ -1,0 +1,146 @@
+{
+  "id": 3484506,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDg0NTA2",
+  "url": "https://hackerone.com/reports/3484506",
+  "title": "CRLF Injection in Gopher Protocol (`lib/gopher.c`)",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-01-02T05:54:08.371Z",
+  "submitted_at": "2026-01-02T05:54:08.618Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "gaurav0212",
+    "url": "/gaurav0212",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/06fjrtecywk1bnp70wyi5h1ol8uy/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-01-02T10:41:22.125Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-01-02T10:41:22.006Z",
+  "team_member_agreed_on_going_public_at": "2026-01-02T10:34:24.273Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Control characters slip through during URL handling in curl’s Gopher setup. Though null bytes get blocked by the `REJECT_ZERO` setting, returns and line feeds remain permitted. A specially built address using percent-encoded breaks - like %0D%0A - opens room for command insertion. Because of how decoding works here, unintended instructions may pass into the data flow. Unexpected behavior follows when those sequences reach downstream systems.\n\nRoot Cause: `lib/gopher.c` handles data, decoding occurs within the path segment through a specific function call\n```c\nresult = Curl_urldecode(newp, 0, &buf_alloc, &buf_len, REJECT_ZERO);\n```\nBecause `REJECT_CTRL` is absent, encoded CRLF sequences become actual line breaks when the request reaches the server.\n\nSteps to Reproduce:\n\n- Create the listener script: (Use the Python script below to capture raw bytes and detect injection).\n```bash\nimport socket\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ns.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\ns.bind(('127.0.0.1', 7070))\ns.listen(1)\nprint(\"Server listening on 7070...\")\nwhile True:\n    conn, addr = s.accept()\n    data = conn.recv(4096)\n    print(f\"Received: {repr(data)}\")\n    if b'\\r\\n' in data: print(\"🚨 CRLF INJECTION DETECTED!\")\n    conn.close()\n```\n- Execute the Payload: Run curl with an encoded CRLF sequence in the Gopher path:\n```bash\ncurl \"gopher://127.0.0.1:7070/x%0D%0AINJECTED_COMMAND\"\n```\n- Verify the Injection: Check your listener output. You will see that the INJECTED_COMMAND appears on a new line, confirming that the protocol stream was broken:\n```text\n[+] Client connected from ('127.0.0.1', 53518)\n[RECEIVED] b'yz\\r\\nINJECTED\\r\\n'\n[HEX] 797a0d0a494e4a45435445440d0a\n\n🚨 CRLF INJECTION DETECTED!\n```\n\n## Impact\n\nSecurity limits may be crossed in this scenario. When an attacker influences the URL or triggers a redirection, interaction with internal systems becomes possible - systems such as Redis, Memcached, or mail components. Execution of unintended instructions follows under these conditions.\n\nFix: In `lib/gopher.c`, swap `REJECT_ZERO` with `REJECT_CTRL`. This change ensures full suppression of control characters. Implementation now prevents unintended character handling by using the updated flag. Outcome aligns with expected filtering behavior. Final effect appears consistent across test cases.\n\nDisclosure:\nTo test the idea, a basic `TCP server` was built `using a code-generation assistant`, focused strictly on recording byte streams from Gopher links. Rather than automating analysis, each stage - examining flaws, tracing origins, judging consequences, replicating issues - was completed by hand. Simplicity guided the design of the server; its purpose limited to exposing how data moves at the protocol layer.",
+  "weakness": {
+    "id": 69,
+    "name": "CRLF Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5177373,
+      "file_name": "01.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/vnyu0jndf3cj3ueqdte9jhg8ddwm?response-content-disposition=attachment%3B%20filename%3D%2201.png%22%3B%20filename%2A%3DUTF-8%27%2701.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXRDL36FJ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162826Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIFrffD4PFhs%2BYPj%2Bf2%2B%2Fs%2B%2FwPTcOjvFfA%2BS0Z3jD4%2F5AAiEAnZm9%2Bjoq7nad82%2FpaSyNzY3yiocvvtflTxJ5%2B8rdhTUqsQUIQBADGgwwMTM2MTkyNzQ4NDkiDHaNl2dz9TUWTxrrxSqOBetL7YyL42aS4OEYSn97tWe4wc91sqqZ9ftnH3mv3cn8z9ruub6WrGXH3cbk7I0F9bQ0QCKm69eZxR8F8StfdBAZvmeyBd5CCS3LMjMiOlsNB54pYgpNtpWjHBYatpH63oaHLPUul8ASMJMHovhObxZlXhjRR%2BsfVyWqNL0MC3IuCbkBktBKrs2fe12s4Dtt3jM%2FSFXzfu062i4Ic2R50PeySoydHyf%2FEFOMZSxEsLPygwLXPlOfLma6R1qXl8EdRA7iNnIWV4eoPIpauXBDv7PWQ7zue2Sxl1ymF2yJPoPCuAvwHdQFyiSfNC8tMZsGVoCOjcqXWpE%2BANAP%2BnxEenay7hMAXXvG1TSKJjHC6i9cLUauk8lMvy4rAYSBNGC16TfkFX6%2BmbHgJMO249U8aT%2Bs5kt22xNpDFwWWZCcYj0hrC8G0F2JijHFA7JmJUBXkSCUhGcfOMamRCvKGbHMiWcwVNQuNqD1mfp%2Ba95%2Bq9oeh4Ck6T52A1tPOdFA6SsSAlU6OnR8pJEMvVESMzprD4RQJlUFUbLcL1WI%2BXjI%2FJsxxNWxLjO6E5DYeCnqcN2laWNtdNqRSYTTkXYUlpbTofn%2FTXT9UByqo9v%2FuqzFq%2FApbzpCuRtIx%2BVeqLJwgakdJ79WkvJQRVU5DFm9u4zDb7QceEfcEZ0ZhlShaCjMNUX%2B%2FYROQEfazfqmfZpm34vom8rOfB5IjKdcjBqcJa053EsjqETMUvGFs8o14a69Bgl9OR1QzVxA83zIk55heWtvzhtyAlkzxRxYrkiOD2xSjy4gmjai2irAOv8qXDzRMke5lkfUHM7cLfb%2BX%2FsMWtsbgmPp1Um9dD3xy9UQYlcnJMtRuy8EFRPHsoNzwvLKTzCDnNjPBjqxAfMTXUgZcDza77JmOO1vpB%2B3foy2X3ss9kjNG%2B7jNl9yMloigvfjWiIbb9OdcTpDY8yCIbPzryCWd9UIYhWgFjZD9f%2FB3%2Ft5IHRXSjdq1mV207uCdhD%2BimOsbOcCytuR5VajF0mu24FUFQudTMkD2HT9GT7Tf3CeHMGZ1AOxv3v2QTSIlLVUBgDlwUWWr1n5bmClKZ8OFnKLxXc0EK2fhoxQ9FU%2FvjcJ6t6A0Xs1lw0jKg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c24207e3b6f9fafce1d13f1657423a21135de3d25089ba4e6ae1a30a35b09d56",
+      "file_size": 170401,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5177374,
+      "file_name": "02.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/no9a13nbm1kbgoi0l12bazvoxh4f?response-content-disposition=attachment%3B%20filename%3D%2202.png%22%3B%20filename%2A%3DUTF-8%27%2702.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXRDL36FJ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162826Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIFrffD4PFhs%2BYPj%2Bf2%2B%2Fs%2B%2FwPTcOjvFfA%2BS0Z3jD4%2F5AAiEAnZm9%2Bjoq7nad82%2FpaSyNzY3yiocvvtflTxJ5%2B8rdhTUqsQUIQBADGgwwMTM2MTkyNzQ4NDkiDHaNl2dz9TUWTxrrxSqOBetL7YyL42aS4OEYSn97tWe4wc91sqqZ9ftnH3mv3cn8z9ruub6WrGXH3cbk7I0F9bQ0QCKm69eZxR8F8StfdBAZvmeyBd5CCS3LMjMiOlsNB54pYgpNtpWjHBYatpH63oaHLPUul8ASMJMHovhObxZlXhjRR%2BsfVyWqNL0MC3IuCbkBktBKrs2fe12s4Dtt3jM%2FSFXzfu062i4Ic2R50PeySoydHyf%2FEFOMZSxEsLPygwLXPlOfLma6R1qXl8EdRA7iNnIWV4eoPIpauXBDv7PWQ7zue2Sxl1ymF2yJPoPCuAvwHdQFyiSfNC8tMZsGVoCOjcqXWpE%2BANAP%2BnxEenay7hMAXXvG1TSKJjHC6i9cLUauk8lMvy4rAYSBNGC16TfkFX6%2BmbHgJMO249U8aT%2Bs5kt22xNpDFwWWZCcYj0hrC8G0F2JijHFA7JmJUBXkSCUhGcfOMamRCvKGbHMiWcwVNQuNqD1mfp%2Ba95%2Bq9oeh4Ck6T52A1tPOdFA6SsSAlU6OnR8pJEMvVESMzprD4RQJlUFUbLcL1WI%2BXjI%2FJsxxNWxLjO6E5DYeCnqcN2laWNtdNqRSYTTkXYUlpbTofn%2FTXT9UByqo9v%2FuqzFq%2FApbzpCuRtIx%2BVeqLJwgakdJ79WkvJQRVU5DFm9u4zDb7QceEfcEZ0ZhlShaCjMNUX%2B%2FYROQEfazfqmfZpm34vom8rOfB5IjKdcjBqcJa053EsjqETMUvGFs8o14a69Bgl9OR1QzVxA83zIk55heWtvzhtyAlkzxRxYrkiOD2xSjy4gmjai2irAOv8qXDzRMke5lkfUHM7cLfb%2BX%2FsMWtsbgmPp1Um9dD3xy9UQYlcnJMtRuy8EFRPHsoNzwvLKTzCDnNjPBjqxAfMTXUgZcDza77JmOO1vpB%2B3foy2X3ss9kjNG%2B7jNl9yMloigvfjWiIbb9OdcTpDY8yCIbPzryCWd9UIYhWgFjZD9f%2FB3%2Ft5IHRXSjdq1mV207uCdhD%2BimOsbOcCytuR5VajF0mu24FUFQudTMkD2HT9GT7Tf3CeHMGZ1AOxv3v2QTSIlLVUBgDlwUWWr1n5bmClKZ8OFnKLxXc0EK2fhoxQ9FU%2FvjcJ6t6A0Xs1lw0jKg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=7c487130fd6572e223c33f78035a172f7fadf27101a5f92881acd8f44597e963",
+      "file_size": 184074,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5177375,
+      "file_name": "03.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ghnlkrl6bvgk2wvvontqju9ndy5j?response-content-disposition=attachment%3B%20filename%3D%2203.png%22%3B%20filename%2A%3DUTF-8%27%2703.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXRDL36FJ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162826Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIFrffD4PFhs%2BYPj%2Bf2%2B%2Fs%2B%2FwPTcOjvFfA%2BS0Z3jD4%2F5AAiEAnZm9%2Bjoq7nad82%2FpaSyNzY3yiocvvtflTxJ5%2B8rdhTUqsQUIQBADGgwwMTM2MTkyNzQ4NDkiDHaNl2dz9TUWTxrrxSqOBetL7YyL42aS4OEYSn97tWe4wc91sqqZ9ftnH3mv3cn8z9ruub6WrGXH3cbk7I0F9bQ0QCKm69eZxR8F8StfdBAZvmeyBd5CCS3LMjMiOlsNB54pYgpNtpWjHBYatpH63oaHLPUul8ASMJMHovhObxZlXhjRR%2BsfVyWqNL0MC3IuCbkBktBKrs2fe12s4Dtt3jM%2FSFXzfu062i4Ic2R50PeySoydHyf%2FEFOMZSxEsLPygwLXPlOfLma6R1qXl8EdRA7iNnIWV4eoPIpauXBDv7PWQ7zue2Sxl1ymF2yJPoPCuAvwHdQFyiSfNC8tMZsGVoCOjcqXWpE%2BANAP%2BnxEenay7hMAXXvG1TSKJjHC6i9cLUauk8lMvy4rAYSBNGC16TfkFX6%2BmbHgJMO249U8aT%2Bs5kt22xNpDFwWWZCcYj0hrC8G0F2JijHFA7JmJUBXkSCUhGcfOMamRCvKGbHMiWcwVNQuNqD1mfp%2Ba95%2Bq9oeh4Ck6T52A1tPOdFA6SsSAlU6OnR8pJEMvVESMzprD4RQJlUFUbLcL1WI%2BXjI%2FJsxxNWxLjO6E5DYeCnqcN2laWNtdNqRSYTTkXYUlpbTofn%2FTXT9UByqo9v%2FuqzFq%2FApbzpCuRtIx%2BVeqLJwgakdJ79WkvJQRVU5DFm9u4zDb7QceEfcEZ0ZhlShaCjMNUX%2B%2FYROQEfazfqmfZpm34vom8rOfB5IjKdcjBqcJa053EsjqETMUvGFs8o14a69Bgl9OR1QzVxA83zIk55heWtvzhtyAlkzxRxYrkiOD2xSjy4gmjai2irAOv8qXDzRMke5lkfUHM7cLfb%2BX%2FsMWtsbgmPp1Um9dD3xy9UQYlcnJMtRuy8EFRPHsoNzwvLKTzCDnNjPBjqxAfMTXUgZcDza77JmOO1vpB%2B3foy2X3ss9kjNG%2B7jNl9yMloigvfjWiIbb9OdcTpDY8yCIbPzryCWd9UIYhWgFjZD9f%2FB3%2Ft5IHRXSjdq1mV207uCdhD%2BimOsbOcCytuR5VajF0mu24FUFQudTMkD2HT9GT7Tf3CeHMGZ1AOxv3v2QTSIlLVUBgDlwUWWr1n5bmClKZ8OFnKLxXc0EK2fhoxQ9FU%2FvjcJ6t6A0Xs1lw0jKg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2c0a3b3bb9c7900215f5f7b665ce6f999f295e9b063b05b83404e9101a97b827",
+      "file_size": 214639,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 9,
+  "voters": [
+    "2026",
+    "gaurav_7777",
+    "gaurav0212",
+    "pl4nkton_",
+    "corrinaalcoser",
+    "m355i",
+    "stableexo",
+    "unknowperson0212",
+    "chirag_soni"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

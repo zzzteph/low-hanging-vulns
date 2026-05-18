@@ -1,0 +1,156 @@
+{
+  "id": 3279804,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMjc5ODA0",
+  "url": "https://hackerone.com/reports/3279804",
+  "title": "Stack use-after-scope in HTTP/3 POST request processing via CURLOPT_POSTFIELDS",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "high",
+  "readable_substate": "N/A",
+  "created_at": "2025-07-31T14:56:23.776Z",
+  "submitted_at": "2025-07-31T14:56:24.068Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "geeknik",
+    "url": "/geeknik",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/jgjvp6dlesp661w5ashvoami0j3c/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-07-31T15:09:00.147Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-07-31T15:05:46.992Z",
+  "team_member_agreed_on_going_public_at": "2025-07-31T15:08:59.883Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n  A stack use-after-scope vulnerability exists in libcurl's HTTP/3 request processing when using `CURLOPT_POSTFIELDS` with stack-allocated buffers. libcurl retains a pointer to user-provided POST data but accesses it after the original stack frame has been destroyed, leading to memory corruption and potential denial of service.\n\n  The vulnerability occurs in `Curl_pretransfer()` at `transfer.c:569` when libcurl calls `strlen()` on the previously stored POST data pointer that now points to invalid stack memory.\n\n ##  Steps to Reproduce / Proof of Concept\n\n  ### Environment\n\n  - libcurl version: 8.16.0-DEV (master branch)\n  - Compiler: Clang 20.1.8 with AddressSanitizer\n  - Platform: macOS (ARM64)\n  - Configuration: HTTP/3 enabled with ngtcp2/nghttp3\n\n###  Reproduction Steps\n\n  1. Build libcurl with ASAN:\n```bash\n  export CC=clang\n  export CFLAGS=\"-O1 -g -fsanitize=address,undefined\"\n  ./configure --with-openssl --with-nghttp2 --with-nghttp3 --with-ngtcp2\n  make\n```\n\n  2. Compile the reproducer:\n```\n  // http3_crash_poc.c\n  #include <curl/curl.h>\n  #include <string.h>\n\n  int main() {\n      CURL *curl = curl_easy_init();\n\n      // Stack-allocated buffer that goes out of scope\n      {\n          char body_data[257];\n          memset(body_data, 'A', 256);\n          body_data[256] = '\\0';\n\n          curl_easy_setopt(curl, CURLOPT_URL, \"https://example.com/\");\n          curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_3);\n          curl_easy_setopt(curl, CURLOPT_POST, 1L);\n          curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body_data); // Vulnerable call\n          curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 50L);\n      } // body_data goes out of scope here\n\n      // libcurl accesses invalid memory during transfer\n      curl_easy_perform(curl);\n      curl_easy_cleanup(curl);\n      return 0;\n  }\n```\n\n  3. Compile and run:\n```bash\n  clang -fsanitize=address http3_crash_poc.c -lcurl -o poc\n  ./poc\n```\n\n###  Crash Output\n```\n  ==3720==ERROR: AddressSanitizer: stack-use-after-scope on address 0x00016fa21470\n  READ of size 45 at 0x00016fa21470 thread T0\n      #0 strlen\n      #1 Curl_pretransfer transfer.c:569\n      #2 multi_runsingle multi.c:2376\n      #3 curl_multi_perform multi.c:2756\n      #4 easy_transfer easy.c:705\n      #5 easy_perform easy.c:813\n\n  SUMMARY: AddressSanitizer: stack-use-after-scope transfer.c:569 in Curl_pretransfer\n```\n###  Fuzzer Discovery\n\n  This vulnerability was discovered using a custom libFuzzer fuzzing harness.\n\n ##  Technical Analysis\n\n###  Root Cause\n\n  The vulnerability stems from libcurl's `CURLOPT_POSTFIELDS` behavior:\n  1. libcurl stores the pointer but doesn't copy the data\n  2. The application's stack buffer becomes invalid after scope exit\n  3. libcurl later dereferences the invalid pointer in `Curl_pretransfer()`\n\n ### Affected Code Path\n\n  curl_easy_setopt(CURLOPT_POSTFIELDS) → \n  curl_easy_perform() → \n  Curl_pretransfer() →\n  strlen(invalid_pointer) → \n  CRASH\n\n###  Recommended Fix\n\n  1. Documentation: Clarify that `CURLOPT_POSTFIELDS` data must remain valid until transfer completion\n  2. API Enhancement: Consider adding bounds checking or automatic copying for stack-detected pointers\n  3. Alternative API: Promote `CURLOPT_COPYPOSTFIELDS` for safer usage patterns\n\n## Impact\n\n##  Security Impact\n\n  1. Denial of Service: Guaranteed crash leading to application termination\n  2. Memory Corruption: Use-after-scope can lead to unpredictable behavior\n  3. Potential Code Execution: In specific circumstances, memory corruption could be leveraged for control flow hijacking\n\n###  Affected Scenarios\n\n  - Applications using libcurl for HTTP/3 requests with POST data\n  - Any code pattern where CURLOPT_POSTFIELDS points to stack-allocated memory\n  - Particularly affects:\n    - HTTP/3 client applications\n    - API clients using stack buffers for request bodies\n    - Embedded systems with limited heap usage\n\n###  Real-World Exposure\n\n  - Language bindings: Many curl bindings may inadvertently create this pattern\n  - Example applications: CLI tools, web scrapers, API clients\n  - Severity: High due to HTTP/3 adoption growth and remote exploitability",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4631164,
+      "file_name": "crash-dba0ab3649c558305fac8daefeb27e8b54396c2c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/egb88buuv53bixuknbs9kf3v2ysr?response-content-disposition=attachment%3B%20filename%3D%22crash-dba0ab3649c558305fac8daefeb27e8b54396c2c%22%3B%20filename%2A%3DUTF-8%27%27crash-dba0ab3649c558305fac8daefeb27e8b54396c2c&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ6LQKI7WJ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163346Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCLQqEgJN2Y%2FJIf%2FJBvnB4b5LKr0IfuWSFS0tUCnPUHLgIhAM2PnKkZlLY4kdb9d5zR%2FR%2Bi6GFQV38L5OCzkYGJzZJYKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5Igwr%2F%2FAy8opFHxSPKT4qjgXjAoa9oAQ71vmw5wLIJSNu62TQVEwKqAMMZa1dKWisr6lVwTXfakFfmukIaxYkEnxr5Urer6esYiAKTUOuVQ%2BFDLNiNiuhHT7hayPkMWqltshq4QY3Z2olt30vKbBCNYYAYWN5XOfSnKjjZHuPZ2oANyP4s7cvFbylHUklQucJyCE7to%2B16VMxmrPQikHKPDleHZ6hf8%2B%2FxvfotdqsnEZehIyLdnhV%2Fcgud7b68MPO8JVxfdbACqqi%2FXl9EPq3NgCWdGxA1dtDGaIiX%2B56OAZwtz61fKvN9cIURuFwR%2Bobgd%2FVJ5GZKfHCkUGtBgbsYJ5LYAW72I37joO0NplFN4aecZphhGTUwpDGDlXxsV3DVHG5TOvzIqZQr7cE2I%2FDHHTs%2F8e3Mp4fnuAVUec5v6eduJjddccUaky%2FItR3YB0HW4w9sc5dDFKHadr%2F4Tz%2FUrw8MMXkhICbm%2F6%2Bov6tXmkf6XM7X0ewn4zsD6d0%2BEP1ALQdhgscLPkLx%2FoXa%2BvUVuwOlN8jOIdR995RholLnrfGwjYOPCbh4wXK%2FczEQ6RXjGaTwO8ypTt2b%2FZUqMmEwj1emPaXatBiqVxPF6rfSeDGiRHQLc%2B9zTagIrMHWZ6fcz%2BqH63Lm9RwhNjKN%2BSVzwYtFWHKlGHuzxJu9SXU3U3x5TmyAqQcG10tQV4yFGzltLEdG8Fq8PZ8uwqV8YKnJEurSk1oy1OyOmLNYPHWxYwr0fPYvc%2Fxi4Y9AkSaxULFPfuQYSI%2B4vQ3FsS9JavKE5SwGGq8kcqcifEMLS7iLFcMnDkEUqon%2FFTbhVqTk%2BdR9hojV274YiFDROf7E7uLTF0G7%2B%2FUoJ5uvpxZDoKOhX73AGG%2F6CXFEPBPtGPok3sw2p7YzwY6sAEI4h8LD2de1dc%2BnXRgYYV%2FfC%2BvEVKha98V7oq%2FKXbglAVsftc5YEMUybZnjB3YbDiZv9JksxcwoMaUryjjT7gGD1OmBeAYo3SyOULT2bmeBVvzib3H4BlDDnsnL%2FtmD22S%2Fv%2B1bXgloQVyDLrF7Jf4a08mMYZgAXVT03ZeujYwHAhJAO99RXAIRuszOMIQftGrOMLK9I8hoNU7Fb%2FGygdApBf06zWK0l61ZcpB8iNg9A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e2ae32710458ad23ac68b329e73f78147f1c1933203486e6f9369f66b4dcb757",
+      "file_size": 1290,
+      "type": "application/octet-stream",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 27,
+  "voters": [
+    "corrupted_bytes",
+    "zeus_web3",
+    "thalaivar304",
+    "2026",
+    "lonely_cat",
+    "geeknik",
+    "adce626q",
+    "aag1107",
+    "mai91",
+    "mrtani",
+    "and 17 more..."
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "id": 735047,
+      "category": "researcher",
+      "content": "**Audit every libcurl POST in your stack. Treat `CURLOPT_POSTFIELDS` like explosives.** Either switch to `CURLOPT_COPYPOSTFIELDS` or prove your pointer lives forever. No exceptions.",
+      "updated_at": "2025-07-31T15:08:41.213Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 12276,
+        "username": "geeknik",
+        "name": "Brian Carpenter",
+        "bio": "Arcane bug finding braggart trying to make the Internet a safer place for everyone.",
+        "cleared": false,
+        "verified": true,
+        "website": "https://github.com/geeknik",
+        "location": "USA",
+        "created_at": "2014-09-21T04:15:33.476Z",
+        "url": "https://hackerone.com/geeknik",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "hacker",
+        "profile_picture_urls": {
+          "small": "https://profile-photos.hackerone-user-content.com/variants/jgjvp6dlesp661w5ashvoami0j3c/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67",
+          "medium": "https://profile-photos.hackerone-user-content.com/variants/jgjvp6dlesp661w5ashvoami0j3c/74790fe75ac5dbe8a5140a122388d59ebac913dcfa941f0b3a45e6cad161f9ea",
+          "xtralarge": "https://profile-photos.hackerone-user-content.com/variants/jgjvp6dlesp661w5ashvoami0j3c/fba683f28d17594d98b39d87e2b3aa09acb938c22d49b206f663ae961dc39adc"
+        }
+      }
+    }
+  ]
+}

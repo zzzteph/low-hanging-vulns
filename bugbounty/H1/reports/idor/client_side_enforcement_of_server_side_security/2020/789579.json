@@ -1,0 +1,132 @@
+{
+  "id": 789579,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC83ODk1Nzk=",
+  "url": "https://hackerone.com/reports/789579",
+  "title": "ActiveStorage direct upload fails to sign content-length header for S3 service",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2020-02-05T22:24:41.310Z",
+  "submitted_at": "2020-02-05T22:24:41.310Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "travispew",
+    "url": "/travispew",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2020-8162"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2020-05-18T20:43:36.685Z",
+  "bug_reporter_agreed_on_going_public_at": "2020-05-18T20:43:36.632Z",
+  "team_member_agreed_on_going_public_at": "2020-05-18T19:37:16.444Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "When a user makes a direct upload using ActiveStorage, the browser makes a request to the DirectUploadsController containing the direct_upload parameters filename, content_type, byte_size, and checksum. These are used to generate a presigned url that is then passed back to the browser, allowing the user to upload directly to S3.\n\nIn particular, the byte_size parameter is intended to be encoded in the url for content-length, preventing the user from uploading a file of a different size. Although Rails does not currently provide any built in validations, developers have been encouraged to modify the controller or provide their own controller if they want to create a validation. For example, a developer might decide to prohibit uploads greater than 10MB in size.\n\nin all current version of Rails with ActiveStorage and direct uploads `active_storage/lib/active_storage/service/s3_service.rb`, the code generates the presigned_url as follows:\n\n```ruby\n    def url_for_direct_upload(key, expires_in:, content_type:, content_length:, checksum:)\n      instrument :url, key: key do |payload|\n        generated_url = object_for(key).presigned_url :put, expires_in: expires_in.to_i,\n          content_type: content_type, content_length: content_length, content_md5: checksum\n\n        payload[:url] = generated_url\n\n        generated_url\n      end\n    end\n```\n\nHowever, the aws-sdk-s3 gem *silently blacklists* the \"content-length\" header:\n\nhttps://github.com/aws/aws-sdk-ruby/blob/master/gems/aws-sdk-s3/lib/aws-sdk-s3/presigner.rb#L22\n\nThis issue is also raised here: https://github.com/aws/aws-sdk-ruby/issues/2098\n\nAs a result, the content-length header is never actually part of the presigned url. As a result, a malicious user can select a file of arbitrary size, tell the direct uploads controller that the file is a different size, and then proceed to upload the file, bypassing the intended protection of the signed url.\n\nThe solution is to add the whitelist_headers argument:\n\n```ruby\n    def url_for_direct_upload(key, expires_in:, content_type:, content_length:, checksum:)\n      instrument :url, key: key do |payload|\n        generated_url = object_for(key).presigned_url :put, expires_in: expires_in.to_i,\n          content_type: content_type, content_length: content_length, content_md5: checksum,\n          whitelist_headers: ['content-length']\n\n        payload[:url] = generated_url\n\n        generated_url\n      end\n    end\n```\nAfter this is added, the content-length will be included in the presigned url and the client will be unable to upload a file of arbitrary size.\n\n## Impact\n\nThe attacker could upload a file of any size, unless the S3 service is configured separately to prevent this, whereas the developer believes they have protected themselves against this. This could allow an attacker to upload a very large file to S3, incurring additional costs to the website owner or causing other harm.",
+  "weakness": {
+    "id": 102,
+    "name": "Client-Side Enforcement of Server-Side Security"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2020-06-17T19:37:16.554Z",
+  "allow_singular_disclosure_after": -185321959.85908562,
+  "singular_disclosure_allowed": true,
+  "vote_count": 5,
+  "voters": [
+    "poneglyph",
+    "2026",
+    "its_afolic",
+    "jabawack81",
+    "rsantoro"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.3,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

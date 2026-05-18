@@ -1,0 +1,179 @@
+{
+  "id": 819717,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC84MTk3MTc=",
+  "url": "https://hackerone.com/reports/819717",
+  "title": "IPv4 only clusters susceptible to MitM attacks via IPv6 rogue router advertisements",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2020-03-15T17:34:18.152Z",
+  "submitted_at": "2020-03-15T17:34:18.152Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "champtar",
+    "url": "/champtar",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/gP6rmwtVzj4iV6taRZdmhSGU/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 39386,
+    "url": "https://hackerone.com/kubernetes",
+    "handle": "kubernetes",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/039/386/486f4380e09776d05a912ca9f46be23f72fe8197_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/039/386/486f4380e09776d05a912ca9f46be23f72fe8197_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Kubernetes",
+      "twitter_handle": "kubernetesio",
+      "website": "https://kubernetes.io/",
+      "about": ""
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2019-9946",
+    "CVE-2019-3462"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2021-11-07T03:52:50.936Z",
+  "bug_reporter_agreed_on_going_public_at": "2021-10-08T03:52:49.109Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "This bug report mostly concerns the default CNI plugins (https://github.com/containernetworking/plugins) but I believe affects many K8S clusters.\nBecause the CNI team still doesn’t provide an explicit way to report security bugs, I hope the K8S security team doesn’t mind doing the coordination job again as was done for CVE-2019-9946.\nI understand this is out of scope for this bounty, and I understand if you want to close this report and prefer that I resend it via email to security@kubernetes.io or other.\n\n## Summary:\nIn many K8S network configurations the container network interface is a virtual ethernet link going to the host (veth interface). In this configuration, an attacker able to run a process as root in a container can send and receive arbitrary packets to the host using the CAP_NET_RAW capability (present in default configuration).\n\nIn a K8S cluster with an IPv4 internal network, if IPv6 is not totally disabled on the host (via ipv6.disable=1 on the kernel cmdline), it will be either unconfigured or configured on some interfaces, but it’s pretty likely that ipv6 forwarding is disabled, ie /proc/sys/net/ipv6/conf/*/forwarding == 0. Also by default, /proc/sys/net/ipv6/conf/*/accept_ra == 1. The combination of these 2 sysctls means that the host accepts router advertisements and configure the IPv6 stack using them.\n\nBy sending “rogue” router advertisements, an attacker can reconfigure the host to redirect part or all of the IPv6 traffic of the host to the attacker controlled container.\nEven if there was no IPv6 traffic before, if the DNS returns A (IPv4) and AAAA (IPv6) records, many HTTP libraries will try to connect via IPv6 first then fallback to IPv4, giving an opportunity to the attacker to respond.\nIf by chance you also have on the host a vulnerability like last year’s RCE in apt (CVE-2019-3462), you can now escalate to the host.\n\nAs CAP_NET_ADMIN is not present by default in K8S pods, the attacker can’t configure the IPs they want to MitM, they can’t use iptables to NAT or REDIRECT the traffic, and they can’t use IP_TRANSPARENT. The attacker can however still use CAP_NET_RAW and implement a tcp/ip stack in user space.\n\nThis report includes a POC based on smoltcp (https://github.com/smoltcp-rs/smoltcp) that sends router advertisements and implements a dummy HTTP server listening on any IPv6 addresses.\n\nThis vulnerability can easily be fixed by setting accept_ra = 0 by default on any interface managed by CNI / K8S.\n\n## Kubernetes Version:\nReproduced on:\nGKE Cos 1.14.10-gke.17 with native VPC\nGKE Cos 1.16.6-gke.12 with/without native VPC\nGKE Cos + containerd 1.16.6-gke.12 without native VPC\nKubespray k8s 1.17.3 + containerd\n\n\n## Component Version:\nCNI 0.7.5\n\n## Steps To Reproduce:\n\nPlease find attached F748694, a recording of my shell using asciinema (https://github.com/asciinema/asciinema)\n\nThe GKE cluster used was created using the following command:\n`gcloud beta container --project \"copper-frame-263204\" clusters create \"testipv6\" --zone \"us-central1-c\" --no-enable-basic-auth --release-channel \"rapid\" --machine-type \"n1-standard-1\" --image-type \"COS\" --disk-type \"pd-standard\" --disk-size \"100\" --metadata disable-legacy-endpoints=true --scopes \"https://www.googleapis.com/auth/devstorage.read_only\",\"https://www.googleapis.com/auth/logging.write\",\"https://www.googleapis.com/auth/monitoring\",\"https://www.googleapis.com/auth/servicecontrol\",\"https://www.googleapis.com/auth/service.management.readonly\",\"https://www.googleapis.com/auth/trace.append\" --num-nodes \"3\" --enable-stackdriver-kubernetes --no-enable-ip-alias --network \"projects/copper-frame-263204/global/networks/default\" --subnetwork \"projects/copper-frame-263204/regions/us-central1/subnetworks/default\" --no-enable-master-authorized-networks --addons HorizontalPodAutoscaling,HttpLoadBalancing --enable-autoupgrade --enable-autorepair`\n\nThis cluster is created without `--enable-ip-alias` (but the attack also with it)\n\n## Supporting Material/References:\nF748693: rust source code for the POC\nF748694: asciinema recording\n\n## Impact\n\nAn attacker able to run arbitrary code as root inside of a container can MitM part of the host’s traffic. This vulnerability if chained with other vulnerability like last year’s RCE in apt (CVE-2019-3462) could allow to escalate to the host.",
+  "weakness": {
+    "id": 30,
+    "name": "Man-in-the-Middle"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 748693,
+      "file_name": "ipv6mitm.tar.xz",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/SnSkQjHNsU552btjNy72aEWc?response-content-disposition=attachment%3B%20filename%3D%22ipv6mitm.tar.xz%22%3B%20filename%2A%3DUTF-8%27%27ipv6mitm.tar.xz&response-content-type=application%2Fx-xz&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ6LQKI7WJ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T172204Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCLQqEgJN2Y%2FJIf%2FJBvnB4b5LKr0IfuWSFS0tUCnPUHLgIhAM2PnKkZlLY4kdb9d5zR%2FR%2Bi6GFQV38L5OCzkYGJzZJYKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5Igwr%2F%2FAy8opFHxSPKT4qjgXjAoa9oAQ71vmw5wLIJSNu62TQVEwKqAMMZa1dKWisr6lVwTXfakFfmukIaxYkEnxr5Urer6esYiAKTUOuVQ%2BFDLNiNiuhHT7hayPkMWqltshq4QY3Z2olt30vKbBCNYYAYWN5XOfSnKjjZHuPZ2oANyP4s7cvFbylHUklQucJyCE7to%2B16VMxmrPQikHKPDleHZ6hf8%2B%2FxvfotdqsnEZehIyLdnhV%2Fcgud7b68MPO8JVxfdbACqqi%2FXl9EPq3NgCWdGxA1dtDGaIiX%2B56OAZwtz61fKvN9cIURuFwR%2Bobgd%2FVJ5GZKfHCkUGtBgbsYJ5LYAW72I37joO0NplFN4aecZphhGTUwpDGDlXxsV3DVHG5TOvzIqZQr7cE2I%2FDHHTs%2F8e3Mp4fnuAVUec5v6eduJjddccUaky%2FItR3YB0HW4w9sc5dDFKHadr%2F4Tz%2FUrw8MMXkhICbm%2F6%2Bov6tXmkf6XM7X0ewn4zsD6d0%2BEP1ALQdhgscLPkLx%2FoXa%2BvUVuwOlN8jOIdR995RholLnrfGwjYOPCbh4wXK%2FczEQ6RXjGaTwO8ypTt2b%2FZUqMmEwj1emPaXatBiqVxPF6rfSeDGiRHQLc%2B9zTagIrMHWZ6fcz%2BqH63Lm9RwhNjKN%2BSVzwYtFWHKlGHuzxJu9SXU3U3x5TmyAqQcG10tQV4yFGzltLEdG8Fq8PZ8uwqV8YKnJEurSk1oy1OyOmLNYPHWxYwr0fPYvc%2Fxi4Y9AkSaxULFPfuQYSI%2B4vQ3FsS9JavKE5SwGGq8kcqcifEMLS7iLFcMnDkEUqon%2FFTbhVqTk%2BdR9hojV274YiFDROf7E7uLTF0G7%2B%2FUoJ5uvpxZDoKOhX73AGG%2F6CXFEPBPtGPok3sw2p7YzwY6sAEI4h8LD2de1dc%2BnXRgYYV%2FfC%2BvEVKha98V7oq%2FKXbglAVsftc5YEMUybZnjB3YbDiZv9JksxcwoMaUryjjT7gGD1OmBeAYo3SyOULT2bmeBVvzib3H4BlDDnsnL%2FtmD22S%2Fv%2B1bXgloQVyDLrF7Jf4a08mMYZgAXVT03ZeujYwHAhJAO99RXAIRuszOMIQftGrOMLK9I8hoNU7Fb%2FGygdApBf06zWK0l61ZcpB8iNg9A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3415864a4c2c39c409df8fbb64f31b56d3add67d19d568d0c760a5aad2f3ecdc",
+      "file_size": 3444,
+      "type": "application/x-xz",
+      "moderated": null
+    },
+    {
+      "id": 748694,
+      "file_name": "ipv6mitm.cast",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/sAkRASHWVb3ytmjDxTZF21c1?response-content-disposition=attachment%3B%20filename%3D%22ipv6mitm.cast%22%3B%20filename%2A%3DUTF-8%27%27ipv6mitm.cast&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ6LQKI7WJ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T172204Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCLQqEgJN2Y%2FJIf%2FJBvnB4b5LKr0IfuWSFS0tUCnPUHLgIhAM2PnKkZlLY4kdb9d5zR%2FR%2Bi6GFQV38L5OCzkYGJzZJYKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5Igwr%2F%2FAy8opFHxSPKT4qjgXjAoa9oAQ71vmw5wLIJSNu62TQVEwKqAMMZa1dKWisr6lVwTXfakFfmukIaxYkEnxr5Urer6esYiAKTUOuVQ%2BFDLNiNiuhHT7hayPkMWqltshq4QY3Z2olt30vKbBCNYYAYWN5XOfSnKjjZHuPZ2oANyP4s7cvFbylHUklQucJyCE7to%2B16VMxmrPQikHKPDleHZ6hf8%2B%2FxvfotdqsnEZehIyLdnhV%2Fcgud7b68MPO8JVxfdbACqqi%2FXl9EPq3NgCWdGxA1dtDGaIiX%2B56OAZwtz61fKvN9cIURuFwR%2Bobgd%2FVJ5GZKfHCkUGtBgbsYJ5LYAW72I37joO0NplFN4aecZphhGTUwpDGDlXxsV3DVHG5TOvzIqZQr7cE2I%2FDHHTs%2F8e3Mp4fnuAVUec5v6eduJjddccUaky%2FItR3YB0HW4w9sc5dDFKHadr%2F4Tz%2FUrw8MMXkhICbm%2F6%2Bov6tXmkf6XM7X0ewn4zsD6d0%2BEP1ALQdhgscLPkLx%2FoXa%2BvUVuwOlN8jOIdR995RholLnrfGwjYOPCbh4wXK%2FczEQ6RXjGaTwO8ypTt2b%2FZUqMmEwj1emPaXatBiqVxPF6rfSeDGiRHQLc%2B9zTagIrMHWZ6fcz%2BqH63Lm9RwhNjKN%2BSVzwYtFWHKlGHuzxJu9SXU3U3x5TmyAqQcG10tQV4yFGzltLEdG8Fq8PZ8uwqV8YKnJEurSk1oy1OyOmLNYPHWxYwr0fPYvc%2Fxi4Y9AkSaxULFPfuQYSI%2B4vQ3FsS9JavKE5SwGGq8kcqcifEMLS7iLFcMnDkEUqon%2FFTbhVqTk%2BdR9hojV274YiFDROf7E7uLTF0G7%2B%2FUoJ5uvpxZDoKOhX73AGG%2F6CXFEPBPtGPok3sw2p7YzwY6sAEI4h8LD2de1dc%2BnXRgYYV%2FfC%2BvEVKha98V7oq%2FKXbglAVsftc5YEMUybZnjB3YbDiZv9JksxcwoMaUryjjT7gGD1OmBeAYo3SyOULT2bmeBVvzib3H4BlDDnsnL%2FtmD22S%2Fv%2B1bXgloQVyDLrF7Jf4a08mMYZgAXVT03ZeujYwHAhJAO99RXAIRuszOMIQftGrOMLK9I8hoNU7Fb%2FGygdApBf06zWK0l61ZcpB8iNg9A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e6b795c942f1ad5b775bea7370c789ac50965533f6a65d27adc1ed91dc8400df",
+      "file_size": 44512,
+      "type": "application/octet-stream",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2021-11-07T03:52:49.178Z",
+  "allow_singular_disclosure_after": -141485355.2632673,
+  "singular_disclosure_allowed": true,
+  "vote_count": 10,
+  "voters": [
+    "h4x0r_dz",
+    "vonypet",
+    "aoxsin",
+    "ad1das",
+    "arjunkrishna",
+    "hend41234",
+    "goodsmile",
+    "hash_eem",
+    "meispi",
+    "qb1tz242"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.0,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "changed",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 32459,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/kubernetes/kubernetes",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "id": 96745,
+      "category": "researcher",
+      "content": "Write up available at https://blog.champtar.fr/IPv6_RA_MITM/",
+      "updated_at": "2021-10-08T03:52:36.788Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 700624,
+        "username": "champtar",
+        "name": "Etienne Champetier",
+        "bio": "",
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": "",
+        "created_at": "2019-08-07T07:30:17.243Z",
+        "url": "https://hackerone.com/champtar",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "hacker",
+        "profile_picture_urls": {
+          "small": "https://profile-photos.hackerone-user-content.com/variants/gP6rmwtVzj4iV6taRZdmhSGU/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+          "medium": "https://profile-photos.hackerone-user-content.com/variants/gP6rmwtVzj4iV6taRZdmhSGU/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c",
+          "xtralarge": "https://profile-photos.hackerone-user-content.com/variants/gP6rmwtVzj4iV6taRZdmhSGU/d6d8259739a2a4d509639b7804214d057bca547cc3fafe509ec3e3a86321b1d1"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,147 @@
+{
+  "id": 2676025,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yNjc2MDI1",
+  "url": "https://hackerone.com/reports/2676025",
+  "title": "Login email verification bypass via `/oauth/token`.",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "none",
+  "readable_substate": "Informative",
+  "created_at": "2024-08-22T14:00:30.546Z",
+  "submitted_at": "2024-08-22T14:00:31.067Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "cybxis",
+    "url": "/cybxis",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/5lzc63j5ay05hi7jxk5bd70iq542/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 264,
+    "url": "https://hackerone.com/gitlab",
+    "handle": "gitlab",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "GitLab",
+      "twitter_handle": "gitlab",
+      "website": "https://about.gitlab.com",
+      "about": "A single application for the entire software development lifecycle."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2024-09-03T17:51:10.641Z",
+  "bug_reporter_agreed_on_going_public_at": "2024-09-03T17:46:11.215Z",
+  "team_member_agreed_on_going_public_at": "2024-09-03T17:51:10.368Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\nHello team, I want to report a security issue on the GitLab authentication functionality. The email verification on login provides an additional layer of security despite 2FA not being implemented. This security measure is being triggered once the account has  three or more failed sign-in attempts in 24 hours or a user attempts to sign in from a new IP address. Reference [here](https://docs.gitlab.com/ee/security/email_verification.html#:~:text=After%20a%20successful%20sign%20in,can%20also%20reset%20your%20password.)\n\nGitlab also supports another basic authentication which is the [Resource Owner Password Credentials (ROPC)](https://docs.gitlab.com/ee/api/oauth2.html#resource-owner-password-credentials-flow) flow. It is where the user credentials(username and password) will be exchanged for an access token with full read and write scope on the endpoint `/oauth/token`. Just like the web authentication, there is also an implemented restriction on this endpoint to avoid any unauthorized authentication. For example, sending the token exchange request on the said endpoint from a new IP address will result to the following API error response:\n```\n{\"error\":\"invalid_grant\",\"error_description\":\"The provided authorization grant is invalid, expired, revoked, does not match the redirection URI used in the authorization request, or was issued to another client.\"}\n```\nHowever, this restriction is only being implemented if there is no active session on the account.\n\nI have discovered that it is possible to bypass this restriction. During my testing, the restriction on `/oauth/token` is being voided once the victim authenticates and completes the email verification regardless of the IP difference between the attacker and the victim.\n\n##Exploit\n```javascript\n#!/usr/bin/sh\n\nUSERNAME=gitlab_username\nPASSWORD=gitlab_password\n\nwhile true\ndo\ncurl --data \"grant_type=password&username=$USERNAME&password=$PASSWORD&scope=api\" \\\n     --request POST \"https://gitlab.com/oauth/token\"\n\n    echo ''\n\n    sleep 1.5\ndone\n```\nThe simple bash script above will serve as an event listener for the attacker. Please note that if the account has already an active session (which means it already completed the email verification) the token exchange will be successful on the first request. Otherwise, it will loop with errors until the victim authenticates and completes the verification on any device or IP.\n\n##Current Behavior\n* The server only checks whether the account has an active session that has completed an email verification on any device and IP address.\n\n##Expected Behavior\n* The server must somehow validate the authenticity of the user sending the request on `/oauth/token` . E.g. sending an email verification link(not code).\n\n##Clarification\nThis bug only affects accounts with 2FA disabled / no configured.\n\n### Steps to reproduce\nFor this to reproduce, your GitLab account must trigger the email verification feature on login. To do this, you can do one of the following.\n* Logout all your session and restart your pc\n* Logout all your session and deliberately commit 3 to 5 incorrect password attempt until you see the warning `Maximum login attempts exceeded. Wait 10 minutes and try again.`. Then wait for 10 minutes to login the correct credentials.\n\nYou need two(2) devices with different IP addresses. In my case (my VPS terminal and my local machine).\n\n`As an attacker:`\n\t1. Login the account via `/oauth/token` endpoint by running the bash script on your terminal to prove the RESTRICTION (IP is flagged and the API will respond an error message mentioned earlier this report). \n    2. Keep it running and notice that there is no success on the authentication.\n\n`As the Victim:`\n\t3. Login the account on victim on [web login](https://gitlab.com/users/sign_in) which will require an email verification. \n\t4. Complete the verification by providing the verification code sent to the email. Sometimes it is delayed, so you might want to resend the code .\n\nOnce the victim is successfully authenticated, the attacker request on the terminal is also being authenticated and able to get access and refresh token.\n\n##Demo and PoC\n█████\n\n##Suggested Fix\nThe implemented mitigation is somehow not sufficient. Relying on the active sessions simply gives the attacker the success since victims always complete this verification step on their trusted devices. There should be a more strict verification process on the vulnerable endpoint such as sending a verification link on the victim's email address notifying them that an ROPC access request is being attempted from a certain device and IP address.\n\n## Impact\n\nThis bug makes the implemented additional layer of security ineffective. This is simply a demonstration where the victim unknowingly completes an email verification for the attacker to access his/her own compromised credentials.",
+  "weakness": {
+    "id": 159,
+    "name": "Missing Critical Step in Authentication"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 66,
+  "voters": [
+    "loaymorad",
+    "aboalezz",
+    "m3lm",
+    "zy9ard3",
+    "shreyaschavhan",
+    "thalaivar304",
+    "ahmed_xyz",
+    "cybxis",
+    "hundredpercent",
+    "pr0f0x01",
+    "and 56 more..."
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18138,
+    "asset_type": "URL",
+    "asset_identifier": "gitlab.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "id": 520486,
+      "category": "researcher",
+      "content": "If an app supports ROPC flow, try to bypass any MFA or additional login verification.\n\nBypass the Gitlab's email verification on login \n\nWriteup: https://cybxis.medium.com/a-bypass-on-gitlabs-login-email-verification-via-oauth-ropc-flow-e194242cad96",
+      "updated_at": "2024-09-18T13:55:08.198Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 1028233,
+        "username": "cybxis",
+        "name": "",
+        "bio": "",
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": "",
+        "created_at": "2020-04-07T10:20:04.603Z",
+        "url": "https://hackerone.com/cybxis",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "hacker",
+        "profile_picture_urls": {
+          "small": "https://profile-photos.hackerone-user-content.com/variants/5lzc63j5ay05hi7jxk5bd70iq542/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+          "medium": "https://profile-photos.hackerone-user-content.com/variants/5lzc63j5ay05hi7jxk5bd70iq542/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c",
+          "xtralarge": "https://profile-photos.hackerone-user-content.com/variants/5lzc63j5ay05hi7jxk5bd70iq542/d6d8259739a2a4d509639b7804214d057bca547cc3fafe509ec3e3a86321b1d1"
+        }
+      }
+    }
+  ]
+}

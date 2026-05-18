@@ -1,0 +1,136 @@
+{
+  "id": 717716,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC83MTc3MTY=",
+  "url": "https://hackerone.com/reports/717716",
+  "title": "Any user with access to program can resume and suspend HackerOne Gateway",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2019-10-18T23:24:36.757Z",
+  "submitted_at": "2019-10-18T23:24:36.757Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jobert",
+    "url": "/jobert",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ht4b9SmcYNqmpbyCFXd7cxHB/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13,
+    "url": "https://hackerone.com/security",
+    "handle": "security",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/013/fa942b9b1cbf4faf37482bf68458e1195aab9c02_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/013/fa942b9b1cbf4faf37482bf68458e1195aab9c02_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "HackerOne",
+      "twitter_handle": "Hacker0x01",
+      "website": "https://hackerone.com",
+      "about": "Vulnerability disclosure should be safe, transparent, and rewarding."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": true,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2019-10-21T18:47:25.240Z",
+  "bug_reporter_agreed_on_going_public_at": "2019-10-21T18:18:42.914Z",
+  "team_member_agreed_on_going_public_at": "2019-10-21T18:47:25.130Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "An Insecure Direct Object Reference (IDOR) vulnerability is present in the `UpdateGatewayProgramStateMutation` that'd allow an attacker to suspend and resume the HackerOne Gateway feature for any program the user has access to. This includes any private programs that use the Gateway product and have a published External Program.\n\n**Proof of concept**\nThe following GraphQL query can used to resume / suspend the VPN:\n\n```\nPOST /graphql? HTTP/1.1\nHost: hackerone.com\n...\n\n{\"query\":\"mutation updateState($input_0:UpdateGatewayProgramStateInput!) {updateGatewayProgramState(input:$input_0) { team { handle } } }\",\"variables\":{\"input_0\":{\"team_id\":\"Z2lkOi8vaGFja2Vyb25lL1RlYW0vMTM=\",\"vpn_suspended\":false,\"clientMutationId\":\"0\"}}}\n```\n\nReplace the `team_id` (base64 encoded) with a team ID that you have access to. For most programs, this will result in a 500 internal server error being returned because the micro service handling VPN configurations can't find the program it needs to update. For programs that use the Gateway product it'll successfully update the VPN status as per the `vpn_suspended` boolean in the GraphQL query.\n\nThe vulnerability stems from the fact that the interactors, called by the mutation, do not implement any kind of authorization. The mutation fetches the team from the protected schema, but with a scope that is too broad. Instead of limiting it to programs the current user can manage, it'll return any team that the user can see.\n\n**app/graphql/mutations/update_gateway_program_state_mutation.rb**\n```ruby\n# ...\ndef resolve(team_id:, vpn_suspended:)\n  current_user = context[:current_user]\n  unsafe_team = context.schema.object_from_id(team_id, context)\n\n  safe_team = ProtectedAttribute::SchemaUtility.use_protected_schema(requester: current_user) do\n    context[:tics].teams_i_can_see.find unsafe_team.id # <-- incorrectly scoped\n  end\n\n  if vpn_suspended\n    Interactors::Vpn::SuspendProgram.interact team: safe_team, as_user: current_user\n  else\n    Interactors::Vpn::ResumeProgram.interact team: safe_team, as_user: current_user\n  end\n\n  # ...\n```\n\n**app/backend/interactors/vpn/suspend_program.rb**\n```ruby\nmodule Interactors\n  module Vpn\n    class SuspendProgram < HackeroneInteractor\n      skip_authorization # <-- authorization check is skipped\n\n      attribute :team, Team, required: true\n\n      private\n\n      def execute\n        vpn_client.suspend_program(team.id)\n        team.update(vpn_suspended: true)\n      end\n\n      # ...\n    end\n  end\nend\n```\n\nThe **app/backend/interactors/vpn/resume_program.rb** interactor is nearly identical to the code above and also skips the required authorization check.\n\nA number of exceptions were triggered on production to reproduce this vulnerability:\n* ████\n* █████\n\n## Impact\n\nA user can suspend and resume the HackerOne Gateway product for any program they have access to in the situation the program leverages the Gateway product.",
+  "weakness": {
+    "id": 55,
+    "name": "Insecure Direct Object Reference (IDOR)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2019-11-20T18:18:43.020Z",
+  "allow_singular_disclosure_after": -203471557.12824556,
+  "singular_disclosure_allowed": true,
+  "vote_count": 64,
+  "voters": [
+    "taha",
+    "yukusawa18",
+    "mashoud1122",
+    "base_64",
+    "sameerphad72",
+    "spam404",
+    "dhakal_ananda",
+    "sudi",
+    "savitar0x01",
+    "ronr",
+    "and 54 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.0,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 3,
+    "asset_type": "URL",
+    "asset_identifier": "hackerone.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

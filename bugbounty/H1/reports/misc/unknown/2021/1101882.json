@@ -1,0 +1,117 @@
+{
+  "id": 1101882,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMTAxODgy",
+  "url": "https://hackerone.com/reports/1101882",
+  "title": "CVE-2021-22876: Automatic referer leaks credentials",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2021-02-12T01:08:34.999Z",
+  "submitted_at": "2021-02-12T01:08:35.028Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "vsz",
+    "url": "/vsz",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/rvw32zb8sg34aoth8t6nmzfhagis/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": true,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2021-22876"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2021-04-30T06:02:48.552Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2021-03-31T06:02:48.058Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nWhen using the `--referer ';auto'` feature the current URL is copied as-is to the referrer header of the subsequent request. The recommendation [1] is to strip these (along with the URL fragment). I can imagine this may, in rare cases, result in unwanted/unexpected disclosure of credentials (e.g. them appearing in 3rd party web server logs), though the overall chances seem low (also considering that ';auto', by hunch, is likely not a widely used curl feature).\n\n[1] https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Referer#directives\n\n## Steps To Reproduce:\n```\n$ curl -svLe ';auto' 'https://user:pass@curl.haxx.se#frag'  2>&1 >/dev/null | grep -i Referer:\n```\n\n## Supporting Material/References:\n```\n$ curl -V                                                                                                \ncurl 7.64.1 (x86_64-apple-darwin19.0) libcurl/7.64.1 (SecureTransport) LibreSSL/2.8.3 zlib/1.2.11 nghttp2/1.39.2\nRelease-Date: 2019-03-27\nProtocols: dict file ftp ftps gopher http https imap imaps ldap ldaps pop3 pop3s rtsp smb smbs smtp smtps telnet tftp \nFeatures: AsynchDNS GSS-API HTTP2 HTTPS-proxy IPv6 Kerberos Largefile libz MultiSSL NTLM NTLM_WB SPNEGO SSL UnixSockets\n```\n\n## Patch that fixes it\n```diff\ndiff --git a/lib/transfer.c b/lib/transfer.c\nindex c3b2d11a2..f63aadbaf 100644\n--- a/lib/transfer.c\n+++ b/lib/transfer.c\n@@ -1567,6 +1567,9 @@ CURLcode Curl_follow(struct Curl_easy *data,\n       data->state.followlocation++; /* count location-followers */\n \n       if(data->set.http_auto_referer) {\n+        CURLU *h;\n+        char *url;\n+\n         /* We are asked to automatically set the previous URL as the referer\n            when we get the next URL. We pick the ->url field, which may or may\n            not be 100% correct */\n@@ -1576,7 +1579,40 @@ CURLcode Curl_follow(struct Curl_easy *data,\n           data->change.referer_alloc = FALSE;\n         }\n \n-        data->change.referer = strdup(data->change.url);\n+        /* Make a copy of the URL without the crenditals and fragment */\n+        h = curl_url();\n+        if(!h)\n+          return CURLE_OUT_OF_MEMORY;\n+\n+        uc = curl_url_set(h, CURLUPART_URL, data->change.url, 0);\n+        if(uc) {\n+          curl_url_cleanup(h);\n+          return CURLE_OUT_OF_MEMORY;\n+        }\n+        uc = curl_url_set(h, CURLUPART_FRAGMENT, NULL, 0);\n+        if(uc) {\n+          curl_url_cleanup(h);\n+          return CURLE_OUT_OF_MEMORY;\n+        }\n+        uc = curl_url_set(h, CURLUPART_USER, NULL, 0);\n+        if(uc) {\n+          curl_url_cleanup(h);\n+          return CURLE_OUT_OF_MEMORY;\n+        }\n+        uc = curl_url_set(h, CURLUPART_PASSWORD, NULL, 0);\n+        if(uc) {\n+          curl_url_cleanup(h);\n+          return CURLE_OUT_OF_MEMORY;\n+        }\n+        uc = curl_url_get(h, CURLUPART_URL, &url, 0);\n+        if(uc) {\n+          curl_url_cleanup(h);\n+          return CURLE_OUT_OF_MEMORY;\n+        }\n+\n+        curl_url_cleanup(h);\n+\n+        data->change.referer = url;\n         if(!data->change.referer)\n           return CURLE_OUT_OF_MEMORY;\n         data->change.referer_alloc = TRUE; /* yes, free this later */\n```\n\nI'm ready to continue this in a public PR if it seems more fitting.\n\n## Impact\n\nThe best I can think of is if an attacker gets hold of web server logs that includer referrer info with credentials leaked into them. It's a privacy/sensitive info-leak vulnerability at best. Can't readily think of a way to actively exploit this.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2021-04-30T06:02:48.131Z",
+  "allow_singular_disclosure_after": -157980622.81279734,
+  "singular_disclosure_allowed": true,
+  "vote_count": 5,
+  "voters": [
+    "demonia",
+    "sa1tama0",
+    "meispi",
+    "krishanusharma123",
+    "ekgaribadmi"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

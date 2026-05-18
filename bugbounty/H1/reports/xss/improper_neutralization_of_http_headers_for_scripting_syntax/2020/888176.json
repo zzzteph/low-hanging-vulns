@@ -1,0 +1,138 @@
+{
+  "id": 888176,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC84ODgxNzY=",
+  "url": "https://hackerone.com/reports/888176",
+  "title": "HTTP Host injection in redirect_to function",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2020-06-01T06:20:35.148Z",
+  "submitted_at": "2020-06-01T06:20:35.148Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "komang4130",
+    "url": "/komang4130",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2021-06-15T17:44:27.821Z",
+  "bug_reporter_agreed_on_going_public_at": "2020-06-06T04:56:25.323Z",
+  "team_member_agreed_on_going_public_at": "2021-06-15T17:44:27.712Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi team,\n\nHere is the sample vulnerable code \n```ruby\nclass TesttestController < ApplicationController\n  def index\n    redirect_to  \"/demo/?your_reset_token=your_reset_token\"\n  end\nend\n```\n\nThe ** _compute_redirect_to_location** will take the input **\"/demo/?your_reset_token=your_reset_token\"** as **options** variables. \nFile **File **action_controller\\metal\\redirecting.rb**** line 63\n```ruby\n    def redirect_to(options = {}, response_options = {})\n      raise ActionControllerError.new(\"Cannot redirect to nil!\") unless options\n      raise AbstractController::DoubleRenderError if response_body\n\n      self.status        = _extract_redirect_to_status(options, response_options)\n      self.location      = _compute_redirect_to_location(request, options)\n      self.response_body = \"<html><body>You are being <a href=\\\"#{ERB::Util.unwrapped_html_escape(response.location)}\\\">redirected</a>.</body></html>\"\n    end\n```\n\nThen it will check if the **options**, because the input is **String**, so it will be the concatenate of **request.protocol + request.host_with_port + options**\nFile **action_controller\\metal\\redirecting.rb** line 96\n```ruby\n    def _compute_redirect_to_location(request, options) #:nodoc:\n      case options\n      # The scheme name consist of a letter followed by any combination of\n      # letters, digits, and the plus (\"+\"), period (\".\"), or hyphen (\"-\")\n      # characters; and is terminated by a colon (\":\").\n      # See https://tools.ietf.org/html/rfc3986#section-3.1\n      # The protocol relative scheme starts with a double slash \"//\".\n      when /\\A([a-z][a-z\\d\\-+\\.]*:|\\/\\/).*/i\n        options\n      when String\n        request.protocol + request.host_with_port + options\n      when Proc\n        _compute_redirect_to_location request, instance_eval(&options)\n      else\n        url_for(options)\n      end.delete(\"\\0\\r\\n\")\n    end\n    module_function :_compute_redirect_to_location\n    public :_compute_redirect_to_location\n```\n\nThe **request.protocol** will be **http://** or **https://**\nThe **request.host_with_port**  will call **raw_host_with_port** to check if there is the **X_FORWARD_FOR** else, it will take the input from **HTTP_HOST** then continue the **_compute_redirect_to_location** process.\nfile **action_dispatch\\http\\url.rb** line 220\n```ruby\n      def raw_host_with_port\n        if forwarded = x_forwarded_host.presence\n          forwarded.split(/,\\s?/).last\n        else\n          get_header(\"HTTP_HOST\") || \"#{server_name || server_addr}:#{get_header('SERVER_PORT')}\"\n        end\n      end\n```\n\nSo at the end, our input will be **request.protocol + request.host_with_port + options** and being set as **Header[\"location\"]** value.\n\nWe cant change the HTTP_HOST to something else because the HTTP_HOST must be declare in the the **config.host** and raise 403 Status ( see the **img4.JPG** )\n\n\nBut if we use the IP, we can bypass this and here is the result, which 149.28.128.52 is the attacker IP, and there is no check for IP address but only the hostname.\n\nThe **img2.JPG** is the PoC request when use HTTP_HOST.\nThe **img3.JPG** is the PoC request when use HTTP_X_FORWARD_HOST.\n\nFix:\nThere should be a check for IP ADDRESS as well as the HOSTNAME in the enviroment config if user dont specific the host as parameter for **redirect_to** function.\n\n## Impact\n\nPassword Reset Poisoning - which user use the HTTP_HOST as the input for the reset token.\nWeb-cache  - which user use the HTTP_HOST as the input",
+  "weakness": {
+    "id": 93,
+    "name": "Improper Neutralization of HTTP Headers for Scripting Syntax"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 850576,
+      "file_name": "img2.JPG",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/1iHQ7DHg3B3FnuiUHxsW2QFj?response-content-disposition=attachment%3B%20filename%3D%22img2.JPG%22%3B%20filename%2A%3DUTF-8%27%27img2.JPG&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ6EKZNFEK%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T172957Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIBjB2VRN7lZco7ZSqncMRo9KWXcmYng3ksv49VKbiBgDAiAwqVrEMgnvfW19KilS6cQM9HaqUqoQdDKjQhj9z6VGbSqyBQhAEAMaDDAxMzYxOTI3NDg0OSIM53jCNo7%2BfqsoRTv%2BKo8Fk2sA02uoApDKWCxvfLDCp%2FIOGc%2BKepyiaXd74BANwEH%2FZSWMqT893j3nfh6Ky6pk5jj45Yebg3mil33pbvb0XISm1KLJA6INLgmtJmh5r4EoA3uHXh0YDYczHon8ldv8SAwaQ7LTMAWP6mSspDZ7vEBbTAODlgDTu6TfknW4J8%2B3RF8nAH0h9D2h%2FsRTWKIpsX8RBdOMZurnbYkpN4PZ6kNp%2Fga1P2D9w%2FXMAXg0Az5W9fxoitHA9N4L9uWQOPZ6IgR6pwmmURXGNisKQ5vpvIsbgjs%2BU%2FvJ41AYVfHcYzmAeLWcQqaT9eF4sHDWUQP8CdPfW6tA45ySdKCeJguy4TP3m904KgC9iq%2BK6s4%2FtQBj6OTYw0cYx7cDLqt3aCDFNqM%2BU%2Fl6gfQLksaWALDiHb0E5JPwvINyRLvSviz0n%2BXBWJdbV%2BJsNdUdoPTcAVEGnWynRH89sCpEmn6Kmpr%2FTle7eCiRz6ulIOi6U%2FtubxldvUc1SwNZKTrN3zA%2FEuAMtcvPOtuwFAbgMHaJmdMDiYJdx7rmSDOFjFAs4AdsQUzlxJysUkUwABF6goLylJV47Eh6dqoSvfls1%2FrYx%2FA2o%2BOBerS4JgIGnkaDAMQeLhDmrcZBKbNcj2a4BxMBXtCNY1v6roRAR80wQQ452ff%2FSw5M9He%2FOfwVHmGXjyuAF%2BDNZ97dL0YjQ6vCjPAYPKGTM0VSs8iI3N6%2BWTR8jnxR%2F22cXBYzPU86LbbVCymLGOGYu%2F9RT2bqESGIUXmazdhssnJoi5k04aNLX992ZBn9yf0vvzRZp2w0ht9EuZajmPuwmJn1%2BsL4G5WDIiZQ7WLgwcbVIFo9Kz1Jk7%2FjR0HdZgVDtcXLUdef%2F%2Bs%2FMV%2FSUzDslNjPBjqyAWyIrYjeeAm6Ra4nHGi0Q9grlW%2BgBmVRwI4HtLlz2wyO8nW3JUVIejvdaoIaXnOgGEtpmEiIu1bsp%2FgZhXCxXZ%2FGfe4dCTRgTUjcUuXKWDRZ00cWsAZuVjYaf9LEqrw0Z0MC8sgl6ZCon282IZewNnaN5kaHbiJfv40kmjhEUh0KqaaDMyjDkrQvOMDkf7oQCfk8dc%2B0b6tXl6q11I7unNjVGqBLrEOrgRQNtiMycNtArrs%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=197521354241054b220d57ed375a04fc5b5682ff5181feddb1812db50b3aa242",
+      "file_size": 88278,
+      "type": "image/jpeg",
+      "moderated": null
+    },
+    {
+      "id": 850582,
+      "file_name": "img3.JPG",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/7Y1YeRahH1RJMGuQdJNBtkGT?response-content-disposition=attachment%3B%20filename%3D%22img3.JPG%22%3B%20filename%2A%3DUTF-8%27%27img3.JPG&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ6EKZNFEK%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T172957Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIBjB2VRN7lZco7ZSqncMRo9KWXcmYng3ksv49VKbiBgDAiAwqVrEMgnvfW19KilS6cQM9HaqUqoQdDKjQhj9z6VGbSqyBQhAEAMaDDAxMzYxOTI3NDg0OSIM53jCNo7%2BfqsoRTv%2BKo8Fk2sA02uoApDKWCxvfLDCp%2FIOGc%2BKepyiaXd74BANwEH%2FZSWMqT893j3nfh6Ky6pk5jj45Yebg3mil33pbvb0XISm1KLJA6INLgmtJmh5r4EoA3uHXh0YDYczHon8ldv8SAwaQ7LTMAWP6mSspDZ7vEBbTAODlgDTu6TfknW4J8%2B3RF8nAH0h9D2h%2FsRTWKIpsX8RBdOMZurnbYkpN4PZ6kNp%2Fga1P2D9w%2FXMAXg0Az5W9fxoitHA9N4L9uWQOPZ6IgR6pwmmURXGNisKQ5vpvIsbgjs%2BU%2FvJ41AYVfHcYzmAeLWcQqaT9eF4sHDWUQP8CdPfW6tA45ySdKCeJguy4TP3m904KgC9iq%2BK6s4%2FtQBj6OTYw0cYx7cDLqt3aCDFNqM%2BU%2Fl6gfQLksaWALDiHb0E5JPwvINyRLvSviz0n%2BXBWJdbV%2BJsNdUdoPTcAVEGnWynRH89sCpEmn6Kmpr%2FTle7eCiRz6ulIOi6U%2FtubxldvUc1SwNZKTrN3zA%2FEuAMtcvPOtuwFAbgMHaJmdMDiYJdx7rmSDOFjFAs4AdsQUzlxJysUkUwABF6goLylJV47Eh6dqoSvfls1%2FrYx%2FA2o%2BOBerS4JgIGnkaDAMQeLhDmrcZBKbNcj2a4BxMBXtCNY1v6roRAR80wQQ452ff%2FSw5M9He%2FOfwVHmGXjyuAF%2BDNZ97dL0YjQ6vCjPAYPKGTM0VSs8iI3N6%2BWTR8jnxR%2F22cXBYzPU86LbbVCymLGOGYu%2F9RT2bqESGIUXmazdhssnJoi5k04aNLX992ZBn9yf0vvzRZp2w0ht9EuZajmPuwmJn1%2BsL4G5WDIiZQ7WLgwcbVIFo9Kz1Jk7%2FjR0HdZgVDtcXLUdef%2F%2Bs%2FMV%2FSUzDslNjPBjqyAWyIrYjeeAm6Ra4nHGi0Q9grlW%2BgBmVRwI4HtLlz2wyO8nW3JUVIejvdaoIaXnOgGEtpmEiIu1bsp%2FgZhXCxXZ%2FGfe4dCTRgTUjcUuXKWDRZ00cWsAZuVjYaf9LEqrw0Z0MC8sgl6ZCon282IZewNnaN5kaHbiJfv40kmjhEUh0KqaaDMyjDkrQvOMDkf7oQCfk8dc%2B0b6tXl6q11I7unNjVGqBLrEOrgRQNtiMycNtArrs%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ddf1ac52a2662b5b37b9941a952b1e8d91a0ab6cbfad028144f2b7ca2913fe00",
+      "file_size": 90282,
+      "type": "image/jpeg",
+      "moderated": null
+    },
+    {
+      "id": 850583,
+      "file_name": "img4.JPG",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/LQngFHRtTUo3KYZtMEhGZemN?response-content-disposition=attachment%3B%20filename%3D%22img4.JPG%22%3B%20filename%2A%3DUTF-8%27%27img4.JPG&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ6EKZNFEK%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T172957Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIBjB2VRN7lZco7ZSqncMRo9KWXcmYng3ksv49VKbiBgDAiAwqVrEMgnvfW19KilS6cQM9HaqUqoQdDKjQhj9z6VGbSqyBQhAEAMaDDAxMzYxOTI3NDg0OSIM53jCNo7%2BfqsoRTv%2BKo8Fk2sA02uoApDKWCxvfLDCp%2FIOGc%2BKepyiaXd74BANwEH%2FZSWMqT893j3nfh6Ky6pk5jj45Yebg3mil33pbvb0XISm1KLJA6INLgmtJmh5r4EoA3uHXh0YDYczHon8ldv8SAwaQ7LTMAWP6mSspDZ7vEBbTAODlgDTu6TfknW4J8%2B3RF8nAH0h9D2h%2FsRTWKIpsX8RBdOMZurnbYkpN4PZ6kNp%2Fga1P2D9w%2FXMAXg0Az5W9fxoitHA9N4L9uWQOPZ6IgR6pwmmURXGNisKQ5vpvIsbgjs%2BU%2FvJ41AYVfHcYzmAeLWcQqaT9eF4sHDWUQP8CdPfW6tA45ySdKCeJguy4TP3m904KgC9iq%2BK6s4%2FtQBj6OTYw0cYx7cDLqt3aCDFNqM%2BU%2Fl6gfQLksaWALDiHb0E5JPwvINyRLvSviz0n%2BXBWJdbV%2BJsNdUdoPTcAVEGnWynRH89sCpEmn6Kmpr%2FTle7eCiRz6ulIOi6U%2FtubxldvUc1SwNZKTrN3zA%2FEuAMtcvPOtuwFAbgMHaJmdMDiYJdx7rmSDOFjFAs4AdsQUzlxJysUkUwABF6goLylJV47Eh6dqoSvfls1%2FrYx%2FA2o%2BOBerS4JgIGnkaDAMQeLhDmrcZBKbNcj2a4BxMBXtCNY1v6roRAR80wQQ452ff%2FSw5M9He%2FOfwVHmGXjyuAF%2BDNZ97dL0YjQ6vCjPAYPKGTM0VSs8iI3N6%2BWTR8jnxR%2F22cXBYzPU86LbbVCymLGOGYu%2F9RT2bqESGIUXmazdhssnJoi5k04aNLX992ZBn9yf0vvzRZp2w0ht9EuZajmPuwmJn1%2BsL4G5WDIiZQ7WLgwcbVIFo9Kz1Jk7%2FjR0HdZgVDtcXLUdef%2F%2Bs%2FMV%2FSUzDslNjPBjqyAWyIrYjeeAm6Ra4nHGi0Q9grlW%2BgBmVRwI4HtLlz2wyO8nW3JUVIejvdaoIaXnOgGEtpmEiIu1bsp%2FgZhXCxXZ%2FGfe4dCTRgTUjcUuXKWDRZ00cWsAZuVjYaf9LEqrw0Z0MC8sgl6ZCon282IZewNnaN5kaHbiJfv40kmjhEUh0KqaaDMyjDkrQvOMDkf7oQCfk8dc%2B0b6tXl6q11I7unNjVGqBLrEOrgRQNtiMycNtArrs%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=af32776a9da47d868c5d64077449d4c414bfcfff65e307a626be01daa193c2f8",
+      "file_size": 84955,
+      "type": "image/jpeg",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 6,
+  "voters": [
+    "0xwise",
+    "grisboublik",
+    "aecherli",
+    "c0nyyyyy",
+    "ekgaribadmi",
+    "sandip5x05"
+  ],
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

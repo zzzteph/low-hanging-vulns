@@ -1,0 +1,123 @@
+{
+  "id": 874401,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC84NzQ0MDE=",
+  "url": "https://hackerone.com/reports/874401",
+  "title": "Use of Ruby Forwardable module and runtime meta-programming may introduce vulnerabilities",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2020-05-14T18:46:29.801Z",
+  "submitted_at": "2020-05-14T18:46:29.801Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jobert",
+    "url": "/jobert",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ht4b9SmcYNqmpbyCFXd7cxHB/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 264,
+    "url": "https://hackerone.com/gitlab",
+    "handle": "gitlab",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "GitLab",
+      "twitter_handle": "gitlab",
+      "website": "https://about.gitlab.com",
+      "about": "A single application for the entire software development lifecycle."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2021-11-15T16:24:12.617Z",
+  "bug_reporter_agreed_on_going_public_at": "2021-11-15T16:24:12.477Z",
+  "team_member_agreed_on_going_public_at": "2021-11-15T03:00:41.852Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "I was digging through the `gitlab-foss`  repository and noticed an interested pattern that seems to be adopted in a few places: the use of `Forwardable` with meta-programming over delegators, explicit `attr_reader` methods or `method_missing`. Heads up: the arbitrary file read vulnerability I demonstrate in this report isn't currently exploitable. I was somewhat hesitant to submit this, but I think it'd be a good refactor nonetheless. Before diving into the vulnerability, I'd like to start by describing Ruby's `Forwardable` module behavior in combination with `def_delegators`.\n\nBefore Ruby 2.5.1, delegators could be implemented using the `delegate` or `method_missing` methods. It would look something like this:\n\n```ruby\nclass HelloWorld\n  def initialize(attributes)\n    @options = OpenStruct.new(attributes)\n  end\n\n  def say_it\n    \"Hello world\"\n  end\n\n  def method_missing(method, *args)\n    @options.send(method, *args)\n  end\nend\n```\n\nWhen a method would be called on a `HelloWorld` instance that wouldn't exist, it would pass it along to the `@options` instance variable.\n\n```ruby\nHelloWorld.new({}).say_it\n# => \"Hello world\"\n\nHelloWorld.new(hello: \"world\").hello\n# => \"world\"\n\nHelloWorld.new(say_it: \"Not hello world\").say_it\n# => \"Hello world\"\n```\n\nBecause the `say_it` method is already defined on the class, its behavior won't be overridden when passing `say_it` to the initializer.\n\nThis class can be refactored to use the `Forwardable` method and `def_delegators`:\n\n```ruby\nclass HelloWorld\n  extend Forwardable\n\n  def initialize(attributes)\n    @options = OpenStruct.new(attributes)\n\n    self.class.instance_eval do\n      def_delegators :@options, *attributes.keys\n    end\n  end\n\n  def say_it\n    \"Hello world\"\n  end\nend\n```\n\nAt first glance, this seems like it has the same behavior as the first code example; but there's one crucial difference: **because the delegators are meta-programmed after the class was loaded, it can overwrite existing methods**:\n\n```ruby\nHelloWorld.new({}).say_it\n# => \"Hello world\"\n\nHelloWorld.new(hello: \"world\").hello\n# => \"world\"\n\nHelloWorld.new(say_it: \"Not hello world\").say_it\n# => \"Not hello world\"\n#        ^------------------ The method is overwritten\n```\n\nAs can be seen in the above example, the `say_it` method is overwritten when passing it to the initializer.\n\nGoing back to GitLab's main Ruby repository, there are a number of places where the `Forwardable` module is used. One place in particular stands out: `Gitlab::ImportExport::AfterExportStrategies::BaseAfterExportStrategy`. This class is a base class used for:\n\n* `Gitlab::ImportExport::AfterExportStrategies::MoveFileStrategy`\n* `Gitlab::ImportExport::AfterExportStrategies::DownloadNotificationStrategy`\n* `Gitlab::ImportExport::AfterExportStrategies::WebUploadStrategy`\n\n```ruby\n# frozen_string_literal: true\n\nmodule Gitlab\n  module ImportExport\n    module AfterExportStrategies\n      class BaseAfterExportStrategy\n        extend Gitlab::ImportExport::CommandLineUtil\n        include ActiveModel::Validations\n        extend Forwardable\n\n        # ...\n\n        def initialize(attributes = {})\n          @options = OpenStruct.new(attributes)\n\n          self.class.instance_eval do\n            def_delegators :@options, *attributes.keys\n          end\n        end\n\n        # ...\n\n        def archive_path\n          project.import_export_shared.archive_path\n        end\n\n        # ...\n      end\n    end\n  end\nend\n```\n\nThe `MoveFileStrategy` and `WebUploadStrategy` classes overwrite the initializer method or declare its arguments, so these don't meta-program the arguments on the class or limit what can be delegated. My worry, and the potential security vulnerabilities, is that if a new strategy would be declared that inherits from the `BaseAfterExportStrategy` without overwriting the initializer, it may give attackers the ability to change the behavior of existing methods.\n\nAs an example, let's say the `DownloadNotificationStrategy` class would be initialized with a user-inputted hash: if the user would specify the `archive_path` argument, it could overwrite the method and point it to a different archive on the local system. Same for the `WebUploadStrategy`: if the `initialize` method would be removed today, specs would still pass, but suddenly a security vulnerability would be present if the user could give it arbitrary arguments (same thing, overwrite the `archive_path`).\n\nI know that this isn't the security vulnerabilities you typically receive from me, but after reading the code, I felt it was the right thing to do to warn you about the potential security vulnerabilities that could be introduced in the future.\n\nThis is based on the `master` branch as of May 13, 2020.\n\n# Recommendation\nGiven that there are only three classes inheriting from the base class, I'd rewrite the code like this to avoid trouble in the future (untested). Direct download: F828467.\n\n```diff\ndiff --git a/lib/gitlab/import_export/after_export_strategies/base_after_export_strategy.rb b/lib/gitlab/import_export/after_export_strategies/base_after_export_strategy.rb\nindex b30258123d4..b52073978ee 100644\n--- a/lib/gitlab/import_export/after_export_strategies/base_after_export_strategy.rb\n+++ b/lib/gitlab/import_export/after_export_strategies/base_after_export_strategy.rb\n@@ -6,7 +6,6 @@ module Gitlab\n       class BaseAfterExportStrategy\n         extend Gitlab::ImportExport::CommandLineUtil\n         include ActiveModel::Validations\n-        extend Forwardable\n \n         StrategyError = Class.new(StandardError)\n \n@@ -16,14 +15,6 @@ module Gitlab\n \n         public\n \n-        def initialize(attributes = {})\n-          @options = OpenStruct.new(attributes)\n-\n-          self.class.instance_eval do\n-            def_delegators :@options, *attributes.keys\n-          end\n-        end\n-\n         def execute(current_user, project)\n           @project = project\n \n@@ -67,10 +58,6 @@ module Gitlab\n           project.import_export_shared.lock_files_path\n         end\n \n-        def archive_path\n-          project.import_export_shared.archive_path\n-        end\n-\n         def locks_present?\n           project.import_export_shared.locks_present?\n         end\ndiff --git a/lib/gitlab/import_export/after_export_strategies/download_notification_strategy.rb b/lib/gitlab/import_export/after_export_strategies/download_notification_strategy.rb\nindex 39a6090ad87..da0a593691c 100644\n--- a/lib/gitlab/import_export/after_export_strategies/download_notification_strategy.rb\n+++ b/lib/gitlab/import_export/after_export_strategies/download_notification_strategy.rb\n@@ -10,6 +10,10 @@ module Gitlab\n           false\n         end\n \n+        def archive_path\n+          project.import_export_shared.archive_path\n+        end\n+\n         private\n \n         def strategy_execute\ndiff --git a/lib/gitlab/import_export/after_export_strategies/move_file_strategy.rb b/lib/gitlab/import_export/after_export_strategies/move_file_strategy.rb\nindex 2e3136936f8..8a58f0911e3 100644\n--- a/lib/gitlab/import_export/after_export_strategies/move_file_strategy.rb\n+++ b/lib/gitlab/import_export/after_export_strategies/move_file_strategy.rb\n@@ -4,6 +4,8 @@ module Gitlab\n   module ImportExport\n     module AfterExportStrategies\n       class MoveFileStrategy < BaseAfterExportStrategy\n+        attr_reader :archive_path\n+\n         def initialize(archive_path:)\n           @archive_path = archive_path\n         end\ndiff --git a/lib/gitlab/import_export/after_export_strategies/web_upload_strategy.rb b/lib/gitlab/import_export/after_export_strategies/web_upload_strategy.rb\nindex e2dba831661..80b12a76d26 100644\n--- a/lib/gitlab/import_export/after_export_strategies/web_upload_strategy.rb\n+++ b/lib/gitlab/import_export/after_export_strategies/web_upload_strategy.rb\n@@ -16,8 +16,11 @@ module Gitlab\n           end\n         end\n \n+        attr_reader :url, :http_method\n+\n         def initialize(url:, http_method: PUT_METHOD)\n-          super\n+          @url = url\n+          @http_method = http_method\n         end\n \n         protected\n@@ -32,6 +35,10 @@ module Gitlab\n           end\n         end\n \n+        def archive_path\n+          project.import_export_shared.archive_path\n+        end\n+\n         private\n \n         def send_file\n```\n\n## Impact\n\nAllowing an attacker to pass a hash to the initializer of a class inheriting from `BaseAfterExportStrategy` may lead to arbitrary file read, or potentially even to remote code execution.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 828467,
+      "file_name": "patch.diff",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/7A7wcfj8Cff4HQyPYctGXBz7?response-content-disposition=attachment%3B%20filename%3D%22patch.diff%22%3B%20filename%2A%3DUTF-8%27%27patch.diff&response-content-type=text%2Fx-patch&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5L4ZJAFZ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T172145Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJHMEUCIQDgLujpIPjf3ri9UgvVkb%2B7FsYSKa8tay1DhFLNIZJ9LQIgVUHiiK89kN4rLK3gXEdwo05jDatoAn6vC3HUCI5l5RcqsQUIQhADGgwwMTM2MTkyNzQ4NDkiDK67X5Apjc3NIWKOUCqOBdn%2BsGO%2FLiirnGVov9Pihp4NByXO8kyd5g20gjNLCYfwH1iFM0K8Tkp7Yqbx0JZoSv%2BsWerilganz%2Bz73RQl2v6%2BmSx7iJSvDUbztKZ5qmpLynBfqcdYy5zJ6xcrjJWahWX2l1KOLqvklHw%2FBH2JrutqybcGiBEcqaiCBzZXP%2FhthLooQ6m0z5BqF4DXxjaWMRcISR6zwThcWkMxpkXkSl0EWp40aomOHPqP077ZGyLSE9MHjP6uF5N8sx0Dffm4TKhm39qscZqLnWGavl7d1anYSWgqCy0N%2Fo7m%2BaJ6Huv09PH1JGDU0yRk91uEemeJ%2Fm2MHeJCexf7r0OtWwKMRsEq7IVD9ty7PqrSBLWGYupmS8JTxfhTWnlV17jAGHJchZ3Y4aH7Ze346DKr76inD8HTTrX73jysYOVqbEQvXn9lNubsjm1eLiUqhgT30VNAE0RvvdXG4%2BSqJa8f6atvDjXDyjOcpB%2F%2BxTIfNN7OKL%2Fypa18cQR2MvapzyKHHUCszpIe7nGAMzfW0AwbU1AAvZ3VIcXVRipd%2FDWMMZ5ytjOw0gI7PRpqyDmrlCECXTDtRe7%2BaRmKbUhTvCI93WkR%2F1rKr%2FSPkGDpO8hh2iY6w4gmAKB7csTlMYM7wkP2bsxeo5CLkqtDuFeYpFdr9yPg5pgidSfvW%2FxprEHDIcO1PVs4BgIi2r9aDEpmpPT%2BLFkXhcYNFSI2HDT%2FqJ%2BkSZan7oXvSFFMeGT%2FCQ3qJoXg%2FUxonyiqHt%2BoBfMkRoyWMEYj58jhw6K%2BLt%2BJiLeBb2OGiBXeJfezfdSnV%2BDnuY3rudG%2BLMNrPh5XYcMm8V%2BOP5qEpqByQ8x9w1QRIPdmxs%2FSo8%2Br5bigm4bGU5JdfD60bjCC4djPBjqxAfDbEQNG3NKO2FPgUYTvwAquC7Z6GEuvIavXL5HnWd1Qyc4xC2VVb%2FEQT%2B4JLvAr7zRP3wP4HsP%2F2zV3cvZEhFp%2FPX2kbZG5ihsK%2FPPx9Skr0zqpwPyO3nWq15xCja%2Fvt2VoXn4BAQ8l1QccXZO7fDCzMg874lX%2BOKBbOa00MKEziBxYW9z0%2BZA%2FQxSFQPA%2Ba6ytoeiis8DMyDANhAJlJZeimNYDGicgMtEjdD2XbI%2FMeg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c5dc20c8c17ec187dafb58ddb7c686de9edf2049d7b955b4bca971fa6133bfac",
+      "file_size": 3315,
+      "type": "text/x-patch",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 2,
+  "voters": [
+    "2026",
+    "official_blackhat13"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18138,
+    "asset_type": "URL",
+    "asset_identifier": "gitlab.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

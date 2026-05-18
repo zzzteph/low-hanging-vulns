@@ -1,0 +1,127 @@
+{
+  "id": 1590071,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNTkwMDcx",
+  "url": "https://hackerone.com/reports/1590071",
+  "title": "CVE-2022-32208: FTP-KRB bad message verification",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2022-06-02T20:12:35.145Z",
+  "submitted_at": "2022-06-02T20:12:35.214Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "nyymi",
+    "url": "/nyymi",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-32208"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2022-06-27T06:55:10.593Z",
+  "bug_reporter_agreed_on_going_public_at": "2022-06-27T06:55:10.536Z",
+  "team_member_agreed_on_going_public_at": "2022-06-27T06:53:55.224Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nlibcurl handles `gss_unwrap` `GSS_S_BAD_SIG` error incorrectly.  This enables malicious attacker to inject arbitrary FTP server responses to GSSAPI protected FTP control connection and/or make the client consume unrelated heap memory as a FTP command response.\n\nThe defective `krb5_decode` function  is as follows:\n ```\nstatic int\nkrb5_decode(void *app_data, void *buf, int len,\n            int level UNUSED_PARAM,\n            struct connectdata *conn UNUSED_PARAM)\n{\n  gss_ctx_id_t *context = app_data;\n  OM_uint32 maj, min;\n  gss_buffer_desc enc, dec;\n\n  (void)level;\n  (void)conn;\n\n  enc.value = buf;\n  enc.length = len;\n  maj = gss_unwrap(&min, *context, &enc, &dec, NULL, NULL);\n  if(maj != GSS_S_COMPLETE) {\n    if(len >= 4)\n      strcpy(buf, \"599 \");\n    return -1;\n  }\n\n  memcpy(buf, dec.value, dec.length);\n  len = curlx_uztosi(dec.length);\n  gss_release_buffer(&min, &dec);\n\n  return len;\n}\n```\nNote how `read_data` function will set the `buf->size` to result of the decode operation as-is without considering  possible `-1` return code and that size `buf->size`  is of type `size_t`:\n```\n/* Types needed for krb5-ftp connections */\nstruct krb5buffer {\n  void *data;\n  size_t size;\n  size_t index;\n  BIT(eof_flag);\n};\n```\n```\nstatic CURLcode read_data(struct connectdata *conn,\n                          curl_socket_t fd,\n                          struct krb5buffer *buf)\n{\n  int len;\n  CURLcode result;\n\n  result = socket_read(fd, &len, sizeof(len));\n  if(result)\n    return result;\n\n  if(len) {\n    /* only realloc if there was a length */\n    len = ntohl(len);\n    buf->data = Curl_saferealloc(buf->data, len);\n  }\n  if(!len || !buf->data)\n    return CURLE_OUT_OF_MEMORY;\n\n  result = socket_read(fd, buf->data, len);\n  if(result)\n    return result;\n  buf->size = conn->mech->decode(conn->app_data, buf->data, len,\n                                 conn->data_prot, conn);\n  buf->index = 0;\n  return CURLE_OK;\n}\n```\nWhen `gss_unwrap` returns an error the `krb5_decode` code attempts to erase the buffer by prefixing the buffer with `599 \\0`. However, this doesn't take into account the case that arbitrary number of bytes can be read by `read_data` function. Hence the buffer may contain multiple lines not just one. The attacker merely needs to find a position in the FTP protocol where ftpcode `599` doesn't lead to connection termination to take over the GSSAPI protected FTP session control channel. From that point onwards the server responses can be forged by the attacker (but need to be predicted, as the attacker has no direct knowledge of the actual commands sent to the server).\n\nIt's also notable that the any `gss_unwrap` error leading to `-1` size will lead to `sec_recv` consuming unallocated heap buffer via `buffer_read` if the reading application keeps reading more data:\n```\nstatic size_t\nbuffer_read(struct krb5buffer *buf, void *data, size_t len)\n{\n  if(buf->size - buf->index < len)\n    len = buf->size - buf->index;\n  memcpy(data, (char *)buf->data + buf->index, len);\n  buf->index += len;\n  return len;\n}\n```\nThis can lead to disclosure of confidential information from the heap - depending on application this may reveal application secrets  to the user (for example via verbose error messages). This is a local leak however, so this impact is only meaningful if the information in heap is normally hidden from the user.\n\n## Impact\n\n- Injection of arbitrary FTP control channel server responses to supposedly GSSAPI protected FTP session.\n- Potential leak of local heap memory to client.\n\nThe practical impact of this vulnerability is rather low, considering the rarity of Kerberos FTP and requirement of either man in the middle or victim connecting to malicious server.",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2022-07-27T06:53:55.331Z",
+  "allow_singular_disclosure_after": -118837086.99730809,
+  "singular_disclosure_allowed": true,
+  "vote_count": 11,
+  "voters": [
+    "zy9ard3",
+    "mohaned0101",
+    "polem4rch",
+    "thalaivar304",
+    "pr0f0x01",
+    "shivammusic",
+    "metwallysec",
+    "rinku66",
+    "404_but_found",
+    "d3basis",
+    "and 1 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,136 @@
+{
+  "id": 822262,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC84MjIyNjI=",
+  "url": "https://hackerone.com/reports/822262",
+  "title": "Path traversal in Nuget Package Registry",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2020-03-17T15:51:58.636Z",
+  "submitted_at": "2020-03-17T15:51:58.636Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "saltyyolk",
+    "url": "/saltyyolk",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/252/596/b03010470e2928f744f71fb5c1685806f1878341_original.jpeg/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 264,
+    "url": "https://hackerone.com/gitlab",
+    "handle": "gitlab",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "GitLab",
+      "twitter_handle": "gitlab",
+      "website": "https://about.gitlab.com",
+      "about": "A single application for the entire software development lifecycle."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2020-12448"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2022-06-07T14:16:20.534Z",
+  "bug_reporter_agreed_on_going_public_at": "2022-06-07T14:16:20.343Z",
+  "team_member_agreed_on_going_public_at": "2020-11-20T20:55:13.986Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\nThere's a path traversal issue in Nuget package registry which was released to GitLab-EE recently. The issue allows an attacker to create any file with an extension “.nupkg” in the filesystem. By combining the bug with a race condition in Gitaly which I used several times before (#762421, #732330). It could finally be used to read sensitive files in a GitLab instance.\n\nFor some context, a large part of the exploit were explained in #762421, the npm registry issue. Here I will focus on the simple path traversal part which makes a little bit difference.\n\nThe root cause of the path traversal lies at `ee/app/services/packages/nuget/metadata_extraction_service.rb`\n```\n      XPATHS = {                                                               \n        package_name: '//xmlns:package/xmlns:metadata/xmlns:id',               \n        package_version: '//xmlns:package/xmlns:metadata/xmlns:version'        \n      }.freeze \n...\n      def extract_metadata(file)                                               \n        doc = Nokogiri::XML(file)                                              \n                                                                               \n        XPATHS.map do |key, query|                                             \n          [key, doc.xpath(query).text]                                         \n        end.to_h \n```\nIt extracts the uploaded nupkg (which is in zip format) for the contained nuspec file (which is an XML). And then looks for attribute `id` and `version`. Then the extracted package_name(id), and package_version(version) will be concatenated into a new filename in `ee/app/services/packages/nuget/update_package_from_metadata_service.rb`\n```                                                                      \n        @package_file.transaction do                                           \n          @package_file.update!(                                               \n            file_name: package_filename,                                       \n            file: @package_file.file                                           \n          )      \n...\n      def package_filename                                                     \n        \"#{package_name.downcase}.#{package_version.downcase}.nupkg\"           \n      end    \n```\nSo my payload is:\n```                                                                  \n  <?xml version=\"1.0\" encoding=\"utf-8\"?>                                       \n  <package xmlns=\"http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd\">  \n    <metadata>                                                                 \n      <id>DummyProject.DummyPackage</id>                                       \n      <version>../../../../../nyangawa</version>                                            \n    </metadata>                                                                \n  </package>                                                                   \n```\nname the file above as `dummy.nuspec` and zip it into `dummy.nupkg` and upload it through `PUT /api/v4/projects/#{id}/packages/nuget/` endpoint  will make GitLab to create a `nyangawa.nupkg` somewhere in the filesystem.\n\nThen I wrote a script (I used in #762421) to combine this issue and the race in Gitaly. I could finally read any file I want in my GitLab instance.\n\n### Steps to reproduce\n\n1. Download the attached exploit.tar.gz and extract it.\n2. Install some requirements by gem install faraday and gem install rubyzip\n3. Edit exp.rb to update some url and credentials\n4. Execute the exp.rb to watch the result of .gitlab_shell_secret of target GitLab instance.\n\n### Examples\n{F750878}\n\n#### Results of GitLab environment info\n```\nroot@localhost:/# gitlab-rake gitlab:env:info\n\nSystem information\nSystem:\t\t\nProxy:\t\tno\nCurrent User:\tgit\nUsing RVM:\tno\nRuby Version:\t2.6.5p114\nGem Version:\t2.7.10\nBundler Version:1.17.3\nRake Version:\t12.3.3\nRedis Version:\t5.0.7\nGit Version:\t2.24.1\nSidekiq Version:5.2.7\nGo Version:\tunknown\n\nGitLab information\nVersion:\t12.8.7-ee\nRevision:\t2643fd87200\nDirectory:\t/opt/gitlab/embedded/service/gitlab-rails\nDB Adapter:\tPostgreSQL\nDB Version:\t10.12\nURL:\t\thttp://10.26.0.5\nHTTP Clone URL:\thttp://10.26.0.5/some-group/some-project.git\nSSH Clone URL:\tgit@10.26.0.5:some-group/some-project.git\nElasticsearch:\tno\nGeo:\t\tno\nUsing LDAP:\tno\nUsing Omniauth:\tyes\nOmniauth Providers: \n\nGitLab Shell\nVersion:\t11.0.0\nRepository storage paths:\n- default: \t/var/opt/gitlab/git-data/repositories\nGitLab Shell path:\t\t/opt/gitlab/embedded/service/gitlab-shell\nGit:\t\t/opt/gitlab/embedded/bin/git\n```\n\nps. I changed my username because of a lost bet, don't be strange :p\n\nBest regards,\nSaltyYolk\n\n## Impact\n\nCommon arbitrary file read issue caused by path traversal similar to my previous reports.",
+  "bounty_amount": "12000.0",
+  "formatted_bounty": "$12,000",
+  "weakness": {
+    "id": 19,
+    "name": "Path Traversal"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 750878,
+      "file_name": "2020-03-17-234802_649x700_scrot.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/E9Ap6Era4ypQ4R3XqBVvjKMh?response-content-disposition=attachment%3B%20filename%3D%222020-03-17-234802_649x700_scrot.png%22%3B%20filename%2A%3DUTF-8%27%272020-03-17-234802_649x700_scrot.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5LXS2N4Y%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T171246Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJIMEYCIQDsJDkFkwo7oVSrACuMpz3wfKjTgJRUv9EMdGm5FIaIZgIhAOrY9wJtbSl%2FMoI8%2B4Wh8Xo54uITN%2FOpzPj9OKJSBtdaKrEFCEIQAxoMMDEzNjE5Mjc0ODQ5Igxqg4LLgqdczj85rNMqjgUUGTPxqlyzKmPWx1fbgsptjuLljdqsp5qWid0ecMpQXhYq%2BXTuRtq78H%2FRVVBes%2F9boiG%2BVnOI7bmSES83Wo2qLmZjdtJrSyx%2BXd8%2BhcIR4uET4w3S8ur4YrlfjgnkTIdy8Iha9Nd2UrTy%2FZML3zgHtP%2F3KEPfDSkBtTyqkgStqJko2kfeRvI09iIXKpnDYO2xGbIFDwO3yuT6O7QSZM1MP2ZmEyu0sohrpUsc40cj6wmqFSF8fHdfmdgnoN2AKkaDpbDrrZ6jlTOUSoLOgiuESDqdyTE21ZqcbyDzSRw154zw7OFCcOCIItHa%2Fkg3KYJrEc%2BI9V2UzNUFsAcN4olT%2BtGcB8XhRytxkVrCFJhIQBtmCe4EGKB4AmeZgw6nid7IhowLvd39TQcHhkucLDXYVBxbfuKXykR5q7HIfoL5fnl0p%2FtsELJZ6bAJ4lVDmLtXBPFz0rP%2B1m7Xf5uLHzqWdgUHdVYtrhQsGXWZjMVtASPLw06x8LdTAir3F0oe7wIkgEm9osPCe0CEXOnPgORs60hA1NLIVjzhanOFGviz302wYcs1tiGAkzUjJmw3not2%2BqDGmp1VfHUOocVRpm2d%2F9FBA7cBNV1EWJGtii%2Bi5SCReg01jOUYBSxLFiVhVhnfhgCl52R8afbFDkBnSmtc53fKWD2zS4D58Hh2%2FJOzhw9fOnQo%2BjWYLYJ%2Fj9D6hw7%2BOywD523mK6ijb8i%2FdgVD0AvvPCxiQvMUiW860E9r%2BMbrvelFxNM555HASOkdAz87IXt5B0tjX86MrDC%2B%2F9M0FP4436Im1hjvwnqtRULjYhIr%2B7CmtDNKgRtPRcu8ZPMIwgQaQ2f5EEvM5Bz39Ami1Yz449qW9AiSidSkziEwuNHYzwY6sAETExq1iaBYA4P45LFrkZImIT2vSOyIKxGinewiZOLPFIlvXOy3cq5CTzxr%2FJKCDQKMWgXaSLiRObpj02Vaum6g2%2BUtb84rkbzgcJvSLzGyudeyIlBRRKYNBdGrqqgtacXGGvGbEyVTTYNO3enDEtMrZWZvDCjhGqnazBaVwCdgApXDx5nSkSzwrgv6cPq7fW66WQpJzHuPBJ%2BypiZGQhV1EdvgHEDtBWu6x6FbD4nNjg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=bf8e622b4785915b00ebcf49bade888e35ffbb9b6fb5c67cb739fd8be131ec86",
+      "file_size": 135484,
+      "type": "image/png",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 87,
+  "voters": [
+    "adilnbabras",
+    "m4khn0",
+    "ghaem51",
+    "jumpydata",
+    "joaxcar",
+    "n1m0",
+    "tolga",
+    "mrmax4o4",
+    "yxw21",
+    "zy9ard3",
+    "and 77 more..."
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 39022,
+    "asset_type": "OTHER",
+    "asset_identifier": "Your Own GitLab Instance",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

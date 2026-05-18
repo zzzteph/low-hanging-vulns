@@ -1,0 +1,123 @@
+{
+  "id": 2271054,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yMjcxMDU0",
+  "url": "https://hackerone.com/reports/2271054",
+  "title": "DoS in bigdecimal's sqrt function due to miscalculation of loop iterations",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2023-12-04T03:30:16.777Z",
+  "submitted_at": "2023-12-04T03:30:16.916Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "z2_",
+    "url": "/z2_",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/5eld4c9eg34za1r92ipvd757pa9d/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7724,
+    "url": "https://hackerone.com/ruby",
+    "handle": "ruby",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/724/bb067434deef370d6a0b16c2cbbc030b57c75e92_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/724/bb067434deef370d6a0b16c2cbbc030b57c75e92_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby",
+      "twitter_handle": "",
+      "website": "https://www.ruby-lang.org",
+      "about": "A Programmer's Best Friend"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2023-12-20T00:02:47.805Z",
+  "bug_reporter_agreed_on_going_public_at": "2023-12-19T15:24:45.592Z",
+  "team_member_agreed_on_going_public_at": "2023-12-20T00:02:47.689Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Vulnerability\n__Affected Product__: `bigdecimal` extension in https://github.com/ruby/ruby\n__Affected Versions__: At least version 3.2.2, I didn't test any previous versions\n\nThe current implementation of `BigDecimal#sqrt` in `ext/bigdecimal/bigdecimal.c` erroneously checks its parameter\nand allows users of the function to control how long it will run. This may lead to\na DoS if the parameter to the function can be controlled by an attacker.\n\nThe implementation of `BigDecimal#sqrt` involves a loop that iteratively calculates\nthe value of the square root:\n```c\ndo {\n    y->MaxPrec *= 2;\n    if (y->MaxPrec > y_prec) y->MaxPrec = y_prec;\n    f->MaxPrec = y->MaxPrec;\n    VpDivd(f, r, x, y);        /* f = x/y    */\n    VpAddSub(r, f, y, -1);     /* r = f - y  */\n    VpMult(f, VpConstPt5, r);  /* f = 0.5*r  */\n    if (VpIsZero(f))\n        goto converge;\n    VpAddSub(r, f, y, 1);      /* r = y + f  */\n    VpAsgn(y, r, 1);           /* y = r      */\n} while (++nr < n);\n```\nThe number of iterations is determined by the number `n`, which is derived from the\nparameter of the `sqrt` function.\nThe application tries to impose a limit on the number of iterations, as can be seen\nin line 4659:\n```c\n#define maxnr 100UL    /* Maximum iterations for calculating sqrt. */\n```\nHowever, the calculation of `n` is erroneous and uses `maxnr` as a _lower_ bound and not\nan upper bound for `n` as can be seen in line 7220:\n```c\nif (n < (SIGNED_VALUE)maxnr) n = (SIGNED_VALUE)maxnr;\n```\nThis may cause the program to have more iterations than originally intended.\n\n# Proof of Concept\nThe following ruby program iterates 10000 times instead of 100 and takes longer than 10 min to complete on my machine:\n```rb\nrequire 'bigdecimal'\nBigDecimal(\"6E19\").sqrt(10000)\n```\nFurthermore, it can be observed the ruby interpreter stalls completely. The program has to be killed with SIGKILL.\n\n# Solution\nThe following patch resolves the error:\n```diff\ndiff --git a/ext/bigdecimal/bigdecimal.c b/ext/bigdecimal/bigdecimal.c\nindex 07c2bcf0b5..31e5574574 100644\n--- a/ext/bigdecimal/bigdecimal.c\n+++ b/ext/bigdecimal/bigdecimal.c\n@@ -7217,7 +7217,7 @@ VpSqrt(Real *y, Real *x)\n     y->MaxPrec = Min((size_t)n , y_prec);\n     f->MaxPrec = y->MaxPrec + 1;\n     n = (SIGNED_VALUE)(y_prec * BASE_FIG);\n-    if (n < (SIGNED_VALUE)maxnr) n = (SIGNED_VALUE)maxnr;\n+    if (n > (SIGNED_VALUE)maxnr) n = (SIGNED_VALUE)maxnr;\n\n     /*\n      * Perform: y_{n+1} = (y_n - x/y_n) / 2\n```\nThis change maintains the correctness of the implementation. \nI have checked this against the test suite from https://github.com/ruby/bigdecimal and all the tests still pass.\n\n## Impact\n\nIf an attacker can control the parameter to `BigDecimal#sqrt` he/she can cause a ruby program to hang\nfor a long time.\nFurtermore, since the loop is inside of a function of an extension it blocks the interpreter / execution engine\nas a whole hindering the delivery of events or signals.\nAs seen above, a ruby program that is caught up in such a loop can only be interrupted by a SIGKILL signal.\nSince the bug is\n1. Easy to trigger if the necessary conditions are met\n2. Has a huge effect for relatively small input values\n\nI chose the severity medium.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 14,
+  "voters": [
+    "z2_",
+    "zy9ard3",
+    "hamzaavvan",
+    "brazil1",
+    "yashlonewolf",
+    "scoody0824",
+    "sigscott",
+    "osinted",
+    "369universewealthmoneymakker",
+    "hackergb",
+    "and 4 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 28212,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/ruby/ruby",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

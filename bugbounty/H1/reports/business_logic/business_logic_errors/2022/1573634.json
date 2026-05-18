@@ -1,0 +1,122 @@
+{
+  "id": 1573634,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNTczNjM0",
+  "url": "https://hackerone.com/reports/1573634",
+  "title": "CVE-2022-32207: Unpreserved file permissions",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2022-05-17T17:28:53.876Z",
+  "submitted_at": "2022-05-17T17:28:53.931Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "nyymi",
+    "url": "/nyymi",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-32207"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2022-06-27T06:55:36.074Z",
+  "bug_reporter_agreed_on_going_public_at": "2022-06-27T06:55:36.032Z",
+  "team_member_agreed_on_going_public_at": "2022-06-27T06:53:26.873Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nCurl fails to preserve file permissions when writing:\n- `CURLOPT_COOKIEJAR` database\n- `CURLOPT_ALTSVC` database\n- `CURLOPT_HSTS` database\n\nInstead the permissions is always reset to 0666 & ~umask if the file is updated.\n\nAs a result a file that was before protected against read access by other users becomes other user readable (as long as umask doesn't have bit 2 set).\nOut of these files only the `CURLOPT_COOKIEJAR` is likely to contain sensitive information.\n\nIn addition curl will replace softlink to the database with locally written database, or if the application is run privileged, specifying `\"/dev/null\"` as a file name can lead to system overwriting the special file and result in inoperable system.\n\nThis is CWE-281: Improper Preservation of Permissions\n\n## Steps To Reproduce:\n\n  1.  `umask 022`\n  2.  `install -m 600 /dev/null cookie.db`\n  3. `curl -b cookie.db -c cookie.db https://google.com`\n  4.  `ls -l cookie.db`\n\nAt least for  `CURLOPT_COOKIEJAR` this vulnerability was introduced in https://github.com/curl/curl/commit/b834890a3fa3f525cd8ef4e99554cdb4558d7e1b - this change was introduced to fix a issue https://github.com/curl/curl/issues/4914\n\n## Fix recommendations\n\nIf a file file is created and moved over a the old one, only do this if the file is regular file. Anything else is likely going to end up causing unexpected behaviour, outright failing, or if the user has high enough permissions, damage to the operating system.\n\nSafe cloning of file permissions can only be achieved if the owner / group of the file match the current user (else group permissions might be incorrect). Hence creating a new file and moving it over the old one should IMO only be attempted if the file user and group match that of the previous file.\n\nIf a method of creating a new file is still desired, something like this could be attempted to cover the most use cases:\n\n ```\n  /* If old file is a regular file attempt creating a new file with same ownership */\n  struct stat st;\n  if (stat(filename, &st) != -1 && S_ISREG(st.st_mode)) {\n    FILE *file;\n    int fd;\n    struct stat nst;\n    fd = open(tempstore, O_CREAT | O_EXCL, 0700);\n    if (fd == -1)\n      goto fail;\n    if (fstat(fd, &nst) == -1 ||\n       nst.st_uid != st.st_uid || nst.st_gid != st.st_gid) {\n      /* newly created file doesn't have same ownership, we can't proceed safely */\n      close(fd);\n      unlink(tempstore);\n      goto fail; // or perhaps try direct write instead?\n     }\n    /* use same mode as old file */\n    if (fchmod(fd, st.st_mode) == -1) {\n      close(fd);\n      unlink(tempstore);\n      goto fail;\n    }\n    file = fdopen(fd, FOPEN_WRITETEXT);\n    if (!file) {\n      close(fd);\n      unlink(tempstore);\n      goto fail;\n   }\n   /* write to file */\n   /* if successful move file over filename etc */\n  }\n  else  {\n    /* use direct file write */\n  }\n ```\n\n## Impact\n\nLeak of sensitive information",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2022-07-27T06:53:26.983Z",
+  "allow_singular_disclosure_after": -118837114.3152127,
+  "singular_disclosure_allowed": true,
+  "vote_count": 6,
+  "voters": [
+    "zy9ard3",
+    "mohaned0101",
+    "polem4rch",
+    "thalaivar304",
+    "shivammusic",
+    "metwallysec"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

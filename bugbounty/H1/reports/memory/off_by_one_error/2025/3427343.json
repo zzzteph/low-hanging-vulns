@@ -1,0 +1,120 @@
+{
+  "id": 3427343,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDI3MzQz",
+  "url": "https://hackerone.com/reports/3427343",
+  "title": "Off-by-One Buffer Overflow in SMB Path Handler",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2025-11-15T19:12:02.795Z",
+  "submitted_at": "2025-11-15T19:12:02.963Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "pelioro",
+    "url": "/pelioro",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fyib612249yt7dacxpa19yqnms8m/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-11-15T22:38:07.360Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-11-15T22:38:07.241Z",
+  "team_member_agreed_on_going_public_at": "2025-11-15T22:34:36.626Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nFound an off-by-one buffer overflow in `lib/smb.c` when handling SMB file paths. The bounds check uses `>` instead of `>=`, allowing a path of exactly 1023 bytes to overflow the 1024-byte buffer by one byte when the null terminator is added.\n\n## Details\n\n**File:** lib/smb.c  \n**Function:** smb_send_open()  \n**Lines:** 784, 801\n\n### The Bug\n\n```c\nstruct smb_nt_create {\n    // ... other fields ...\n    char bytes[1024];  // fixed size buffer\n} PACK;\n\nstatic CURLcode smb_send_open(...) {\n    struct smb_nt_create msg;\n    const size_t byte_count = strlen(req->path) + 1;\n    \n    if(byte_count > sizeof(msg.bytes))  // Wrong: should be >=\n        return CURLE_FILESIZE_EXCEEDED;\n    \n    // ... setup code ...\n    \n    strcpy(msg.bytes, req->path);  // Overflow when byte_count == 1024\n}\n```\n\n### The Math\n\n- Buffer size: 1024 bytes\n- Check allows: byte_count <= 1024 (because > not >=)\n- If path is 1023 bytes:\n  - `strlen(req->path)` = 1023\n  - `byte_count` = 1024\n  - Check: `1024 > 1024` = FALSE (passes)\n  - `strcpy()` writes 1024 bytes + null = **1025 bytes**\n  - **Overflow by 1 byte**\n\n## Testing\n\nBuilt curl with ASan to verify:\n\n```bash\n./configure --with-openssl --enable-smb --enable-debug \\\n  CFLAGS=\"-fsanitize=address\"\nmake\n```\n\nSMB support confirmed:\n```\n$ ./src/curl --version | grep smb\nProtocols: ... smb smbs ...\n```\n\nNote: Couldn't trigger the crash in testing because it requires an actual SMB connection, but the bug is visible in the code.\n\n## Fix\n\nTwo changes needed:\n\n```diff\n- if(byte_count > sizeof(msg.bytes))\n+ if(byte_count >= sizeof(msg.bytes))\n    return CURLE_FILESIZE_EXCEEDED;\n\n- strcpy(msg.bytes, req->path);\n+ memcpy(msg.bytes, req->path, byte_count);\n```\n\n## Notes\n\n- Tested on curl master branch\n- SMB support must be compiled in\n- Bug is in release builds, not debug-only\n- Manual code review, no AI used\n\nThis is a real bug that should be fixed, even though exploitation is unlikely.\n\n## Impact\n\n- Memory corruption (1 byte past buffer)\n- Likely causes crash\n- RCE unlikely (off-by-one is hard to exploit)\n- Affects any app using libcurl with SMB",
+  "weakness": {
+    "id": 17,
+    "name": "Off-by-one Error"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 8,
+  "voters": [
+    "2026",
+    "pelioro",
+    "zeta47",
+    "kamekame",
+    "fhqb",
+    "cellroad4sec",
+    "triloos",
+    "saintvlucifer"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

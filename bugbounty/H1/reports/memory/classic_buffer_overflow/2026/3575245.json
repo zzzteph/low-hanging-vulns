@@ -1,0 +1,140 @@
+{
+  "id": 3575245,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTc1MjQ1",
+  "url": "https://hackerone.com/reports/3575245",
+  "title": "Integer Overflow in curl_multi_get_handles() Leading to Heap Buffer Overflow",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-02-26T10:52:45.582Z",
+  "submitted_at": "2026-02-26T10:52:46.274Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "knickers",
+    "url": "/knickers",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-02-26T18:58:16.429Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-02-26T14:47:39.982Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Integer Overflow in curl_multi_get_handles() Leading to Heap Buffer Overflow\n\n## Summary\n\nThe `curl_multi_get_handles()` function in `lib/multi.c` contains an integer overflow vulnerability when the number of easy handles in a multi handle approaches `UINT_MAX` (4,294,967,295). When `count == UINT_MAX`, the expression `count + 1` overflows to `0`, causing `malloc(0)` to return a non-NULL pointer. Subsequent write operations `a[i++] = data` then write beyond the allocated buffer, resulting in a heap buffer overflow. While exploitation requires extreme resource consumption (~32TB memory for ~4.3 billion handles), this represents a memory safety violation that should be addressed.\n\n**PoC Concept:**\n```c\n// lib/multi.c:3728-3729\nunsigned int count = Curl_uint32_tbl_count(&multi->xfers);\nCURL **a = curlx_malloc(sizeof(struct Curl_easy *) * (count + 1));  // OVERFLOW when count == UINT_MAX\n// When count == 0xFFFFFFFF: count + 1 = 0, malloc(0) returns non-NULL\n// Subsequent a[i++] = data writes to undersized buffer\n```\n\n## Affected Version\n\n**curl version:** 8.18.0 (API `curl_multi_get_handles()` introduced in this version)\n\n**Platform:** All platforms (64-bit systems theoretically exploitable, 32-bit systems not exploitable due to address space limits)\n\n```\ncurl 8.18.0 (x86_64-pc-linux-gnu) libcurl/8.18.0 OpenSSL/3.0.0 zlib/1.2.13\nRelease-Date: 2026-01-07\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ldap ldaps mqtt pop3 pop3s rtsp scp sftp smb smbs smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS brotli GSS-API HSTS HTTP2 HTTP3 HTTPS-proxy IDN IPv6 Kerberos Largefile libz NTLM NTLM_WB PSL SPNEGO SSL TLS-SRP UnixSockets zstd\n```\n\n## Steps to Reproduce\n\n### Method 1: Code Analysis (Recommended)\n\n1. Examine the vulnerable code in `lib/multi.c:3724-3745`:\n\n```c\nCURL **curl_multi_get_handles(CURLM *m)\n{\n  struct Curl_multi *multi = m;\n  void *entry;\n  unsigned int count = Curl_uint32_tbl_count(&multi->xfers);\n  CURL **a = curlx_malloc(sizeof(struct Curl_easy *) * (count + 1));  // VULNERABLE\n  if(a) {\n    unsigned int i = 0;\n    uint32_t mid;\n    if(Curl_uint32_tbl_first(&multi->xfers, &mid, &entry)) {\n      do {\n        struct Curl_easy *data = entry;\n        DEBUGASSERT(i < count);\n        if(!data->state.internal)\n          a[i++] = data;  // Write to potentially undersized buffer\n      } while(Curl_uint32_tbl_next(&multi->xfers, mid, &mid, &entry));\n    }\n    a[i] = NULL;\n  }\n  return a;\n}\n```\n\n2. Observe that when `count == 0xFFFFFFFF` (UINT_MAX):\n   - `count + 1` overflows to `0`\n   - `malloc(sizeof(void*) * 0)` = `malloc(0)` returns non-NULL\n   - Subsequent writes cause heap buffer overflow\n\n### Method 2: Simulation PoC\n\nRun the attached Python PoC to see the overflow demonstration:\n\n```python\n# Simulate integer overflow\ncount = 0xFFFFFFFF  # UINT_MAX\noverflow_result = (count + 1) & 0xFFFFFFFF  # Result: 0\n\n# Memory allocation would be:\nelement_size = 8  # sizeof(void*) on 64-bit\nalloc_size = element_size * overflow_result  # = 0 bytes\n# malloc(0) returns non-NULL pointer\n\n# Subsequent writes overflow the buffer\n```\n\n### Method 3: Stress Test (Theoretical)\n\nThe following code demonstrates the attack path (not practical due to memory requirements):\n\n```c\n#include <curl/curl.h>\n#include <limits.h>\n\nint main() {\n    CURLM *multi = curl_multi_init();\n\n    // Would need ~4.3 billion iterations\n    // Requiring ~32TB of memory\n    for(unsigned long i = 0; i < UINT_MAX; i++) {\n        CURL *easy = curl_easy_init();\n        curl_easy_setopt(easy, CURLOPT_URL, \"http://example.com\");\n        curl_multi_add_handle(multi, easy);\n    }\n\n    // This triggers the overflow\n    CURL **handles = curl_multi_get_handles(multi);\n    // handles points to undersized buffer\n    // Writing to handles[0] causes heap overflow\n\n    return 0;\n}\n```\n\n## Impact\n\n### Security Impact\n\n1. **Heap Buffer Overflow**: When triggered, this vulnerability causes a write to memory beyond the allocated buffer boundary. This can lead to:\n   - Memory corruption\n   - Denial of Service (crash)\n   - Potential arbitrary code execution (though exploitation is extremely difficult)\n\n2. **Memory Safety Violation**: This represents a fundamental violation of memory safety principles in a widely-used library.\n\n### Practical Exploitability\n\n| Factor | Assessment |\n|--------|------------|\n| **Memory Required** | ~32TB (each handle ~8KB × 4.3 billion handles) |\n| **Time Required** | ~50 days at 1,000 handles/sec |\n| **32-bit Systems** | Not exploitable (4GB address space limit) |\n| **64-bit Systems** | Theoretically exploitable but impractical |\n| **Real-world Impact** | LOW - Extreme resource requirements make practical exploitation nearly impossible |\n\n### Why This Still Matters\n\n1. **Code Quality**: This is a clear violation of secure coding practices (CWE-190: Integer Overflow)\n2. **Future Risk**: As memory becomes cheaper, the exploitability threshold may become more achievable\n3. **Similar Patterns**: This vulnerability pattern might exist in other parts of the codebase\n4. **Defensive Programming**: Adding the overflow check is a simple one-line fix that improves code robustness\n\n### Recommended Fix\n\n```c\nunsigned int count = Curl_uint32_tbl_count(&multi->xfers);\n\n/* Prevent integer overflow */\nif(count == UINT_MAX) {\n    return NULL;\n}\n\nCURL **a = curlx_malloc(sizeof(struct Curl_easy *) * (count + 1));\n```\n\n## Attachments\n\n- `curl_multi_overflow_poc.py` - Python simulation demonstrating the overflow concept\n- `curl_multi_overflow_poc.c` - C PoC (requires libcurl)\n\n---\n\n**Credit**: Sun Tao\n**Date**: 2026-02-26\n\n## Impact\n\n## Summary:\nThe `curl_multi_get_handles()` function in `lib/multi.c` contains an integer overflow vulnerability when the number of easy handles in a multi handle approaches `UINT_MAX` (4,294,967,295). When `count == UINT_MAX`, the expression `count + 1` overflows to `0`, causing `malloc(0)` to return a non-NULL pointer. Subsequent write operations `a[i++] = data` then write beyond the allocated buffer, resulting in a heap buffer overflow. While exploitation requires extreme resource consumption (~32TB memory for ~4.3 billion handles), this represents a memory safety violation that should be addressed.",
+  "weakness": {
+    "id": 3,
+    "name": "Classic Buffer Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5426946,
+      "file_name": "curl_multi_overflow_poc.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ra0c338s6swyne66hy58wa4ue522?response-content-disposition=attachment%3B%20filename%3D%22curl_multi_overflow_poc.py%22%3B%20filename%2A%3DUTF-8%27%27curl_multi_overflow_poc.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQVLL3MOL%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162432Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCICXZ2t25W06qgJGfQEKgCHiLu2RwBCYfTtrgA3QZzFZjAiEA993Cf7iOatTQrB5x5IZxlmcwuY3LP%2Fa2bNKX4ASYmP0qsgUIQBADGgwwMTM2MTkyNzQ4NDkiDIEqMtXaoEpelmH7SCqPBXgJYEDkYwMAT0lhTX8qRa%2BqzeESV1rrpvOy%2B%2Bjcv%2BVfIEepp0Eq3HqN2NrCJhJhHfL%2FlVIW%2FFU1Nzp8sZ884kZpYumsSnbe9lZjARKcp4zyfvDNeudfC2haYUxbeBcmi10scQzjuqTT39xWW1Q%2F0Rij2kEsebFuSbUMe7KSHflFCUzZwPTopHlZ5okaWMJmjlNScPEDtkmyypxf8kAV9RNHug8RG%2FFRj3CZ8qcNIEneMW7L4r%2Bbc9Qe1FiwJnGuuugiRvWSUihQwu9dkkT7eMqjDdr4Q2YmKKzORy7YrxRR23ImvLw6aHUjIlu7zE4GbmwrY9g6eVZP%2FPHxHGd%2Bzbv14iMnmbbUUOeIaSJ9le4Sj8pBIRIgANs%2Fr34AK9GPtxrpmKMUzzOz8gaBxf0D5o2F9C0fxOF51mZvEutyCjUVgIlMTPyhQ%2BMP1FmPyvDtX%2FS9ClSPeZMJx3kptRriSnWTR98EvM8w3JXoCSR6EzcIfv8eOYxl9WbcxZWs%2FP7%2F3x0pWgfdAHT7qeBu6vbyXql4qypkowJp6vZLPX1jP%2BDXMaqMJzZs4UhYZe15j6wX99qHKRVQJoZHKJCwqarVX5dn3OeztUZUaqTzDRUiNCNMmd%2FECiaRP3V9JaUZ6afMqtNIlkbCvmkuQPCuiHnjJKJAjrSvx7TavC%2BQWhwCyo5l71X0wAPWUQEm4BcgcosaIvgb1s8kij8dth14zpM3d%2FmYKmPK5ORTuK4LllFLtMIDmpYQgGl7%2FgPjhodovfY2JeSpFWHh1gVJI9v4929bfLEGL3nRVjqM1Z8HQcL4WzNeCkQdtZ8IVpkxRNmfqu234ulN5MLeGiAc0B9elzqZHSKeBgXJGBHK%2BA9bOWF%2Br04wpabYzwY6sQFvFOv9hGQXzF%2B7IztrfF1YvNzhhZIz4vJscNSGXou%2FzQ92vv14JymGZk6XltXiB1sbY0m%2Bf8J4XSWtDJY3IL82BGAeUyLbJnjj35p9uJGkUcsUPXxMm7wTOV0O5z2aS30tvZxBw2WdhXHR06AXH5BQeiBXEfdSXzSt5El2Y7m6M9WNdUbYZiT9DfhUi1T5WvCNXTGsu3Raj7dUylHWfKKfFC1s0%2BLcRRM5P39b0qukX2Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=965bf30d50d8d2ccbfb05de708f7b636fb42dc8178dc85865f35a467a3dc3d2d",
+      "file_size": 6696,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5426947,
+      "file_name": "curl_multi_overflow_poc.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/t5aw45ru1qh2eh4dd6z1ahvcvws6?response-content-disposition=attachment%3B%20filename%3D%22curl_multi_overflow_poc.c%22%3B%20filename%2A%3DUTF-8%27%27curl_multi_overflow_poc.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQVLL3MOL%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162432Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCICXZ2t25W06qgJGfQEKgCHiLu2RwBCYfTtrgA3QZzFZjAiEA993Cf7iOatTQrB5x5IZxlmcwuY3LP%2Fa2bNKX4ASYmP0qsgUIQBADGgwwMTM2MTkyNzQ4NDkiDIEqMtXaoEpelmH7SCqPBXgJYEDkYwMAT0lhTX8qRa%2BqzeESV1rrpvOy%2B%2Bjcv%2BVfIEepp0Eq3HqN2NrCJhJhHfL%2FlVIW%2FFU1Nzp8sZ884kZpYumsSnbe9lZjARKcp4zyfvDNeudfC2haYUxbeBcmi10scQzjuqTT39xWW1Q%2F0Rij2kEsebFuSbUMe7KSHflFCUzZwPTopHlZ5okaWMJmjlNScPEDtkmyypxf8kAV9RNHug8RG%2FFRj3CZ8qcNIEneMW7L4r%2Bbc9Qe1FiwJnGuuugiRvWSUihQwu9dkkT7eMqjDdr4Q2YmKKzORy7YrxRR23ImvLw6aHUjIlu7zE4GbmwrY9g6eVZP%2FPHxHGd%2Bzbv14iMnmbbUUOeIaSJ9le4Sj8pBIRIgANs%2Fr34AK9GPtxrpmKMUzzOz8gaBxf0D5o2F9C0fxOF51mZvEutyCjUVgIlMTPyhQ%2BMP1FmPyvDtX%2FS9ClSPeZMJx3kptRriSnWTR98EvM8w3JXoCSR6EzcIfv8eOYxl9WbcxZWs%2FP7%2F3x0pWgfdAHT7qeBu6vbyXql4qypkowJp6vZLPX1jP%2BDXMaqMJzZs4UhYZe15j6wX99qHKRVQJoZHKJCwqarVX5dn3OeztUZUaqTzDRUiNCNMmd%2FECiaRP3V9JaUZ6afMqtNIlkbCvmkuQPCuiHnjJKJAjrSvx7TavC%2BQWhwCyo5l71X0wAPWUQEm4BcgcosaIvgb1s8kij8dth14zpM3d%2FmYKmPK5ORTuK4LllFLtMIDmpYQgGl7%2FgPjhodovfY2JeSpFWHh1gVJI9v4929bfLEGL3nRVjqM1Z8HQcL4WzNeCkQdtZ8IVpkxRNmfqu234ulN5MLeGiAc0B9elzqZHSKeBgXJGBHK%2BA9bOWF%2Br04wpabYzwY6sQFvFOv9hGQXzF%2B7IztrfF1YvNzhhZIz4vJscNSGXou%2FzQ92vv14JymGZk6XltXiB1sbY0m%2Bf8J4XSWtDJY3IL82BGAeUyLbJnjj35p9uJGkUcsUPXxMm7wTOV0O5z2aS30tvZxBw2WdhXHR06AXH5BQeiBXEfdSXzSt5El2Y7m6M9WNdUbYZiT9DfhUi1T5WvCNXTGsu3Raj7dUylHWfKKfFC1s0%2BLcRRM5P39b0qukX2Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e7ae9142ac96f8d7a44a901f82c70878077774ce0ad8643e92c8807c1825b504",
+      "file_size": 9272,
+      "type": "text/x-c++src",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 36,
+  "voters": [
+    "coder_mohammed",
+    "2026",
+    "rintaro_kazehaya",
+    "hacking1984",
+    "4_u-2_b-k",
+    "tev-tech",
+    "seawolff",
+    "emokprime",
+    "anastourki",
+    "radwan101",
+    "and 26 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

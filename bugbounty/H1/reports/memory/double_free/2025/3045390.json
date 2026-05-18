@@ -1,0 +1,120 @@
+{
+  "id": 3045390,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMDQ1Mzkw",
+  "url": "https://hackerone.com/reports/3045390",
+  "title": "Double free caused by mqtt_doing()",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "none",
+  "readable_substate": "Informative",
+  "created_at": "2025-03-18T23:38:25.449Z",
+  "submitted_at": "2025-03-18T23:38:25.840Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "tdp3kel9g",
+    "url": "/tdp3kel9g",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-06-30T18:54:49.078Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-06-28T12:26:32.369Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "`mqtt_doing()` (`lib/mqtt.c`) causes a double free under certain conditions. The conditions are (1) an `mqtt_send()` is unable to send its entire buffer at one time; and (2) the next call to `mqtt_send()` fails. The bug arises because `mqtt_doing()` `free()`s the pointer `mq->sendleftovers` without nulling it (line 755).\n\n(Source below, from v.8.12.1; the bug appears still present in master branch as of 3/17/2025):\n\n```\n740: static CURLcode mqtt_doing(struct Curl_easy *data, bool *done)\n741: {\n...\n751:   if(mq->nsend) {\n752:     /* send the remainder of an outgoing packet */\n753:     char *ptr = mq->sendleftovers;\n754:     result = mqtt_send(data, mq->sendleftovers, mq->nsend);\n755:     free(ptr);\n756:     if(result)\n757:       return result;\n758:   }\n...\n```\n```\n119: static CURLcode mqtt_send(struct Curl_easy *data,\n120:                           char *buf, size_t len)\n121: {\n122:   CURLcode result = CURLE_OK;\n123:   struct MQTT *mq = data->req.p.mqtt;\n124:   size_t n;\n125:   result = Curl_xfer_send(data, buf, len, FALSE, &n);\n126:   if(result)\n127:     return result;\n\n```\n```\n729: static CURLcode mqtt_done(struct Curl_easy *data,\n730:                           CURLcode status, bool premature)\n731: {\n732:   struct MQTT *mq = data->req.p.mqtt;\n733:   (void)status;\n734:   (void)premature;\n735:   Curl_safefree(mq->sendleftovers);\n736:   Curl_dyn_free(&mq->recvbuf);\n737:   return CURLE_OK;\n738: }\n\n```\n\nYou can verify the bug using the debugger thusly:\n\n1. Build cURL in VS2022.\n2. Set a BP on `mqtt_send()` line 125, on `mqtt_doing()` line 754, and on `mqtt_done()` line 735.\n3. Set curl as the default project\n4. Set curl properties/debugging/command line arguments to `-v mqtt://test.mosquitto.org:1883/test`\n5. Run curl (F5)\n6. When the BP on `mqtt_send()` fires, step into the call to `Curl_xfer_send()`.\n7. Step that function up to the call to `Curl_conn_send()`.\n8. Simulate a partial transfer by using the debugger to doctor `blen` to `2` (its initial value should be `26`).\n9. Step back out into `mqtt_send()` and watch it allocate `mq->sendleftovers`. Note the value of this pointer.\n10. Proceed.\n11. You'll get a BP in `mqtt_doing()`. Step into `mqtt_send()` and simulate an error sending by skipping the call to `Curl_xfer_send()` and setting `result` == `CURLE_SEND_ERROR`.\n12. Step back out into `mqtt_doing()` and watch line 755 `free()` the pointer you noted in step 9  without nulling it.\n13. Proceed.\n14. You'll get a BP in `mqtt_done()` line 735, which will again `free()` the pointer you noted in step 9. If you built cURL in debug mode, the CRT will throw an exception.\n\nThis bug should be reachable in the wild. In Windows builds, the socket is nonblocking (`curlx_nonblock()` gets called during socket setup) so it should be capable of partial writes [1]. The bug should be reachable if conditions are such that the first call to mqtt_send() sends only a portion of the requested buffer, and the next call to mqtt_send() fails, as by the mqtt server falling offline before the second call.\n\n[1] https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-send says \"On nonblocking stream oriented sockets, the number of bytes written can be between 1 and the requested length, depending on buffer availability on both the client and server computers.\"\n\n## Impact\n\nPotentially anything achievable using a double free / use-after-free bug.",
+  "weakness": {
+    "id": 49,
+    "name": "Double Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 8,
+  "voters": [
+    "zy9ard3",
+    "thalaivar304",
+    "2026",
+    "ryel",
+    "bilalhacker302",
+    "dansoappiah",
+    "never34",
+    "jameswhoareyou"
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

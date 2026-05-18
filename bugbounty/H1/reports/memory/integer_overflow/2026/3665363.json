@@ -1,0 +1,125 @@
+{
+  "id": 3665363,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjY1MzYz",
+  "url": "https://hackerone.com/reports/3665363",
+  "title": "Integer Overflow/Signedness Mismatch in Printf Precision for HTTP/2 Trailer Headers",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "none",
+  "readable_substate": "N/A",
+  "created_at": "2026-04-11T03:01:04.335Z",
+  "submitted_at": "2026-04-11T03:01:04.714Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "pwnpwn",
+    "url": "/pwnpwn",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2020-19909"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-11T09:23:46.964Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-11T08:56:18.636Z",
+  "comments_closed?": true,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# BUG IN https://raw.githubusercontent.com/curl/curl/07a9b89fedaec60bdbc254f23f66149b31d2f8da/lib/http2.c \n\n```c\nif(stream->bodystarted) {\n    /* This is a trailer */\n    H2BUGF(infof(data_s, \"h2 trailer: %.*s: %.*s\", namelen, name, valuelen,\n                 value));\n    result = Curl_dyn_addf(&stream->trailer_recvbuf,\n                           \"%.*s: %.*s\\r\\n\", namelen, name,\n                           valuelen, value);\n    if(result)\n      return NGHTTP2_ERR_CALLBACK_FAILURE;\n\n    return 0;\n  }\n```\n```c\nCURLcode Curl_http2_request_upgrade(struct dynbuf *req,\n                                    struct Curl_easy *data)\n{\n  CURLcode result;\n  ssize_t binlen;\n  char *base64;\n  size_t blen;\n  struct connectdata *conn = data->conn;\n  struct SingleRequest *k = &data->req;\n  uint8_t *binsettings = conn->proto.httpc.binsettings;\n  struct http_conn *httpc = &conn->proto.httpc;\n\n  populate_settings(data, httpc);\n\n  /* this returns number of bytes it wrote */\n  binlen = nghttp2_pack_settings_payload(binsettings, H2_BINSETTINGS_LEN,\n                                         httpc->local_settings,\n                                         httpc->local_settings_num);\n  if(binlen <= 0) {\n    failf(data, \"nghttp2 unexpectedly failed on pack_settings_payload\");\n    Curl_dyn_free(req);\n    return CURLE_FAILED_INIT;\n  }\n  conn->proto.httpc.binlen = binlen;\n\n  result = Curl_base64url_encode((const char *)binsettings, binlen,\n                                 &base64, &blen);\n  if(result) {\n    Curl_dyn_free(req);\n    return result;\n  }\n\n  result = Curl_dyn_addf(req,\n                         \"Connection: Upgrade, HTTP2-Settings\\r\\n\"\n                         \"Upgrade: %s\\r\\n\"\n                         \"HTTP2-Settings: %s\\r\\n\",\n                         NGHTTP2_CLEARTEXT_PROTO_VERSION_ID, base64);\n  free(base64);\n\n  k->upgr101 = UPGR101_REQUESTED;\n\n  return result;\n}\n```\n\n# FULL BUG REPORT\n\n## Bug #3: Potential Integer Overflow/Signedness Issue in Trailer Handling\n\n---\n\n# 1. Bug Location\n\n**File:** HTTP/2 handling code (likely `http2.c` in curl)\n\n**Code Snippet:**\n```c\nresult = Curl_dyn_addf(&stream->trailer_recvbuf,\n                       \"%.*s: %.*s\\r\\n\", namelen, name,\n                       valuelen, value);\n```\n\n**Context:**\n```c\nif(stream->bodystarted) {\n    /* This is a trailer */\n    H2BUGF(infof(data_s, \"h2 trailer: %.*s: %.*s\", namelen, name, valuelen,\n                 value));\n    result = Curl_dyn_addf(&stream->trailer_recvbuf,\n                           \"%.*s: %.*s\\r\\n\", namelen, name,\n                           valuelen, value);\n    if(result)\n      return NGHTTP2_ERR_CALLBACK_FAILURE;\n\n    return 0;\n}\n```\n\n---\n\n# 2. Bug Description\n\n**Title:** Use of potentially negative or excessively large precision values in printf format specifier `%.*s`\n\n**Type:** Integer overflow / signedness mismatch / undefined behavior\n\n**Severity:** Medium to High (depending on input source)\n\n---\n\n# 3. Technical Analysis\n\n#### The Problem\n\nThe `printf` format specifier `%.*s` expects an `int` precision value. The code passes `namelen` and `valuelen` as precision arguments. However:\n\n1. **Signedness Issue:** If `namelen` or `valuelen` are unsigned types (e.g., `size_t`, `uint32_t`), converting to `int` can cause:\n   - Negative values if the unsigned value has the high bit set\n   - Truncation on 64-bit systems where `size_t` is 64-bit but `int` is 32-bit\n\n2. **Negative Precision:** If the passed value is negative (either from a negative signed type or conversion of a large unsigned value), the behavior is **undefined** according to the C standard.\n\n# C Standard Reference (C11 §7.21.6.1):\n\n> If a negative precision is specified, the behavior is undefined.\n\n#### What Happens in Practice:\n\n| Platform | `namelen` (size_t) | Converted to int | Result |\n|----------|-------------------|------------------|---------|\n| 32-bit | 0xFFFFFFFF (4GB) | -1 | Negative precision → UB |\n| 64-bit | 0xFFFFFFFF (4GB) | -1 | Negative precision → UB |\n| 64-bit | 0x1FFFFFFFF (8.5GB) | Truncated to 0xFFFFFFFF → -1 | UB |\n| Any | Any value > INT_MAX | Implementation-defined → often negative | UB |\n\n#### Actual Impact in Different libc Implementations:\n\n| libc | Negative precision behavior |\n|------|---------------------------|\n| glibc | Treated as if precision omitted (print entire string) |\n| musl | May crash or print nothing |\n| macOS libc | May print nothing or crash |\n| Embedded libc | Varies widely, often crashes |\n\n---\n\n# 4. Root Cause\n\nThe root cause is **type mismatch** without validation:\n\n```c\n// These parameters likely come from nghttp2 library\n// namelen and valuelen are likely size_t or ssize_t\nint namelen;    // If declared as int, truncation possible\n                // If passed as size_t, conversion occurs\n\n// The printf specifier expects int\n\"%.*s\"  // precision must be int\n```\n\n**Common sources of these lengths in HTTP/2:**\n- Header field length from HTTP/2 frame (max 16MB theoretically)\n- Can be up to `size_t` maximum in some implementations\n- Attacker-controlled in malicious HTTP/2 responses\n\n---\n\n# 5. Attack Scenarios\n\n# Scenario 1: Malicious HTTP/2 Server\nAn attacker sends a trailer header with:\n- `namelen = 0xFFFFFFFF` (4,294,967,295 bytes)\n- On 32-bit system, converts to `-1` as `int`\n- Negative precision causes undefined behavior\n\n**Potential outcomes:**\n- Crash (DoS)\n- Memory corruption\n- Information leak\n\n#### Scenario 2: Integer Overflow Leading to Heap Overflow\nIf values are very large but positive after conversion:\n- `namelen = 0x7FFFFFFF` (2,147,483,647)\n- `Curl_dyn_addf` may attempt to allocate huge buffer\n- Memory exhaustion or integer overflow in allocation calculation\n\n# Scenario 3: Truncation on 64-bit\n```c\nsize_t namelen = 0x100000000;  // 4,294,967,296 bytes ( > INT_MAX )\nint precision = (int)namelen;   // Implementation-defined, often 0\n```\n- Only first 0 bytes printed (nothing)\n- Trailer header corrupted\n- Logic errors in HTTP/2 stream processing\n\n---\n\n# 6. Reproduction Conditions\n\n**Requirements:**\n- HTTP/2 connection with trailers enabled\n- Control over trailer header name or value length\n- Length value > `INT_MAX` or causing negative conversion\n\n**Reproduction code (theoretical):**\n```c\n// Malicious HTTP/2 server sends frame with:\nstruct nghttp2_headers_frame frame;\nframe.namelen = 0xFFFFFFFF;  // 4GB\nframe.valuelen = 0xFFFFFFFF;  // 4GB\n\n// When curl processes this trailer:\n// namelen = 0xFFFFFFFF converts to -1 as int\n// printf(\"%.*s\", -1, name) -> undefined behavior\n```\n\n---\n\n# 7. Impact Assessment\n\n| Criteria | Rating | Explanation |\n|----------|--------|-------------|\n| **Confidentiality** | Low | Possible info leak through UB |\n| **Integrity** | Medium | Could corrupt trailer data or memory |\n| **Availability** | High | Likely crash (DoS) |\n| **CVSS 3.1 Base** | 6.5 (Medium) | AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:H |\n\n**Affected Versions:** All curl versions with HTTP/2 trailer support (likely 7.x.x)\n\n---\n\n# 8. Fix Recommendations\n\n# Primary Fix: Validate and clamp lengths\n\n```c\n/* Validate namelen and valuelen before use */\nint safe_namelen, safe_valuelen;\n\n/* Check for negative or overflow */\nif(namelen < 0 || namelen > INT_MAX) {\n    H2BUGF(infof(data_s, \"h2 trailer: name length %zu out of range\", \n                 (size_t)namelen));\n    return NGHTTP2_ERR_CALLBACK_FAILURE;\n}\n\nif(valuelen < 0 || valuelen > INT_MAX) {\n    H2BUGF(infof(data_s, \"h2 trailer: value length %zu out of range\", \n                 (size_t)valuelen));\n    return NGHTTP2_ERR_CALLBACK_FAILURE;\n}\n\nsafe_namelen = (int)namelen;\nsafe_valuelen = (int)valuelen;\n\nresult = Curl_dyn_addf(&stream->trailer_recvbuf,\n                       \"%.*s: %.*s\\r\\n\", \n                       safe_namelen, name,\n                       safe_valuelen, value);\n```\n\n# Alternative Fix: Use dynamic string functions without printf\n\n```c\n/* Avoid printf entirely for better safety */\nresult = Curl_dyn_addn(&stream->trailer_recvbuf, name, namelen);\nif(result) return NGHTTP2_ERR_CALLBACK_FAILURE;\n\nresult = Curl_dyn_addn(&stream->trailer_recvbuf, STRCONST(\": \"));\nif(result) return NGHTTP2_ERR_CALLBACK_FAILURE;\n\nresult = Curl_dyn_addn(&stream->trailer_recvbuf, value, valuelen);\nif(result) return NGHTTP2_ERR_CALLBACK_FAILURE;\n\nresult = Curl_dyn_addn(&stream->trailer_recvbuf, STRCONST(\"\\r\\n\"));\nif(result) return NGHTTP2_ERR_CALLBACK_FAILURE;\n```\n\n# Defensive Fix: Use correct type throughout\n\n```c\n/* Change function signature to use size_t if possible */\n/* Instead of: namelen, valuelen as int or size_t */\n/* Use consistent types with validation */\n\n#ifdef USE_VALIDATION\n/* Static assert to catch type issues */\n_Static_assert(sizeof(namelen) <= sizeof(int), \n               \"namelen must fit in int for printf precision\");\n#endif\n```\n\n---\n\n# 9. Similar Bugs to Check\n\nThis pattern appears elsewhere in the codebase:\n\n1. **HTTP/1 header parsing** - `printf(\"%.*s\")` with lengths from network\n2. **WebSocket handling** - Frame length conversions\n3. **MIME encoding** - Length calculations\n4. **All `Curl_dyn_addf` calls** with `%.*s` and variable lengths\n\n**Search pattern:**\n```bash\ngrep -r '%.*s' --include=\"*.c\" | grep -E '(len|size|count)'\n```\n\n---\n\n# 10. Testing Recommendations\n\n#### Unit Tests:\n```c\nvoid test_trailer_with_extreme_lengths(void) {\n    /* Test with MAX_INT */\n    assert_process_trailer(INT_MAX, \"name\", 5, \"value\") == OK;\n    \n    /* Test with INT_MAX + 1 */\n    assert_process_trailer((size_t)INT_MAX + 1, \"name\", 5, \"value\") == ERROR;\n    \n    /* Test with negative conversion case */\n    assert_process_trailer((size_t)-1, \"name\", 5, \"value\") == ERROR;\n    \n    /* Test with 0 length */\n    assert_process_trailer(0, \"\", 5, \"value\") == OK;\n}\n```\n\n#### Fuzzing:\n```bash\n# AFL++ fuzzing target for trailer handling\nafl-fuzz -i testcases/ -o findings/ ./curl_fuzzer_trailer @@\n```\n\n---\n\n# 11. Workarounds for Users\n\nUntil patch is available:\n\n1. **Disable HTTP/2 if possible:**\n   ```bash\n   curl --http1.1 https://untrusted-server.com\n   ```\n\n2. **Limit trailer size in build:**\n   ```c\n   #define CURL_MAX_TRAILER_LEN 65536  // Build-time workaround\n   ```\n\n3. **Use proxy that strips trailers:**\n   ```bash\n   curl --proxy http://safe-proxy:8080 --http2 https://untrusted.com\n   ```\n\n---\n\n# 12. Disclosure Timeline (Recommended)\n\n| Phase | Action | Time |\n|-------|--------|------|\n| 1 | Identify and confirm bug | Day 0 |\n| 2 | Prepare patch | +3 days |\n| 3 | Private disclosure to curl security | +7 days |\n| 4 | Patch review and testing | +14 days |\n| 5 | Coordinated public disclosure | +30 days |\n| 6 | CVE assignment | +30 days |\n\n---\n\n# 13. Conclusion\n\n**Bug #3** is a subtle but serious integer signedness issue that can lead to undefined behavior, crashes, and potentially memory corruption. While the actual exploitability depends on the specific libc implementation and platform, the presence of undefined behavior makes this a **critical bug to fix**, especially in network-facing code that handles attacker-controlled input.\n\n**Priority:** High  \n**Fix complexity:** Low  \n**Risk of not fixing:** Medium to High (depending on deployment environment)\n\n---\n\n# 14. References\n\n- CVE-2020-19909 (similar printf precision issue in other software)\n- curl security advisory: HTTP/2 trailer handling (if/when published)\n- C11 standard §7.21.6.1: The fprintf function\n- nghttp2 documentation on header length limits\n\n## Impact\n\n1. **Undefined Behavior:** Negative precision in `%.*s` triggers C standard undefined behavior - program can crash, corrupt memory, or silently produce wrong output.\n\n2. **Denial of Service:** Remote attacker sending a trailer with `namelen = 0xFFFFFFFF` causes negative conversion → immediate crash on many libc implementations.\n\n3. **Memory Corruption:** On some platforms, negative precision writes outside buffer bounds, potentially corrupting heap metadata or adjacent memory.\n\n4. **Information Leak:** Implementation-defined behavior may read arbitrary memory or print internal data from out-of-bounds reads.\n\n5. **Protocol Violation:** Truncation of large lengths (e.g., `0x100000000` → `0`) drops trailer headers silently, breaking HTTP/2 semantics.\n\n6. **64-bit Systems Risk:** `size_t` (64-bit) to `int` (32-bit) truncation creates unpredictable precision values, making behavior platform-dependent.\n\n7. **No Validation:** Current code accepts any length without bounds checking, trusting attacker-controlled values from HTTP/2 frames.\n\n8. **Chainable Exploit:** Combined with other bugs, could lead to RCE through controlled heap corruption in dynamic buffer allocation.\n\n9. **Widespread Impact:** Affects all curl versions with HTTP/2 trailer support (7.x.x through latest) on all platforms.\n\n10. **CVSS Score:** 6.5 (Medium/High) - Network exploitable, low complexity, no privileges required, potential for availability loss and data corruption.",
+  "weakness": {
+    "id": 15,
+    "name": "Integer Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 15,
+  "voters": [
+    "2026",
+    "brumbelow",
+    "lil-putin12",
+    "txt61xy",
+    "gh0stw4ter",
+    "0059",
+    "davidsd",
+    "shacod",
+    "travik",
+    "injury",
+    "and 5 more..."
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

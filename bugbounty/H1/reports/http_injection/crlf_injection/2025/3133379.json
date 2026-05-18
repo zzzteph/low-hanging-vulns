@@ -1,0 +1,140 @@
+{
+  "id": 3133379,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMTMzMzc5",
+  "url": "https://hackerone.com/reports/3133379",
+  "title": "CRLF Injection in `--proxy-header` allows extra HTTP headers (CWE-93)",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "none",
+  "readable_substate": "N/A",
+  "created_at": "2025-05-07T22:24:21.872Z",
+  "submitted_at": "2025-05-07T22:24:22.322Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "oblivionsage",
+    "url": "/oblivionsage",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ip4cyu4gxdh9vdw49fk160hphdhf/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-05-08T08:21:52.339Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-05-08T08:20:33.743Z",
+  "team_member_agreed_on_going_public_at": "2025-05-08T08:21:52.000Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hello Team,\n\nThere is a bug in `curl` where a user can inject **new HTTP headers** into a proxy request by using special characters in the `--proxy-header` option.\n\nThis is done by adding `\\r\\n` (carriage return + line feed) inside the header value. This breaks the HTTP format and lets the user create more headers from a single line\n\n\n\n#  What’s the Problem?\n\nThe problem happens because `curl` **does not check** for `\\r` or `\\n` in the input. So if a user puts:\n\n```bash\n--proxy-header $'X-Test: hello\\r\\nX-Evil: owned'\n```\n\nThe proxy sees **two headers**:\n\n```\nX-Test: hello\nX-Evil: owned\n```\n\nThis is **not supposed to happen**\n\n\n\n#  How the Code Works (with file paths and lines)\n\nHere’s how `curl` processes the `--proxy-header` input:\n\n\n\n## Main Function\n\n`src/tool_main.c` line 238\n\nEntry point of the program:\n\n```c\nint main(int argc, char *argv[])\n```\n\n## Calling `operate()`\n\n`src/tool_main.c` line 284\n\n```\nresult = operate(&global, argc, argv);\n```\n##CLI Parsing\n\n`src/tool_operate.c`, line 3186\n\n```\nparse_args(global, argc, argv);\n```\n\n##Handling `--proxy-header`\n\n`src/tool_getparam.c` line 2766\n\n```c\ncase C_PROXY_HEADER:\n    err = parse_header(global, config, cmd, nextarg);\n```\n\n\n##Passing the value\n\n`src/tool_getparam.c`, line 1281\n\n```\nerr = add2list(&config->proxyheaders, nextarg);\n```\n\n##No Filtering Happens\n\n\n`src/tool_paramhlp.c`, line 614–615\n\n```\nParameterError add2list(...) {\n    struct curl_slist *newlist = curl_slist_append(*list, ptr);\n```\n\nAt this point, the raw input (even if it includes \\r\\n) is passed as-is to `curl_slist_append()`, and then into the final HTTP request\n\nThere is no check to block newline injection\n\n\n\n#  Proof of Concept\n\n# 1. Start a fake proxy listener:\n\n```bash\nnc -lvp 8080\n```\n\n# 2. Run curl with a payload header:\n\n```bash\ncurl --proxy http://127.0.0.1:8080 \\\n     --proxy-header $'X-Evil: val\\r\\nInjected-Header: pwned' \\\n     http://example.com\n```\n\nAttachment:\n\n{F4325956}\n\n# 3. Netcat output:\n\n```\nListening on 0.0.0.0 8080\nConnection received on localhost 54198\nGET http://example.com/ HTTP/1.1\nHost: example.com\nUser-Agent: curl/8.13.0\nAccept: */*\nProxy-Connection: Keep-Alive\nX-Evil: val\nInjected-Header: pwned\n\n```\n\nIt proves that one CLI input caused **two** headers\n\nAttachment:\n\n{F4325954}\n\n\n\n\n\n\n\n##  Suggested Fix\n\nIn this file:\n\n`src/tool_paramhlp.c`, inside `add2list()`, around line **615**:\n\nAdd a simple check:\n\n```c\nif(strchr(ptr, '\\r') || strchr(ptr, '\\n'))\n    return PARAM_INVALID_HEADER;\n```\n\nThis will block all `\\r` or `\\n` inside header input.\n\n## Impact\n\nThis bug allows the user to inject raw HTTP headers into proxy requests.\n\nBy using a single command-line input, a user can add multiple headers.This breaks the normal HTTP format and can be used to:\n\nBypass security filters (WAF, proxy rules)\n\nInject spoofed headers like X-Forwarded-For, Authorization\n\nPoison logs on the proxy\n\n Bug is easy to test\n\nThe issue is real and  affects live network traffic\n\n Similar bugs in other tools got CVEs\n\n\nTested on `curl 8.13.0` (May 2025), on Kali Linux\n\n\nThanks for reviewing. Let me know if you need help verifying the fix",
+  "weakness": {
+    "id": 69,
+    "name": "CRLF Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4325954,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/t0dcifpkxulkg26nt67418egnda6?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWCREIVXB%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163636Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJGMEQCIEdvPePbfaWbg9GApII7kroalivZUoz%2B3%2FECWiAaLIvzAiBGrxNNo6kBYT%2Fdp3teXzRGe9e%2BJzOifStmsxgRhD3M%2BiqxBQg%2FEAMaDDAxMzYxOTI3NDg0OSIMU9nmDBKw%2FxuuXov%2BKo4FMHblGWNTAIckfC7GcX33ydLGAr%2B7FiZa1kOwx3hTqWCpIh4V2mceTRYBw1nJICgjAYiWklP8JyQXDAxTKMF3oYbSzLbk%2FBVik9u%2B9E%2FF5JVHQbN%2B3ExTUj3b5eOB5xOuZTEQQFPMbR5psPWpEjIKlkosLhTFw4DcBAXYQ3EpWo4gNxXNIWiOdmRqplgfmii5nuVYdQNgWCbLncooOjB6BpD%2BUOGt0pyS6lq38IvPXFGlF0Xucq3ATSo89jB97X1h3QrYuaoBODSC5JpHHAZUQu2xEhtj9%2Bfk2ZC%2BvfasAsehIX767HFstB4vD%2FltkHF7qbKqbY0x1ZqBe2g13N2sHptoOqWJhnrfdWUH1FAqIZUCpIXh%2B%2BrkF33NaoHchwbP%2Fsbc7muzklk3khS5qGTfBHNNnAO%2FSzBlz60NuLmGGZ6BeAYWv%2FhrUaRSsYmc6vI%2BvRAQp8svg4gcjxD8XOarZvqJJUi8UqWEV7cHQd40fFl7RRVtJvr7EFZoHOGZOpRJnnP2c2zyLQykGxgepFVO0IOBTdUVaiDhMsKFMY4DY5uxG1GEEgopzOI2Jg8koMfh2lHgo2Ty%2FojzO%2FM2ahx3CAGfAlfDwODfPW7%2B9VKCkYOnGKTTSPLSpCulN625JfCbU02YWZ77IJTgsF1ajB8BzPnPYm%2BSQ%2B8CKWAHK997UXCs7YyXCYjfBApnvlU0nBIXBnSL1j8ayrkvcmyR3VI7i9qzm5Vx%2F44T%2BYrrsSrPTyrKP3SZ4FslxGTlgfbtLH%2Ffaw71CvuYJ%2BEshY0izII3NLZ9nRD5u8wvN%2BZddgTcIU9yTKvNTeCvnWMNii%2Bsoz%2BqI5H8P2kgS5Xb2ETPaLJAtMMtE%2F9%2BcvclpvC94XxbMLGA2M8GOrIB9rzxSafD28yFyQBvjnugEFFPZMADXhtgZq7SbsJ%2F5%2FZk6kbC0342HwEmETFadpjR%2Biy%2FKsIRTGI1kyBM0w91l1b%2FjtUU5wQXQDdlV%2F4AxwIig8%2BQBFF5isZT1FwPiOZeeUnwgp%2FOsDL1c8WOVl7Y3OLefvqgJ8wDwWwA3ZaSWtH5r628MtX5bgrYV4heoaV2jmadHtyyJuj3k0yYnXy6WMYqVrFrkKlqlz1L0uxfrEz89w%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=63f236961bc46fe814d186416d0b0fb3b0637d17322ab38ce222756090bca725",
+      "file_size": 159083,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 4325956,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/5wd38y7282xi4cv3ra9nsc3m426q?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWCREIVXB%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163636Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJGMEQCIEdvPePbfaWbg9GApII7kroalivZUoz%2B3%2FECWiAaLIvzAiBGrxNNo6kBYT%2Fdp3teXzRGe9e%2BJzOifStmsxgRhD3M%2BiqxBQg%2FEAMaDDAxMzYxOTI3NDg0OSIMU9nmDBKw%2FxuuXov%2BKo4FMHblGWNTAIckfC7GcX33ydLGAr%2B7FiZa1kOwx3hTqWCpIh4V2mceTRYBw1nJICgjAYiWklP8JyQXDAxTKMF3oYbSzLbk%2FBVik9u%2B9E%2FF5JVHQbN%2B3ExTUj3b5eOB5xOuZTEQQFPMbR5psPWpEjIKlkosLhTFw4DcBAXYQ3EpWo4gNxXNIWiOdmRqplgfmii5nuVYdQNgWCbLncooOjB6BpD%2BUOGt0pyS6lq38IvPXFGlF0Xucq3ATSo89jB97X1h3QrYuaoBODSC5JpHHAZUQu2xEhtj9%2Bfk2ZC%2BvfasAsehIX767HFstB4vD%2FltkHF7qbKqbY0x1ZqBe2g13N2sHptoOqWJhnrfdWUH1FAqIZUCpIXh%2B%2BrkF33NaoHchwbP%2Fsbc7muzklk3khS5qGTfBHNNnAO%2FSzBlz60NuLmGGZ6BeAYWv%2FhrUaRSsYmc6vI%2BvRAQp8svg4gcjxD8XOarZvqJJUi8UqWEV7cHQd40fFl7RRVtJvr7EFZoHOGZOpRJnnP2c2zyLQykGxgepFVO0IOBTdUVaiDhMsKFMY4DY5uxG1GEEgopzOI2Jg8koMfh2lHgo2Ty%2FojzO%2FM2ahx3CAGfAlfDwODfPW7%2B9VKCkYOnGKTTSPLSpCulN625JfCbU02YWZ77IJTgsF1ajB8BzPnPYm%2BSQ%2B8CKWAHK997UXCs7YyXCYjfBApnvlU0nBIXBnSL1j8ayrkvcmyR3VI7i9qzm5Vx%2F44T%2BYrrsSrPTyrKP3SZ4FslxGTlgfbtLH%2Ffaw71CvuYJ%2BEshY0izII3NLZ9nRD5u8wvN%2BZddgTcIU9yTKvNTeCvnWMNii%2Bsoz%2BqI5H8P2kgS5Xb2ETPaLJAtMMtE%2F9%2BcvclpvC94XxbMLGA2M8GOrIB9rzxSafD28yFyQBvjnugEFFPZMADXhtgZq7SbsJ%2F5%2FZk6kbC0342HwEmETFadpjR%2Biy%2FKsIRTGI1kyBM0w91l1b%2FjtUU5wQXQDdlV%2F4AxwIig8%2BQBFF5isZT1FwPiOZeeUnwgp%2FOsDL1c8WOVl7Y3OLefvqgJ8wDwWwA3ZaSWtH5r628MtX5bgrYV4heoaV2jmadHtyyJuj3k0yYnXy6WMYqVrFrkKlqlz1L0uxfrEz89w%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=417c7d379b8b29e4fcf54e1c8cca8567b174648097ba593546094609f2958ffb",
+      "file_size": 58614,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 42,
+  "voters": [
+    "k0ns0l",
+    "t4r1k-b41",
+    "hashem_mo",
+    "mohaned0101",
+    "2026",
+    "oblivionsage",
+    "demonia",
+    "bigshaq",
+    "ker9m",
+    "batuhanesrefkoc",
+    "and 32 more..."
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

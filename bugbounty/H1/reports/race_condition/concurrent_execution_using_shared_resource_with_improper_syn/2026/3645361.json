@@ -1,0 +1,123 @@
+{
+  "id": 3645361,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjQ1MzYx",
+  "url": "https://hackerone.com/reports/3645361",
+  "title": "Data race in Curl_dnscache_add_negative() corrupts shared DNS cache — heap corruption and double-free when using CURLOPT_SHARE with CURL_LOCK_DATA_DNS",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-04-02T17:39:32.708Z",
+  "submitted_at": "2026-04-02T17:39:34.260Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "intrax",
+    "url": "/intrax",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fn3i6zynanhm4yz6dhwuwl9yv6e2/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-04T10:48:16.216Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-03T14:53:38.110Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Data race in Curl_dnscache_add_negative() corrupts shared DNS cache — heap corruption and double-free when using CURLOPT_SHARE with CURL_LOCK_DATA_DNS\n\n**Severity:** Medium\n**CVSS 3.1:** 6.5 — AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:H\n\n---\n\n## Summary\n\n`Curl_dnscache_add_negative()` in `lib/dnscache.c` modifies the shared DNS cache hash table and manipulates a `refcount` field without acquiring the `dnscache_lock()`. Every other public function in `dnscache.c` that modifies this hash table does acquire the lock. When two threads using `CURLOPT_SHARE` with `CURL_LOCK_DATA_DNS` fail DNS resolution simultaneously, the unprotected `Curl_hash_add()` and `refcount--` operations produce a data race that corrupts the heap. The result is a crash (denial of service) or, in the double-free case, a potential path to code execution.\n\nThe bug was introduced in commit `96d5b5c` (2026-03-06, \"dnscache: own source file, improvements\") and is present on current `master` (`e65ba1b`).\n\n---\n\n## Vulnerability Details\n\n**Vulnerable function** — `lib/dnscache.c:593-616`:\n\n```c\nCURLcode Curl_dnscache_add_negative(struct Curl_easy *data,\n                                    uint8_t dns_queries,\n                                    const char *host,\n                                    uint16_t port)\n{\n  struct Curl_dnscache *dnscache = dnscache_get(data);\n  // ...\n\n  // BUG: no dnscache_lock() here\n  dns = dnscache_add_addr(data, dnscache, dns_queries, NULL,\n                          host, strlen(host), port, FALSE);\n  //     ^^^^^^^^^^^^^^^^ calls Curl_hash_add() on shared hash table — no lock\n\n  if(dns) {\n    dns->refcount--;   // BUG: unsynchronized refcount decrement — no lock\n    // ...\n  }\n}\n```\n\n`dnscache_add_addr()` (`lib/dnscache.c:533-568`) calls `Curl_hash_add(&dnscache->entries, ...)` at line 558, which inserts into the hash table's internal linked lists. Without the lock, two concurrent calls corrupt these linked lists.\n\n**Compare with the sister function** — `lib/dnscache.c:570-591`:\n\n```c\nCURLcode Curl_dnscache_add(struct Curl_easy *data,\n                           struct Curl_dns_entry *entry)\n{\n  // ...\n  dnscache_lock(data, dnscache);                    // <— LOCKS\n  if(!Curl_hash_add(&dnscache->entries, id, idlen + 1, (void *)entry)) {\n    dnscache_unlock(data, dnscache);\n    return CURLE_OUT_OF_MEMORY;\n  }\n  entry->refcount++;\n  dnscache_unlock(data, dnscache);                  // <— UNLOCKS\n  return CURLE_OK;\n}\n```\n\n`Curl_dnscache_add()` protects the identical operation with `dnscache_lock/unlock`. `Curl_dnscache_add_negative()` does not.\n\n**Complete list of public functions that modify the hash table and their locking status:**\n\n| Function | Line of `dnscache_lock()` | Locked? |\n|---|---|---|\n| `Curl_dnscache_prune()` | 181 | Yes |\n| `Curl_dnscache_clear()` | 205 | Yes |\n| `Curl_dnscache_get()` | 304 | Yes |\n| `Curl_dnscache_add()` | 583 | Yes |\n| `Curl_dns_entry_link()` | 625 | Yes |\n| `Curl_dns_entry_unlink()` | 646 | Yes |\n| CURLOPT_RESOLVE (internal) | 716, 821 | Yes |\n| **`Curl_dnscache_add_negative()`** | — | **No** |\n\nThe third caller of `dnscache_add_addr()` (CURLOPT_RESOLVE processing at line 845) also wraps the call with `dnscache_lock()` at line 821 and `dnscache_unlock()` at line 853. `Curl_dnscache_add_negative()` is the only code path that reaches `dnscache_add_addr()` without holding the lock.\n\n**Neither caller of `Curl_dnscache_add_negative()` holds the lock either:**\n\n- `lib/hostip.c:686` — in `hostip_resolv()`, no lock. Three lines below, `Curl_dnscache_add()` is called (line 694), which handles its own locking internally.\n- `lib/hostip.c:992` — in `Curl_resolv_take_result()`, no lock. Same pattern: `Curl_dnscache_add()` is called at line 986 with internal locking.\n\n---\n\n## Steps to Reproduce\n\nThis is a source code audit finding. The bug is verifiable by reading the code — no runtime PoC is needed because the missing lock is a factual asymmetry between `Curl_dnscache_add()` and `Curl_dnscache_add_negative()`.\n\n**To trigger at runtime:**\n\n1. Create a `CURLSHARE` handle with `CURL_LOCK_DATA_DNS` and lock callbacks\n2. Create two `CURLM` multi handles in separate threads, both sharing the DNS cache\n3. On each thread, add an easy handle that resolves a non-existent hostname (e.g., `nonexistent1.invalid`, `nonexistent2.invalid`)\n4. Call `curl_multi_perform()` on both threads simultaneously\n5. Both DNS resolutions fail, both threads call `Curl_dnscache_add_negative()`, both threads enter `Curl_hash_add()` and `refcount--` without locking — data race\n\nA network attacker triggers this by blocking or spoofing NXDOMAIN responses for multiple hostnames while the victim application resolves them concurrently.\n\n---\n\n## Impact\n\n**1. Heap corruption.** `Curl_hash_add()` manipulates bucket linked lists (`Curl_llist`). Two threads inserting simultaneously corrupt the list pointers (`next`, `prev`, `head`). This leads to a crash on the next hash table operation. Any application using `CURLOPT_SHARE` with `CURL_LOCK_DATA_DNS` where two or more transfers fail DNS resolution at the same time hits this code path.\n\n**2. Double-free.** The `dns->refcount--` at line 610 is unsynchronized. The classic race:\n\n```\nThread A reads  refcount = 1\nThread B reads  refcount = 1\nThread A writes refcount = 0 → triggers free\nThread B writes refcount = 0 → triggers free on already-freed memory\n```\n\nA double-free on heap is a well-known exploitation primitive for arbitrary code execution.\n\n**3. Use-after-free.** If both threads add a negative entry for the same `hostname:port`, `Curl_hash_add()` replaces the existing entry (freeing it). The other thread still holds a pointer to the freed entry and proceeds to decrement its `refcount`, writing to freed memory.\n\n**Attack scenario:** A network attacker (e.g., on shared WiFi, ISP-level, or corporate network) causes DNS failures for a multi-threaded application that uses libcurl with shared DNS caching. This is not an exotic configuration — `CURLOPT_SHARE` with `CURL_LOCK_DATA_DNS` is the documented way to share DNS cache across threads, used by crawlers, proxies, and HTTP client pools.\n\n---\n\n## Recommended Fix\n\nAdd `dnscache_lock/unlock` around the hash table modification in `Curl_dnscache_add_negative()`, matching the pattern used by every other function:\n\n```c\nCURLcode Curl_dnscache_add_negative(struct Curl_easy *data,\n                                    uint8_t dns_queries,\n                                    const char *host,\n                                    uint16_t port)\n{\n  struct Curl_dnscache *dnscache = dnscache_get(data);\n  struct Curl_dns_entry *dns;\n  DEBUGASSERT(dnscache);\n  if(!dnscache)\n    return CURLE_FAILED_INIT;\n\n  dnscache_lock(data, dnscache);                    // <— ADD\n  dns = dnscache_add_addr(data, dnscache, dns_queries, NULL,\n                          host, strlen(host), port, FALSE);\n  if(dns)\n    dns->refcount--;\n  dnscache_unlock(data, dnscache);                  // <— ADD\n\n  if(dns) {\n    CURL_TRC_DNS(data, \"cache negative name resolve for %s:%d type=%s\",\n                 host, port, Curl_resolv_query_str(dns_queries));\n    return CURLE_OK;\n  }\n  return CURLE_OUT_OF_MEMORY;\n}\n```\n\n---\n\n## Timeline\n\n- **2026-03-06** — `Curl_dnscache_add_negative()` introduced without lock (commit `96d5b5c`)\n- **2026-03-31** — Function signature changed (commit `2b3dfb4`), lock still missing\n- **2026-04-02** — Bug identified via source code review (this report)\n\n## Impact\n\n## Summary:\n Heap corruption and denial of service in multi-threaded applications using libcurl's shared DNS cache. When two threads fail DNS resolution simultaneously while sharing a DNS cache via CURLOPT_SHARE with\n  CURL_LOCK_DATA_DNS, the function Curl_dnscache_add_negative() modifies the shared hash table and decrements a refcount without holding the required lock. This data race corrupts the hash table's internal linked\n  list pointers, crashing the application. The unsynchronized refcount-- creates a double-free condition: two threads read refcount=1, both write refcount=0, and the entry is freed twice — a classic heap\n  exploitation primitive. A network attacker triggers this by causing concurrent DNS failures (blocking responses or injecting NXDOMAIN) against any application that uses libcurl with shared DNS caching across\n  threads.",
+  "weakness": {
+    "id": 140,
+    "name": "Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 22,
+  "voters": [
+    "ariverapoblet",
+    "2026",
+    "intrax",
+    "3d7omb",
+    "claudiogoose",
+    "marianacodebase",
+    "darlaterry",
+    "pwnm4n",
+    "pieceofcake755",
+    "maswara",
+    "and 12 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,148 @@
+{
+  "id": 3591956,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTkxOTU2",
+  "url": "https://hackerone.com/reports/3591956",
+  "title": "Use-After-Free in SMB connection reuse (req->path dangling pointer after needle destruction)",
+  "state": "Closed",
+  "substate": "duplicate",
+  "severity_rating": "high",
+  "readable_substate": "Duplicate",
+  "created_at": "2026-03-08T11:47:19.735Z",
+  "submitted_at": "2026-03-08T11:47:20.112Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "nadsec42",
+    "url": "/nadsec42",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-29T07:16:24.126Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-29T06:11:34.726Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nA heap-use-after-free occurs in `smb_send_open()` at `lib/smb.c` when curl processes two SMB URLs targeting the same host. The function `smb_parse_url_path()` sets `req->path` as a non-owning pointer into `smbc->share` (connection-owned memory). During connection reuse, the needle connection is freed via `Curl_conn_free()` → `smb_conn_dtor()`, which frees `smbc->share`, but `req->path` (on the easy handle) still references the freed buffer. The subsequent `strlen(req->path)` in `smb_send_open()` reads freed heap memory.\n\n## Affected Version\n\ncurl 8.19.0-DEV (master branch, built March 8 2026)\nPlatform: Ubuntu 22.04 on x86_64 (WSL2)\nBuilt with: gcc, OpenSSL, --enable-smb, -fsanitize=address\n\n## Steps To Reproduce\n\n1. Clone and build curl from master with ASAN and SMB enabled:\n\n```\ngit clone https://github.com/curl/curl.git && cd curl\nautoreconf -fi\n./configure --with-openssl --enable-smb --without-libpsl\nmake CFLAGS=\"-fsanitize=address -g -O0 -fno-omit-frame-pointer\" LDFLAGS=\"-fsanitize=address\" -j$(nproc)\n```\n\n2. Start the attached fake SMB server (fake_smb_server.py) in one terminal:\n\n```\npython3 fake_smb_server.py 5445\n```\n\n3. In another terminal, run curl with two SMB URLs to the same host:\n\n```\nASAN_OPTIONS=detect_leaks=0 LD_LIBRARY_PATH=./lib/.libs \\\n./src/.libs/curl -u guest:guest \\\n  \"smb://127.0.0.1:5445/share1/file1\" -o /dev/null \\\n  \"smb://127.0.0.1:5445/share2/file2\" -o /dev/null\n```\n\n4. ASAN reports heap-use-after-free in smb_send_open.\n\n## Root Cause\n\nIn `smb_parse_url_path()` (lib/smb.c ~line 398-435):\n- `smbc->share = strdup(path)` allocates \"share2/file2\" (13 bytes)\n- The `/` is replaced with `\\0`, splitting it into \"share2\\0file2\\0\"\n- `req->path = slash` points 7 bytes into `smbc->share`\n\nWhen the second URL reuses the pooled connection from URL #1:\n- `url_find_or_create_conn()` finds a match and frees the needle connection\n- `Curl_conn_free()` → `smb_conn_dtor()` → `free(smbc->share)`\n- `req->path` now dangles into freed heap\n\nThen `smb_request_state()` → `smb_send_open()`:\n```c\nconst size_t byte_count = strlen(req->path) + 1;  // UAF read\n```\n\nASAN confirms: \"0x502000002a57 is located 7 bytes inside of 13-byte region, freed by smb_conn_dtor, previously allocated by smb_parse_url_path via strdup\"\n\n## ASAN Output\n\n```\n==519095==ERROR: AddressSanitizer: heap-use-after-free on address 0x502000002a57 at pc 0x7967a543daa7 bp 0x7fffdbfd8b00 sp 0x7fffdbfd82a8\nREAD of size 1 at 0x502000002a57 thread T0\n    #0 0x7967a543daa6 in __interceptor_strlen\n    #1 0x7967a51a4326 in smb_send_open (libcurl.so.4)\n    #2 0x7967a51a75fe in smb_request_state (libcurl.so.4)\n    #3 0x7967a5158fbf in protocol_doing (libcurl.so.4)\n    #4 0x7967a515d395 in multi_runsingle (libcurl.so.4)\n    #5 0x7967a515e569 in multi_perform (libcurl.so.4)\n    #6 0x7967a515ebe0 in curl_multi_perform (libcurl.so.4)\n    #7 0x7967a50bc841 in easy_transfer (libcurl.so.4)\n    #8 0x7967a50bcf0a in easy_perform (libcurl.so.4)\n    #9 0x7967a50bcffe in curl_easy_perform (libcurl.so.4)\n    #10 0x5d0efa2f6ea2 in serial_transfers (curl)\n    #11 0x5d0efa2f80b2 in run_all_transfers (curl)\n    #12 0x5d0efa2f8cd6 in operate (curl)\n    #13 0x5d0efa2ea7b4 in main (curl)\n\nfreed by thread T0 here:\n    #0 __interceptor_free\n    #1 smb_conn_dtor (libcurl.so.4)\n    #2 hash_elem_clear_ptr (libcurl.so.4)\n    #3 hash_elem_destroy (libcurl.so.4)\n    #4 Curl_hash_clean (libcurl.so.4)\n    #5 Curl_hash_destroy (libcurl.so.4)\n    #6 Curl_conn_free (libcurl.so.4)\n    #7 url_find_or_create_conn (libcurl.so.4)\n\npreviously allocated by thread T0 here:\n    #0 __interceptor_strdup\n    #1 smb_parse_url_path (libcurl.so.4)\n    #2 smb_setup_connection (libcurl.so.4)\n    #3 setup_connection_internals (libcurl.so.4)\n    #4 url_create_needle (libcurl.so.4)\n    #5 url_find_or_create_conn (libcurl.so.4)\n\nSUMMARY: AddressSanitizer: heap-use-after-free in __interceptor_strlen\n0x502000002a57 is located 7 bytes inside of 13-byte region [0x502000002a50,0x502000002a5d)\n```\n\n## Impact\n\nHeap-use-after-free (CWE-416) triggered by a simple two-URL curl command line. Requires no authentication to a real SMB server - the UAF occurs client-side before any server response to the second request. This results in a guaranteed crash (DoS). If the freed 13-byte heap region is reallocated with attacker-influenced data before the read, it could potentially lead to information disclosure or further memory corruption.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": 3591944,
+  "original_report_url": "https://hackerone.com/reports/3591944",
+  "attachments": [
+    {
+      "id": 5490121,
+      "file_name": "fake_smb_server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/x2f458e2ew9jrq8t5be33ci6x70u?response-content-disposition=attachment%3B%20filename%3D%22fake_smb_server.py%22%3B%20filename%2A%3DUTF-8%27%27fake_smb_server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQV6NUNJUN%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162043Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJHMEUCIQDlsIh5oucLOGFMM90fA86CqAk4zAluUhzc7pqyT2kMjwIgE6EUOFMqocAxZBbTN2BYmz1ZlIAkQ1RlzSQ1QL8ZdIoqsQUIPxADGgwwMTM2MTkyNzQ4NDkiDBceOQSsmetrore2XiqOBWKNFXDn1YyOOacO0OFfmqgJP2gMkzU7TbCBb%2BR6mVFAIwWwvbYXltotAexIliKTGLN1WylF3HKQSOUZdooAa9CkPWK3Y1a7qCpUTfrsCqjl1gonPo5twkpLc95yJ%2FttwvEpWbYAkrt7NwGqgSOogV5XsuJFo%2FWnWSlKzuuLSQdrW%2B%2BTGyzE8UBuIwS28NY%2FLWoklSUmFQcxfASZwdAoyDhTyHW1I2%2BPd548euRtBsiHglP9O%2FbW1oZ7dfh4gnyxxyTlGymFyJlpgTicuZJLoN%2Fxg1v0LeRgYMxKVNbaFHAC9ZGQkzNWUqSCDZxvC%2FW%2FtDOCJoxbDwfrFtNqfJUTdSzTrjIqqqGEMy0stPdILat0GRh86EeVPoJqDyTdQRVcJha%2FgLM1s2EM2cuKEdUxThJdH5TEguKHKF%2FOgsF0in0Z14eK5WhxVNGfRd7roYgyjl2Mo3tuOkg0ij8hKvKmuTs4YyOsVTG1VY5bMAK549noc1JlgqrCFGNadJjOPcFohHv68Ix7Uc3e02fkSBCry973xbD2ia%2FKMehtK45A3%2BGC0uyKgIt%2FBZyCJ06%2FGydNvg75E%2BlhZvUbe5oEt%2FHySRqsVk%2Fd%2FuJsFlm%2FU8w5o2RG3hZIccZDyz3S6HO6d%2BcaHvTQ0qpduPHFGHeOEPpNxfE%2BWVDBW5bAsQbFODUe9XC9V2KFWTrEaGJOyjY5RmJPqZPZUhh1TGrSuRv9%2BJZJtfp9VXsnx8h68Kr4lf1O6WW2FqRLIelaDHp139vJpridOUdVMEUMJpRFZhbFoAXI95eqxGZ%2BCciD7PfTO3D0nLqYZtWrmlcbi7AcWV2KlMEgkf5n22YX2CZA9R9Ilmv%2FFdkg8RQKnFlLbs4JyUePDTDHgdjPBjqxAc1xfk%2FJ48z63MGE%2FlN1sSPctpfqXSI5CLWQ1hhQFoq6Xzh08TAe8yTOOS6z5Nf1YYrjNNPJiTtTTUDDkymh0x7nrgma%2FYoWvWyDX8a0Ac13BE728emfF8vIPMtRRAZVmPxaesDoOx4vbzkC84xVuASE5kwPJz3FFRxq32leFY4IGVrAtB4zmmNQ12W7ss33yl8Zb9AdxrmGIuLiVkGMIGQf1vU3Aca7KkY2%2F0LAcD5M5A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=7eb4da16753a0ae338a68e0d3026d82b4d1bea373005a1ed489e6cad037b517d",
+      "file_size": 9003,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5490123,
+      "file_name": "run_uaf.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/8b14eq13z9nfztsaeruswpkuf6hk?response-content-disposition=attachment%3B%20filename%3D%22run_uaf.sh%22%3B%20filename%2A%3DUTF-8%27%27run_uaf.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQV6NUNJUN%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162043Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJHMEUCIQDlsIh5oucLOGFMM90fA86CqAk4zAluUhzc7pqyT2kMjwIgE6EUOFMqocAxZBbTN2BYmz1ZlIAkQ1RlzSQ1QL8ZdIoqsQUIPxADGgwwMTM2MTkyNzQ4NDkiDBceOQSsmetrore2XiqOBWKNFXDn1YyOOacO0OFfmqgJP2gMkzU7TbCBb%2BR6mVFAIwWwvbYXltotAexIliKTGLN1WylF3HKQSOUZdooAa9CkPWK3Y1a7qCpUTfrsCqjl1gonPo5twkpLc95yJ%2FttwvEpWbYAkrt7NwGqgSOogV5XsuJFo%2FWnWSlKzuuLSQdrW%2B%2BTGyzE8UBuIwS28NY%2FLWoklSUmFQcxfASZwdAoyDhTyHW1I2%2BPd548euRtBsiHglP9O%2FbW1oZ7dfh4gnyxxyTlGymFyJlpgTicuZJLoN%2Fxg1v0LeRgYMxKVNbaFHAC9ZGQkzNWUqSCDZxvC%2FW%2FtDOCJoxbDwfrFtNqfJUTdSzTrjIqqqGEMy0stPdILat0GRh86EeVPoJqDyTdQRVcJha%2FgLM1s2EM2cuKEdUxThJdH5TEguKHKF%2FOgsF0in0Z14eK5WhxVNGfRd7roYgyjl2Mo3tuOkg0ij8hKvKmuTs4YyOsVTG1VY5bMAK549noc1JlgqrCFGNadJjOPcFohHv68Ix7Uc3e02fkSBCry973xbD2ia%2FKMehtK45A3%2BGC0uyKgIt%2FBZyCJ06%2FGydNvg75E%2BlhZvUbe5oEt%2FHySRqsVk%2Fd%2FuJsFlm%2FU8w5o2RG3hZIccZDyz3S6HO6d%2BcaHvTQ0qpduPHFGHeOEPpNxfE%2BWVDBW5bAsQbFODUe9XC9V2KFWTrEaGJOyjY5RmJPqZPZUhh1TGrSuRv9%2BJZJtfp9VXsnx8h68Kr4lf1O6WW2FqRLIelaDHp139vJpridOUdVMEUMJpRFZhbFoAXI95eqxGZ%2BCciD7PfTO3D0nLqYZtWrmlcbi7AcWV2KlMEgkf5n22YX2CZA9R9Ilmv%2FFdkg8RQKnFlLbs4JyUePDTDHgdjPBjqxAc1xfk%2FJ48z63MGE%2FlN1sSPctpfqXSI5CLWQ1hhQFoq6Xzh08TAe8yTOOS6z5Nf1YYrjNNPJiTtTTUDDkymh0x7nrgma%2FYoWvWyDX8a0Ac13BE728emfF8vIPMtRRAZVmPxaesDoOx4vbzkC84xVuASE5kwPJz3FFRxq32leFY4IGVrAtB4zmmNQ12W7ss33yl8Zb9AdxrmGIuLiVkGMIGQf1vU3Aca7KkY2%2F0LAcD5M5A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1a33fef5158f451e417143712a6efc011809264f3ceee0566766236bdde2ff5a",
+      "file_size": 1047,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5490124,
+      "file_name": "curl1.mp4",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/loxqd9zglgmhyckdhix7ufy4m7y4?response-content-disposition=attachment%3B%20filename%3D%22curl1.mp4%22%3B%20filename%2A%3DUTF-8%27%27curl1.mp4&response-content-type=video%2Fmp4&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQV6NUNJUN%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162043Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJHMEUCIQDlsIh5oucLOGFMM90fA86CqAk4zAluUhzc7pqyT2kMjwIgE6EUOFMqocAxZBbTN2BYmz1ZlIAkQ1RlzSQ1QL8ZdIoqsQUIPxADGgwwMTM2MTkyNzQ4NDkiDBceOQSsmetrore2XiqOBWKNFXDn1YyOOacO0OFfmqgJP2gMkzU7TbCBb%2BR6mVFAIwWwvbYXltotAexIliKTGLN1WylF3HKQSOUZdooAa9CkPWK3Y1a7qCpUTfrsCqjl1gonPo5twkpLc95yJ%2FttwvEpWbYAkrt7NwGqgSOogV5XsuJFo%2FWnWSlKzuuLSQdrW%2B%2BTGyzE8UBuIwS28NY%2FLWoklSUmFQcxfASZwdAoyDhTyHW1I2%2BPd548euRtBsiHglP9O%2FbW1oZ7dfh4gnyxxyTlGymFyJlpgTicuZJLoN%2Fxg1v0LeRgYMxKVNbaFHAC9ZGQkzNWUqSCDZxvC%2FW%2FtDOCJoxbDwfrFtNqfJUTdSzTrjIqqqGEMy0stPdILat0GRh86EeVPoJqDyTdQRVcJha%2FgLM1s2EM2cuKEdUxThJdH5TEguKHKF%2FOgsF0in0Z14eK5WhxVNGfRd7roYgyjl2Mo3tuOkg0ij8hKvKmuTs4YyOsVTG1VY5bMAK549noc1JlgqrCFGNadJjOPcFohHv68Ix7Uc3e02fkSBCry973xbD2ia%2FKMehtK45A3%2BGC0uyKgIt%2FBZyCJ06%2FGydNvg75E%2BlhZvUbe5oEt%2FHySRqsVk%2Fd%2FuJsFlm%2FU8w5o2RG3hZIccZDyz3S6HO6d%2BcaHvTQ0qpduPHFGHeOEPpNxfE%2BWVDBW5bAsQbFODUe9XC9V2KFWTrEaGJOyjY5RmJPqZPZUhh1TGrSuRv9%2BJZJtfp9VXsnx8h68Kr4lf1O6WW2FqRLIelaDHp139vJpridOUdVMEUMJpRFZhbFoAXI95eqxGZ%2BCciD7PfTO3D0nLqYZtWrmlcbi7AcWV2KlMEgkf5n22YX2CZA9R9Ilmv%2FFdkg8RQKnFlLbs4JyUePDTDHgdjPBjqxAc1xfk%2FJ48z63MGE%2FlN1sSPctpfqXSI5CLWQ1hhQFoq6Xzh08TAe8yTOOS6z5Nf1YYrjNNPJiTtTTUDDkymh0x7nrgma%2FYoWvWyDX8a0Ac13BE728emfF8vIPMtRRAZVmPxaesDoOx4vbzkC84xVuASE5kwPJz3FFRxq32leFY4IGVrAtB4zmmNQ12W7ss33yl8Zb9AdxrmGIuLiVkGMIGQf1vU3Aca7KkY2%2F0LAcD5M5A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=861709a6f1dac34e015eaad05d6694c51011a3a136dc5c63cf9c21e7f6a8129a",
+      "file_size": 16065774,
+      "type": "video/mp4",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 21,
+  "voters": [
+    "salahhasoneh",
+    "2026",
+    "onepunchf",
+    "pir_ahsan_raza",
+    "1ayomaffhack",
+    "mrp4rr0t",
+    "jayanto_kumar_roy9",
+    "clayynh",
+    "elia909",
+    "0xterrifier",
+    "and 11 more..."
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

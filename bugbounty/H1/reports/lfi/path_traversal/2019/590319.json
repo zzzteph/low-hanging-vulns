@@ -1,0 +1,149 @@
+{
+  "id": 590319,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC81OTAzMTk=",
+  "url": "https://hackerone.com/reports/590319",
+  "title": "Linux client is vulnerable to directory traversal when downloading files",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2019-05-26T04:50:06.211Z",
+  "submitted_at": "2019-05-26T04:50:06.211Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "netranger",
+    "url": "/netranger",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2020-8227"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2020-08-17T12:57:06.364Z",
+  "bug_reporter_agreed_on_going_public_at": "2020-08-17T12:57:06.325Z",
+  "team_member_agreed_on_going_public_at": "2020-08-05T08:52:47.735Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe Nextcloud Linux client is vulnerable to directory traversal when downloading files from a Nextcloud server. A malicious Nextcloud administrator can exploit the vulnerability to write arbitrary files to a user computer(s) with the potential for remote command execution under certain conditions.\n\n## Reproduction\n\nThe issue is exploited via a two step process. It is possible to do this using a proxy such as Burp suite, but it is tricky and involves modifying some server replies while also passing through others. The general process is:\n\nConfigure the client to use a proxy like Burp and set Burp to intercept server replies for review. Allow all client and server requests/responses to pass except the ones listed here. Force sync or wait for the client to issue the request \"PROPFIND /nextcloud/remote.php/dav/files/admin/\" with body paramters of:\n<?xml version=\"1.0\" ?>\n<d:propfind xmlns:d=\"DAV:\" xmlns:oc=\"http://owncloud.org/ns\">\n  <d:prop>\n    <d:resourcetype />\n    <d:getlastmodified />\n    <d:getcontentlength />\n    <d:getetag />\n    <oc:id />\n    <oc:downloadURL />\n    <oc:dDC />\n    <oc:permissions />\n    <oc:checksums />\n    <oc:data-fingerprint />\n    <oc:share-types />\n  </d:prop>\n</d:propfind>\n\nForward it. When the server replies, insert an entry in the XML response for an available file. The file name in the HREF tag of the modification data is the vulnerable parameter. For example, you could insert the following:\n<d:response><d:href>/nextcloud/remote.php/dav/files/user/../.bash_profile</d:href><d:propstat><d:prop><d:resourcetype/><d:getlastmodified>Tue, 30 Apr 2020 20:44:16 GMT</d:getlastmodified><d:getcontentlength>37042</d:getcontentlength><d:getetag>&quot;08b9d12b0e2263f92820e8b4706a42c7&quot;</d:getetag><oc:id>00000051ocya3bx9cxde</oc:id><oc:downloadURL></oc:downloadURL><oc:permissions>RGDNVW</oc:permissions><oc:data-fingerprint></oc:data-fingerprint><oc:share-types/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat><d:propstat><d:prop><oc:dDC/><oc:checksums/></d:prop><d:status>HTTP/1.1 404 Not Found</d:status></d:propstat></d:response>\n\nNote the path /nextcloud/remote.php/dav/files/user/../.bash_profile. When the client goes to write this file to disk, it will write traverse to the directory above the sync location (~/Nextcloud/ by default, so would end up at ~/)\n\nNext, the client should send a request to the server requesting the file, like so:\nGET http://192.168.144.128/nextcloud/remote.php/dav/files/user/../.bash_profile HTTP/1.1\nHost: 192.168.144.128\nAuthorization: Basic abc123\nUser-Agent: Mozilla/5.0 (Linux) mirall/2.5.2git (build 20190319) (Nextcloud)\nAccept: */*\nX-Request-ID: 4a1e1d20-283b-4072-9d24-9f39cf7db243abc123\nCookie: nc_sameSiteCookielax=true; nc_sameSiteCookiestrict=true; ocya3bx9cxde=rvam; oc_sessionPassphrase=srq12bLDYJI8abc123\nConnection: Keep-Alive\nAccept-Encoding: gzip, deflate\nAccept-Language: en-US,*\n\nThe server should reply saying the file wasn't found. Modify the response to become:\n\nHTTP/1.1 200 OK\nConnection: close\nContent-Type: text/text; charset=utf-8\nContent-Length: 93\nETag: 08b9d12b0e2263f92820e8b4706a42c7\n\necho \"It worked! Nextcloud Linux client directory traversal/code execution proof of concept.\"\n\n...and the content will be written to ~/.bash_profile instead of ~/Nextcloud/.bash_profile\n\nTo simplify the process, I created a proof of concept Python script and attached it here. The script must be run with Python3 and requires the requests HTTP library. It listens on port 8080 and is a proxy; it forwards all requests from the client to the real Nextcloud server. The proxy reviews each request and if it detects one of the aforementioned vulnerable requests, it modifies the server reply appropriately. For PoC purposes the filename is test.txt.\n\nTo use, open a terminal and run 'python3 poc.py'. Open the Nextcloud client settings, go to Network, and set it to use a proxy of 127.0.0.1 port 8080. You can force a sync if one does not trigger. After it syncs you should get a file 'test.txt' written one level above your Nextcloud sync folder.\n\nFor testing purposes an http-only Nextcloud server is needed, as the proxy is not SSL capable.\n\nThe proxy is not completely reliable, you may need to get the proxy running, then set the Nextcloud client to use proxy address 127.0.0.1:8080. If you have any issues identifying or reproducing this please let me know.\n\n## Impact\n\n## Limitations\n\nSome limitations surrounding this vulnerability:\n- Only new files can be written to disk. I have not found a way to overwrite existing files, i.e. if ~/test.txt already exists it won't get overwritten by the attacker's content.\n- An attacker can only write files to locations the Nextcloud program has permission to access.\n- The attacker must continously have the intercept running to keep the file on the target's system. If you stop the proof of concept script, the client interprets the exploit file's absence in the next sync as meaning it was deleted elsewhere, so it deletes the local copy. \n\n## Impact\n\nSince an attacker cannot overwrite existing files, this makes getting anything useful from the exploit harder, but not impossible. I have noticed with Ubuntu 16.04 and 18.04 systems the ~/.bash_profile file is absent by default. Bash executes any commands in this file when the user logs in from a terminal (not the GUI and not when opening the Terminal app within the GUI). An attacker could potentially get remote code execution by:\n- Exploiting the Nextcloud client to write ~/.bash_profile containing shell commands.\n- Getting lucky and having the user log in via SSH or virtual console. For example, in Ubuntu, pressing CTRL+ALT+F1 at the GUI login screen brings up a virtual console. Logging in here will execute ~/.bash_profile.\n\nAn attacker could also write various executable files (jar, sh, bin, etc) to various places on the user's system and hope the user, not knowing how they got there, would execute one.\n\nOther exploit payloads might exist, this is all I could come up at this time.\n\n## Scope\nIf a Nextcloud server adminstrator wanted to exploit the vulnerability, they could do so on the Nextcloud server itself by modifying the core code and not rely in traffic interception. Modifying the Nextcloud PHP code directly would also have the benefit of removing SSL as a limitation. \n\nThe Nextcloud security scope document states Nextcloud administrators are expected to have ability to access all user files and execute code on the server. However, with this vulnerability Nextcloud administrators could potentially execute code on remote user clients, which they may not have control over. \n\nSorry for the long winded report. :) If I can provide any further information please let me know. Thanks!",
+  "bounty_amount": "250.0",
+  "formatted_bounty": "$250",
+  "weakness": {
+    "id": 19,
+    "name": "Path Traversal"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 496879,
+      "file_name": "nextcloud_poc.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/000/496/879/5e3a06b689bb968be7a420ebc5614f85b6362fe7/nextcloud_poc.py?response-content-disposition=attachment%3B%20filename%3D%22nextcloud_poc.py%22%3B%20filename%2A%3DUTF-8%27%27nextcloud_poc.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZMNJ4J4M%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T175016Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJGMEQCIH9bRFoOUBix5Z96%2BOdMkVCDhbb81B33Sr3WpX1PXK3OAiAqWlBObDMELkje8gpuB8fP16e58eyH75FztPEK1WZI%2BCqyBQhBEAMaDDAxMzYxOTI3NDg0OSIMhMOmPeQZD3GL9insKo8FEltkSWQHNcB%2F6zlC9bsD1q9O0CF5GEuCLU937wTGodBcqKx3msdV7%2Fs1gqZR0xHi9IL6ZNHGfK%2B%2FJvEXwH5U0QDsKnJyGrrVAIuKcVLDNGRXGBTISRcGYNBbYqX4DB%2FVMOH0bSOI2G93cOnDXN5HMBhsIGns5PHRD5IcijaUqCVja1WK8AMriC66j3GnWbptQHtbqd%2FijJcp9xiO1QeYA8vsdVFtUmustgO5Me6%2Fe2Wv7wf6zyOeSbpo6cGCJeR1NjFaJQlwkSLeIYtpKXJm9exAua1kHQdlTdM6Sr0jGZYpOOo4yheC2kGni778FiCcoaTZOfAwas24qCkd4cgnY76cXP4I7gLMJhxE4BNFaYO3LNFFusnjnAKyTpTV%2F3Tsk6URg9zOnsx23NNmri%2BIuHR3oQbg5vCzC4OLG5bU9fnghXru8e0t7EcP304X8jDh0AmpDwcngt311SWOg2ZXlpkcjhgMVQzWtkPJe4jlCRLyvVDwWgPyDhpkQyYc%2BMRGP7Xsv8gb4mkguDniOHMDjrdeLW021cN9eGxyYvB05BcX2F7tq0LDVbykRx03CxjsYdMggQ63PKlkQFeQXEWzRw00tMPGIq1J6s9gzeDbsmV2WnCCmX8SFy69S9WCu5CDk9dRhmZBpYlZRvzvoQpGI0eDpCSWe9dIfzbQjaM7QJhukMkaIH%2Bu9A9nAyHeO212LcEnU7TJmU42ieGt9l9R5cVPNy2gfEvBqTCOntdqLqsmzkh1pSxw2AypkVDLP1fJye5FDI3ocCGvaFpaW0RRUeBH3vbND67WmfK4a8znnwadWkD6K7mHPW12WpbrAALWYwX9dIXh2KK2pEz%2FK3uRJx8EOyq5mdId4jYuQpJAYTCytNjPBjqyAQjNR1KSycQ3CujPIFhVgR9jRH1DD8JP3bY1%2BbXsHKTLAq8qKhQuKd0%2F7uJDxpAmUqfsLoU1YlN9H1WXZRZuS3U%2Fep9NDpyJucNFXNIxfnM2sGm%2FQo0zTmYLSa67irJSbpP5Y5F2SsjQAmHfcC%2BTjAnYbNyWeSTNgV%2BNLWqANSK44V7AJT6EFlEGlBxleFJN7xZ08mSeAtURZdjrNkyu0dh%2BHuYkWmnwCEN6lPTDaACwQYw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=edbbdf2561b7c8637c81da6333278d3aad1c635334ff829913ce45bf5db43a67",
+      "file_size": 8059,
+      "type": "text/x-python",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2020-09-04T08:52:47.851Z",
+  "allow_singular_disclosure_after": -178534648.49262428,
+  "singular_disclosure_allowed": true,
+  "vote_count": 14,
+  "voters": [
+    "m4khn0",
+    "ali",
+    "m00n_knight",
+    "khizer47",
+    "b569cec3ca679fa99b40451",
+    "mr0bart",
+    "hitman_",
+    "aoneslex",
+    "gr3yr0n1n",
+    "coryblue12",
+    "and 4 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.1,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "high",
+      "user_interaction": "required",
+      "scope": "changed",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 77,
+    "asset_type": "DOWNLOADABLE_EXECUTABLES",
+    "asset_identifier": "Desktop Client",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

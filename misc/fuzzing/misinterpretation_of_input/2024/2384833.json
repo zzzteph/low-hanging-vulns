@@ -1,0 +1,136 @@
+{
+  "id": 2384833,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yMzg0ODMz",
+  "url": "https://hackerone.com/reports/2384833",
+  "title": "CVE-2024-2004: Usage of disabled protocol",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2024-02-21T19:56:12.005Z",
+  "submitted_at": "2024-02-21T19:56:12.137Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "dfandrich",
+    "url": "/dfandrich",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": true,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2024-2004"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2024-03-27T17:48:56.893Z",
+  "bug_reporter_agreed_on_going_public_at": "2024-03-27T17:48:53.859Z",
+  "team_member_agreed_on_going_public_at": "2024-03-27T07:23:21.958Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n` --proto` in some circumstances ENABLES all protocols after being given `-all`, potentially leading to sending sensitive data over an unencrypted channel.\n\n## Steps To Reproduce:\n`curl -Ivs --proto -all,-http http://curl.se`\nThis command should result in `curl: (1) Protocol \"http\" disabled` but it actually succeeds.\n\n## Supporting Material/References:\nThe example command above performs a request to curl.se over http, despite being http support being disabled, both implicitly (-all) and explicitly (-http).  It appears that a `--proto` string starting with `-all` and only ever removes protocols without adding them fails in this way. For example:\n\nExample failure scenarios (allowing ALL protocols to go through):\n```\n--proto -all\n--proto -all,-http\n--proto -all,-ftp,-smtp,-pop3\n```\nExample correct scenarios (behaving as documented):\n```\n--proto -all,https\n--proto -all,https,-http\n--proto -all,-ftp,-smtp,-pop3,pop3s\n--proto -http\n```\nThe only failure scenarios I could find were those that first removed all protocols with -all, then (optionally) removed additional, individual\nprotocols, and never added any. The documented behaviour for this would be to fail ALL curl transfers, so it shouldn't happen anywhere in production\nsituations (since generally people want to do transfers with curl). However, I could still imagine it happening, such as when the list of allowed protocols is programmatically computed in a system where a particular situation should not allow any transfers. But this bug means that transfers would go ahead, anyway.\n\nIn a situation where something is relying on curl to block an unencrypted transfer, the consequences of this bug can be pretty severe (unencrypted data travelling over the Internet) and therefore High severity. On the other hand, IF this is the only situation where this bug occurs (where all protocols are supposed to be disabled), then I'm guessing this generally pretty uncommon and therefore Medium or even Low may be more appropriate. It's hard to know if anyone is relying on this.\n\nI bisected the problem to [this commit]( https://github.com/curl/curl/commit/e6f8445edef8e7996d1cfb141d6df184efef972c) which was released in 7.85.0 and introduced string-based protocol selection:\n```\ne6f8445edef8e7996d1cfb141d6df184efef972c is the first bad commit\ncommit e6f8445edef8e7996d1cfb141d6df184efef972c\nAuthor: Daniel Stenberg <daniel@haxx.se>\nDate:   Mon Jun 13 09:30:45 2022 +0200\n\n    setopt: add CURLOPT_PROTOCOLS_STR and CURLOPT_REDIR_PROTOCOLS_STR\n\n    ... as replacements for deprecated CURLOPT_PROTOCOLS and\n    CURLOPT_REDIR_PROTOCOLS as these new ones do not risk running into the\n    32 bit limit the old ones are facing.\n\n    CURLINFO_PROTCOOL is now deprecated.\n\n    The curl tool is updated to use the new options.\n\n    Added test 1597 to verify the libcurl protocol parser.\n\n    Closes #8992\n```\nI discovered it while replying to https://github.com/curl/curl/issues/12942\n\nAn example test case to show the problem is attached.\n\n## Impact\n\nData can be sent over an unencrypted channel because curl'ls mechanism to prevent it does not work.",
+  "weakness": {
+    "id": 266,
+    "name": "Misinterpretation of Input"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 3066810,
+      "file_name": "test1684",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/a7vky4g7kwre2549qpudy1d2q4m4?response-content-disposition=attachment%3B%20filename%3D%22test1684%22%3B%20filename%2A%3DUTF-8%27%27test1684&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRA3EW65E%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T164732Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJHMEUCIHW0VuokGZZCKFWtjGjLG1goabBN%2Fn9vI8OhakIv2yOZAiEA%2BhvF%2BldoAv8iuPFClxZ9sXuEvr%2Bh71NjX35MN70zVIkqsQUIPxADGgwwMTM2MTkyNzQ4NDkiDJV%2Bb42pZOkokLnj1CqOBdDTB9qlVMZ7MBRj4JlDp5JUHov6rkSrDBq7AC7gONNbPS%2BeU1ZFiK50gujJ6StPPIZboAkNfhcBLJnS4Lbbvtmkp1HzOCGSYRDwFH3rOchJBzCUmL%2FZWLVrfH9NBPwxb%2BFOqTb0nAVnTXPaAoSsMCmx77GEJUIE9JPCjtj6zbjwnQmfhtbEDjQVSla%2Btzcv5Q7c33uNP%2FANbU3JAslhLuNUwXya0Nk3l3wtcT4Phh9tJoARz%2FmTfeuzha0mPAQgOc3%2BwbY13DGzKj070MsFczEkifK5gNGfOoVd1pRAmcwJrFL6aeebTWDrBiTD7fxgtDDLjJ1hjv5Gzi2124HdQCCudj%2FTLZvBISl1bH6Fq2y7l3bjQuTDDg8JH72Tb9y2tYy4clVwemVNdBfnyJUe5H0WD0Zv2z0Su%2BdoQk70vUL%2BfzRGa27WimYm2n0vO0R%2BkTcVWm8k3ooc7dYb0ZTIzds4yIM2tjWqeKXTw9PpVN%2FCD8VWVgVBnYAnX%2BGcA0otTUU5t1GYCHVOjev5c%2FYuPzGOMsyTaIdB5Rqg8sP%2BSZUnFYvYXNl4E%2BbJ5WQqvsCBpwzYZ6J6h9o9HZVU20D9goWCahpr4RttQ7arDjLaPBYX0f91N7A%2BcXslXxnCmeQAwkqwwWf4LTDkTk%2FjFmTubsb25PKXRLeJDNox19L8iEltgmAZxcYBRRvI9va0wYWcx4z6Mp%2FW6ZSuc2pn9S1Oort5RJGAghJg0Ee6%2BFR0D0zqbh8UyASzu7wjjjayNCjO%2FcmBMR9czsrB3CxfE7zTynKZg7YrSGjcevmAmVHq%2B6yHIUth94KShLfUT9O4Hkl71CcLdX8WF8Jz77oZD9c%2Fnu6lHXgS97Ky36BgPq%2BAATDrh9jPBjqxAUApQM0Sw8PjdpFlsbCZ637Q20kjq7BiXbtIrsw9Tsw2hSEHidKPVRJ%2Bzj16FPI47GP9Ylbhe%2F4TWF9BauYQW1atKGJFDrAO4uU92W63VI8Qjy1%2FlcP6KdMxEWv8KKJIGbHjMj2GCke8OzGK0puKX2m0C2ChBuV1DSJ8JUrTKZu%2FvV8W0%2FTvnjRfS10CbLn5DGR%2FLzqsT5XeVv2wGAcP8%2FRw0QbKG5X3dGyIbLj9pRAsug%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=fd88af41d1df05483c6c07f7a74d3a528f39a972e303b549a963d2f0416f21f1",
+      "file_size": 471,
+      "type": "application/octet-stream",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2024-04-26T07:23:22.207Z",
+  "allow_singular_disclosure_after": -63624250.43390613,
+  "singular_disclosure_allowed": true,
+  "vote_count": 33,
+  "voters": [
+    "exec_iq",
+    "zy9ard3",
+    "thalaivar304",
+    "cyborg_m",
+    "n9rxxx",
+    "kichukishor",
+    "swarnimbandekar",
+    "sushant102",
+    "justmvg",
+    "3dra",
+    "and 23 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

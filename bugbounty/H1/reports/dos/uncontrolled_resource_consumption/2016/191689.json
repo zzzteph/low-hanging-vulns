@@ -1,0 +1,136 @@
+{
+  "id": 191689,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xOTE2ODk=",
+  "url": "https://hackerone.com/reports/191689",
+  "title": "Incorrect code generation when result of NODE_NEGATE is not used",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2016-12-16T13:39:39.239Z",
+  "submitted_at": "2016-12-16T13:39:39.239Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "dkasak",
+    "url": "/dkasak",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/122/858/df3e45a00fd0f5e53ef7dc7f9b12168cbde93200_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 15668,
+    "url": "https://hackerone.com/shopify-scripts",
+    "handle": "shopify-scripts",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/015/668/ebbe467de8ef2fc936053593e1289e30f04c3b06_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/015/668/ebbe467de8ef2fc936053593e1289e30f04c3b06_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "shopify-scripts",
+      "twitter_handle": "",
+      "website": "",
+      "about": ""
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2017-01-12T00:37:02.807Z",
+  "bug_reporter_agreed_on_going_public_at": "2017-01-12T00:37:02.763Z",
+  "team_member_agreed_on_going_public_at": "2017-01-11T21:56:20.390Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Introduction\n============\n\nNot using the result of `NODE_NEGATE` leads to incorrect code generation which could possibly result in arbitrary bytecode generation. Currently it is possible to produce a crash through a SIGABRT via an `assert` failure.\n\nProof of concept\n================\n\nassert_failure.rb\n-------------\n\n    -0E00;0\n\n1. Run either:\n\n    a. `mruby assert_failure.rb`\n    b. `sandbox assert_failure.rb`\n\n2. Both cause a crash via an `assert` failure.\n\nDiscussion\n==========\n\nThe flaw was introduced in commit `d56a19cbf526190de036130fe3a5bf14a0705ee2`.\n\nThe problem is that `codegen` is called recursively on the argument of `NODE_NEGATE` without checking whether it is a valid node. This is problematic because `codegen` assumes that its `tree` argument is a valid node (i.e. that the node's type is stored under the `car` member, further nodes or data under the `cdr` member and that `filename_index` and `lineno` are set properly). This creates an opportunity for the attacker to control further code generation, though it might not be possible to place a valid node type in `car` with the current codebase. Nevertheless, `filename_index` *can* be controlled and this is what allows the POC to make the assertion on line 135 of `debug.c` fail:\n\n    ruby: ext/mruby_engine/mruby/src/debug.c:135: mrb_debug_info_append_file: Assertion `irep->filename' failed.\n    zsh: abort      mruby-engine/bin/sandbox assert_failure.rb\n\nRunning mruby with the following input in gdb:\n\n    -0.5555555555555555555;0\n\nAnd breaking on `parse.y:2885`, we can see that `filename_index` is set to 13621 (which is two '5' characters interpreted as an integer):\n\n    (gdb) x/16hd yyvsp[0].nd->cdr\n    0x79162c:       11824   13621   13621   13621   13621   13621   13621   13621\n    0x79163c:       13621   13621   53      0       52      0       0       0\n    (gdb) p yyvsp[0].nd->cdr->filename_index \n    $21 = 13621\n\nThen, breaking `codegen.c:1230`, we see that `tree->filename_index` is indeed set to 13621:\n\n    (gdb) p tree->filename_index\n    $22 = 13621\n\nThis eventually leads to `assert` to fail.\n\nSolution\n========\n\nTo fix the problem, we should ensure `tree->car` is a valid node before calling `codegen` on `tree` in the case of `NODE_NEGATE`.\n\nnegate_node.patch\n-----------------\n\n    diff --git a/mrbgems/mruby-compiler/core/codegen.c b/mrbgems/mruby-compiler/core/codegen.c\n    index 90bafb3..9d47cca 100644\n    --- a/mrbgems/mruby-compiler/core/codegen.c\n    +++ b/mrbgems/mruby-compiler/core/codegen.c\n    @@ -2232,7 +2232,9 @@ codegen(codegen_scope *s, node *tree, int val)\n        nt = (intptr_t)tree->car;\n        tree = tree->cdr;\n        if (!val) {\n    -        codegen(s, tree, NOVAL);\n    +        if (tree && (intptr_t)tree->car < NODE_LAST) {\n    +          codegen(s, tree, NOVAL);\n    +        }\n            break;\n        }\n        switch (nt) {\n\n--\nDenis Kasak\n",
+  "bounty_amount": "1000.0",
+  "formatted_bounty": "$1,000",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 144130,
+      "file_name": "assert_failure.rb",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/000/144/130/200d3b6b50a398142e12f71cc7e3f642abfaae8c/assert_failure.rb?response-content-disposition=attachment%3B%20filename%3D%22assert_failure.rb%22%3B%20filename%2A%3DUTF-8%27%27assert_failure.rb&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ53BV5QVA%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T193819Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHoaCXVzLXdlc3QtMiJGMEQCIFOY9B2RR%2F%2FINEbn59kjzZGtsXx%2FPH5ZQMeB57s7WubMAiB8cFVl8eDQsx6arNE5aV2w8zvHmZ8AXnmoWupVzLnScyqxBQhDEAMaDDAxMzYxOTI3NDg0OSIMh7EJp2%2FxlC6FVqEzKo4FOYbfuGliJYvYNDGa8fs2qxcS2CHPaaVvys%2FBXqlvEsbA87MD9s8CiBM5YQGhrOmHyniaZF%2BJ3WZiX6QiYj%2F5wFlLVJx%2BDGdNaPCr%2F4UAGOG8R98NnXClhuR6GnfXH05U7DD9ym3BZHGK6d%2BdGKBAuCRyTogpbRl0sfjAQYg%2Ft5RTq7i5XhtXRWjhKpDPV6pc2OFH15L%2B7bEsvESmWubVm11xwgjmzIVWxhtWCkdHAiOszYIORdiVY8X6NTeB3o0Dn6I1XZGPQpZzOnA%2Fg43uJfcMs20%2BuEb7pxUh3wTDR7dlCCECBM3WJzdrRIv5NPOXi56j2asZlUnMVeE3D4y2iv9vJzO%2Bofawokjn2BNzo7G0RBfqwYO%2BUccZrPG35aLbtqjW5Tt6UAN%2BKnVAkx4IoRnY6%2Fo%2BRdMDTNHVr75rLCbO50Ud%2FvR1ktT1EuOz2EZkmUaJioqXtxsmTqTpaMkKmpWCTyWH5%2FV5ZVs7AI4O%2B%2F5gBwKzGugsmKakV%2FRONmi%2BtaIQ83rEpZMgMQFw7glw8YeSf6WhjVBzyK9L4fmd%2F0xLM60icJoUzDc6EU5cV%2FXzroy3Qs37qNmUveAUWVzll0HABsA48WKi26k2nk0szH7Ud3bAcOUpQulu8aFmUj%2BWyU1E5mJTyPJaEQotUZiIiXyx5m0ZRPIfFBCBhbkhxM1KC1ndSHG8dgFlRBAxCCeqRo5M8S27v40eTvFAOjC4qC2zjo0789vcAbo%2BlFvuc2isokGpAMUkoH%2BhGbw4lfsKYFU6a4VffUC8VwQUKSXgeQgmd%2FAL36sYQl%2FTO6tG5CwuhpmVXrWivg2fdyCOLSxgUvzVCL1OVjkYw1LMVz2cHfcYAV01WL6cMB%2FXO%2B91MJbz2M8GOrIBtXZg7SUsIsSCUT6SiSs68uOIEXKVDwc0rVbb%2F0W3ruuO7xBIX9ZLDUVaTWx1AThVFnr4xK528UnVVazcRM9CHiNhXXgcNETHuxD%2F6n7xM2Pv87PxqYo5kFj8saEuQ5V3y8hTb%2B5ma9GqUJaDVIZLfPn%2FVduzzZErNtY14PR4iDdP0rxPxWxKz4M%2By7LX%2FzNl%2F1T6UqLwFdtwduDvHZ3M25HRJd1kfYLxMLEoU%2FBkXxBqPA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=fed3bff35023097ff42a978b929899ba5c3ddb0f1c7d64b73073bd65049a432f",
+      "file_size": 8,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 144131,
+      "file_name": "0001-Fix-code-generation-when-NODE_NEGATE-result-is-not-u.patch",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/000/144/131/b396c83028ce6fdff43e401e9b80362f8d891920/0001-Fix-code-generation-when-NODE_NEGATE-result-is-not-u.patch?response-content-disposition=attachment%3B%20filename%3D%220001-Fix-code-generation-when-NODE_NEGATE-result-is-not-u.patch%22%3B%20filename%2A%3DUTF-8%27%270001-Fix-code-generation-when-NODE_NEGATE-result-is-not-u.patch&response-content-type=text%2Fx-diff&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ53BV5QVA%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T193819Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHoaCXVzLXdlc3QtMiJGMEQCIFOY9B2RR%2F%2FINEbn59kjzZGtsXx%2FPH5ZQMeB57s7WubMAiB8cFVl8eDQsx6arNE5aV2w8zvHmZ8AXnmoWupVzLnScyqxBQhDEAMaDDAxMzYxOTI3NDg0OSIMh7EJp2%2FxlC6FVqEzKo4FOYbfuGliJYvYNDGa8fs2qxcS2CHPaaVvys%2FBXqlvEsbA87MD9s8CiBM5YQGhrOmHyniaZF%2BJ3WZiX6QiYj%2F5wFlLVJx%2BDGdNaPCr%2F4UAGOG8R98NnXClhuR6GnfXH05U7DD9ym3BZHGK6d%2BdGKBAuCRyTogpbRl0sfjAQYg%2Ft5RTq7i5XhtXRWjhKpDPV6pc2OFH15L%2B7bEsvESmWubVm11xwgjmzIVWxhtWCkdHAiOszYIORdiVY8X6NTeB3o0Dn6I1XZGPQpZzOnA%2Fg43uJfcMs20%2BuEb7pxUh3wTDR7dlCCECBM3WJzdrRIv5NPOXi56j2asZlUnMVeE3D4y2iv9vJzO%2Bofawokjn2BNzo7G0RBfqwYO%2BUccZrPG35aLbtqjW5Tt6UAN%2BKnVAkx4IoRnY6%2Fo%2BRdMDTNHVr75rLCbO50Ud%2FvR1ktT1EuOz2EZkmUaJioqXtxsmTqTpaMkKmpWCTyWH5%2FV5ZVs7AI4O%2B%2F5gBwKzGugsmKakV%2FRONmi%2BtaIQ83rEpZMgMQFw7glw8YeSf6WhjVBzyK9L4fmd%2F0xLM60icJoUzDc6EU5cV%2FXzroy3Qs37qNmUveAUWVzll0HABsA48WKi26k2nk0szH7Ud3bAcOUpQulu8aFmUj%2BWyU1E5mJTyPJaEQotUZiIiXyx5m0ZRPIfFBCBhbkhxM1KC1ndSHG8dgFlRBAxCCeqRo5M8S27v40eTvFAOjC4qC2zjo0789vcAbo%2BlFvuc2isokGpAMUkoH%2BhGbw4lfsKYFU6a4VffUC8VwQUKSXgeQgmd%2FAL36sYQl%2FTO6tG5CwuhpmVXrWivg2fdyCOLSxgUvzVCL1OVjkYw1LMVz2cHfcYAV01WL6cMB%2FXO%2B91MJbz2M8GOrIBtXZg7SUsIsSCUT6SiSs68uOIEXKVDwc0rVbb%2F0W3ruuO7xBIX9ZLDUVaTWx1AThVFnr4xK528UnVVazcRM9CHiNhXXgcNETHuxD%2F6n7xM2Pv87PxqYo5kFj8saEuQ5V3y8hTb%2B5ma9GqUJaDVIZLfPn%2FVduzzZErNtY14PR4iDdP0rxPxWxKz4M%2By7LX%2FzNl%2F1T6UqLwFdtwduDvHZ3M25HRJd1kfYLxMLEoU%2FBkXxBqPA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f784df0c14a8c71de28b46ae748b43e8d1e9cda6451cdccf0be611a6f8554021",
+      "file_size": 877,
+      "type": "text/x-diff",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2017-02-10T21:56:20.435Z",
+  "allow_singular_disclosure_after": -290986919.0781275,
+  "singular_disclosure_allowed": true,
+  "vote_count": 8,
+  "voters": [
+    "dkasak",
+    "dgaletic",
+    "michiel",
+    "mpz",
+    "eveeez",
+    "khizer47",
+    "japz",
+    "spetr0x"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

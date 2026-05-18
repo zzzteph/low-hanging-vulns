@@ -1,0 +1,130 @@
+{
+  "id": 3518571,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTE4NTcx",
+  "url": "https://hackerone.com/reports/3518571",
+  "title": "Argument Injection in /manage/ssh/ via host parameter leads to sensitive file disclosure on Weblate",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-01-20T21:29:25.819Z",
+  "submitted_at": "2026-01-20T21:29:25.897Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "alexb_616",
+    "url": "/alexb_616",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/jxf7se7aktnbrhs14jyqjddnmzeu/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19468,
+    "url": "https://hackerone.com/weblate",
+    "handle": "weblate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Weblate",
+      "twitter_handle": "WeblateOrg",
+      "website": "https://weblate.org/",
+      "about": "Weblate is a libre software web-based continuous localization system"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-24126"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-04-26T13:21:45.466Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-03-27T13:21:37.309Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Describe the security issue you would like to report\n\nProduct: Weblate. \nVerified on self-hosted instances.\nAffected Versions: Confirmed in version 5.0.2 and the current stable release 5.15.2.\nProbably all versions are vulnerable.\n\nA critical argument injection vulnerability was discovered in the SSH management interface. The host parameter does not properly sanitize user input before passing it to internal system commands. An attacker with administrative privileges can inject command-line arguments (such as -f) to force the server to read and display the contents of sensitive local files, including /etc/passwd, Django settings.py (containing the SECRET_KEY), and private SSH keys (id_rsa).\n\nEndpoint: /manage/ssh/ \n\nParameter: host and type\n\nVulnerable code: \n\n```python\ndef ssh(request):\n    \"\"\"Show information and manipulate with SSH key.\"\"\"\n    # Check whether we can generate SSH key\n    can_generate = can_generate_key()\n\n    # Grab action type\n    action = request.POST.get(\"action\")\n\n    # Generate key if it does not exist yet\n    if can_generate and action == \"generate\":\n        generate_ssh_key(request, key_type=request.POST.get(\"type\", \"rsa\")) #Unsanitized input from a web form flows into subprocess.run, where it is used as a shell command. This may result in a Command Injection vulnerability.\n\n        return redirect(\"manage-ssh\")\n\n    # Read key data if it exists\n    keys = get_all_key_data()\n   # Add host key\n    form = SSHAddForm()\n    if action == \"add-host\":\n        form = SSHAddForm(request.POST)\n        if form.is_valid():\n            add_host_key(request, **form.cleaned_data) #Unsanitized input from a web form flows into subprocess.run, where it is used as a shell command. This may result in a Command Injection vulnerability.\n\n```\n\nThe function add_host_key in weblate/vcs/ssh.py constructs a command line for ssh-keyscan by directly appending the host variable to the cmdline list.\n\n```python\ndef add_host_key(request, host, port=\"\"):\n    \"\"\"Add host key for a host.\"\"\"\n    if not host:\n        messages.error(request, gettext(\"Invalid host name given!\"))\n    else:\n        cmdline = [\"ssh-keyscan\"]\n        if port:\n            cmdline.extend([\"-p\", str(port)])\n        cmdline.append(host)\n        try:\n            result = subprocess.run(\n                cmdline,\n                env=get_clean_env(),\n                check=True,\n                text=True,\n                capture_output=True,\n            )\n            keys = set()\n            for key in result.stdout.splitlines():\n                key = key.strip()\n                if not is_key_line(key):\n                    continue\n                keys.add(key)\n                host, keytype, fingerprint = parse_hosts_line(key)\n                messages.warning(\n                    request,\n                    gettext(\n                        \"Added host key for %(host)s with fingerprint \"\n                        \"%(fingerprint)s (%(keytype)s), \"\n                        \"please verify that it is correct.\"\n                    )\n                    % {\"host\": host, \"fingerprint\": fingerprint, \"keytype\": keytype},\n                )\n            if keys:\n                known_hosts_file = ssh_file(KNOWN_HOSTS)\n                # Remove existing key entries\n                if os.path.exists(known_hosts_file):\n                    with open(known_hosts_file) as handle:\n                        for line in handle:\n                            keys.discard(line.strip())\n                # Write any new keys\n                if keys:\n                    with open(known_hosts_file, \"a\") as handle:\n                        for key in keys:\n                            handle.write(key)\n                            handle.write(\"\\n\")\n            else:\n                messages.error(\n                    request, gettext(\"Could not fetch public key for a host!\")\n                )\n        except subprocess.CalledProcessError as exc:\n            messages.error(\n                request,\n                gettext(\"Could not get host key: %s\") % exc.stderr or exc.stdout,\n            )\n        except OSError as exc:\n            messages.error(request, gettext(\"Could not get host key: %s\") % str(exc))\n\n```\n\nThe leakage occurs because subprocess.run captures the output, and the application's error handling logic explicitly returns exc.stderr to the Django messaging framework.\n\nThere is no way of direct RCE since the binary (ssh-keyscan) does not support flags that allow for arbitrary command execution (such as -exec), limiting the impact to Argument Injection\n\n# What steps can we follow to reproduce this issue?\n\nLog in to the Weblate instance with a user capable of managing SSH keys.\n\nNavigate to the SSH management page (/manage/ssh/).\n\nAttempt to \"Add a host key\".\n\nIntercept the request using a proxy (e.g., Burp Suite).\n\nModify the host parameter in the POST body to point to a local file using the -f flag.\n\nPayload: action=add-host&host=-f/app/data/ssh/id_rsa&port=22\n\nSend the request.\n\nObserve the response. The application will return an error message containing the contents of the targeted file.\n\nPoC:\n```\nPOST /manage/ssh/ HTTP/1.1\n[...]\nHost: 127.0.0.1\n[...]\ncsrfmiddlewaretoken=t4FmhxCwsT1O7EBbd8ecQaadr7uqfs4cU3XN3L5BtPJ61xXGqdDstIovEOVUeA3F&host=-f/etc/passwd&port=12&action=add-host\n```\n\n{F5252376}\n{F5252378}\n\n# What is the impact of this issue?\n\nAn attacker with admin privileges can read sensitive files on the server filesystem that the web user has access to.\n\nAs demonstrated in the evidence, an attacker can extract the server's SSH Private Keys (id_rsa), /etc/passwd, secret key, or source code.\n\nLeaked SSH keys or credentials could allow the attacker to pivot to other systems or gain full shell access.\n\nVerified on self-hosted instances.\n\nAffected Versions: Confirmed in version 5.0.2 and the current stable release 5.15.2. \nProbably all versions are vulnerable.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5252376,
+      "file_name": "POC1.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/tumcahtzvd5vto6slbvl2tza98pn?response-content-disposition=attachment%3B%20filename%3D%22POC1.png%22%3B%20filename%2A%3DUTF-8%27%27POC1.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTLAFP4TE%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162111Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIBjfJaXTOx3bRWUSm2MCczXAHIWxahXT6C2I3YxSXca3AiEAph3oeHGqX%2FwVlDscybgl6B7m5oeh4O4KBzDBIL7QYmkqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDJBk4DqfVXHT4MohnSqOBVth%2Fo1kBuwhwqSIK6kPqRlczUiS6m5mko4EyinR7FbPpBkwKhDJ2II%2FySzAGXrS4Bb4JVa0lW9hx80b9A%2B3IabiocGLXzn5LFYPH8oMbtB1p2ngDNkoWi6lLXYYafJeGpbiVWnEDgZM4plxI8mcHyaR36GoHRXndAyTS3WAvBomd4S2QCuAxrAA3bfAc8w%2FQ6vV2lON7fqqN6WheGi8iobWcfmMdKxVNVW%2FGy9NQi7WUL2tNBzG7F45%2Bkau3MXuxu8fPyjCjtp%2FfirAI0RAj7js3vGWb6Wsjj%2FYx%2FIyvWIROvdC4X53%2FpYYm51FdBXtsYjyMzYLeP8oWlBN5AEFj54slXnhl8iAsktsf4epMagxrpakSTu2d2cl4Q40VsVDOh5xhK4Jy3DcuAct0LVnJSJ56fm74PNVA7MmlwM9rRoOFNCrzEEZ%2BZPDt32ZiuBMDwssJoY7Q%2FYykEywAnUlnrMiINk%2BuRjAQHRQaCdwf6kqwJNjnuw%2F8fgbhJ3tVN%2FtrA1VbKahdqp%2Bkk0X8FHtUz5ll8Gjsx8FmxlAHjdnQOg127ErHdIq9QXwAU64i1JPi%2Bx2ZibevAgZMoZnG9Sm%2Fdnx%2Forv5e0gzKwLXeLMDVQHM3JguXui9DlDZLQTn0hZVojHvc1TvBfUvzsOevHLJx%2Bvn9lYr3v8pA0vxalJAF%2BoKAkRDBKxX1ZQHnAlreL5XPGWZR8I%2BWt2pqDal9FtkHx%2FKPtU8TKhxE6RDSorX5I%2BYP2GCec9H%2B8AfCNVdCs%2FP1W3X4liJVElIrooAYErcIN2OCD2Jja9jl0%2F2xxemOwEHYuSSJ815TZqheKOh5pM2d04hrZ4M0VknwL3pLqTXfswlpdNK%2BEzerzjlanxjjDUsdjPBjqxAcQSFj1qQChU7PSgGzk2DJV9xuVpokoPGbDLAn3q98oW5MjiNJ7ZwHodlqcDL8QIqSjInq8hl8O3oCTbiGAhTpkLGwo%2B%2FvHOMDRaD7oqFzrzm5ijdJ9KjO5O8y9FNtjCpgTCY0Y8qc4ZD4NsEtVv%2FNmxwajrPw4cK5EkgYRaLhmXbtCNWskw1ih1h1uAqdq6xLaDYCTzLRVg413qobL7H6LKKWnZtr90IRFj4bsLHZ99yw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a12bdcd6de21962997c292f5b04c23b667c9445e97432e85906c1b68d2a9a0ba",
+      "file_size": 231564,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5252378,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/s9quutkmfvaycoppc0j7wdoilvbb?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTLAFP4TE%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162111Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIBjfJaXTOx3bRWUSm2MCczXAHIWxahXT6C2I3YxSXca3AiEAph3oeHGqX%2FwVlDscybgl6B7m5oeh4O4KBzDBIL7QYmkqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDJBk4DqfVXHT4MohnSqOBVth%2Fo1kBuwhwqSIK6kPqRlczUiS6m5mko4EyinR7FbPpBkwKhDJ2II%2FySzAGXrS4Bb4JVa0lW9hx80b9A%2B3IabiocGLXzn5LFYPH8oMbtB1p2ngDNkoWi6lLXYYafJeGpbiVWnEDgZM4plxI8mcHyaR36GoHRXndAyTS3WAvBomd4S2QCuAxrAA3bfAc8w%2FQ6vV2lON7fqqN6WheGi8iobWcfmMdKxVNVW%2FGy9NQi7WUL2tNBzG7F45%2Bkau3MXuxu8fPyjCjtp%2FfirAI0RAj7js3vGWb6Wsjj%2FYx%2FIyvWIROvdC4X53%2FpYYm51FdBXtsYjyMzYLeP8oWlBN5AEFj54slXnhl8iAsktsf4epMagxrpakSTu2d2cl4Q40VsVDOh5xhK4Jy3DcuAct0LVnJSJ56fm74PNVA7MmlwM9rRoOFNCrzEEZ%2BZPDt32ZiuBMDwssJoY7Q%2FYykEywAnUlnrMiINk%2BuRjAQHRQaCdwf6kqwJNjnuw%2F8fgbhJ3tVN%2FtrA1VbKahdqp%2Bkk0X8FHtUz5ll8Gjsx8FmxlAHjdnQOg127ErHdIq9QXwAU64i1JPi%2Bx2ZibevAgZMoZnG9Sm%2Fdnx%2Forv5e0gzKwLXeLMDVQHM3JguXui9DlDZLQTn0hZVojHvc1TvBfUvzsOevHLJx%2Bvn9lYr3v8pA0vxalJAF%2BoKAkRDBKxX1ZQHnAlreL5XPGWZR8I%2BWt2pqDal9FtkHx%2FKPtU8TKhxE6RDSorX5I%2BYP2GCec9H%2B8AfCNVdCs%2FP1W3X4liJVElIrooAYErcIN2OCD2Jja9jl0%2F2xxemOwEHYuSSJ815TZqheKOh5pM2d04hrZ4M0VknwL3pLqTXfswlpdNK%2BEzerzjlanxjjDUsdjPBjqxAcQSFj1qQChU7PSgGzk2DJV9xuVpokoPGbDLAn3q98oW5MjiNJ7ZwHodlqcDL8QIqSjInq8hl8O3oCTbiGAhTpkLGwo%2B%2FvHOMDRaD7oqFzrzm5ijdJ9KjO5O8y9FNtjCpgTCY0Y8qc4ZD4NsEtVv%2FNmxwajrPw4cK5EkgYRaLhmXbtCNWskw1ih1h1uAqdq6xLaDYCTzLRVg413qobL7H6LKKWnZtr90IRFj4bsLHZ99yw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=88077552dc01a9111133cb9ffcaf2228c4a52770c3e79519c85484198e991873",
+      "file_size": 150229,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-04-26T13:21:37.470Z",
+  "allow_singular_disclosure_after": -529174.283812937,
+  "singular_disclosure_allowed": true,
+  "vote_count": 31,
+  "voters": [
+    "kingsmanbuggy",
+    "mohaned0101",
+    "2026",
+    "oblivionsage",
+    "empty_404",
+    "52_hz",
+    "go8ombiz",
+    "m7monster",
+    "bashing-ol",
+    "wildercode20",
+    "and 21 more..."
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

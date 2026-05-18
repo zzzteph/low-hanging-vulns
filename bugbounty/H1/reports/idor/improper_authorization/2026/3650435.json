@@ -1,0 +1,148 @@
+{
+  "id": 3650435,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjUwNDM1",
+  "url": "https://hackerone.com/reports/3650435",
+  "title": "Improper enforcement of CURLOPT_SOCKS5_AUTH due to missing reuse key validation in libcurl",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-04-05T06:08:49.892Z",
+  "submitted_at": "2026-04-05T06:08:51.898Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "cutiapretaa",
+    "url": "/cutiapretaa",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/m99ukjdcdq106tumx9nxlb3zpbvs/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-07T06:24:02.465Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-04-06T05:27:51.131Z",
+  "team_member_agreed_on_going_public_at": "2026-04-07T06:24:01.850Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# detail:\n\n- `lib/setopt.c:1048-1051`\n   - `CURLOPT_SOCKS5_AUTH` is stored into `data->set.socks5auth`\n\n- `lib/socks.c:597-641` (`socks5_req0_init`)\n   - fresh SOCKS5 handshake reads `data->set.socks5auth`, if BASIC is not allowed, it clears `sx->proxy_user` at 618-620, so username/password auth is not even offered\n\n- `lib/socks.c:665-688` (`socks5_check_resp0`)\n   - on a fresh connection, if the proxy selects BASIC while BASIC is disabled, or if no acceptable method exists, the connection fails\n\n- `lib/urldata.h:345-351`\n   - struct `proxy_info` stores host / port / proxytype / user / passwd, but no SOCKS5 auth-method policy\n\n- `lib/url.c:578-590` (`proxy_info_matches`)\n   - reuse match compares only proxy type, port, host, proxy user, and proxy password\n\n- `lib/url.c:879-913` (`url_match_proxy_use`)\n   - SOCKS proxy reuse uses `proxy_info_matches()`\n\n- `lib/url.c:1207-1229` (`url_match_conn`)\n   - connection reuse is accepted if that proxy match succeeds\n\n- `lib/url.c:2965-2998` (`url_conn_reuse_adjust`)\n   - on reuse, curl may refresh proxy credentials, but it does not compare or refresh the SOCKS5 auth-method policy\n\nso the invariant break is:\n\nfresh SOCKS5 connections enforce `CURLOPT_SOCKS5_AUTH`, but connection reuse does not include that policy in the reuse key\n\n## docs:\n\nthis is not an API misuse case\n\nchanging options between transfers on the same easy handle is a documented libcurl usage pattern, and connection reuse is the default behavior unless the application forces a fresh connection, \n\nif curl wanted `CURLOPT_SOCKS5_AUTH` to be “new connection only,” its docs should say so the same way they do for `CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256`, they do not, that makes silent reuse under a stricter later auth policy a bug, not intended behavior \n\n( ref: https://curl.se/libcurl/c/CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256.html, https://curl.se/libcurl/c/curl_easy_setopt.html , https://curl.se/libcurl/c/CURLOPT_SOCKS5_AUTH.html , https://curl.se/libcurl/c/CURLOPT_FRESH_CONNECT.html  )\n\n\n# exploit:\n\n1. create a normal easy handle\n\n2. set:\n   - `CURLOPT_URL = http://127.0.0.1:18081/`\n   - `CURLOPT_PROXY = socks5://127.0.0.1:19081`\n   - `CURLOPT_PROXYUSERPWD = \"user:pass\"`\n   - `CURLOPT_SOCKS5_AUTH = CURLAUTH_BASIC`\n\n3. perform transfer #1\n   - the SOCKS5 proxy requires username/password, so the SOCKS handshake succeeds and the connection stays alive for reuse\n\n4. on the same easy handle, change only:\n   - `CURLOPT_SOCKS5_AUTH = CURLAUTH_NONE`\n\n5. perform transfer #2 to the same proxy/destination\n   - libcurl reuses the existing connection because the reuse key ignores the SOCKS5 auth-method policy\n\n6. no new SOCKS5 handshake happens, so the request succeeds over the already-authenticated tunnel\n\n7. do the same “NONE only” transfer on a fresh easy handle\n   - it fails with `CURLE_PROXY` / error 97, because `CURLAUTH_NONE` means only no-auth is allowed and the proxy requires username/password\n\n# poc:\n\ni ran a local setup:\n\n- SOCKS5 proxy on 127.0.0.1:19081 that requires username/password\n- HTTP origin on 127.0.0.1:18081\n- C poc using the uploaded libcurl build\n\n**what happened:**\n\n1. transfer #1 on one easy handle with\n   - `CURLOPT_PROXY = socks5://127.0.0.1:19081`\n   - `CURLOPT_PROXYUSERPWD = \"user:pass\"`\n   - `CURLOPT_SOCKS5_AUTH = CURLAUTH_BASIC`\n   - result: success\n\n2. transfer #2 on the same easy handle, changing only\n   - `CURLOPT_SOCKS5_AUTH = CURLAUTH_NONE`\n   - result: success\n   - log: reusing existing http: connection with proxy 127.0.0.1\n\n3. transfer #3 on a fresh easy handle with\n   - `CURLOPT_SOCKS5_AUTH = CURLAUTH_NONE`\n   - result: failure\n   - error: 97 (proxy handshake error)\n   - log: no authentication method was acceptable\n\n**server-side logs:**\n\n- first connection offered methods `[0, 2]` and completed username/password auth\n- second transfer reused the same SOCKS connection and sent the HTTP request with no new SOCKS handshake\n- fresh third attempt offered only method `[0]` and the proxy rejected it\n\n## Impact\n\n# impacts:\n\n- SOCKS5 proxy-auth policy bypass\n- a transfer that is explicitly configured with `CURLOPT_SOCKS5_AUTH = CURLAUTH_NONE` can succeed when it should fail\n- the second transfer silently continues over an already-authenticated SOCKS5 tunnel created under a less restrictive earlier policy\n- applications can believe they enforced “no proxy authentication” for a later transfer, while libcurl actually keeps using a previously BASIC-authenticated proxy connection",
+  "weakness": {
+    "id": 124,
+    "name": "Improper Authorization"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5676750,
+      "file_name": "poc_socks5_reuse.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/t0f7vn1ormdecwtu9ajg7amsxo3z?response-content-disposition=attachment%3B%20filename%3D%22poc_socks5_reuse.c%22%3B%20filename%2A%3DUTF-8%27%27poc_socks5_reuse.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2JLRQC3Z%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162209Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCyF6a0h%2FSd%2BZSks8Rxtl8IMUlV6CnC0EkjKPdOgZppbgIhAJFn8L8q2CGh2pHyXZ5ZMKdMaJy0NuM5GjHSVUlFDTCvKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5IgxPqaDNpE%2FTESHVWKUqjgXASGPQnvNHr2m%2FJIy2ISQVEqko3Yetjo%2F8q7I39IKV7lUxcfLD%2F1XR3w%2FIeZqxTqeeRRnn9MG4wOJuUQCz0TbJ3RYUzLp6NFNeeLUs89tSWQao3K3K1YRQpvxHyd%2FVnQLjGQL%2ByA1W8vwaggeEJOTWpMHro8OmuLbCpiojpf4c0ScAk7jIPo9nq%2BdAbGBT%2BUrarFg54aa3t9Gjb2afUvfC17M1qY0bNHwJ9Pays%2B4nfSf65gBvV8Q5%2Fkpn2Je3SSARa2gRxt8W9gAA9Yz%2F8tRQDheeLfJKjE9hsJmFjYGJtxkvZRnIoMIZtUzAY2MtoEJTGW%2BhaIRYO%2FRUewE0oTOIPtRlJWl5bAfn8xkwDxJGLCuWS3KqjYOTnjUBxC2vKaRWNUjX6wCoWcfqjFWh9kDHe%2FglTqO7%2FhymgHO0N%2FbJGPfLrXbN5nLp3basc2D8NVFFYPypZpmZoGvPODZcm6MKNiYFgL%2Be8G9kqEeW8j2uv3WRlTWjKLgMSUSdC6BU4KKWs%2BW6LgY%2FRNzZuNsvNF8Wq%2BEvh%2FNwtKZXWo6ViLVGheYXcFM%2FCxvdiO7VmMS8UFOcEw7jGaJiNuUo%2FusoO7I9jqghkw84cRFWxYNCOPOLMINynxHc%2BW22HCuCKPHpH4%2FngERDkQV2JzcTL6DXXgmaWwGRAkppif4Q%2F3GBWcIg9VrXqC%2FxvtGt3sQCbHnxLjOKrQMMEe%2BONDXrx3C7yUjREIGX6LQmXabH6XVYcLGnerLvSFDJKfMKGMW5v0agg4D1FI9fwGqnYK6JSiZD9QGCMyr%2BcYow%2FItz7HbxBjBG8iivYaDi65QyjP1vssif0a4uy1m7FnAEaGmy4QGtZ5Lb211YvfP%2FOe9KdZr8EI4whZnYzwY6sAGVm755FFPDuelFXnnKYnWpAjxtT4m5T4dhCScUP5vZ3berrWswAuaFRhjvJ6cDzwNkR4au5erhrpfKwurh6cId6LUxrQzFJEQaW3UAiEFuckw3j%2FkbGaviGEB38PcRx6XKNjiqwHiC6LcoMM6fvomI7IhaJ0gnUaZJ1AFyezf9SM0zuYoK2fyhapRMIp88t3rNFA2L6qmyXeSoRKuz3ku2BETpnGwn4Qmy2ugAijW9bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=cf2e9f6bfb9c0b39a9820548e96efa4d33814e87ba1fc222b4fd70fee8358633",
+      "file_size": 2326,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 5676751,
+      "file_name": "poc_out.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bpmj2avcxj8it0gxpoiiec6zykfo?response-content-disposition=attachment%3B%20filename%3D%22poc_out.txt%22%3B%20filename%2A%3DUTF-8%27%27poc_out.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2JLRQC3Z%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162209Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCyF6a0h%2FSd%2BZSks8Rxtl8IMUlV6CnC0EkjKPdOgZppbgIhAJFn8L8q2CGh2pHyXZ5ZMKdMaJy0NuM5GjHSVUlFDTCvKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5IgxPqaDNpE%2FTESHVWKUqjgXASGPQnvNHr2m%2FJIy2ISQVEqko3Yetjo%2F8q7I39IKV7lUxcfLD%2F1XR3w%2FIeZqxTqeeRRnn9MG4wOJuUQCz0TbJ3RYUzLp6NFNeeLUs89tSWQao3K3K1YRQpvxHyd%2FVnQLjGQL%2ByA1W8vwaggeEJOTWpMHro8OmuLbCpiojpf4c0ScAk7jIPo9nq%2BdAbGBT%2BUrarFg54aa3t9Gjb2afUvfC17M1qY0bNHwJ9Pays%2B4nfSf65gBvV8Q5%2Fkpn2Je3SSARa2gRxt8W9gAA9Yz%2F8tRQDheeLfJKjE9hsJmFjYGJtxkvZRnIoMIZtUzAY2MtoEJTGW%2BhaIRYO%2FRUewE0oTOIPtRlJWl5bAfn8xkwDxJGLCuWS3KqjYOTnjUBxC2vKaRWNUjX6wCoWcfqjFWh9kDHe%2FglTqO7%2FhymgHO0N%2FbJGPfLrXbN5nLp3basc2D8NVFFYPypZpmZoGvPODZcm6MKNiYFgL%2Be8G9kqEeW8j2uv3WRlTWjKLgMSUSdC6BU4KKWs%2BW6LgY%2FRNzZuNsvNF8Wq%2BEvh%2FNwtKZXWo6ViLVGheYXcFM%2FCxvdiO7VmMS8UFOcEw7jGaJiNuUo%2FusoO7I9jqghkw84cRFWxYNCOPOLMINynxHc%2BW22HCuCKPHpH4%2FngERDkQV2JzcTL6DXXgmaWwGRAkppif4Q%2F3GBWcIg9VrXqC%2FxvtGt3sQCbHnxLjOKrQMMEe%2BONDXrx3C7yUjREIGX6LQmXabH6XVYcLGnerLvSFDJKfMKGMW5v0agg4D1FI9fwGqnYK6JSiZD9QGCMyr%2BcYow%2FItz7HbxBjBG8iivYaDi65QyjP1vssif0a4uy1m7FnAEaGmy4QGtZ5Lb211YvfP%2FOe9KdZr8EI4whZnYzwY6sAGVm755FFPDuelFXnnKYnWpAjxtT4m5T4dhCScUP5vZ3berrWswAuaFRhjvJ6cDzwNkR4au5erhrpfKwurh6cId6LUxrQzFJEQaW3UAiEFuckw3j%2FkbGaviGEB38PcRx6XKNjiqwHiC6LcoMM6fvomI7IhaJ0gnUaZJ1AFyezf9SM0zuYoK2fyhapRMIp88t3rNFA2L6qmyXeSoRKuz3ku2BETpnGwn4Qmy2ugAijW9bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=bf451c1e9a11c0c207092268b0337464d50572feaa449b3482abc29175423155",
+      "file_size": 1240,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 5676753,
+      "file_name": "socks_http_test.log",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/awd8t6kr8aosixfupvrn1mdz0t6t?response-content-disposition=attachment%3B%20filename%3D%22socks_http_test.log%22%3B%20filename%2A%3DUTF-8%27%27socks_http_test.log&response-content-type=text%2Fx-log&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2JLRQC3Z%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162209Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCyF6a0h%2FSd%2BZSks8Rxtl8IMUlV6CnC0EkjKPdOgZppbgIhAJFn8L8q2CGh2pHyXZ5ZMKdMaJy0NuM5GjHSVUlFDTCvKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5IgxPqaDNpE%2FTESHVWKUqjgXASGPQnvNHr2m%2FJIy2ISQVEqko3Yetjo%2F8q7I39IKV7lUxcfLD%2F1XR3w%2FIeZqxTqeeRRnn9MG4wOJuUQCz0TbJ3RYUzLp6NFNeeLUs89tSWQao3K3K1YRQpvxHyd%2FVnQLjGQL%2ByA1W8vwaggeEJOTWpMHro8OmuLbCpiojpf4c0ScAk7jIPo9nq%2BdAbGBT%2BUrarFg54aa3t9Gjb2afUvfC17M1qY0bNHwJ9Pays%2B4nfSf65gBvV8Q5%2Fkpn2Je3SSARa2gRxt8W9gAA9Yz%2F8tRQDheeLfJKjE9hsJmFjYGJtxkvZRnIoMIZtUzAY2MtoEJTGW%2BhaIRYO%2FRUewE0oTOIPtRlJWl5bAfn8xkwDxJGLCuWS3KqjYOTnjUBxC2vKaRWNUjX6wCoWcfqjFWh9kDHe%2FglTqO7%2FhymgHO0N%2FbJGPfLrXbN5nLp3basc2D8NVFFYPypZpmZoGvPODZcm6MKNiYFgL%2Be8G9kqEeW8j2uv3WRlTWjKLgMSUSdC6BU4KKWs%2BW6LgY%2FRNzZuNsvNF8Wq%2BEvh%2FNwtKZXWo6ViLVGheYXcFM%2FCxvdiO7VmMS8UFOcEw7jGaJiNuUo%2FusoO7I9jqghkw84cRFWxYNCOPOLMINynxHc%2BW22HCuCKPHpH4%2FngERDkQV2JzcTL6DXXgmaWwGRAkppif4Q%2F3GBWcIg9VrXqC%2FxvtGt3sQCbHnxLjOKrQMMEe%2BONDXrx3C7yUjREIGX6LQmXabH6XVYcLGnerLvSFDJKfMKGMW5v0agg4D1FI9fwGqnYK6JSiZD9QGCMyr%2BcYow%2FItz7HbxBjBG8iivYaDi65QyjP1vssif0a4uy1m7FnAEaGmy4QGtZ5Lb211YvfP%2FOe9KdZr8EI4whZnYzwY6sAGVm755FFPDuelFXnnKYnWpAjxtT4m5T4dhCScUP5vZ3berrWswAuaFRhjvJ6cDzwNkR4au5erhrpfKwurh6cId6LUxrQzFJEQaW3UAiEFuckw3j%2FkbGaviGEB38PcRx6XKNjiqwHiC6LcoMM6fvomI7IhaJ0gnUaZJ1AFyezf9SM0zuYoK2fyhapRMIp88t3rNFA2L6qmyXeSoRKuz3ku2BETpnGwn4Qmy2ugAijW9bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d8cfcd51837e89df1f9b75a019d8af28c55e1ca44d2fe23cf5cd6f98aed1c490",
+      "file_size": 740,
+      "type": "text/x-log",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 15,
+  "voters": [
+    "2026",
+    "idkruan",
+    "cutiapretaa",
+    "wsadip011",
+    "hash_security",
+    "ketaxpl0it",
+    "dhmhack",
+    "kratohack",
+    "ehax0x",
+    "logzzz",
+    "and 5 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

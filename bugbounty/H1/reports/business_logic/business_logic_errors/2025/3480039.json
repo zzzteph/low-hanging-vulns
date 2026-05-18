@@ -1,0 +1,121 @@
+{
+  "id": 3480039,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDgwMDM5",
+  "url": "https://hackerone.com/reports/3480039",
+  "title": "WebSocket Logic Error: Control Frame (PING/PONG) Starvation causes Connection Drop (DoS) during large transfers",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2025-12-27T18:12:44.720Z",
+  "submitted_at": "2025-12-27T18:12:44.879Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "efrsxcv",
+    "url": "/efrsxcv",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-12-28T21:29:00.818Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-12-28T15:59:47.525Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Summary: I have discovered a logic flaw in lib/ws.c regarding the handling of WebSocket Control Frames (PING/PONG). According to RFC 6455, Control Frames should be processed as soon as possible, even in the middle of fragmented data frames, to maintain connection state (Keep-Alive).\n\nHowever, libcurl fails to prioritize PONG responses when it is actively sending a large stream of data via curl_ws_send. If payload_remain > 0, the PONG response is queued behind the user data. If the transfer takes longer than the server's Keep-Alive timeout, the server will drop the connection, resulting in a Denial of Service (DoS) for valid operations.\n\nAffected version Reproduced on the latest curl master branch (and recent releases supporting WebSocket). (Please run curl -V in your terminal and paste the output here)\n\nSteps To Reproduce:\n\nTo reproduce this, we need a \"Strict\" WebSocket Server that enforces a short Keep-Alive timeout, and a Client that saturates the sending queue.\n\n1. Setup the Malicious Server (strict_ws_server.py) This Python script simulates a server that sends a PING every 1 second and disconnects if no PONG is received within 3 seconds.\nimport socket\nimport struct\nimport time\nimport threading\nimport select\n\nOP_PING = 0x9\nOP_PONG = 0xA\n\ndef create_frame(opcode, payload=b\"\"):\n    b1 = 0x80 | opcode\n    b2 = len(payload) & 0x7F\n    return struct.pack(\"!BB\", b1, b2) + payload\n\ndef handle_client(conn):\n    print(\"[+] Client connected. Handshaking...\")\n    try:\n        req = conn.recv(4096)\n        resp = (\n            b\"HTTP/1.1 101 Switching Protocols\\r\\n\"\n            b\"Upgrade: websocket\\r\\n\"\n            b\"Connection: Upgrade\\r\\n\"\n            b\"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\\r\\n\"\n            b\"\\r\\n\"\n        )\n        conn.sendall(resp)\n        print(\"[+] Handshake OK. Monitoring Heartbeat...\")\n        \n        last_pong_time = time.time()\n        running = True\n        \n        def pinger():\n            nonlocal last_pong_time, running\n            while running:\n                try:\n                    time.sleep(1)\n                    conn.sendall(create_frame(OP_PING, b\"alive?\"))\n                    if time.time() - last_pong_time > 3:\n                        print(\"\\n[!!!] TIMEOUT: Client did not reply PONG in 3s!\")\n                        running = False\n                        conn.close()\n                        return\n                except:\n                    running = False\n                    return\n\n        t = threading.Thread(target=pinger)\n        t.start()\n\n        while running:\n            ready = select.select([conn], [], [], 1)\n            if ready[0]:\n                data = conn.recv(1024)\n                if not data: break\n                opcode = data[0] & 0x0F\n                if opcode == OP_PONG:\n                    last_pong_time = time.time()\n    except:\n        pass\n\ndef start_server():\n    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind(('0.0.0.0', 9090))\n    s.listen(1)\n    print(\"[*] Strict Server on 9090...\")\n    while True:\n        conn, addr = s.accept()\n        handle_client(conn)\n\nif __name__ == \"__main__\":\n    start_server()\n\n2. Setup the Client PoC (poc_ws_starve.c) Compile this with: gcc poc_ws_starve.c -o poc_ws_starve -lcurl This client sends a large amount of data while artificially slowing down slightly to simulate network latency/busy loop, forcing the PONG to be queued.\n#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n#include <curl/curl.h>\n\nint main(void) {\n    CURL *curl;\n    CURLcode res;\n\n    curl_global_init(CURL_GLOBAL_DEFAULT);\n    curl = curl_easy_init();\n    \n    if(curl) {\n        // Connect to local strict server\n        curl_easy_setopt(curl, CURLOPT_URL, \"ws://127.0.0.1:9090/\");\n        curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 2L);\n        \n        res = curl_easy_perform(curl);\n        if(res != CURLE_OK) return 1;\n\n        size_t sent;\n        char buffer[1024]; \n        memset(buffer, 'A', sizeof(buffer));\n        \n        const struct curl_ws_frame *meta;\n        size_t rlen;\n        char rbuf[256];\n\n        // Send massive data stream\n        for(int i=0; i<100000; i++) {\n            // 1. Send Data (CURLWS_BINARY)\n            res = curl_ws_send(curl, buffer, sizeof(buffer), &sent, 0, CURLWS_BINARY);\n            if(res != CURLE_OK) break;\n\n            // 2. Sleep briefly to allow Server to send PING\n            usleep(10000); \n\n            // 3. Call recv to process incoming PING\n            // EXPECTED: Curl should reply PONG immediately.\n            // ACTUAL: Curl queues PONG behind the data stream because payload_remain > 0.\n            curl_ws_recv(curl, rbuf, sizeof(rbuf), &rlen, &meta);\n        }\n    }\n    curl_easy_cleanup(curl);\n    curl_global_cleanup();\n    return 0;\n}\n\n3. Execution\n1. Run python3 strict_ws_server.py in Terminal 1.\n2. Run ./poc_ws_starve in Terminal 2.\n\nSupporting Material/References:\n- RFC 6455 Section 5.5: \"Control frames (see Section 5.5) MAY be injected in the middle of a fragmented message.\"\n\n- Root Cause: In lib/ws.c, function ws_enc_add_cntrl, the code checks if(!ws->enc.payload_remain). If data is being sent, it returns CURLE_OK effectively queuing the PONG without sending it, causing the starvation.\n\nObserved Output (Server Terminal):\n[!!!] TIMEOUT: Client did not reply PONG in 3s!\n\nThe server disconnects the client despite the client being active, confirming the logic error.\n\n## Impact\n\n## Summary:",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 9,
+  "voters": [
+    "2026",
+    "tw181802",
+    "haydar98",
+    "junkieguk",
+    "abudahab",
+    "cyphervision",
+    "roydennis",
+    "hackwidmaddy",
+    "mshan"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

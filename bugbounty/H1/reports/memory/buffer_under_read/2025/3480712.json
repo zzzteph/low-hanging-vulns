@@ -1,0 +1,132 @@
+{
+  "id": 3480712,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDgwNzEy",
+  "url": "https://hackerone.com/reports/3480712",
+  "title": "Telnet Suboption Buffer Pointer Underflow in lib/telnet.c leads to Out-of-Bounds Read",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2025-12-28T16:15:31.727Z",
+  "submitted_at": "2025-12-28T16:15:31.954Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "stif",
+    "url": "/stif",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/5n2egpluzo60hhi5zb0s4ub68iir/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-12-29T15:46:46.753Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-12-29T09:14:34.625Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nA buffer pointer underflow vulnerability exists in curl's telnet protocol handler (`lib/telnet.c`). When processing telnet suboptions in the `CURL_TS_SE` state, the code unconditionally decrements the suboption buffer pointer by 2 (`subpointer -= 2`), even when the `CURL_SB_ACCUM` macro skips writing due to a full buffer. This leads to an out-of-bounds read when `suboption()` and `printsub()` are subsequently called.\n\n## Affected Version\n\n- All curl versions with telnet support containing this code pattern\n- Tested on latest curl source from GitHub (master branch)\n- File: `lib/telnet.c`\n- Vulnerable lines: 1210 and 1226\n\n## Technical Analysis\n\n### Vulnerable Code Pattern\n\nIn `lib/telnet.c`, the `CURL_SB_ACCUM` macro (lines 69-73) conditionally writes to the buffer:\n\n```c\n#define CURL_SB_ACCUM(x, c)                                   \\\n  do {                                                        \\\n    if(x->subpointer < (x->subbuffer + sizeof(x->subbuffer))) \\\n      *x->subpointer++ = (c);                                 \\\n  } while(0)\n```\n\nHowever, in the `CURL_TS_SE` state handling (lines 1207-1211 and 1223-1227), the pointer decrement is unconditional:\n\n**Path 1 (line 1207-1211):**\n```c\nCURL_SB_ACCUM(tn, CURL_IAC);\nCURL_SB_ACCUM(tn, c);\ntn->subpointer -= 2;    // UNCONDITIONAL - causes underflow when buffer is full\nCURL_SB_TERM(tn);\n```\n\n**Path 2 (line 1223-1227):**\n```c\nCURL_SB_ACCUM(tn, CURL_IAC);\nCURL_SB_ACCUM(tn, CURL_SE);\ntn->subpointer -= 2;    // UNCONDITIONAL - causes underflow when buffer is full\nCURL_SB_TERM(tn);\n```\n\n### Exploitation Flow\n\n1. Malicious telnet server sends suboption data to fill the 512-byte buffer (`SUBBUFSIZE`)\n2. Server sends `IAC` followed by another byte while buffer is full\n3. `CURL_SB_ACCUM` macro does nothing (buffer full check passes)\n4. `subpointer -= 2` executes unconditionally, causing pointer underflow\n5. `CURL_SB_TERM` sets `subend = subpointer` (now pointing before buffer start)\n6. `suboption()` is called with corrupted pointer\n7. `CURL_SB_LEN` macro calculates negative/wrapped length\n8. `printsub()` reads out-of-bounds memory in verbose mode\n\n### Memory Layout (struct TELNET)\n\n```c\nstruct TELNET {\n  // ... other fields ...\n  struct dynbuf out;              // Contains heap pointers\n  unsigned char subbuffer[512];   // The suboption buffer\n  unsigned char *subpointer;      // Points into subbuffer\n  unsigned char *subend;          // End marker\n  // ...\n};\n```\n\nWhen `subpointer` underflows, it points to the `dynbuf out` structure, which contains heap pointers that may be leaked.\n\n## Steps To Reproduce\n\n1. Save the attached PoC script as `curl_telnet_poc.py`\n\n2. Run the malicious telnet server:\n```bash\npython3 curl_telnet_poc.py -p 2323\n```\n\n3. In another terminal, connect with curl in verbose mode:\n```bash\ncurl -v telnet://127.0.0.1:2323\n```\n\n4. Observe the verbose output for:\n   - Anomalous suboption data in the output\n   - Potential non-printable characters indicating memory leak\n   - Possible crash (depending on memory layout)\n\n5. For better observation, build curl with AddressSanitizer:\n```bash\n./configure CFLAGS=\"-fsanitize=address -g\"\nmake\n./src/curl -v telnet://127.0.0.1:2323\n```\n\nASan should report an out-of-bounds read.\n\n## Supporting Material/References\n\n- Attached: `curl_telnet_poc.py` - Python PoC server script\n- Source file: https://github.com/curl/curl/blob/master/lib/telnet.c\n- Vulnerable lines: 1210, 1226\n- Related macros: lines 63-76 (CURL_SB_CLEAR, CURL_SB_TERM, CURL_SB_ACCUM, CURL_SB_GET, CURL_SB_LEN)\n```\n\n## Impact\n\n## Impact\n\n### Security Impact\n\n1. **Information Disclosure (Low-Medium)**: When curl is run in verbose mode (`-v`), the `printsub()` function may read and display memory contents from before the suboption buffer. This could potentially leak:\n   - Heap pointers (useful for ASLR bypass in chained exploits)\n   - Contents of the `dynbuf out` structure\n   - Other sensitive data in adjacent memory\n\n2. **Denial of Service (Low)**: Depending on memory layout and access patterns, the out-of-bounds read could cause a crash.\n\n### Attack Scenario\n\nAn attacker controlling a malicious telnet server could:\n1. Wait for a victim to connect using `curl -v telnet://malicious-server`\n2. Send crafted telnet suboption data to trigger the vulnerability\n3. Potentially observe leaked memory contents in error messages or logs\n4. Use leaked heap pointers to aid in exploiting other vulnerabilities\n\n### Limitations\n\n- Requires victim to connect to attacker-controlled telnet server\n- Most impactful in verbose mode (`-v` flag)\n- Telnet protocol is deprecated and rarely used\n- No direct code execution capability",
+  "weakness": {
+    "id": 10,
+    "name": "Buffer Under-read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5163392,
+      "file_name": "curl_telnet_poc.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/uzuw76s5785lgs2zav2led918oe4?response-content-disposition=attachment%3B%20filename%3D%22curl_telnet_poc.py%22%3B%20filename%2A%3DUTF-8%27%27curl_telnet_poc.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTLAFP4TE%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162838Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIBjfJaXTOx3bRWUSm2MCczXAHIWxahXT6C2I3YxSXca3AiEAph3oeHGqX%2FwVlDscybgl6B7m5oeh4O4KBzDBIL7QYmkqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDJBk4DqfVXHT4MohnSqOBVth%2Fo1kBuwhwqSIK6kPqRlczUiS6m5mko4EyinR7FbPpBkwKhDJ2II%2FySzAGXrS4Bb4JVa0lW9hx80b9A%2B3IabiocGLXzn5LFYPH8oMbtB1p2ngDNkoWi6lLXYYafJeGpbiVWnEDgZM4plxI8mcHyaR36GoHRXndAyTS3WAvBomd4S2QCuAxrAA3bfAc8w%2FQ6vV2lON7fqqN6WheGi8iobWcfmMdKxVNVW%2FGy9NQi7WUL2tNBzG7F45%2Bkau3MXuxu8fPyjCjtp%2FfirAI0RAj7js3vGWb6Wsjj%2FYx%2FIyvWIROvdC4X53%2FpYYm51FdBXtsYjyMzYLeP8oWlBN5AEFj54slXnhl8iAsktsf4epMagxrpakSTu2d2cl4Q40VsVDOh5xhK4Jy3DcuAct0LVnJSJ56fm74PNVA7MmlwM9rRoOFNCrzEEZ%2BZPDt32ZiuBMDwssJoY7Q%2FYykEywAnUlnrMiINk%2BuRjAQHRQaCdwf6kqwJNjnuw%2F8fgbhJ3tVN%2FtrA1VbKahdqp%2Bkk0X8FHtUz5ll8Gjsx8FmxlAHjdnQOg127ErHdIq9QXwAU64i1JPi%2Bx2ZibevAgZMoZnG9Sm%2Fdnx%2Forv5e0gzKwLXeLMDVQHM3JguXui9DlDZLQTn0hZVojHvc1TvBfUvzsOevHLJx%2Bvn9lYr3v8pA0vxalJAF%2BoKAkRDBKxX1ZQHnAlreL5XPGWZR8I%2BWt2pqDal9FtkHx%2FKPtU8TKhxE6RDSorX5I%2BYP2GCec9H%2B8AfCNVdCs%2FP1W3X4liJVElIrooAYErcIN2OCD2Jja9jl0%2F2xxemOwEHYuSSJ815TZqheKOh5pM2d04hrZ4M0VknwL3pLqTXfswlpdNK%2BEzerzjlanxjjDUsdjPBjqxAcQSFj1qQChU7PSgGzk2DJV9xuVpokoPGbDLAn3q98oW5MjiNJ7ZwHodlqcDL8QIqSjInq8hl8O3oCTbiGAhTpkLGwo%2B%2FvHOMDRaD7oqFzrzm5ijdJ9KjO5O8y9FNtjCpgTCY0Y8qc4ZD4NsEtVv%2FNmxwajrPw4cK5EkgYRaLhmXbtCNWskw1ih1h1uAqdq6xLaDYCTzLRVg413qobL7H6LKKWnZtr90IRFj4bsLHZ99yw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ed1623c10588bb0a53a24bc0a8070748e7dd62f43ec2c3d25fb5c2cbc0120efc",
+      "file_size": 8911,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 16,
+  "voters": [
+    "2026",
+    "stif",
+    "nitin-8551",
+    "i-amlogan",
+    "junkieguk",
+    "hoss_a",
+    "cyphervision",
+    "ngorzz",
+    "randomname7",
+    "isk_3",
+    "and 6 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

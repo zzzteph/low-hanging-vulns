@@ -1,0 +1,144 @@
+{
+  "id": 2402845,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yNDAyODQ1",
+  "url": "https://hackerone.com/reports/2402845",
+  "title": "CVE-2024-2398: HTTP/2 push headers memory-leak",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2024-03-05T16:56:33.495Z",
+  "submitted_at": "2024-03-05T16:56:33.627Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "w0x42",
+    "url": "/w0x42",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2024-2398"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2024-03-27T10:33:14.061Z",
+  "bug_reporter_agreed_on_going_public_at": "2024-03-27T10:33:13.888Z",
+  "team_member_agreed_on_going_public_at": "2024-03-27T07:23:49.002Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nFor each incoming `PUSH_PROMISE` header a new `name:value` string is allocated \nand the pointer to that string is stored in the `stream->push_headers` array.\n\n```\nh = aprintf(\"%s:%s\", name, value);\n    if(h)\n      stream->push_headers[stream->push_headers_used++] = h;\n```\n\nLibcurl will reject `PUSH_PROMISE` frames with too many headers.\nWhen the number of headers exceeds some threshold, `on_header` returns an error.\nHowever, libcurl forgets to free the `stream->push_headers` array elements before `stream->push_headers` is freed.\nA malicious server may continuously send `PUSH_PROMISE` frames with over 1000 headers, which would eventually consume all available memory.\n\nThe same issue exists when `Curl_saferealloc` fails.\n\n```\n if(stream->push_headers_alloc > 1000) {\n        /* this is beyond crazy many headers, bail out */\n        failf(data_s, \"Too many PUSH_PROMISE headers\");\n        Curl_safefree(stream->push_headers);\n        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;\n      }\n      stream->push_headers_alloc *= 2;\n      headp = Curl_saferealloc(stream->push_headers,\n                               stream->push_headers_alloc * sizeof(char *));\n      if(!headp) {\n        stream->push_headers = NULL;\n        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;\n      }\n```\n\n\n## Steps To Reproduce:\n\n  1. compile `nghttp2` with {F3099659} applied\n  1. compile {F3099658}\n  1. run `nghttpd -p/=/foo.bar --no-tls 8181`\n  1. run `valgrind --leak-check=full http2_push_promise`\n\nfor each `-p` option `nghttpd` will send 200 `PUSH_PROMISE` frames, each with 1280 headers (not counting pseudo headers)\n\n## Supporting Material/References:\n`valgrind --leak-check=full http2_push_promise` output:\n```\n==13928== \n==13928== HEAP SUMMARY:\n==13928==     in use at exit: 8,285,018 bytes in 256,674 blocks\n==13928==   total heap usage: 261,567 allocs, 4,893 frees, 12,766,009 bytes allocated\n==13928== \n==13928== 64 bytes in 2 blocks are possibly lost in loss record 2 of 10\n==13928==    at 0x48436C4: malloc (vg_replace_malloc.c:392)\n==13928==    by 0x4889F45: dyn_nappend (dynbuf.c:107)\n==13928==    by 0x488A2C5: Curl_dyn_addn (dynbuf.c:170)\n==13928==    by 0x48C393E: alloc_addbyter (mprintf.c:1065)\n==13928==    by 0x48C2FF9: dprintf_formatf (mprintf.c:852)\n==13928==    by 0x48C39FF: curl_mvaprintf (mprintf.c:1095)\n==13928==    by 0x48C3AF0: curl_maprintf (mprintf.c:1110)\n==13928==    by 0x48B0F86: on_header (http2.c:1467)\n==13928==    by 0x4C310C1: nghttp2_session_mem_recv (in /usr/lib64/libnghttp2.so.14.25.1)\n==13928==    by 0x48AE62B: h2_process_pending_input (http2.c:552)\n==13928==    by 0x48B2570: h2_progress_ingress (http2.c:1914)\n==13928==    by 0x48B2775: cf_h2_recv (http2.c:1953)\n==13928== \n==13928== 8,191,872 bytes in 255,996 blocks are definitely lost in loss record 10 of 10\n==13928==    at 0x48436C4: malloc (vg_replace_malloc.c:392)\n==13928==    by 0x4889F45: dyn_nappend (dynbuf.c:107)\n==13928==    by 0x488A2C5: Curl_dyn_addn (dynbuf.c:170)\n==13928==    by 0x48C393E: alloc_addbyter (mprintf.c:1065)\n==13928==    by 0x48C2FF9: dprintf_formatf (mprintf.c:852)\n==13928==    by 0x48C39FF: curl_mvaprintf (mprintf.c:1095)\n==13928==    by 0x48C3AF0: curl_maprintf (mprintf.c:1110)\n==13928==    by 0x48B0F86: on_header (http2.c:1467)\n==13928==    by 0x4C310C1: nghttp2_session_mem_recv (in /usr/lib64/libnghttp2.so.14.25.1)\n==13928==    by 0x48AE62B: h2_process_pending_input (http2.c:552)\n==13928==    by 0x48B2570: h2_progress_ingress (http2.c:1914)\n==13928==    by 0x48B2775: cf_h2_recv (http2.c:1953)\n==13928== \n==13928== LEAK SUMMARY:\n==13928==    definitely lost: 8,191,872 bytes in 255,996 blocks\n==13928==    indirectly lost: 0 bytes in 0 blocks\n==13928==      possibly lost: 64 bytes in 2 blocks\n==13928==    still reachable: 93,082 bytes in 676 blocks\n==13928==         suppressed: 0 bytes in 0 blocks\n==13928== Reachable blocks (those to which a pointer was found) are not shown.\n==13928== To see them, rerun with: --leak-check=full --show-leak-kinds=all\n==13928== \n==13928== For lists of detected and suppressed errors, rerun with: -s\n==13928== ERROR SUMMARY: 2 errors from 2 contexts (suppressed: 0 from 0)\n```\n\n## Impact\n\ndenial of service",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 3099658,
+      "file_name": "http2_push_promise.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ss7y8kny7uztd49j7orx8cj635t2?response-content-disposition=attachment%3B%20filename%3D%22http2_push_promise.c%22%3B%20filename%2A%3DUTF-8%27%27http2_push_promise.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR4PMSLRZ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T164736Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJHMEUCICvVuxKdti4s54mVesV7ID2aB8vIqtsEXgl3ASvwzJliAiEA%2BNlysXvMx7QlLbhXsvjxJahGn25Cay2WPx9Ls9qt02kqsgUIPxADGgwwMTM2MTkyNzQ4NDkiDMVZ%2FI9nDmVaoQOAKCqPBQ4eim985iK5r1B%2BYfvOYTnU3QzkpjmMcXM64mxIknUDYYDleVz7pb%2FtthuP5uLY0OEg%2FF%2BWaYXZFuWU8N%2BFQMkqo13XyVwhB1FxjV0q5JI7kLxhUuBmBHxVpOXhu%2B9l0WUi92ebPWSTVJ8KlSeubz3x3MjbJjy%2B78lsQTXWISObVbvgpVYRsdM4xVcbk5f1WLjczeFdvELgMoFjuKq6i2ZVvVpc5lx7DEgwvXky4fGiAqwe4PP6yCfAkKFGUT%2FAM2jyj293zF2qtC4V3HsRhhgtrIgFDVY%2B%2BfPCZnz8mwzITU1BKj9ArFvj%2Fre9aWb0wtFnkFck4gjrEjD%2B0fnbGFVHn%2FJ8s8cbz5Kwnpiunt%2F6McSu4cKvBpD2IHl6X2bOMfgwDcglL2%2FOOJM4WhPInhsM2ZWPZHE%2FTNBFB3nByWRKV8coHqtNvR%2FMhVwdUZRDVsS%2FDfJisjNqM1NlICI4dioR4CuB88RgG4kkA%2BoXEpi9DsePR220koXxEiAf6F3z6gJ4v7tPEBXr0jydg%2B2zmZ6YQnUyczNfxY1bNyedp2lrNyYUJwfrAuxrFmtooR3qjwyq%2BCUHxuuD2XIn5tQnBEOTk3xf%2B3VitLXQKBLaQMW84tRHI0fVFE6PwcEVChBgFLcmoRNuOjZoi9gLNHL09%2FqZybvt0Ztrzxmf0uDhbKm2ciDvUC9jEQwMO4oXZMtPZ3wyQXVqnGv%2BqiIKQpdeFdy%2BNQT9S3g%2B19GkFhMmf2bdHqX%2Bgw5fxkqEnlZqvoInA66%2BQnEgaS4EQ6z3I1kVm%2FdsjOuzWyWvvedFFbUuG2uitfH3CSPUV422TS%2BAJip1UuLcl1VLnFy4dQ1icEP4hKiySR5sKmURuhH3vbUmB7QwoovYzwY6sQGE6NzbGOPAnJsNHZeZ8M%2BToFQYPuX8YFlSEIYm7cLlDZfQi6%2FTc1UzF4AWJgkFw25CpLJRx3vB%2FXZZ3MfXHg6NAMhgffWIRJ6nv%2FX1Oyr5%2Fbq2o1xhQo43veoKnJCkO%2Bo44tMR8GnuS%2F3brWzIc90fCkOZ00N9GLZv1WeToQeTZ50xgmnuprF3Vvs2d2PC36lY8WHbKrPxUMtf9bki5UwsEYR%2BBdr%2BJGr98hgCzm48VkE%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=47e58df8580630815f99eb827619979f81c10f905113c7962547298d323543eb",
+      "file_size": 1966,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 3099659,
+      "file_name": "nghttp_v1.59.patch",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/u4nowgbpa5rhcm8oww06asythybo?response-content-disposition=attachment%3B%20filename%3D%22nghttp_v1.59.patch%22%3B%20filename%2A%3DUTF-8%27%27nghttp_v1.59.patch&response-content-type=text%2Fx-diff&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR4PMSLRZ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T164736Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJHMEUCICvVuxKdti4s54mVesV7ID2aB8vIqtsEXgl3ASvwzJliAiEA%2BNlysXvMx7QlLbhXsvjxJahGn25Cay2WPx9Ls9qt02kqsgUIPxADGgwwMTM2MTkyNzQ4NDkiDMVZ%2FI9nDmVaoQOAKCqPBQ4eim985iK5r1B%2BYfvOYTnU3QzkpjmMcXM64mxIknUDYYDleVz7pb%2FtthuP5uLY0OEg%2FF%2BWaYXZFuWU8N%2BFQMkqo13XyVwhB1FxjV0q5JI7kLxhUuBmBHxVpOXhu%2B9l0WUi92ebPWSTVJ8KlSeubz3x3MjbJjy%2B78lsQTXWISObVbvgpVYRsdM4xVcbk5f1WLjczeFdvELgMoFjuKq6i2ZVvVpc5lx7DEgwvXky4fGiAqwe4PP6yCfAkKFGUT%2FAM2jyj293zF2qtC4V3HsRhhgtrIgFDVY%2B%2BfPCZnz8mwzITU1BKj9ArFvj%2Fre9aWb0wtFnkFck4gjrEjD%2B0fnbGFVHn%2FJ8s8cbz5Kwnpiunt%2F6McSu4cKvBpD2IHl6X2bOMfgwDcglL2%2FOOJM4WhPInhsM2ZWPZHE%2FTNBFB3nByWRKV8coHqtNvR%2FMhVwdUZRDVsS%2FDfJisjNqM1NlICI4dioR4CuB88RgG4kkA%2BoXEpi9DsePR220koXxEiAf6F3z6gJ4v7tPEBXr0jydg%2B2zmZ6YQnUyczNfxY1bNyedp2lrNyYUJwfrAuxrFmtooR3qjwyq%2BCUHxuuD2XIn5tQnBEOTk3xf%2B3VitLXQKBLaQMW84tRHI0fVFE6PwcEVChBgFLcmoRNuOjZoi9gLNHL09%2FqZybvt0Ztrzxmf0uDhbKm2ciDvUC9jEQwMO4oXZMtPZ3wyQXVqnGv%2BqiIKQpdeFdy%2BNQT9S3g%2B19GkFhMmf2bdHqX%2Bgw5fxkqEnlZqvoInA66%2BQnEgaS4EQ6z3I1kVm%2FdsjOuzWyWvvedFFbUuG2uitfH3CSPUV422TS%2BAJip1UuLcl1VLnFy4dQ1icEP4hKiySR5sKmURuhH3vbUmB7QwoovYzwY6sQGE6NzbGOPAnJsNHZeZ8M%2BToFQYPuX8YFlSEIYm7cLlDZfQi6%2FTc1UzF4AWJgkFw25CpLJRx3vB%2FXZZ3MfXHg6NAMhgffWIRJ6nv%2FX1Oyr5%2Fbq2o1xhQo43veoKnJCkO%2Bo44tMR8GnuS%2F3brWzIc90fCkOZ00N9GLZv1WeToQeTZ50xgmnuprF3Vvs2d2PC36lY8WHbKrPxUMtf9bki5UwsEYR%2BBdr%2BJGr98hgCzm48VkE%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1da2d6cbc8581db068cb7650d0617beedef3f98e3a2a1ef1e14788a3cb62cbd6",
+      "file_size": 1966,
+      "type": "text/x-diff",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2024-04-26T07:23:49.253Z",
+  "allow_singular_disclosure_after": -63624227.004132085,
+  "singular_disclosure_allowed": true,
+  "vote_count": 12,
+  "voters": [
+    "sunilk45",
+    "zy9ard3",
+    "mk7120",
+    "kichukishor",
+    "aecherli",
+    "enquireabhinav",
+    "francisco08",
+    "manik6588",
+    "70x1c473d",
+    "lucaas_gomes",
+    "and 2 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

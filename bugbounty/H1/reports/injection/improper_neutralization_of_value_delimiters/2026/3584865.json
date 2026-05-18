@@ -1,0 +1,123 @@
+{
+  "id": 3584865,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTg0ODY1",
+  "url": "https://hackerone.com/reports/3584865",
+  "title": "In curl's SASL OAUTHBEARER authentication, including the SOH character (0x01) in the username corrupts the message structure.",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-03-04T12:47:15.658Z",
+  "submitted_at": "2026-03-04T12:47:16.146Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "y_security",
+    "url": "/y_security",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-03-08T22:56:12.487Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-03-07T10:03:11.608Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\nThis vulnerability arises because curl fails to validate the contents of the username when constructing OAuth2 authentication messages. Depending on the server-side implementation, this could lead to log tampering or credential spoofing.\n\n## Affected version\n\ncurl 8.18.0 (x86_64-apple-darwin23.6.0)\n\n## Steps To Reproduce:\n\n1. Set up an IMAP server using Python (port 1430)\n2. Execute curl with the username set to `user\\x01host=evil.com`:\n`curl -v --url “imap://127.0.0.1:1430” -u \"$(python3 -c 'import sys; sys.stdout.buffer.write(b“user\\x01host=evil.com”)'):TOKEN“ --oauth2-bearer ”TOKEN\"`\n\n## Actual Output:\n--- AUTH MESSAGE RECEIVED ---\nRaw: b'bixhPXVzZXIBaG9zdD1ldmlsLmNvbSwBaG9zdD0xMjcuMC4wLjEBcG9ydD0xNDMwAWF1dGg9QmVhcmVyIFRPS0VOAQE='\n--- DECODED MESSAGE ---\nb'n,a=user[SOH]host=evil.com,[SOH]host=127.0.0.1[SOH]port=1430[SOH]auth=Bearer TOKEN[SOH][SOH]'\n\n## Expected behavior:\nThe SOH character in the username should be rejected\nwith an error (e.g., CURLE_AUTH_ERROR).\n\n## Actual behavior:\nThe SOH character is passed through without validation,\nresulting in protocol field injection.\n\n## Supporting Material:\nPython code for IMAP server (for Steps To Reproduce section)\n```python\nimport socket\nimport base64\n\ndef start_server():\n    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind(('127.0.0.1', 1430)) \n    s.listen(1)\n    print(\"Waiting for IMAP OAuth message on port 1430...\")\n\n    while True:\n        conn, addr = s.accept()\n        try:\n            conn.send(b\"* OK IMAP4rev1 Server Ready\\r\\n\")\n            \n            conn.recv(1024) \n            conn.send(b\"* CAPABILITY IMAP4rev1 AUTH=OAUTHBEARER\\r\\nA001 OK\\r\\n\")\n            \n            conn.recv(1024) \n            conn.send(b\"+ \\r\\n\")\n            \n            final_data = conn.recv(4096)\n            if final_data:\n                print(f\"\\n--- AUTH MESSAGE RECEIVED ---\")\n                print(f\"Raw: {final_data.strip()}\")\n                \n                try:\n                    decoded = base64.b64decode(final_data.strip())\n                    print(f\"--- DECODED MESSAGE ---\")\n                    print(decoded.replace(b'\\x01', b'[SOH]'))\n                except:\n                    print(\"Could not decode base64\")\n        except Exception as e:\n            print(f\"Error: {e}\")\n        finally:\n            conn.close()\n\nif __name__ == \"__main__\":\n    start_server()\n```\n\n## Impact\n\n## Summary:\ncurl does not validate the username for SOH (0x01) characters \nbefore constructing OAUTHBEARER messages.\n\nThe username should normally be a single block of data following `n,a=`. However, in this example, mixing in `\\x01host=evil.com` causes `host=evil.com` to reach the server as an independent field. This means that another field within the protocol can potentially be rewritten from the username input field.\nFurthermore, even though the connection is actually made to 127.0.0.1, it may appear in logs as an access attempt to a different host. Server logs could record this as a connection attempt to host=evil.com. This allows attackers to conceal their actions or potentially deceive log audits.",
+  "weakness": {
+    "id": 434,
+    "name": "Improper Neutralization of Value Delimiters"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 17,
+  "voters": [
+    "alimuhannad",
+    "2026",
+    "2_4-a",
+    "tanjimulislam01huntr",
+    "cronos3218",
+    "mukiibi",
+    "jeisondev",
+    "7hk",
+    "x_verse",
+    "pbugger96",
+    "and 7 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

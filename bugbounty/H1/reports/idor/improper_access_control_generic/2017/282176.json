@@ -1,0 +1,131 @@
+{
+  "id": 282176,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yODIxNzY=",
+  "url": "https://hackerone.com/reports/282176",
+  "title": "Unauthenticated hidden groups disclosure via Ajax groups search",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2017-10-23T17:52:58.780Z",
+  "submitted_at": "2017-10-23T17:52:58.780Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jdgrimes",
+    "url": "/jdgrimes",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/009/109/d46d46e7dd9a78c3bd46390279cd42d1c1e76124_original.jpeg/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2017-11-02T19:05:57.285Z",
+  "bug_reporter_agreed_on_going_public_at": "2017-11-02T18:20:32.850Z",
+  "team_member_agreed_on_going_public_at": "2017-11-02T19:05:57.107Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "*Note: this issue was previously submitted to `security@wordpress.org`, because I did not have the rep to submit it here. That was cleared up with HackerOne, so I am now submitting the issue here, at @aaroncampbell's direction.*\n\n## Summary\n\nIt is possible for an unauthenticated user to view the title, description, avatar, time of last activity, and membership count of hidden groups. This is possible via the Ajax groups search feature, due to a failure to properly encode user-supplied values when incorporating them into the query string within the Ajax handler. This allows the user to pass args to the groups query that they aren't intended to be able to use. Specifically, the `show_hidden` query arg may be used to show hidden groups.\n\n## Technical details\n\nGroups in BuddyPress can have one of three different statuses: `public`, `private`, or `hidden`. Public and private groups are publicly queryable, by default, although private groups cannot be joined without an invitation. Hidden groups are not only restricted like private groups, but are also hidden in queries, unless a user has moderator capabilities.\n\nThe `BP_Groups_Group::get()` method is used to query for groups. Of particular interest are the `status` and `show_hidden` query args:\n\n```php\n<?php\n     if ( ! empty( $r['status'] ) ) {\n        if ( ! is_array( $r['status'] ) ) {\n           $r['status'] = preg_split( '/[\\s,]+/', $r['status'] );\n        }\n        $r['status'] = array_map( 'sanitize_title', $r['status'] );\n        $status_in = \"'\" . implode( \"','\", $r['status'] ) . \"'\";\n        $where_conditions['status'] = \"g.status IN ({$status_in})\";\n     } elseif ( empty( $r['show_hidden'] ) ) {\n        $where_conditions['hidden'] = \"g.status != 'hidden'\";\n     }\n```\n\nAs you can see, there are no restrictions applied as to who can use these args within the method itself. So any code which allows arbitrary query args to be passed to that method by users without proper permissions is vulnerable to hidden groups disclosure.\n\nThe only place where the method is called in that manner is in its wrapper function, `groups_get_groups()`, which in turn is used by `BP_Groups_Template` to get the groups to display in a groups template. It does not accept the `status` query arg, but does allow `show_hidden`.\n\n`BP_Groups_Template::__construct()` does contain this code:\n\n```php\n<?php\n     if ( bp_current_user_can( 'bp_moderate' ) || ( is_user_logged_in() && $user_id == bp_loggedin_user_id() ) ) {\n        $show_hidden = true;\n     }\n```\n\nHowever, note that this doesn't prevent `$show_hidden` from being passed in as `true` even if the condition isn't met. Thus, the class is still vulnerable if we can find a way to pass the `show_hidden` arg into it.\n\nThe groups template class is utilized only by `bp_has_groups()`, which is used in the groups template files to set up a groups query. The `bp_has_groups()` function accepts an array of query args to be passed to it, although usually that feature either isn't used or it isn't possible to pass arbitrary args in.\n\nHowever, there are two places of particular interest. The first is in `buddypress/bp-templates/bp-legacy/buddypress/groups/groups-loop.php` on line 26:\n\n```php\n<?php if ( bp_has_groups( bp_ajax_querystring( 'groups' ) ) ) : ?>\n```\n\nThe value returned by the `bp_ajax_querystring()` function is determined via the `'bp_ajax_querystring'` filter. For the Legacy template pack, the `bp_legacy_theme_ajax_querystring()` function is hooked to that filter to supply the value.\n\n`bp_legacy_theme_ajax_querystring()` is located in `buddypress/bp-templates/bp-legacy/buddypress-functions.php`, and most of it is pretty well hardened against this kind of issue, properly sanitizing the user-supplied values. However, on line 692, it does this:\n\n```php\n<?php\n  // Activity stream filtering on action.\n  if ( ! empty( $_BP_COOKIE['bp-' . $object . '-filter'] ) && '-1' != $_BP_COOKIE['bp-' . $object . '-filter'] ) {\n     $qs[] = 'type=' . $_BP_COOKIE['bp-' . $object . '-filter'];\n\n     // ...\n  }\n```\n\nThe value of `$_BP_COOKIE` can be set via `$_POST['cookie']` (line 675):\n\n```php\n<?php\n  // Set up the cookies passed on this AJAX request. Store a local var to avoid conflicts.\n  if ( ! empty( $_POST['cookie'] ) ) {\n     $_BP_COOKIE = wp_parse_args( str_replace( '; ', '&', urldecode( $_POST['cookie'] ) ) );\n  } else {\n     $_BP_COOKIE = &$_COOKIE;\n  }\n```\n\nThe `bp-$object-scope` is also vulnerable on line 714:\n\n```php\n<?php\n  if ( ! empty( $_BP_COOKIE['bp-' . $object . '-scope'] ) ) {\n\n     //...\n\n     // Activity stream scope only on activity directory.\n     if ( 'all' != $_BP_COOKIE['bp-' . $object . '-scope'] && ! bp_displayed_user_id() && ! bp_is_single_item() )\n        $qs[] = 'scope=' . $_BP_COOKIE['bp-' . $object . '-scope'];\n  }\n```\n\nThe solution is to wrap the values in `urlencode()`, as is done with `$_POST['search_terms']` on line 734.\n\n```php\n<?php\n\n     $qs[] = 'type=' . urlencode( $_BP_COOKIE['bp-' . $object . '-filter'] );\n\n     $qs[] = 'scope=' . urlencode( $_BP_COOKIE['bp-' . $object . '-scope'] );\n```\n\nThe BuddyPress Default theme also suffers from the same problems, in `bp_dtheme_ajax_querystring()` (`buddypress/bp-themes/bp-default/groups/groups-loop.php` uses `bp_has_groups( bp_ajax_querystring( 'groups' ) )` as the Legacy template pack does). In that function, however, `$_POST['search_terms']` is also a vector, since it isn't passed through `urlencode()` (`buddypress/bp-themes/bp-default/_inc/ajax.php` line 137):\n\n```php\n<?php\n  $object_search_text = bp_get_search_default_text( $object );\n  if ( ! empty( $_POST['search_terms'] ) && $object_search_text != $_POST['search_terms'] && 'false' != $_POST['search_terms'] && 'undefined' != $_POST['search_terms'] )\n     $qs[] = 'search_terms=' . $_POST['search_terms'];\n```\n\n## POC\n\nSend a `POST` request to `/wp-admin/admin-ajax.php` with the following body:\n\n```\naction=groups_filter&cookie=bp-groups-filter%253D%252526show_hidden%3D1&object=groups\n```\n\n`bp-groups-filter` can be replaced with `bp-groups-scope` to the same effect:\n\n```\naction=groups_filter&cookie=bp-groups-scope%253D%252526show_hidden%3D1&object=groups\n```",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2017-12-02T18:20:32.928Z",
+  "allow_singular_disclosure_after": -265510504.97051728,
+  "singular_disclosure_allowed": true,
+  "vote_count": 6,
+  "voters": [
+    "bl4de",
+    "skansing",
+    "eveeez",
+    "japz",
+    "destinedtohack",
+    "b4155f7c29acd42c27d007a"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.1,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 2751,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "BuddyPress Core",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

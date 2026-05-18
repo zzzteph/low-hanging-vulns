@@ -1,0 +1,129 @@
+{
+  "id": 3725659,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzI1NjU5",
+  "url": "https://hackerone.com/reports/3725659",
+  "title": "Kerberos/SPNEGO Connection Reuse Vulnerability",
+  "state": "Closed",
+  "substate": "duplicate",
+  "readable_substate": "Duplicate",
+  "created_at": "2026-05-10T23:09:10.152Z",
+  "submitted_at": "2026-05-10T23:09:10.322Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "rootofpi_ramesh",
+    "url": "/rootofpi_ramesh",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-14T09:32:23.913Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-11T09:18:17.666Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Kerberos/SPNEGO Connection Reuse Vulnerability in curl\n\n## Summary\n\ncurl reuses HTTP connections across different users without checking Kerberos state. User B's request can inherit User A's GSS security context, allowing authentication bypass.\n\n## Affected Versions\n\nAll curl versions with Kerberos support (tested and confirmed on curl 8.5.0)\n\n## Root Cause\n\n`ConnectionExists()` in `lib/url.c` checks NTLM state (lines 1214-1273) but has no equivalent check for `http_negotiate_state` or `proxy_negotiate_state`. \n\nWhen Kerberos auth completes, `conn->http_negotiate_state` advances to `GSS_AUTHSUCC` and the GSS security context remains valid. Since `hashkey()` (`lib/conncache.c:126-150`) only uses `port+hostname` (no credentials) and HTTP sets `PROTOPT_CREDSPERREQUEST` which skips credential checks, any request to the same `host:port` reuses the connection with the previous user's GSS context.\n\n## Partial Mitigation\n\ncurl has `noauthpersist` (`lib/http_negotiate.c:140-152`) that cleans up GSS context for single-roundtrip Negotiate (MIT Kerberos). However:\n\n- When `havemultiplerequests` is TRUE (multi-roundtrip auth, common with Windows AD/IIS), `noauthpersist` is FALSE and no cleanup occurs\n- This cleanup happens AFTER `ConnectionExists()` already matched the connection - wrong defensive layer\n- NTLM has protection in both layers; Negotiate has neither\n\n## Suggested Fix\n\nAdd `#if defined(USE_SPNEGO)` block to `ConnectionExists()` mirroring the NTLM pattern:\n\n- Compare credentials when Negotiate is wanted\n- Reject connections with active Negotiate state if new request doesn't want it\n- Add per-transfer Negotiate state reset (like NTLM at `url.c:3776-3792`)\n\n**Note:** For SSO (`--negotiate -u :`), usernames are empty so credential comparison won't work - might need to clear GSS context unconditionally or force separate connections. Apply to both `http_negotiate_state` and `proxy_negotiate_state`.\n\n## Proof of Concept\n\nI've developed a complete reproduction package with real Kerberos authentication:\n\n### Files Included:\n\n1. **source-analysis.md** - Detailed code analysis with line numbers and exploitation flow\n2. **run-exploit.sh** - Automated PoC demonstrating the vulnerability\n3. **test-server.py** - GSSAPI test server that tracks GSS context per TCP connection\n\n### Reproduction Steps:\n\n1. Setup Kerberos KDC with test users (alice, bob)\n2. Run `./run-exploit.sh`\n3. Observe connection reuse and GSS context inheritance\n\nThe PoC demonstrates:\n- Alice authenticates with `--negotiate`\n- Bob makes a request to the same server\n- Connection is reused (same TCP socket)\n- Server logs show: `\"CONNECTION REUSED - GSS context persists for bob@TESTLAB.LOCAL\"`\n\n## Technical Details\n\nSee attached `source-analysis.md` for:\n- Complete code analysis\n- Comparison with NTLM protection mechanism\n- Exploitation flow for different scenarios (single-roundtrip vs multi-roundtrip)\n- Root cause explanation with exact file/line references\n\n## Attachments\n\n- `source-analysis.md` - Technical deep dive\n- `run-exploit.sh` - Working proof-of-concept\n- `test-server.py` - Test server for reproduction\n\n---\n\n**Reported by:** Ramesh Adhikari (adhikari.resume@gmail.com)\n\n## Impact\n\n## Impact\n\nCorporate environments using Kerberos authentication are at high risk. Attack scenarios include:\n\n- **CI/CD pipelines** with multiple service accounts accessing the same API\n- **Shared web servers** where User B's request executes with User A's privileges\n- **Multi-tenant applications** where connection pools are shared across users",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5891883,
+      "file_name": "run-exploit.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/dyssrm4ufbi91lu70mmziw03gg3e?response-content-disposition=attachment%3B%20filename%3D%22run-exploit.sh%22%3B%20filename%2A%3DUTF-8%27%27run-exploit.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVMGHAMUE%2F20260514%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260514T095417Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIDkMNbX2IAqnTxi%2Fc11tcUy4IEmEQXSh1Jl9Y02Pm5C6AiEA92OhByEL6TXU90sIrUX2NtNjER%2BRUQN5AJZ4sMdgl%2B0qsQUIWxADGgwwMTM2MTkyNzQ4NDkiDJ1u34nyosed0KhGtiqOBcTu4gwnS7DKeGuWPmL%2BVlR2iVO%2FySkx8VAsyn7mAZ%2FyQ9qqsVBFcKDYQ8U4A%2FBwOtp9J8b8eP6dKJTIAMn%2FdUZ%2BMQLHl1OkZ7sq3WuHHcITJLBhszX1N6ofkPddxnBdyvxAU4698dRBMtz6gsHTA%2FRuVobEvS7lHPtBsSxDMpzkaGhIxcUpGEtfK8ZKaEWtDi4KfHMXnwJT%2F6u3JVxz6gxqqO63AlG8A%2BCGPizrS63TQCSQBLsQceY6qIuuoFcHOp6wwI%2FwNuUOK%2Bzxy9KsnbeT0GfLTOnbtrkn7mseR54cbDtsix%2BpwPgxijLjynqeyEjHtTvg5RJlZobGm7hEy2rTn6mDjN1SMFuQPY7LhSZgzX4bzOq2fkGtc1KXRnvq7dGCOyel5PA%2BAmn8MGXAmE30mtOCw4gx2vgS%2FqtkZ0KT3ElBsCGKrgYNOyLnmWs14MOTkYUhfLwXK%2Fo4tALdWFVtddF0CCM5K0NNH900BZWzrnnIvZA5KS8ucJnnN47w9kAMhEVGdDXtkyvuDM7%2FqwLpUUa6TSBJ%2BidomA6uJdyL0hUXAtFYaC%2FpBqn8zBkA5dM73CL8p0GIsX%2BFtzx3poOhGOiu1US7hX720VJUO9D%2F7bupjTU7MGd62Q%2FRpvJOfD06NZVxzrHWv5%2BL%2FOBGuGW60IzuVRQlGN0fvaiowkTNsCb6GMPqub8zqkO31TGgltITFY8mbXKlDNVsuqEF2NEATEo6NOG66KYSeSi4GxBHmBwGU4YTx03lnCp15iWzCfUBWCO%2BKEtEICNRr07xpq5LrehIFBGVBsp6CrGEbdYGAw%2FPmDG0Es4KjNP%2B7XMKhXfUz4%2BzQd3RbfSfHZmnPZB7HtcPV%2FRIA9NgUoeMJDC2rpbQBjqxAWBC8jkcVYQJsg2eqFA7z7UNz9OETcLoySSpV2aX8tJj89D08EQa3Y1t0bRl20ZuSR7YJkjRszphG%2B%2BGKHWNlGzLa4UgqJiVmvh919IzUZZlTGvFJ7%2FGnVhl%2FBp5MeBGhofdqzIhujTX3y6jxVRKsTFs9Y%2B%2FdRZq1X98KZ2uCYNe1JeJRjFh3W2bLYosniWRTHy%2FlWjQj2VH2UEUvn0TV98RvAfyxxVpJWgw1rtH8dws%2Bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=84c8aba443415b020da5a431c388ee1ee59481052e5474fa25b166ecdcfa456e",
+      "file_size": 1867,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5891885,
+      "file_name": "source-analysis.md",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9p2sjhn406mm2634lqe9dmmzdz02?response-content-disposition=attachment%3B%20filename%3D%22source-analysis.md%22%3B%20filename%2A%3DUTF-8%27%27source-analysis.md&response-content-type=text%2Fmarkdown&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVMGHAMUE%2F20260514%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260514T095417Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIDkMNbX2IAqnTxi%2Fc11tcUy4IEmEQXSh1Jl9Y02Pm5C6AiEA92OhByEL6TXU90sIrUX2NtNjER%2BRUQN5AJZ4sMdgl%2B0qsQUIWxADGgwwMTM2MTkyNzQ4NDkiDJ1u34nyosed0KhGtiqOBcTu4gwnS7DKeGuWPmL%2BVlR2iVO%2FySkx8VAsyn7mAZ%2FyQ9qqsVBFcKDYQ8U4A%2FBwOtp9J8b8eP6dKJTIAMn%2FdUZ%2BMQLHl1OkZ7sq3WuHHcITJLBhszX1N6ofkPddxnBdyvxAU4698dRBMtz6gsHTA%2FRuVobEvS7lHPtBsSxDMpzkaGhIxcUpGEtfK8ZKaEWtDi4KfHMXnwJT%2F6u3JVxz6gxqqO63AlG8A%2BCGPizrS63TQCSQBLsQceY6qIuuoFcHOp6wwI%2FwNuUOK%2Bzxy9KsnbeT0GfLTOnbtrkn7mseR54cbDtsix%2BpwPgxijLjynqeyEjHtTvg5RJlZobGm7hEy2rTn6mDjN1SMFuQPY7LhSZgzX4bzOq2fkGtc1KXRnvq7dGCOyel5PA%2BAmn8MGXAmE30mtOCw4gx2vgS%2FqtkZ0KT3ElBsCGKrgYNOyLnmWs14MOTkYUhfLwXK%2Fo4tALdWFVtddF0CCM5K0NNH900BZWzrnnIvZA5KS8ucJnnN47w9kAMhEVGdDXtkyvuDM7%2FqwLpUUa6TSBJ%2BidomA6uJdyL0hUXAtFYaC%2FpBqn8zBkA5dM73CL8p0GIsX%2BFtzx3poOhGOiu1US7hX720VJUO9D%2F7bupjTU7MGd62Q%2FRpvJOfD06NZVxzrHWv5%2BL%2FOBGuGW60IzuVRQlGN0fvaiowkTNsCb6GMPqub8zqkO31TGgltITFY8mbXKlDNVsuqEF2NEATEo6NOG66KYSeSi4GxBHmBwGU4YTx03lnCp15iWzCfUBWCO%2BKEtEICNRr07xpq5LrehIFBGVBsp6CrGEbdYGAw%2FPmDG0Es4KjNP%2B7XMKhXfUz4%2BzQd3RbfSfHZmnPZB7HtcPV%2FRIA9NgUoeMJDC2rpbQBjqxAWBC8jkcVYQJsg2eqFA7z7UNz9OETcLoySSpV2aX8tJj89D08EQa3Y1t0bRl20ZuSR7YJkjRszphG%2B%2BGKHWNlGzLa4UgqJiVmvh919IzUZZlTGvFJ7%2FGnVhl%2FBp5MeBGhofdqzIhujTX3y6jxVRKsTFs9Y%2B%2FdRZq1X98KZ2uCYNe1JeJRjFh3W2bLYosniWRTHy%2FlWjQj2VH2UEUvn0TV98RvAfyxxVpJWgw1rtH8dws%2Bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=77abd447e5e229a2c098b6f0835388a13cf67bfa8014f7880f71e8552218d639",
+      "file_size": 4546,
+      "type": "text/markdown",
+      "moderated": null
+    },
+    {
+      "id": 5891886,
+      "file_name": "test-server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bjzasnm0umpkw0jdwwe0fhrw3nc5?response-content-disposition=attachment%3B%20filename%3D%22test-server.py%22%3B%20filename%2A%3DUTF-8%27%27test-server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVMGHAMUE%2F20260514%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260514T095417Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIDkMNbX2IAqnTxi%2Fc11tcUy4IEmEQXSh1Jl9Y02Pm5C6AiEA92OhByEL6TXU90sIrUX2NtNjER%2BRUQN5AJZ4sMdgl%2B0qsQUIWxADGgwwMTM2MTkyNzQ4NDkiDJ1u34nyosed0KhGtiqOBcTu4gwnS7DKeGuWPmL%2BVlR2iVO%2FySkx8VAsyn7mAZ%2FyQ9qqsVBFcKDYQ8U4A%2FBwOtp9J8b8eP6dKJTIAMn%2FdUZ%2BMQLHl1OkZ7sq3WuHHcITJLBhszX1N6ofkPddxnBdyvxAU4698dRBMtz6gsHTA%2FRuVobEvS7lHPtBsSxDMpzkaGhIxcUpGEtfK8ZKaEWtDi4KfHMXnwJT%2F6u3JVxz6gxqqO63AlG8A%2BCGPizrS63TQCSQBLsQceY6qIuuoFcHOp6wwI%2FwNuUOK%2Bzxy9KsnbeT0GfLTOnbtrkn7mseR54cbDtsix%2BpwPgxijLjynqeyEjHtTvg5RJlZobGm7hEy2rTn6mDjN1SMFuQPY7LhSZgzX4bzOq2fkGtc1KXRnvq7dGCOyel5PA%2BAmn8MGXAmE30mtOCw4gx2vgS%2FqtkZ0KT3ElBsCGKrgYNOyLnmWs14MOTkYUhfLwXK%2Fo4tALdWFVtddF0CCM5K0NNH900BZWzrnnIvZA5KS8ucJnnN47w9kAMhEVGdDXtkyvuDM7%2FqwLpUUa6TSBJ%2BidomA6uJdyL0hUXAtFYaC%2FpBqn8zBkA5dM73CL8p0GIsX%2BFtzx3poOhGOiu1US7hX720VJUO9D%2F7bupjTU7MGd62Q%2FRpvJOfD06NZVxzrHWv5%2BL%2FOBGuGW60IzuVRQlGN0fvaiowkTNsCb6GMPqub8zqkO31TGgltITFY8mbXKlDNVsuqEF2NEATEo6NOG66KYSeSi4GxBHmBwGU4YTx03lnCp15iWzCfUBWCO%2BKEtEICNRr07xpq5LrehIFBGVBsp6CrGEbdYGAw%2FPmDG0Es4KjNP%2B7XMKhXfUz4%2BzQd3RbfSfHZmnPZB7HtcPV%2FRIA9NgUoeMJDC2rpbQBjqxAWBC8jkcVYQJsg2eqFA7z7UNz9OETcLoySSpV2aX8tJj89D08EQa3Y1t0bRl20ZuSR7YJkjRszphG%2B%2BGKHWNlGzLa4UgqJiVmvh919IzUZZlTGvFJ7%2FGnVhl%2FBp5MeBGhofdqzIhujTX3y6jxVRKsTFs9Y%2B%2FdRZq1X98KZ2uCYNe1JeJRjFh3W2bLYosniWRTHy%2FlWjQj2VH2UEUvn0TV98RvAfyxxVpJWgw1rtH8dws%2Bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2a37d857932b49f0af1aaa1c3c9fae8885a3334c9fb51b8e70f9cd5d4b4881aa",
+      "file_size": 5624,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "bl4ck-"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

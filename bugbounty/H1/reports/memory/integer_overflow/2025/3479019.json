@@ -1,0 +1,123 @@
+{
+  "id": 3479019,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDc5MDE5",
+  "url": "https://hackerone.com/reports/3479019",
+  "title": "Security hardening: missing integer overflow check in curl_load_library()",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "low",
+  "readable_substate": "N/A",
+  "created_at": "2025-12-26T13:31:26.627Z",
+  "submitted_at": "2025-12-26T13:31:26.899Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "y_security",
+    "url": "/y_security",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-12-27T13:47:27.970Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-12-27T10:03:32.723Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\nA missing integer overflow check was identified in `lib/system_win32.c::curl_load_library()`\nwhen calculating the buffer size for a DLL path. On 32-bit Windows builds, the unchecked\nsize calculation can wrap around, resulting in an undersized heap allocation followed by\nunbounded string copies via `_tcscpy()`.\n\nWhile the current call sites only pass fixed, trusted strings and no immediate attack\nvector is identified, the presence of a latent heap corruption primitive places this issue\nbeyond pure informational hardening and justifies a **Low severity** classification.\n\n---\n\n## Affected Code\n**File:** `lib/system_win32.c`  \n**Function:** `curl_load_library(LPCTSTR filename)`\n\n``` c\nUINT systemdirlen = GetSystemDirectory(NULL, 0);\nif(systemdirlen) {\n  size_t filenamelen = _tcslen(filename);\n  TCHAR *path = curlx_malloc(sizeof(TCHAR) *\n                             (systemdirlen + 1 + filenamelen));\n  if(path && GetSystemDirectory(path, systemdirlen)) {\n    _tcscpy(path + _tcslen(path), TEXT(\"\\\\\"));\n    _tcscpy(path + _tcslen(path), filename);\n  }\n  curlx_free(path);\n}\n```\n\n---\n\n## Technical Details\n\n### Integer Overflow Condition\n- `systemdirlen` is of type `UINT` (32-bit)\n- `filenamelen` is of type `size_t`\n- The allocation size is computed as:\n\n```\nsizeof(TCHAR) * (systemdirlen + 1 + filenamelen)\n```\n\nOn 32-bit platforms, `size_t` arithmetic wraps on overflow. If `filenamelen` is large,\nthe multiplication can overflow, resulting in a much smaller allocation than intended.\n\n### Memory Safety Impact\nAfter allocation, `_tcscpy()` is used twice without any bounds checking. If the buffer\nis undersized due to arithmetic wrap-around, this creates a **reliable heap corruption\ncondition at the code level**, independent of current reachability.\n\n---\n\n## Why This Is Low Severity (Not Informational)\n\n### 1. Heap Corruption Primitive Exists\nEven though the current code paths are not attacker-controlled, the function contains\na complete heap corruption pattern (overflowable size calculation + unbounded copy).\nThis exceeds a stylistic or theoretical issue.\n\n### 2. Violation of libcurl’s Own Defensive Patterns\nOther parts of the codebase explicitly guard against integer overflows in allocation\ncalculations (e.g. `vauth/ntlm.c` using `SIZE_MAX` checks). This inconsistency weakens\nthe overall security posture and makes future maintenance riskier.\n\n### 3. Long-Term and Supply-Chain Risk\n`curl_load_library()` is a general-purpose internal utility. As libcurl evolves or is\nembedded by third-party software, future refactoring or reuse could unintentionally\npass unvalidated input to this function, immediately exposing a heap corruption flaw.\n\n### 4. Low-Cost, High-Value Fix\nThe issue can be resolved with a simple bounds check and without changing runtime\nbehavior in valid cases. This makes it a practical security fix rather than a\npurely informational observation.\n\n---\n\n## Recommended Fix\n\nAdd an explicit overflow check before allocation, consistent with existing libcurl\npractices:\n\n``` c\nif(filenamelen > (SIZE_MAX / sizeof(TCHAR)) - systemdirlen - 1) {\n  return NULL;\n}\n\nTCHAR *path = curlx_malloc(sizeof(TCHAR) *\n                           (systemdirlen + 1 + filenamelen));\n```\n\n---\n\n## Severity Assessment\n- **Severity:** Low\n- **Type:** Integer overflow leading to potential heap-based buffer overflow\n- **Current Exploitability:** None identified\n- **Risk Category:** Latent memory corruption / future reachability risk\n\n---\n\n## References\n- CWE-190: Integer Overflow or Wraparound\n- CWE-122: Heap-based Buffer Overflow\n- CERT C: INT30-C (Ensure that unsigned integer operations do not wrap)\n- libcurl precedent: overflow checks in `vauth/ntlm.c`\n\n## Impact\n\n### Impact\n\nAt present, no direct attacker-controlled input reaches this code path, and no\nimmediate exploitation scenario is identified in the current libcurl codebase.\n\nHowever, this implementation contains a complete heap corruption primitive\n(integer overflow in allocation size calculation followed by unbounded string\ncopies). If this function were to become reachable through future refactoring,\nnew features, or third-party reuse, an attacker could potentially achieve:\n\n- Heap memory corruption on 32-bit Windows builds\n- Process crash (denial of service)\n- Potential arbitrary code execution, depending on allocator behavior and\n  surrounding memory layout\n\nBecause libcurl is a widely embedded library, such latent issues increase\nsoftware supply-chain risk and maintenance fragility. Fixing this proactively\neliminates a memory corruption condition before it becomes externally reachable.",
+  "weakness": {
+    "id": 15,
+    "name": "Integer Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 12,
+  "voters": [
+    "2026",
+    "0x0000nosfu",
+    "junkieguk",
+    "ekoms_savior",
+    "lordms",
+    "lauralex",
+    "haydar98",
+    "bytehunter027",
+    "shecodes",
+    "vario",
+    "and 2 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

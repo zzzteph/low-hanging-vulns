@@ -1,0 +1,118 @@
+{
+  "id": 3636244,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjM2MjQ0",
+  "url": "https://hackerone.com/reports/3636244",
+  "title": "HackerOne Vulnerability Report: libcurl SSL/TLS Identity Leakage via Insecure Connection Reuse",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-03-29T19:02:10.216Z",
+  "submitted_at": "2026-03-29T19:02:10.606Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "ankitsingh131225",
+    "url": "/ankitsingh131225",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-03-31T08:51:37.603Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-03-31T05:40:36.348Z",
+  "comments_closed?": true,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## **Summary**\n`libcurl` contains a critical logic flaw in its connection reuse mechanism where transfers using the `CURLOPT_SSL_CTX_FUNCTION` (SSL context callback) to establish a specific identity (e.g., via client certificates) can have their connections incorrectly reused by subsequent, unauthenticated transfers to the same host. This leads to **identity leakage and authentication bypass** between independent easy handles within the same application process.\n\n---\n\n## **Technical Description**\n\n### **The Flaw**\nWhen a connection is established, `libcurl` caches it in a connection pool for potential reuse. To ensure safety, `libcurl` performs a \"matching\" check to verify that the new request requires the same security-sensitive configuration as the cached connection.\n\nHowever, the matching logic for SSL/TLS connections in [lib/vtls/vtls.c](file:///d:/curl/lib/vtls/vtls.c) (and the connection data structure itself) only tracks and compares the **\"primary\" SSL configuration** (e.g., verify flags, CA paths). It **entirely omits** the `fsslctx` field (the callback set via `CURLOPT_SSL_CTX_FUNCTION`).\n\n### **Affected Code References**\n1.  **Inadequate Data Storage:** In [lib/urldata.h](file:///d:/curl/lib/urldata.h#L412), the `connectdata` structure only stores `struct ssl_primary_config ssl_config`.\n2.  **Incomplete Cloning:** In [Curl_ssl_conn_config_init](file:///d:/curl/lib/vtls/vtls.c#L395-402), only the primary configuration is cloned from the easy handle to the connection. The `fsslctx` callback is lost at the connection level.\n3.  **Flawed Matching:** In [match_ssl_primary_config](file:///d:/curl/lib/vtls/vtls.c#L193), the comparison loop only checks fields within the primary config. It has no way to detect if a connection was established using a custom SSL context callback.\n\n---\n\n## **Steps to Reproduce (Conceptual PoC)**\n1.  Set up an HTTPS server that requires client certificate authentication.\n2.  Perform a transfer with Handle 1, using `CURLOPT_SSL_CTX_FUNCTION` to load a valid client certificate.\n3.  Perform a second transfer with Handle 2 to the same host/port, but **do not** specify any client certificate or callback.\n4.  Observe that libcurl reuses the connection from Handle 1 (verified via `CURLINFO_NUM_CONNECTS` returning 0 for the second transfer).\n5.  Observe that the server accepts the second request as authenticated under Handle 1's identity.\n\n---\n\n## **Recommended Mitigation**\n1.  Extend `struct ssl_primary_config` to include the `fsslctx` callback pointer (or a hash of its identity if the pointer is not sufficient).\n2.  Update [match_ssl_primary_config](file:///d:/curl/lib/vtls/vtls.c#193-225) to include a strict comparison of the `fsslctx` (and `fsslctxp`) fields.\n3.  Ensure that any connection established with a custom `SSL_CTX` callback is marked as non-reusable by any request that does not share the exact same callback configuration.\n\n---\n\n## **Related Observations**\nDuring this audit, verified similar matching gaps were found in:\n- **IMAP/SMTP/POP3/LDAP:** `conn->options` (login options) are ignored in [url_match_auth](file:///d:/curl/lib/url.c#L1003).\n- **SSH:** `known_hosts` file paths and policies are ignored in [ssh_config_matches](file:///d:/curl/lib/url.c#L705). @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\n## Impact\n\n## Summary:\n\n### **Scenario: Identity Theft / Authentication Bypass**\n1.  **Request A:** An application uses `CURLOPT_SSL_CTX_FUNCTION` to load a specific user's client certificate into the SSL context. The connection is established and the user is authenticated by the server.\n2.  **Request B:** A second, unauthenticated request (possibly for a different user or an anonymous action) is made to the same host.\n3.  **Vulnerability:** `libcurl` matches Request B to the existing connection of Request A because their \"primary\" SSL settings (like `verifypeer`) are identical. Request B **reuses** the already-authenticated TLS session of Request A.\n4.  **Result:** Request B is performed under Request A's identity, bypassing authentication and potentially accessing private data.\n\nThis is a **High Severity** issue in multi-identity applications or services using `libcurl` as a shared backend.",
+  "weakness": {
+    "id": 184,
+    "name": "Authentication Bypass by Primary Weakness"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 26,
+  "voters": [
+    "2026",
+    "bagheeraaltered",
+    "yogisking_76",
+    "rutuj",
+    "dpixls",
+    "claudiogoose",
+    "atl_oceans",
+    "aravithapa",
+    "cerebro_virgil",
+    "maswara",
+    "and 16 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

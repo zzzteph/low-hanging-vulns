@@ -1,0 +1,118 @@
+{
+  "id": 3022041,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMDIyMDQx",
+  "url": "https://hackerone.com/reports/3022041",
+  "title": "Use after free (read) in curl_multi_perform with DoH and Proxy options, and resolve timeouts",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2025-03-04T06:24:57.323Z",
+  "submitted_at": "2025-03-04T06:24:58.089Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "catenacyber",
+    "url": "/catenacyber",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-03-06T09:58:10.619Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-03-06T09:58:10.471Z",
+  "team_member_agreed_on_going_public_at": "2025-03-06T09:32:45.046Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n[summary of the vulnerability]\n\nThere is a use after free in `curl_multi_perform` when DoH resolver timeouts and `CURLOPT_PROXY` is used (see reproducer and stack trace)\n\nI found it via fuzzing with https://github.com/catenacyber/curl-fuzzer/tree/proxy (after fixing a small memory leak in curl)\nAnother reproducer was found with curl_fuzzer_mqtt\n(I have other fuzzers reports)\n\n## Affected version\n[Which curl/libcurl version are you using to reproduce? On which platform? `curl -V` typically generates good output to include]\n\nMaster at commit 7b0240c07799c28dc84272f9e38e1092ce4cc498\n```\ncurl 8.13.0-DEV (x86_64-apple-darwin23.6.0) libcurl/8.13.0-DEV OpenSSL/1.0.2n zlib/1.2.11 libidn2/2.0.4 libpsl/0.19.1 nghttp2/1.55.1 librtmp/2.3\nRelease-Date: [unreleased]\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns ldap ldaps mqtt pop3 pop3s rtmp rtsp smb smbs smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS HSTS HTTP2 HTTPS-proxy IDN IPv6 Largefile libz NTLM PSL SSL threadsafe TLS-SRP UnixSockets\n```\n\n## Steps To Reproduce:\n[add details for how we can reproduce the issue]\n\n  1. Run the following example\n\n```c\n#include <stdio.h>\n#include <curl/curl.h>\n\nint main(void)\n{\n  CURL *curl;\n  int still_running;\n\n  curl = curl_easy_init();\n  if(curl) {\n    CURLM *multi_handle = curl_multi_init();\n    curl_multi_add_handle(multi_handle, curl);\n    curl_easy_setopt(curl, CURLOPT_DOH_URL, \"doh\");\n    curl_easy_setopt(curl, CURLOPT_PROXY, \"proxy\");\n    curl_easy_setopt(curl, CURLOPT_URL, \"tftp://curl.se/\");\n    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 50L);\n    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);\n    curl_easy_setopt(curl, CURLOPT_SERVER_RESPONSE_TIMEOUT, 1L);\n    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, \"tftp\");\n\n    curl_multi_perform(multi_handle, &still_running);\n      while (still_running > 0) {\n          printf(\"still_running %d\\n\", still_running);\n          struct timespec remaining, request = { 0, 60000000 };\n          // We should do a select, but let's just wait for timeout for reproducibility\n          nanosleep(&request, &remaining);\n          curl_multi_perform(multi_handle, &still_running);\n    }\n    curl_multi_remove_handle(multi_handle, curl);\n    curl_multi_cleanup(multi_handle);\n    curl_easy_cleanup(curl);\n  }\n  return 0;\n}\n\n```\n\n## Supporting Material/References:\n[list any additional material (e.g. screenshots, logs, etc.)]\n\nOutput when curl is compiled with `--enable-debug` and stack trace from ASAN is \n\n```\n* Added connection 0. The cache now contains 1 members\n* Resolving timed out after 61 milliseconds\n* Curl_disconnect(conn #0, aborted=1)\n* closing connection #0\n=================================================================\n==47284==ERROR: AddressSanitizer: heap-use-after-free on address 0x622000003148 at pc 0x00010e3a3397 bp 0x7ff7b25cf1c0 sp 0x7ff7b25cf1b8\nREAD of size 4 at 0x622000003148 thread T0\n    #0 0x10e3a3396 in Curl_node_elem llist.c:248\n    #1 0x10e3c5cba in curl_multi_perform multi.c:2604\n    #2 0x10d931c46 in main pocuaf.c:29\n    #3 0x7ff8011a4344 in start+0x774 (dyld:x86_64+0xfffffffffff5c344)\n\n0x622000003148 is located 72 bytes inside of 5760-byte region [0x622000003100,0x622000004780)\nfreed by thread T0 here:\n    #0 0x10ecacdb6 in free+0xa6 (libclang_rt.asan_osx_dynamic.dylib:x86_64h+0xe0db6)\n    #1 0x10e3a47fd in curl_dbg_free memdebug.c:297\n    #2 0x10e436f30 in Curl_close url.c:337\n    #3 0x10e31d12a in Curl_doh_close doh.c:1305\n    #4 0x10e3e5ea4 in Curl_req_done request.c:110\n    #5 0x10e3c2308 in multi_done multi.c:597\n    #6 0x10e3ce6ff in multi_handle_timeout multi.c:1583\n    #7 0x10e3c72d3 in multi_runsingle multi.c:2242\n    #8 0x10e3c5c8e in curl_multi_perform multi.c:2620\n    #9 0x10d931c46 in main pocuaf.c:29\n    #10 0x7ff8011a4344 in start+0x774 (dyld:x86_64+0xfffffffffff5c344)\n\npreviously allocated by thread T0 here:\n    #0 0x10ecad042 in calloc+0xa2 (libclang_rt.asan_osx_dynamic.dylib:x86_64h+0xe1042)\n    #1 0x10e3a424d in curl_dbg_calloc memdebug.c:175\n    #2 0x10e4380fb in Curl_open url.c:499\n    #3 0x10e319c09 in doh_run_probe doh.c:272\n    #4 0x10e319445 in Curl_doh doh.c:436\n    #5 0x10e357a63 in Curl_resolv hostip.c:813\n    #6 0x10e44445c in resolve_server url.c:3250\n    #7 0x10e43e70c in Curl_connect url.c:3803\n    #8 0x10e3c76e2 in multi_runsingle multi.c:2275\n    #9 0x10e3c5c8e in curl_multi_perform multi.c:2620\n    #10 0x10d931bb9 in main pocuaf.c:22\n    #11 0x7ff8011a4344 in start+0x774 (dyld:x86_64+0xfffffffffff5c344)\n```\n\n## Impact\n\n## Summary:\n\nI am not sure if this UAF can be used to gain RCE, or as it is a UAF read to bypass ASLR",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 26,
+  "voters": [
+    "aboalezz",
+    "viperblitzz",
+    "2026",
+    "blaster_br",
+    "mr-alienx-kurd",
+    "kongkonchisim54",
+    "khompitoon5",
+    "fancyurban010",
+    "codeax",
+    "raiz_87",
+    "and 16 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

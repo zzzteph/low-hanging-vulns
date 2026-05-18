@@ -1,0 +1,131 @@
+{
+  "id": 1429694,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNDI5Njk0",
+  "url": "https://hackerone.com/reports/1429694",
+  "title": "Node.js Certificate Verification Bypass via String Injection",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2021-12-17T14:57:13.470Z",
+  "submitted_at": "2021-12-17T14:57:13.530Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "bengl",
+    "url": "/bengl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/223/864/0f36cf76b29faba9f7a2b91b34d26e220cbee626_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22984,
+    "url": "https://hackerone.com/nodejs",
+    "handle": "nodejs",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Node.js",
+      "twitter_handle": "nodejs",
+      "website": "https://nodejs.org",
+      "about": "The Node.js JavaScript Runtime"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": true,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2021-44531",
+    "CVE-2021-44532",
+    "CVE-2021-44533"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2022-02-10T01:26:57.782Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2022-01-11T01:26:56.380Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "This is a report on behalf of Google, who did not want to report through H1.\n\n---\n\n**Summary**\nNode’s APIs for reporting certificate fields are ambiguous and allow bypassing certificate verification in some circumstances.\n\n**Details**\nIn light of CVE-2021-3712, I’ve been looking at code which misuses OpenSSL’s printing functions. Node’s use will cause it to misparse certificates, and, I believe, allows certificate verification bypasses in some circumstances, such as a name-constrained intermediate. It’s also just a generally unsafe pattern.\n\nFor background, the OpenSSL utility has options like openssl x509 -text which output some human-readable text representation of the certificate. This gives output like:\n\n```\nX509v3 Subject Alternative Name:  \n  DNS:*.nodejs.org, DNS:nodejs.org\n```\n\nCertificates are not text. They use a structured binary encoding, called DER. Fields may contain commas, spaces, or any other byte. The text representation is just an ad-hoc diagnostic output by OpenSSL. It has no well-defined grammar and does not even escape characters, so the output is ambiguous. It should not be parsed.\n\nOpenSSL has functions for the text format in the library itself. These are X509_print, i2v_GENERAL_NAME, X509V3_EXT_val_prn, X509V3_EXT_print, and others. But, these are still for diagnostics, not a well-defined serialization of the certificate.\n\nUnfortunately, it looks like Node tries to parse this output to interpret the certificate itself:\nhttps://github.com/nodejs/node/blob/95834d11a23b224f1abcc71a868d3cade4763717/src/crypto/crypto_x509.cc#L219\nhttps://github.com/nodejs/node/blob/95834d11a23b224f1abcc71a868d3cade4763717/src/crypto/crypto_x509.cc#L229\nhttps://github.com/nodejs/node/blob/95834d11a23b224f1abcc71a868d3cade4763717/src/crypto/crypto_common.h#L162\nhttps://github.com/nodejs/node/blob/95834d11a23b224f1abcc71a868d3cade4763717/src/crypto/crypto_common.cc#L678\n(Despite the name, SafeX509ExtPrint is not safe.)\nhttps://github.com/nodejs/node/blob/95834d11a23b224f1abcc71a868d3cade4763717/lib/_tls_common.js#L133\nhttps://github.com/nodejs/node/blob/95834d11a23b224f1abcc71a868d3cade4763717/lib/tls.js#L239\n\nThe last instance is especially concerning. If a certificate is issued for, say, \"nodejs.org, DNS:blah.attacker.example\", certificate issuance or verification may reason, “this has .attacker.example as a suffix, which you own, so this certificate is fine”. Meanwhile, Node sees a text output of \"DNS:nodejs.org, DNS:blah.attacker.example\" and misinterprets it as two names, one of which is nodejs.org. Concretely, this may happen if a CA issues a name-constrained intermediate certificate to attacker.example. OpenSSL performs the name constraint check against the correct parse, then Node misinterprets the certificate and bypasses the name constraint.\n\nThis is similar to the old null prefix attack from 11 years ago. Other SAN types may also be injection vectors.\n\nAdditionally, as this is not the intended use, OpenSSL’s print functions receive less attention than other parts of their X.509 stack. Indeed not mentioned in the CVE-2021-3712 advisory is that the print functions silently truncated their outputs on interior NUL bytes. That makes uses like Node’s vulnerable to exactly the old null prefix attack from 11 years ago. (The GEN_DNS special case in SafeX509ExtPrint avoids it for DNS SANs, but other SAN types are still truncated.)\n\nInstead, Node should look at the GENERAL_NAME, etc., structure, which will give you the actual fields unambiguously, or call into the high-level OpenSSL functions that check hostnames.\n\n**Recommendations**\nThis is part of Node’s public API, so the fix may be tricky. Here is a rough roadmap:\n\nFirst, change the private C++/JavaScript interface for subjectaltname and infoAccess from OpenSSL print functions to structured JavaScript objects. Walk the actual structs, rather than using the print functions. I can help review this, as may not be obvious what fields you need, or what checks OpenSSL has (or, usually, hasn’t) done on the expected character encoding.\n\nYou’ll need to decide how to represent IPv6 addresses. Node seems to typically use uv_inet_ntop, but I think the old OpenSSL format was slightly different. I don’t know what you expect from your public API.\n\nWith that done, delete GetInfoString andSafeX509ExtPrint. To prevent future copy-and-paste mishaps, there should be _no_ references to the print functions remaining.\n\nNext, decide what to do with the public API. I assume you cannot remove these:\nhttps://nodejs.org/api/crypto.html#crypto_x509_subjectaltname\nhttps://nodejs.org/api/crypto.html#crypto_x509_infoaccess\nhttps://nodejs.org/api/tls.html#tls_certificate_object\n(Odd that infoAccess is in a different format between the two modules.)\n\nInstead, document an actual format for these, based on the ad-hoc OpenSSL output you were picking up. To avoid injection attacks in downstream code, have the internal JavaScript logic strip out entries with characters like commas or spaces. Update the documentation to describe how callers can safely parse these strings.\n\nOptionally, you all may wish to define a more structured API and deprecate the old ones.\n\n**Additional instances**\nThere are some more instances of the printing APIs, that also need to be fixed.\n\nGetCertificateAltNames and GetCertificateCN, seem unused and should just be deleted. GetCertificateAltNames is not suitable as reference for future code and should be removed.\nhttps://github.com/nodejs/node/blob/95834d11a23b224f1abcc71a868d3cade4763717/src/crypto/crypto_common.cc#L136\n\nNext the issuer and subject names are reported via X509_NAME_print_ex and parsed back out:\nhttps://github.com/nodejs/node/blob/95834d11a23b224f1abcc71a868d3cade4763717/src/crypto/crypto_common.cc#L718\nhttps://github.com/nodejs/node/blob/95834d11a23b224f1abcc71a868d3cade4763717/lib/_tls_common.js#L133\nhttps://github.com/nodejs/node/blob/95834d11a23b224f1abcc71a868d3cade4763717/lib/internal/tls/parse-cert-string.js#L15\n\nUnlike the other print functions, there is a defined text form of X.509 names in RFC 2253. However, I have not carefully analyzed OpenSSL’s RFC 2253 implementation to see if it always produces unambiguous output. Moreover, Node is not correctly parsing RFC 2253. There are quoting and escaping mechanisms. The newline separator is also not the usual one. There is probably a similar injection bug lurking here. For instance, in the CA/B Forum BRs, the OU field is not quite yet sunset. The OU field is largely unverified beyond not containing trademarks/company names, so it may be an injection vector in even a trusted CA. This also needs to be switched to something structured, or at least well-defined.\n\nThat said, extracting DNS names from the subject common name, as opposed to the SAN list, is outdated anyway. Browsers do not do it anymore, and the IETF is updating the specifications to match. Consider removing it from checkServerIdentity.\nhttps://github.com/nodejs/node/blob/95834d11a23b224f1abcc71a868d3cade4763717/lib/tls.js#L281\n\nDisclosure Timeline: We are privately disclosing this vulnerability to you so that you can develop a fix and manage its rollout. We do not require you to keep any information of this report secret, but if you make it public then please let us know that you did. This advisory will be kept private by Google for 30 days after a fix is publicly available or after 90 days if no fix is made. After this deadline we plan to disclose this advisory in full at: https://github.com/google/security-research/. Please read more details about this policy here: https://g.co/appsecurity\n\n---\n\nIn putting that together, I found another bug, also in the repro: Node accepts URI SANs as a substitute for DNS name verification. Accepting random SAN types is not actually safe. Name constraints in X.509 are defined weirdly and do not actually constrain unrelated SAN types. That means, unless your PKI is specifically defined to use a particular SAN type, it is not safe to consume it, or you'll bypass name-constrained intermediates. (Arguably name constraints shouldn't have worked this way. Alas, they are what they are, which means the Node behavior is wrong.)\n\n## Impact\n\nSee above.",
+  "weakness": {
+    "id": 29,
+    "name": "Improper Following of a Certificate's Chain of Trust"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2022-02-10T01:26:56.471Z",
+  "allow_singular_disclosure_after": -133285872.5559864,
+  "singular_disclosure_allowed": true,
+  "vote_count": 2,
+  "voters": [
+    "pr0f0x01",
+    "intomyeyes2000"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.8,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 666,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/nodejs/node",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

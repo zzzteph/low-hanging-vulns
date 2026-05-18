@@ -1,32 +1,32 @@
-# Low Hanging Vulns
+# Bugbounty monitor
 
-![Telegram Logo](tg.png)
+Yet another automated intelligence feed for **real-world** vulnerabilities disclosed on [HackerOne](https://hackerone.com/hacktivity).
 
-Yet another automated monitor for **Critical** and **High** severity **Web** vulnerabilities published at [NVD (National Vulnerability Database)](https://nvd.nist.gov/).
+## What's inside
+
+| Directory | Contents |
+|-----------|----------|
+| `reports/` | Full HackerOne report JSONs, organised by category → weakness → year |
+| `skills/` | AI-generated hunter playbooks (one per vuln class) + `bughunter.md` master |
+| `fuzzing/` | Per-category payload wordlists — one payload per line, ready for fuzzing tools |
 
 ## Features
-- **Updated every 6 hours**
-- **Web Vulnerability Focus**: Filters vulnerabilities to include only:
-  - **High** and **Critical** severity.
-  - Low attack complexity.
-  - Exploitable via network
-- **Automated Monitoring**: Uses GitHub Actions to monitor and fetch data.
-- **Telegram Channel Updates**: All identified vulnerabilities are published on our Telegram channel: [Low Hanging Vulns](https://t.me/lowhangingvulns).
-- **Monitoring Period**: Each vulnerability will be monitored for up to **90 days**, or until an exploit is published, whichever comes first.
-- **Tags**: Vulnerabilities are published with appropriate tags for better categorization and easy identification.
-- **Data Source**: All vulnerabilities are sourced from the [National Vulnerability Database (NVD)](https://nvd.nist.gov/).
 
-## Stay Updated
-Join Telegram channel to stay informed about the latest low-complexity, high-impact web vulnerabilities:
+- **Hourly updates** - GitHub Actions fetches newly disclosed reports every hour and rebuilds the index.
+- **Hunter playbooks** - each `skills/*.md` file covers root causes, attack surface, recon checklist, hunt methodology, payload library, WAF bypass tips, triage guidance, and real bounty examples.
+- **Fuzzing payloads** - extracted and curated from real reports.
+- **Telegram notifications** 👉 [https://t.me/lowhangingvulns](https://t.me/lowhangingvulns)
+
+## Telegram channel
+
+Join to get notified about freshly disclosed bug bounty reports:
 
 👉 [https://t.me/lowhangingvulns](https://t.me/lowhangingvulns)
 
----
+## Vulnerability categories
 
-### Contribution
-Contributions, feedback, and suggestions are welcome! Feel free to open an issue or submit a pull request.
+`xss` · `sqli` · `rce` · `ssrf` · `idor` · `lfi` · `csrf` · `authn` · `privesc` · `info_disclosure` · `memory` · `dos` · `business_logic` · `secrets` · `open_redirect` · `http_injection` · `deserialization` · `injection` · `xxe` · `crypto` · `tls` · `race_condition` · `clickjacking` · `cors` · `file_upload` · `llm` · `supply_chain` · `misc`
 
----
+## Data source
 
-### License
-This project is open-source and licensed under the [MIT License](LICENSE).
+ [HackerOne Hacktivity](https://hackerone.com/hacktivity)

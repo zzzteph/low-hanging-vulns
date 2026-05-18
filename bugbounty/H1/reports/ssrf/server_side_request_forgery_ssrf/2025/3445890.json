@@ -1,0 +1,136 @@
+{
+  "id": 3445890,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDQ1ODkw",
+  "url": "https://hackerone.com/reports/3445890",
+  "title": "Link unfurling calls out to arbitrary URLs and the private-network guard misses link-local addresses",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2025-12-01T01:23:13.353Z",
+  "submitted_at": "2025-12-01T01:23:14.409Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "brumbelow",
+    "url": "/brumbelow",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/rozlu1u0aa5bvlpf4d2gz9st2wt9/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 67,
+    "url": "https://hackerone.com/basecamp",
+    "handle": "basecamp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/STtZ2opgRsHdKby72xs56KhB/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/STtZ2opgRsHdKby72xs56KhB/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Basecamp",
+      "twitter_handle": "basecamp",
+      "website": "https://37signals.com/policies/security/response",
+      "about": "Basecamp is the leading online project manager and the birthplace of Ruby on Rails. Creators of the HEY email service."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2025-12-22T17:43:51.412Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-12-11T18:18:28.376Z",
+  "team_member_agreed_on_going_public_at": "2025-12-22T17:43:51.082Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n- /unfurl_link lets any signed-in user supply a URL that the server fetches for OpenGraph data.\n- The “private network” guard only blocks RFC1918/loopback/0.0.0.0 and ignores link-local ranges, so 169.254.0.0/16 (IMDS) and fe80::/10 are treated as public.\n- The unfurl fetcher then issues a server-side HTTP request to that link-local host, enabling SSRF against cloud metadata or other link-local services.\n\n## Affected Components\n- app/controllers/unfurl_links_controller.rb:3-8 (accepts untrusted url and triggers metadata fetch.)\n- app/models/opengraph/location.rb:25-39 (validates target via PrivateNetworkGuard.resolve and accepts link-local IPs.)\n- lib/restricted_http/private_network_guard.rb:9-20 (private_ip? omits ipaddr.link_local?, so 169.254.x.x and fe80::/10 are not blocked.)\n- app/models/opengraph/fetch.rb:12-74 (performs the Net::HTTP request to the resolved IP using server network context.)\n\n## Attack preconditions\n- Any authenticated user (CSRF token or API client) can reach /unfurl_link.\n\n## Steps to reproduce\n1. Sign in as a normal user and obtain the session/CSRF tokens.\n\n2. Send a request such as:\n```bash\ncurl -X POST https://<host>/unfurl_link -H \"Cookie: session_token=...\" -H \"X-CSRF-Token: <token>\" -d 'url=http://169.254.169.254/latest/meta-data/'\n```\n\n3. Because PrivateNetworkGuard.private_ip? returns false for link-local addresses (IPAddr.new(\"169.254.169.254\").private? #=> false while link_local? #=> true), the guard permits the target and Opengraph::Fetch issues a GET from the server to 169.254.169.254. On cloud hosts his reaches IMDS; responses with text/html would be returned, otherwise the request is still made (blind SSRF), allowing metadata probing/timing and any link-local HTML endpoints to be exfiltrated.\n\n## Evidence/References \n- Guard logic lacks a link-local check, so resolve does not raise for 169.254.169.254 (lib/restricted_http/private_network_guard.rb:9-20).\n- Opengraph::Location#validate_url_is_public trusts that result and proceeds to fetch (app/models/opengraph/location.rb:25-38).\n- The fetcher performs the server-side request (app/models/opengraph/fetch.rb:12-74), driven directly by user input (app/controllers/unfurl_links_controller.rb:3-8).\n\n## Impact\n\n- Authenticated users can coerce the server to reach link-local resources, including cloud metadata services (IMDS) that should be unreachable, enabling credential theft or internal service probing/timing if an HTML response is available.",
+  "weakness": {
+    "id": 68,
+    "name": "Server-Side Request Forgery (SSRF)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-01-10T18:18:28.706Z",
+  "allow_singular_disclosure_after": -9670231.841560656,
+  "singular_disclosure_allowed": true,
+  "vote_count": 58,
+  "voters": [
+    "loaymorad",
+    "tsyogesh40",
+    "thelem",
+    "techeight",
+    "ghaddarittoo",
+    "zy9ard3",
+    "0-chrollo-0",
+    "vaaq",
+    "mohaned0101",
+    "ahmed_xyz",
+    "and 48 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "changed",
+      "confidentiality": "high",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 604232,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "ONCE: Campfire",
+    "max_severity": "high"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

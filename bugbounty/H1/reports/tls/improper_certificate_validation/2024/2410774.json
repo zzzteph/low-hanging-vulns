@@ -1,0 +1,127 @@
+{
+  "id": 2410774,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yNDEwNzc0",
+  "url": "https://hackerone.com/reports/2410774",
+  "title": "CVE-2024-2379: QUIC certificate check bypass with wolfSSL",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2024-03-10T21:32:06.332Z",
+  "submitted_at": "2024-03-10T21:32:06.455Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fullmetal5",
+    "url": "/fullmetal5",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/a6iegyjbjybr98lky7870ruzfxjb/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2024-2379"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2024-03-27T07:37:36.622Z",
+  "bug_reporter_agreed_on_going_public_at": "2024-03-27T07:37:36.454Z",
+  "team_member_agreed_on_going_public_at": "2024-03-27T07:23:37.511Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nIn `vquic-tls.c` `curl_wssl_init_ctx` errors are handled by `goto out` and having `result` be set to an error code to be returned. At the beginning of the function `result` is correctly set to `CURLE_FAILED_INIT` which allows for `goto out` to work correctly without having to set `result` however, `result`'s value is overridden at a certain point  if `ctx_setup` is passed to the function. If `ctx_setup` returns 0 (the expected result) then it's assigned to `result` and any attempt after that to `goto out` without setting `result` to an error code will make the function skip the rest of its initialization and return with an error code indicating success.\n\nUnfortunately the last thing `curl_wssl_init_ctx` is supposed to setup for the ssl context is the certificate verification requirements. There are 4 places `goto out` is used without setting `result`, of those 3 can result from bad user input (bad tls13-ciphers, curves, or cafile/capath) and 1 is from trying to setup ssl key logging when having a WolfSSL build that doesn't have `wolfSSL_CTX_set_keylog_callback`. \n\nLuckily this does require the user to have passed in bogus values for one of the above parameters which I find very unlikely. Also very fortunately  WolfSSL attempts to default to verify a cert rather than OpenSSL's default of not verifying. There is an option to make WolfSSL have OpenSSL compatible defaults but I don't know how common it is to have WolfSSL configured like that so I'm not sure how likely it is that people could run into this.\n\nGiven the unlikely set of configurations required to encounter this I don't think this is a \"high\" vulnerability like the CVSS claims but there is no way of manually setting the score, honestly I would have just submitted a patch to fix this but I'm not to sure on how common having WolfSSL in OpenSSL compatible mode is so I'm err'ing on the side of caution and submitting it here.\n\nI checked the other initialization functions in `vquic-tls.c` and it doesn't look like the same mistake was made in them. `result` is assigned before each use of `goto out`.\n\n## Steps To Reproduce:\nBuild WolfSSL with something that sets `OPENSSL_COMPATIBLE_DEFAULTS` (I used `--enable-nginx`) and build curl with the WolfSSL backend.\nSetup a QUIC webserver with a self signed cert that matches the domain being spoofed and attempt to make a HTTP/3 connection to it using curl with a bad `--curves` list. curl connects to the site without having set `--insecure`, taking out the bad `--curves` argument curl will complain about the invalid cert. \n\nex:\n```\n./curl -v --http3-only 'https://example.com/' -o /dev/null -s --resolve example.com:443:192.168.1.24 --curves blah\n* Added example.com:443:192.168.1.24 to DNS cache\n* Hostname example.com was found in DNS cache\n*   Trying 192.168.1.24:443...\n* wolfSSL failed to set curves\n* Verified certificate just fine\n* Connected to example.com (192.168.1.24) port 443\n* using HTTP/3\n* [HTTP/3] [0] OPENED stream for https://example.com/\n* [HTTP/3] [0] [:method: GET]\n* [HTTP/3] [0] [:scheme: https]\n* [HTTP/3] [0] [:authority: example.com]\n* [HTTP/3] [0] [:path: /]\n* [HTTP/3] [0] [user-agent: curl/8.7.0-DEV]\n* [HTTP/3] [0] [accept: */*]\n> GET / HTTP/3\n> Host: example.com\n> User-Agent: curl/8.7.0-DEV\n> Accept: */*\n> \n* We are completely uploaded and fine\n< HTTP/3 200 \n< server: nginx/1.25.4\n< date: Sun, 10 Mar 2024 21:02:39 GMT\n< content-type: text/html\n< content-length: 615\n< last-modified: Wed, 14 Feb 2024 16:03:00 GMT\n< etag: \"65cce434-267\"\n< accept-ranges: bytes\n< \n{ [615 bytes data]\n* Connection #0 to host example.com left intact\n```\n\nvs\n\n```\n./curl -v --http3-only 'https://example.com/' -o /dev/null -s --resolve example.com:443:192.168.1.24 \n* Added example.com:443:192.168.1.24 to DNS cache\n* Hostname example.com was found in DNS cache\n*   Trying 192.168.1.24:443...\n*  CAfile: /etc/ssl/certs/ca-certificates.crt\n*  CApath: none\n* QUIC connect to 192.168.1.24 port 443 failed: SSL peer certificate or SSH remote key was not OK\n* Failed to connect to example.com port 443 after 12 ms: SSL peer certificate or SSH remote key was not OK\n* Closing connection\n```\n\n## Supporting Material/References:\nThis was introduced in https://github.com/curl/curl/pull/12678 so the only vulnerable version to be released is 8.6.0\n\n## Impact\n\nIf the stars align and the user is using such a configuration and passing bad arguments then they would be vulnerable to MITM attacks.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2024-04-26T07:23:37.854Z",
+  "allow_singular_disclosure_after": -63624239.36513384,
+  "singular_disclosure_allowed": true,
+  "vote_count": 11,
+  "voters": [
+    "zy9ard3",
+    "idealphaseth",
+    "blackowl332",
+    "70x1c473d",
+    "francisco08",
+    "jonathanmuswil",
+    "xamanee",
+    "pradhankumardhiren",
+    "aecherli",
+    "manasraj",
+    "and 1 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

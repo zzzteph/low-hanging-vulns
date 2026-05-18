@@ -1,0 +1,129 @@
+{
+  "id": 541502,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC81NDE1MDI=",
+  "url": "https://hackerone.com/reports/541502",
+  "title": "[https-proxy-agent] Socket returned without TLS upgrade on non-200 CONNECT response, allowing request data to be sent over unencrypted connection",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2019-04-17T19:20:28.876Z",
+  "submitted_at": "2019-04-17T19:20:28.876Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "kadler15",
+    "url": "/kadler15",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/584/250/fa85e1dd3a7776efef9277c99178cadb5fe2efe1_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 23949,
+    "url": "https://hackerone.com/nodejs-ecosystem",
+    "handle": "nodejs-ecosystem",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/023/949/3ea3b2ae039a8f955a4a8fe65d99fe85dc817398_original./235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/023/949/3ea3b2ae039a8f955a4a8fe65d99fe85dc817398_original./3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "disabled",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Node.js third-party modules",
+      "twitter_handle": "",
+      "website": "https://nodejs.org/en/security/",
+      "about": "This program was used to handle vulnerabilities in the Node.js ecosystem."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2019-09-25T08:21:57.569Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2019-08-26T08:21:57.268Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "I would like to report a man-in-the-middle vulnerability in `https-proxy-agent`.\nIt allows an attacker with access to the network firewall or targeted proxy server to obtain secrets (e.g. a HTTP basic auth header) from the client trying to send HTTPS traffic via HTTP proxy.\n\n# Module\n\n**module name:** `https-proxy-agent`\n**version:** 2.2.1\n**npm page:** `https://www.npmjs.com/package/https-proxy-agent`\n\n## Module Description\n\n> This module provides an http.Agent implementation that connects to a specified HTTP or HTTPS proxy server, and can be used with the built-in https module.\n\n## Module Stats\n\n4314908 downloads in the last week\n\n# Vulnerability\n\n## Vulnerability Description\n\nWhen targeting a HTTP proxy, `https-proxy-agent` [opens a socket](https://github.com/TooTallNate/node-https-proxy-agent/blob/2.2.1/index.js#L77) to the proxy, and sends the proxy server a [CONNECT request](https://github.com/TooTallNate/node-https-proxy-agent/blob/2.2.1/index.js#L203). E.g.:\n\n```\nCONNECT www.google.com:443 HTTP/1.1\nHost: www.google.com\nConnection: close\n```\n\nIf the proxy server responds with 200 and the client is targeting a secure endpoint, `https-proxy-agent` [TLS-upgrades](https://github.com/TooTallNate/node-https-proxy-agent/blob/2.2.1/index.js#L154) the socket before returning it for use. This is normal and expected.\n\nHowever, if the proxy server (or firewall blocking the request) responds with something other than a 200, `https-proxy-agent` incorrectly [returns the socket](https://github.com/TooTallNate/node-https-proxy-agent/blob/2.2.1/index.js#L170) without any TLS upgrade. Companion library `agent-base` [passes the socket off](https://github.com/TooTallNate/node-agent-base/blob/4.2.1/index.js#L141) to Node HTTP internals, which will write the pending request data to the socket. E.g.:\n\n```\nGET / HTTP/1.1\nHost: www.google.com\nAuthorization: Basic dXNlcm5hbWU6cGFzc3dvcmQ=\nConnection: close\n```\n\nThe request data, which may contain basic auth credentials or other secrets, is sent over an unencrypted connection. An attacker with access to tcpdump contents at the firewall or proxy server can steal these secrets and impersonate the client.\n\n## Steps To Reproduce:\n\nRun a simple web server on port 80 that returns 403 in response to any request:\n```bash\n#!/bin/bash\nwhile true; do\n  echo -e \"HTTP/1.1 403 FORBIDDEN\\r\\n$(date)\\r\\n\\r\\n<h1>hello world from $(hostname) on $(date)</h1>\" |  nc -vl 80;\ndone\n```\n\nSend a a request to a remote server using the simple web server as a proxy:\n```javascript\nvar url = require('url');\nvar https = require('https');\nvar HttpsProxyAgent = require('https-proxy-agent');\n\nvar proxyOpts = url.parse('http://127.0.0.1:80');\nvar opts = url.parse('https://www.google.com');\nvar agent = new HttpsProxyAgent(proxyOpts);\nopts.agent = agent;\nopts.auth = 'username:password';\nhttps.get(opts);\n```\n\nLogs observed on the simple web server:\n```\nCONNECT www.google.com:443 HTTP/1.1\nHost: www.google.com\nConnection: close\n\nGET / HTTP/1.1\nHost: www.google.com\nAuthorization: Basic dXNlcm5hbWU6cGFzc3dvcmQ=\nConnection: close\n```\n\n## Patch\n\nChanges in a [commit from 2013](https://github.com/TooTallNate/node-https-proxy-agent/commit/ae03c687bd5667e4088f13bd1eda6228cb10f62d) to buffer and replay incoming proxy data in case of error should be reconsidered. Maybe the replaying can still be done when targeting an insecure endpoint, but it seems unsafe to return the socket without TLS upgrade in the secure endpoint case. It would be better to do something like:\n\n```javascript\nif (200 == statusCode) {\n  // Happy path\n} else if (secureEndpoint) {\n  cleanup();\n  socket.destroy();\n  fn(new Error(`Could not establish TLS connection. Status code: ${statusCode}`));\n} else {\n  // Replay on insecure endpoint\n}\n```\n\nThere may also be a way for the agent to replay the incoming proxy data on and then destroy the socket before returning it.\n\n## Supporting Material/References:\n\n- Ubuntu 16.04 / Linux 4.15.0-43\n- Node 10.15.3\n- npm 6.4.1\n- gnu-netcat 0.7.1\n\n# Wrap up\n\n- I contacted the maintainer to let them know: N\n- I opened an issue in the related repository: N\n\n## Impact\n\nThe vulnerability allows a determined attacker with access to the network firewall or targeted proxy server to see plaintext request data, which could expose auth credentials or other secrets.",
+  "weakness": {
+    "id": 30,
+    "name": "Man-in-the-Middle"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2019-09-25T08:21:57.379Z",
+  "allow_singular_disclosure_after": -208345954.86764565,
+  "singular_disclosure_allowed": true,
+  "vote_count": 4,
+  "voters": [
+    "sameerphad72",
+    "asdasdasdqqqqqqqqqqqqqqqqqqqqq",
+    "2801881804",
+    "praveen211"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.1,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "adjacent",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "changed",
+      "confidentiality": "high",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 6412,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https-proxy-agent",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

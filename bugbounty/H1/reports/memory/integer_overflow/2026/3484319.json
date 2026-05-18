@@ -1,0 +1,132 @@
+{
+  "id": 3484319,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDg0MzE5",
+  "url": "https://hackerone.com/reports/3484319",
+  "title": "MQTT Protocol Violation & Integer Overflow in libcurl",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "high",
+  "readable_substate": "Informative",
+  "created_at": "2026-01-01T21:51:13.454Z",
+  "submitted_at": "2026-01-01T21:51:13.695Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "ssyyaa",
+    "url": "/ssyyaa",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/pfep1suhfttd55tb4jjnaeyp467h/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-01-01T22:50:02.911Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-01-01T22:40:53.152Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Executive Summary\n\n**Vulnerability Type:** CWE-190\n**Component:** lib/mqtt.c  \n**Function:** mqtt_decode_len  \n\n**Affected Architectures:**\n- **All architectures:** Protocol non-compliance leading to stream desynchronization\n- **32-bit architectures:** Deterministic integer overflow in length decoding\n\nlibcurl does not correctly enforce the MQTT v3.1.1 specification limit for the “Remaining Length” field when decoding incoming packets. This allows malformed MQTT packets to be parsed incorrectly, leading to protocol desynchronization and potential denial of service. On 32-bit systems, the decoding logic additionally allows a deterministic integer overflow.\n\n---\n\n## Root Cause: Inconsistent Length Handling\n\nThe issue is caused by an inconsistency within `lib/mqtt.c`.  \nThe encoder correctly enforces the MQTT specification limit, while the decoder does not.\n\n### Correct Behavior (Encoding)\n\nIn `mqtt_encode_len`, the implementation explicitly limits the Remaining Length field to four bytes, as required by the specification:\n\n```c\nfor(i = 0; (len > 0) && (i < 4); i++) {\n  unsigned char encoded;\n  encoded = len % 0x80;\n  /* ... */\n}\n````\n\nThis ensures protocol compliance.\n\n### Incorrect Behavior (Decoding)\n\nIn contrast, `mqtt_decode_len` does not enforce the same limit:\n\n```c\nfor(i = 0; (i < buflen) && (encoded & 128); i++) {\n  encoded = buf[i];\n  len += (encoded & 127) * mult;\n  mult *= 128;\n}\n```\n\nThe loop continues as long as the continuation bit is set and input is available, allowing more than four bytes to be consumed as part of the Remaining Length field.\n\n---\n\n## Specification Violation\n\nAccording to the MQTT v3.1.1 specification, Section 2.2.3 (Remaining Length):\n\n> “The number of bytes in the Remaining Length field MUST NOT exceed four bytes.”\n\nBy accepting and processing length fields longer than four bytes, libcurl violates the MQTT specification and enters an undefined protocol state.\n\n---\n\n## Integer Overflow on 32-bit Systems\n\nOn 32-bit architectures, `size_t` is a 32-bit unsigned integer.\nThe variable `mult` is repeatedly multiplied by 128 during decoding.\n\nExample progression on a 32-bit system:\n\n| Iteration | mult value  | Operation | Result           |\n| --------: | ----------- | --------- | ---------------- |\n|         0 | 1           | 1 × 128   | 128              |\n|         1 | 128         | 128 × 128 | 16,384           |\n|         2 | 16,384      | × 128     | 2,097,152        |\n|         3 | 2,097,152   | × 128     | 268,435,456      |\n|         4 | 268,435,456 | × 128     | **Overflow → 0** |\n\nAfter the overflow, `mult` becomes zero, and any further bytes consumed contribute nothing to the decoded length. This allows a large or malformed Remaining Length field to be partially “hidden” while still advancing the input pointer.\n\n---\n\n## Impact\n\n# Impact\n\n### Protocol Desynchronization (All Architectures)\n\nBy consuming more than four bytes for the Remaining Length field, libcurl can become desynchronized from the MQTT stream. Bytes intended to be part of the payload or subsequent packets may instead be interpreted as length data, causing incorrect parsing of later packets.\n\n### Denial of Service\n\nThis desynchronization can result in malformed packet handling, unexpected connection termination, or repeated protocol errors such as `CURLE_WEIRD_SERVER_REPLY`.\n\nNo memory corruption or code execution is claimed.\n\n---\n\n## Recommended Fix\n\nThe decoding logic should explicitly enforce the four-byte limit defined by the MQTT specification.\n\nExample fix:\n\n```c\nfor(i = 0; (i < buflen) && (encoded & 128); i++) {\n  if(i >= 4) {\n    /* Malformed Remaining Length */\n    return 0; /* or propagate an error to the caller */\n  }\n  encoded = buf[i];\n  len += (encoded & 127) * mult;\n  mult *= 128;\n}\n```\n\nOptionally, the decoded length can also be checked against the implementation limit:\n\n```c\nif(len > MAX_MQTT_MESSAGE_SIZE)\n  return 0;\n```\n\n---\n\n## Verification Notes\n\nThe issue was verified through code inspection and logic simulation, confirming that `mqtt_decode_len` accepts more than four bytes for the Remaining Length field and allows arithmetic overflow on 32-bit systems. Runtime exploitation was not required to demonstrate the protocol violation.\n\n---\n\n## Conclusion\n\nThis is a protocol parsing bug caused by missing enforcement of a mandatory MQTT specification limit. While it does not directly result in memory corruption, it allows malformed MQTT packets to desynchronize the client’s protocol state and cause denial of service. Aligning the decoder with the existing encoder logic resolves the issue cleanly.\n\n```",
+  "weakness": {
+    "id": 15,
+    "name": "Integer Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5176784,
+      "file_name": "mqtt_malicious_server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/mkm0k9jpwm1e2ghyc1d7vmn2d36p?response-content-disposition=attachment%3B%20filename%3D%22mqtt_malicious_server.py%22%3B%20filename%2A%3DUTF-8%27%27mqtt_malicious_server.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSG55IBL4%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162829Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAHaQGGM9uV7RXtbGBiGFEJpz8IhS%2Bb1J2JqfxF68R4sAiBpRR%2FNQ9rep8AQIAfmdAyebAyrTDj2kA3Dey7lGFZ7tCqxBQhAEAMaDDAxMzYxOTI3NDg0OSIMPtlnXKpugKDBPcJ6Ko4Ftf%2FFY4AHpj0%2Bcw5wlqcIH2kGMZTrB0gA18yO8Uj2hz2yWYYUAc6jqrVtwIoAYZ9hxMkThDbzD2GvWsz5atMKaeMSCVI2f6jt8nNyr9EGI74zaXmp7e194k6ye6xobAB7KHMWmr%2B8q5RXVTNEf%2F%2FOPqQVYSM5CXxRB4hsI%2FtWgshxon8NGrZoVVdb6grn14FrycGYXaGCnrjPyYbx272faoh6dJAKKlA3ae8FtGMTuw6nouH%2FIrc0srOTUD5UfNIWvM%2FDx62zoMx5z9%2Bryw%2BV8ys4W16DRJ6wS5YiLe4af2KmxlroQ3QR2AL2feSt%2FX5uq4C2BFpVYTxV%2BsFdjTPjPhsYOwmiuq8mRRSr5rWMNlm8%2Fr1Yf8XNCgIxaiezY1lUQX9Pd%2BdjznMQ6WQfI%2BhWI29AO4llJuTbzM22RT%2BoEDQRHAHv0WY6axPOzx9%2Bu72mPPmJ%2B%2BgeLslLlWWZrVm36x0ThBG7RgBsXS0vxQ6Eq6KGfvkej1XLqrptvpJPSkXHmgU97WePdPymfMkpVYNpe%2BrVgjs7Sr8ydrCm65w6lNyYk%2FoiZxTjzvbBxz13HSEWEXvZ1%2FET3oc1MNdOq7V8pn%2BT%2BuXkzyscF5ioAPW1vHRG4%2Fd%2B08DAXIefe6%2FEcWvjfTEE7kkSn4P4mKpnAuNYF9fqhCa4RsuXwsmrAd62ECTNVvQLx5YLbYClAc0W1DdyhkPp%2BMcfxSP3AYSGL44DVBpCI8ORWF7TBtUom4DMrXOt2XYBcMvJt40XU3zKpAVIpZV6Sp3O4Jib2%2F7ESDO5woLIyrnjGqQDGn4uy5iDgajsJ0OebEtUw7Jrz704O%2FOV5spCrCLuulixqnjv4lqnCm8azv%2F86bAgeDb8mXjCMOKV2M8GOrIBFX2jD4IwV%2BFpP%2B0lHzXpigPAhUteEkgkAIFojb3BzL6JeITOunrwXe3fov7e7LX3VTZEyGlGUkNjrzajSiIo7ZsJWRYP7UdG7M7B4K76ujF9Kgk82Ef2Fp%2BTlaFgg0r%2FwR0xQ9jB9TSbFb1XAEtjzvlW3GJgHWAALitNrlmMBP%2FIKpnX4Lq%2Bq80vYjwCwageVLQYFjhgK5A1oXBNmybZvoVF0SeHE9d8RmZjYni5%2BAUR%2Fw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=49442e205904da5a63fad8f58882645dbdcfe72960e909565d51ee88cd9e3dee",
+      "file_size": 2378,
+      "type": "text/x-python",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 14,
+  "voters": [
+    "2026",
+    "aleksandr129",
+    "canyoneri",
+    "tonino",
+    "mshan",
+    "iossefy",
+    "stableexo",
+    "secretexploitt6",
+    "m355i",
+    "xelft",
+    "and 4 more..."
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

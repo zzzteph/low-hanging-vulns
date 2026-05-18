@@ -1,0 +1,127 @@
+{
+  "id": 3137657,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMTM3NjU3",
+  "url": "https://hackerone.com/reports/3137657",
+  "title": "Memory Leak",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2025-05-09T20:18:25.908Z",
+  "submitted_at": "2025-05-09T20:18:26.098Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": true,
+    "username": "antypanty",
+    "url": "/antypanty",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-05-10T21:16:26.583Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-05-10T21:15:54.455Z",
+  "comments_closed?": true,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "* in getparameter() via strdup() in tool_getparam.c > SIGSEGV\nProject: cURL\nFile: src/tool_getparam.c\nFunction: getparameter() → indirectly via getstr()\nDetected By: AddressSanitizer (ASan)\nCommand Used:\n\nASAN_OPTIONS=\"detect_leaks=1:verbosity=2:malloc_context_size=50\" ./curl -K <crash-file>\n\n# Overview\nA memory leak vulnerability has been identified in Curl’s configuration handling within tool_getparam.c. The issue originates from improper memory management of dynamically allocated strings using strdup(), leading to a persistent allocation that is never freed. Leak occurs in a key parsing function that processes user input, and survives until program termination, violating memory safety expectations for clean exits or tools used in pipelines and fuzzing environments. The issue lies in allocations made for fields like config->range, config->useragent, etc., without corresponding calls to free() or a cleanup routine.\nAffected Component\n- File: tool_getparam.c\n- Function: getstr()\n- Location: Line 2754\n- Bug Type: Memory Leak\n- Impact: The persistent allocation results in uncontrolled heap growth. While a memory leak alone does not directly enable arbitrary code execution, further analysis is required to assess whether heap fragmentation or manipulation could lead to memory corruption scenarios.\n\n## Technical Details\nIssue Description\nThe function getstr() is responsible for handling dynamically allocated strings used for various Curl parameters. If an existing string pointer is assigned a new value, it is properly freed before reallocation:\nstatic ParameterError getstr(char **str, const char *val, bool allowblank)\n{\n  if(*str) {\n    free(*str);\n    *str = NULL;\n  }\n\nHowever, when val is provided, strdup() is used to duplicate the string without ensuring proper memory cleanup later:\n  if(val) {\n    if(!allowblank && !val[0])\n      return PARAM_BLANK_STRING;\n  \n    *str = strdup(val);  // Potential leak occurs here\n    if(!*str)\n      return PARAM_NO_MEM;\n  }\n  return PARAM_OK;\n}\n\n\nSince there is no corresponding free() before process termination, this leads to a direct memory leak, as confirmed by ASAN:\n==7796==ERROR: LeakSanitizer: detected memory leaks\n\nDirect leak of 2 byte(s) in 1 object(s) allocated from:\n    #0 0x55fa1dc2f19e in strdup (/home/og/test/afl-test/curl/build/src/curl+0xdf19e)\n    #1 0x55fa1dca3e21 in getparameter /home/og/test/afl-test/curl/src/tool_getparam.c:2754\n    #2 0x55fa1dce687b in parseconfig /home/og/test/afl-test/curl/src/tool_parsecfg.c:175\n\nControl Flow Analysis\nThe memory allocation propagates through several functions, increasing impact:\ngetparameter() → parseconfig() → parse_args() → operate() → main()\n\n\nThis suggests that user-provided configuration values influence the strdup() call, meaning an attacker might manipulate inputs to generate excessive heap allocations.\n\nSanitizer Output (Summary)\n\n==7796==ERROR: LeakSanitizer: detected memory leaks\n\nDirect leak of 2 byte(s) in 1 object(s) allocated from:\n    #0 0x55fa1dc2f19e in strdup\n    #1 0x55fa1dca3e21 in getparameter /curl/src/tool_getparam.c:2754:35\n    #2 0x55fa1dce687b in parseconfig /curl/src/tool_parsecfg.c:175:13\n    #3 0x55fa1dca7c03 in getparameter /curl/src/tool_getparam.c:2793:10\n    ...\nSUMMARY: AddressSanitizer: 2 byte(s) leaked in 1 allocation(s).\n\n## Root Cause\n\nThe function getstr() is used to safely copy a string into a heap-allocated buffer, freeing any previous value:\n\nstatic ParameterError getstr(char **str, const char *val, bool allowblank)\n{\n  if(*str) {\n    free(*str);\n    *str = NULL;\n  }\n  if(val) {\n    if(!allowblank && !val[0])\n      return PARAM_BLANK_STRING;\n\n    *str = strdup(val);  // <-- Allocation not freed later\n    if(!*str)\n      return PARAM_NO_MEM;\n  }\n  return PARAM_OK;\n}\n\nThe call site inside getparameter() likely sets *str (e.g. config->range or another config field) but the value is never freed at the end of execution or between subsequent calls, especially in a fuzzing or crashing scenario.\n\n- Execution Flow:\ngetparameter() → parseconfig() → parse_args() → operate() → main()\n\n## Impact\n\nCauses memory leaks on malformed or crafted config files (especially during fuzzing).\n\n    Affects test reliability and resource handling.\n\n    May mask deeper issues or confuse fuzzers due to retained allocations.\n\n- The allocation remains in memory until exit, resulting in a direct memory leak.",
+  "weakness": {
+    "id": 2,
+    "name": "Memory Corruption - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4333933,
+      "file_name": "curl-SIG-bug",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/m8upubqjve5u4rtbhjqwuz1sudh2?response-content-disposition=attachment%3B%20filename%3D%22curl-SIG-bug%22%3B%20filename%2A%3DUTF-8%27%27curl-SIG-bug&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQV6EHBL6H%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163632Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIGpfaPxy%2BJjNKj80xGPDPuR%2FjUgTgAZwAykQ0f%2ByM0Q9AiAo97rj%2F7MdE2veaINP4JqdyNlWbhns5zRyCq%2FyXHP4QCqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMM%2Bc5KXLHV1rnGyq4Ko8F2CNZ9vCbrzD5XfsiRGv%2FzYkZ8Tj5R6uvchDcjYCUk5gMukq%2Ba4oL9JOwC3qbQEg3xFZ%2Fms6kjSKIf57DsUZOZ4NThzOoPI2y0Z1WIs0KhsCP%2FfDsUNX2p%2FbSJckXGcvSr1FZntHVKSSBipX7YQx0D6XsXOvvxKLl0ylcnffuVMMYfLLVUnSSc1jWZeU2Lew7%2BL6o6LdEkbcuyZgBILKnSt1AhPz8WTJvzQMltDr9Rts3P0uP77z%2BnsElqYUdbibPQsLlgsyUxCxCKd7ntasf4zbyMvorDmHvEY0F%2FZzb2%2B8hrWrDYCq2Zdr9fu2B%2FrqWoSqaB2S3D3Zvw%2FnXKIUwcImk2DtYbcu90%2F4T%2FPnPqR%2FnA2i2mhPKfY7YGvZc5An1AFA6ZBOl7Mm39uGLIisOPMyOTB37NlfkxqFewirU2OpjelKIQJcWKXKWyt0ySy6DULvJTMGwspEv17jB0atuQmMI3czC%2BvHPdHVMwmvjPaewNjRkL5Lo%2FyrdK9FT8hHCNqV9Cjo0O2F%2FO%2BY037NrK1pK3ZWv%2F8wop8ANZzeXjn4lF0KHByGq7YxaC3cO7HTclocluPLf6CkF6MVNlV96kjJhCRqRgltF9V0xQp6C7qFuOL5V2xRtuegO3jRPL3afdoLVo9WZwnyyBEP0g7R17xgRvSeuqkrL9o6RP9NQgWmHQYKqhcSPUMzEPY2JMmT0s8gzuU%2F0gcwD%2BHdgwbLOpu0T9pSBGGiWDWkLcwspZRPx9P9zUfJeV5wW7l8qCMq8hq62TM9QBICbn1Lmvoe3yUcmyPccOcjPMPBvRSjPweJHsOwd5UntWui0T3AwTzMv7I6ELr2eti1wVHMGQF4jm6W%2FCWMpKgdAjTxFCCi75DDrqdjPBjqyASiApVMGDnA0b5StiizLrYnvN%2BrnbDZVvLL%2FNYWC8QiEXVhDMFK5Av27%2FG5ml9U75BziP0JvVwnXxcwUOUKnnPO3qI4Mp%2Fu6zYuh3C62%2BnqRDgTTzxQw543EtpZ94cPsRMaFi7oyLz6Y0xgrxqhLRoiQb5O1b52jsO68QFBlyO%2FfVnam5hJxa4Yg0xKOz5lTd3rnioksL%2BPphVkAILLvTzHqS6ILrGIYbw%2ByJazFwMF4Uk0%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ff7cd0b0c6d22f649964f9fb05d74963936fa061fe1fb2d9dba659163d52b5cb",
+      "file_size": 135,
+      "type": "application/octet-stream",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 28,
+  "voters": [
+    "xchessy",
+    "k0ns0l",
+    "alp",
+    "mohaned0101",
+    "2026",
+    "muhammadwaseem3",
+    "mohammadtayb",
+    "fox0000",
+    "hamdy_zizo_1010",
+    "liangliangya",
+    "and 18 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

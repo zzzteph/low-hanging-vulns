@@ -1,0 +1,123 @@
+{
+  "id": 3356088,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMzU2MDg4",
+  "url": "https://hackerone.com/reports/3356088",
+  "title": "Race condition on global `gss_context` during SOCKS5 GSS-API negotiation in libcurl",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2025-09-24T03:36:19.089Z",
+  "submitted_at": "2025-09-24T03:36:19.351Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-09-26T07:05:11.060Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-09-25T11:37:51.978Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nConcurrent SOCKS5 GSS-API authentications share a file-scope global `gss_context` without synchronization, causing data races and undefined behavior.\n\n- Global context defined at:\n```52:54:curl/lib/socks_gssapi.c\nstatic gss_ctx_id_t gss_context = GSS_C_NO_CONTEXT;\n```\n- Passed by address into the GSS init routine per negotiation:\n```184:193:curl/lib/socks_gssapi.c\ngss_major_status = Curl_gss_init_sec_context(data,\n                                             &gss_minor_status,\n                                             &gss_context,\n                                             server,\n                                             &Curl_krb5_mech_oid,\n                                             NULL,\n                                             gss_token,\n                                             &gss_send_token,\n                                             TRUE,\n                                             &gss_ret_flags);\n```\n\nUsing Helgrind with libcurl’s DEBUGBUILD GSS stub (`CURL_STUB_GSS_CREDS=KRB5`) to avoid libkrb5-internal noise, I observed a reproducible data race that directly references the global symbol `gss_context`:\n\n- Helgrind evidence (from `docker_helgrind.log`):\n```\n==XXXX== Possible data race during read of size 8 at ...\n==XXXX==    at 0x1CEFC0: stub_gss_init_sec_context (curl_gssapi.c:126)\n==XXXX==    by 0x1CEE43: Curl_gss_init_sec_context (curl_gssapi.c:329)\n==XXXX==    by 0x1BCB3B: Curl_SOCKS5_gssapi_negotiate (socks_gssapi.c:184)\n...\n==XXXX== This conflicts with a previous write of size 8 by thread #Y\n==XXXX==    at 0x1CF4A4: stub_gss_init_sec_context (curl_gssapi.c:264)\n==XXXX==    by 0x1CEE43: Curl_gss_init_sec_context (curl_gssapi.c:329)\n==XXXX==    by 0x1BCB3B: Curl_SOCKS5_gssapi_negotiate (socks_gssapi.c:184)\n==XXXX==  Address ... is 0 bytes inside data symbol \"gss_context\"\n```\n\n[AI assistance was used to orchestrate the build/run environment and tooling and to help with report writing. All findings, code locations, and outputs cited below were directly observed and verified from the built code and runtime logs.]\n\n## Affected version\n- Built from current `master` (configure summary reported: `curl version: 8.17.0-DEV`) in an Ubuntu 24.04 (arm64) container\n- GSS-API provider: MIT Kerberos (system `libgssapi_krb5`), and also tested with curl’s DEBUGBUILD GSS stub via `CURL_STUB_GSS_CREDS=KRB5`\n\n## Steps To Reproduce:\n\n1. Start an Ubuntu container and install prerequisites:\n```bash\ndocker run --rm -it -v \"$PWD\":/src -w /src ubuntu:24.04 bash -lc '\n  set -euo pipefail\n  export DEBIAN_FRONTEND=noninteractive\n  apt-get update -qq\n  apt-get install -y -qq clang make autoconf automake libtool pkg-config libkrb5-dev python3 valgrind > /dev/null\n  update-ca-certificates > /dev/null 2>&1 || true\n'\n```\n\n2. Configure and build libcurl (Debug, GSS-API, minimal deps):\n```bash\ndocker run --rm -it -v \"$PWD\":/src -w /src ubuntu:24.04 bash -lc '\n  set -euo pipefail\n  if [ -f Makefile ]; then make distclean || true; fi\n  if [ -x ./buildconf ]; then ./buildconf; else autoreconf -fi; fi\n  export CC=clang CFLAGS=\"-O0 -g -fno-omit-frame-pointer\" LDFLAGS=\"\"\n  ./configure --enable-debug --with-gssapi --disable-shared \\\n    --without-ssl --without-libidn2 --without-libpsl --without-libssh2 \\\n    --without-brotli --without-zstd --without-nghttp2 --without-nghttp3 --without-ngtcp2\n  make -j\"$(nproc)\"\n'\n```\n\n3. Launch a minimal SOCKS5 proxy that selects GSS-API (method 1):\n```bash\ndocker run --rm -it -v \"$PWD\":/src -w /src ubuntu:24.04 bash -lc '\n  set -euo pipefail\n  cat > proxy.py <<PY\nimport socket, threading, struct\n\ndef handle(c):\n    try:\n        data=c.recv(262)\n        if len(data)<3: return\n        c.sendall(b\"\\x05\\x01\")\n        hdr=c.recv(4)\n        if len(hdr)<4: return\n        ln=struct.unpack(\"!H\", hdr[2:4])[0]\n        _=c.recv(ln)\n        c.sendall(b\"\\x01\\x01\\x00\\x01D\")\n        hdr=c.recv(4)\n        if len(hdr)<4: return\n        ln=struct.unpack(\"!H\", hdr[2:4])[0]\n        _=c.recv(ln)\n        c.sendall(b\"\\x01\\x02\\x00\\x01\\x00\")\n    finally:\n        try: c.close()\n        except: pass\n\ns=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\ns.bind((\"0.0.0.0\",1081)); s.listen()\nprint(\"listening 0.0.0.0 1081\", flush=True)\nwhile True:\n    c,_=s.accept()\n    threading.Thread(target=handle,args=(c,),daemon=True).start()\nPY\n  python3 proxy.py &\n  sleep 1\n'\n```\n\n4. Build the multithreaded PoC using libcurl:\n```bash\ndocker run --rm -it -v \"$PWD\":/src -w /src ubuntu:24.04 bash -lc '\n  set -euo pipefail\n  cat > test_gss_race.c <<C\n#include <pthread.h>\n#include <curl/curl.h>\nstatic void *worker(void *u){\n  CURL *e=curl_easy_init();\n  curl_easy_setopt(e,CURLOPT_URL,(char*)u);\n  curl_easy_setopt(e,CURLOPT_PROXY,\"socks5://127.0.0.1:1081\");\n  curl_easy_setopt(e,CURLOPT_SOCKS5_GSSAPI_SERVICE,\"rcmd\");\n  curl_easy_setopt(e,CURLOPT_SOCKS5_AUTH,(long)CURLAUTH_GSSAPI);\n  for(int i=0;i<50;++i) curl_easy_perform(e);\n  curl_easy_cleanup(e);\n  return 0;\n}\nint main(void){\n  curl_global_init(CURL_GLOBAL_DEFAULT);\n  enum { N=16 }; pthread_t th[N];\n  for(int i=0;i<N;++i) pthread_create(&th[i],0,worker,\"http://example.com\");\n  for(int i=0;i<N;++i) pthread_join(th[i],0);\n  curl_global_cleanup();\n  return 0;\n}\nC\n  clang -O0 -g -Iinclude test_gss_race.c -Llib/.libs -lcurl -lgssapi_krb5 -lpthread -o test_gss_race\n'\n```\n\n5. Run under Helgrind with curl’s DEBUGBUILD GSS stub to surface races in curl (and reduce libkrb5 noise):\n```bash\ndocker run --rm -it -v \"$PWD\":/src -w /src ubuntu:24.04 bash -lc '\n  set -euo pipefail\n  export CURL_STUB_GSS_CREDS=KRB5\n  valgrind --tool=helgrind --quiet --fair-sched=try ./test_gss_race | tee docker_helgrind.log\n'\n```\n\n6. Verify the race report mentions the global symbol `gss_context` and the call site in `socks_gssapi.c`:\n- Look for lines similar to:\n```\nPossible data race ...\n... Curl_SOCKS5_gssapi_negotiate (socks_gssapi.c:184)\n... Address ... is 0 bytes inside data symbol \"gss_context\"\n```\n\n## Supporting Material/References:\n- Source code location of the shared global:\n```52:54:curl/lib/socks_gssapi.c\nstatic gss_ctx_id_t gss_context = GSS_C_NO_CONTEXT;\n```\n- Call site passing the shared global by address into the GSS routine:\n```184:193:curl/lib/socks_gssapi.c\ngss_major_status = Curl_gss_init_sec_context(data,\n                                             &gss_minor_status,\n                                             &gss_context,\n                                             server,\n                                             &Curl_krb5_mech_oid,\n                                             NULL,\n                                             gss_token,\n                                             &gss_send_token,\n                                             TRUE,\n                                             &gss_ret_flags);\n```\n- Helgrind log excerpt (from my run) demonstrating the race on `gss_context`:\n```\n==XXXX== Possible data race during read of size 8 ...\n==XXXX==    at 0x1CEFC0: stub_gss_init_sec_context (curl_gssapi.c:126)\n==XXXX==    by 0x1CEE43: Curl_gss_init_sec_context (curl_gssapi.c:329)\n==XXXX==    by 0x1BCB3B: Curl_SOCKS5_gssapi_negotiate (socks_gssapi.c:184)\n...\n==XXXX== This conflicts with a previous write ...\n==XXXX==    at 0x1CF4A4: stub_gss_init_sec_context (curl_gssapi.c:264)\n==XXXX==    by 0x1CEE43: Curl_gss_init_sec_context (curl_gssapi.c:329)\n==XXXX==    by 0x1BCB3B: Curl_SOCKS5_gssapi_negotiate (socks_gssapi.c:184)\n==XXXX==  Address ... is 0 bytes inside data symbol \"gss_context\"\n```\n\n## Impact\n\n## Summary:\nThe shared global `gss_context` is accessed and modified concurrently across connections without synchronization. This presents a realistic risk of:\n- Process crash / denial of service due to undefined behavior and races in GSS context handling\n- Authentication failures or misbehavior during SOCKS5 proxy negotiation under load\n\nI did not observe or claim memory disclosure or RCE, the verified impact is concurrency-related instability (DoS/UB) when multiple handles/authentications run concurrently.",
+  "weakness": {
+    "id": 140,
+    "name": "Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 17,
+  "voters": [
+    "k0ns0l",
+    "2026",
+    "wefega",
+    "darkey_",
+    "camphirex",
+    "cyberalchemist_99",
+    "smtsmart",
+    "zerakay",
+    "r0gues3c",
+    "khal1facipher",
+    "and 7 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

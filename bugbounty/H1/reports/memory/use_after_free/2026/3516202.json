@@ -1,0 +1,140 @@
+{
+  "id": 3516202,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTE2MjAy",
+  "url": "https://hackerone.com/reports/3516202",
+  "title": "Cookie Replacement Use-After-Free Vulnerability",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "none",
+  "readable_substate": "N/A",
+  "created_at": "2026-01-19T10:27:16.208Z",
+  "submitted_at": "2026-01-19T10:27:16.454Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "bhaskar_ram",
+    "url": "/bhaskar_ram",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/cqqhpn6i5pp2lq6ax7uv1h3wuls8/8774a5031fc14b74dc4404da039040c69df8ed41021007c0c2beb9de489fcf66"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-01-19T11:50:24.059Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-01-19T10:57:09.080Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nThe cookie replacement logic in `lib/cookie.c` contains a use-after-free vulnerability in the `replace_existing()` function. The function modifies a linked list while iterating over it, creating potential for memory corruption in concurrent or complex cookie operations.\n\n**Vulnerable Code Location:** `lib/cookie.c:822-925`\n\n```c\nstatic bool replace_existing(struct Curl_easy *data,\n                             struct Cookie *co,\n                             struct CookieInfo *ci,\n                             bool secure,\n                             bool *replacep)\n{\n    bool replace_old = FALSE;\n    struct Curl_llist_node *replace_n = NULL;\n    struct Curl_llist_node *n;\n    \n    // Iterate over cookie list\n    for(n = Curl_llist_head(&ci->cookielist[myhash]); n; n = Curl_node_next(n)) {\n        struct Cookie *clist = Curl_node_elem(n);\n        // ... comparison logic ...\n        if(replace_old)\n            replace_n = n;  // Store node for later deletion\n    }\n    \n    // Delete node after iteration\n    if(replace_n) {\n        struct Cookie *repl = Curl_node_elem(replace_n);\n        co->creationtime = repl->creationtime;  // Access freed memory\n        Curl_node_remove(replace_n);\n        freecookie(repl, TRUE);  // Free memory\n    }\n}\n```\n\n## Affected version\ncurl 7.x - 8.x\n\n## Steps To Reproduce:\n\n### PoC Server\n\nA race condition server has been developed to trigger the vulnerability:\n\n**File:** `poc_cookie_uaf.py`\n\n```bash\n# Run the PoC server\npython3 poc_cookie_uaf.py\n\n# Server starts on http://localhost:8000\n# Provides 3 different exploit scenarios\n```\n\n### Testing with AddressSanitizer\n\n**CRITICAL:** This vulnerability requires AddressSanitizer to detect reliably.\n\n#### Build curl with ASan\n\n```bash\ncd curl\nexport CFLAGS=\"-fsanitize=address -fno-omit-frame-pointer -g\"\nexport LDFLAGS=\"-fsanitize=address\"\n./buildconf\n./configure --enable-debug --disable-shared\nmake clean\nmake\n```\n\n#### Test 1: Rapid Cookie Replacement\n\n```bash\n# Single request with 50 cookies\n./src/curl -c cookies.txt http://localhost:8000/exploit1\n\n# Check for ASan errors\n# Look for: \"heap-use-after-free\"\n```\n\n**Expected ASan Output (if vulnerable):**\n```\n==12345==ERROR: AddressSanitizer: heap-use-after-free on address 0x602000001234\nREAD of size 8 at 0x602000001234 thread T0\n    #0 0x... in replace_existing lib/cookie.c:915\n    #1 0x... in Curl_cookie_add lib/cookie.c:1234\n    #2 0x... in Curl_http_input_auth lib/http.c:567\n```\n\n#### Test 2: Concurrent Requests\n\n```bash\n# Trigger race conditions with concurrent requests\nfor i in {1..20}; do\n    ./src/curl -c cookies_$i.txt http://localhost:8000/exploit2 &\ndone\nwait\n\n# Check for crashes or ASan errors\n```\n\n#### Test 3: Complex Replacement Patterns\n\n```bash\n# Test edge cases\n./src/curl -c cookies.txt http://localhost:8000/exploit3\n\n# Run multiple times to trigger race\nfor i in {1..100}; do\n    ./src/curl -c cookies_test_$i.txt http://localhost:8000/exploit3\ndone\n```\n\n### Verification Script\n\n```python\n#!/usr/bin/env python3\n# verify_uaf.py - Check for use-after-free indicators\n\nimport subprocess\nimport sys\n\ndef run_test(url):\n    \"\"\"Run curl and check for ASan errors\"\"\"\n    result = subprocess.run(\n        ['./src/curl', '-c', 'test.txt', url],\n        capture_output=True,\n        text=True\n    )\n    \n    # Check for ASan errors\n    if 'heap-use-after-free' in result.stderr:\n        print(f\"[VULN] Use-after-free detected: {url}\")\n        print(result.stderr)\n        return True\n    elif 'double-free' in result.stderr:\n        print(f\"[VULN] Double-free detected: {url}\")\n        print(result.stderr)\n        return True\n    elif result.returncode != 0:\n        print(f\"[CRASH] curl crashed: {url}\")\n        return True\n    \n    return False\n\n# Test all exploits\nexploits = [\n    'http://localhost:8000/exploit1',\n    'http://localhost:8000/exploit2',\n    'http://localhost:8000/exploit3',\n]\n\nvulnerable = False\nfor exploit in exploits:\n    if run_test(exploit):\n        vulnerable = True\n\nif vulnerable:\n    print(\"\\\\n[RESULT] Vulnerability confirmed!\")\n    sys.exit(1)\nelse:\n    print(\"\\\\n[RESULT] No vulnerability detected (or patched)\")\n    sys.exit(0)\n```\n\n## Supporting Material/References:\n\n- [CWE-416: Use After Free](https://cwe.mitre.org/data/definitions/416.html)\n- [AddressSanitizer Documentation](https://github.com/google/sanitizers/wiki/AddressSanitizer)\n- [curl Security Policy](https://curl.se/docs/security.html)\n- [Memory Safety in C](https://en.wikipedia.org/wiki/Memory_safety)\n\n### Attachments\n 1. `poc_cookie_uaf.py` - Proof of concept race condition server\n 2. `fix_cookie_uaf.patch` - Security patch\n\n## Impact\n\n## Summary:\n\n   - Heap corruption from use-after-free\n   - Potential for arbitrary code execution\n   - Information disclosure through freed memory\n   - Crashes from accessing freed memory\n   - Segmentation faults in cookie handling\n   - Application instability\n   - Freed cookie data may contain sensitive information\n   - Session tokens, authentication data exposed\n   - Memory layout information leaked\n   - If attacker can control freed memory contents\n   - Heap spraying techniques applicable\n   - Function pointer corruption possible",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5244568,
+      "file_name": "fix_cookie_uaf.patch",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/7yy4z79k956s55ob9mhxw072dhs4?response-content-disposition=attachment%3B%20filename%3D%22fix_cookie_uaf.patch%22%3B%20filename%2A%3DUTF-8%27%27fix_cookie_uaf.patch&response-content-type=text%2Fx-diff&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2JLRQC3Z%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162534Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCyF6a0h%2FSd%2BZSks8Rxtl8IMUlV6CnC0EkjKPdOgZppbgIhAJFn8L8q2CGh2pHyXZ5ZMKdMaJy0NuM5GjHSVUlFDTCvKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5IgxPqaDNpE%2FTESHVWKUqjgXASGPQnvNHr2m%2FJIy2ISQVEqko3Yetjo%2F8q7I39IKV7lUxcfLD%2F1XR3w%2FIeZqxTqeeRRnn9MG4wOJuUQCz0TbJ3RYUzLp6NFNeeLUs89tSWQao3K3K1YRQpvxHyd%2FVnQLjGQL%2ByA1W8vwaggeEJOTWpMHro8OmuLbCpiojpf4c0ScAk7jIPo9nq%2BdAbGBT%2BUrarFg54aa3t9Gjb2afUvfC17M1qY0bNHwJ9Pays%2B4nfSf65gBvV8Q5%2Fkpn2Je3SSARa2gRxt8W9gAA9Yz%2F8tRQDheeLfJKjE9hsJmFjYGJtxkvZRnIoMIZtUzAY2MtoEJTGW%2BhaIRYO%2FRUewE0oTOIPtRlJWl5bAfn8xkwDxJGLCuWS3KqjYOTnjUBxC2vKaRWNUjX6wCoWcfqjFWh9kDHe%2FglTqO7%2FhymgHO0N%2FbJGPfLrXbN5nLp3basc2D8NVFFYPypZpmZoGvPODZcm6MKNiYFgL%2Be8G9kqEeW8j2uv3WRlTWjKLgMSUSdC6BU4KKWs%2BW6LgY%2FRNzZuNsvNF8Wq%2BEvh%2FNwtKZXWo6ViLVGheYXcFM%2FCxvdiO7VmMS8UFOcEw7jGaJiNuUo%2FusoO7I9jqghkw84cRFWxYNCOPOLMINynxHc%2BW22HCuCKPHpH4%2FngERDkQV2JzcTL6DXXgmaWwGRAkppif4Q%2F3GBWcIg9VrXqC%2FxvtGt3sQCbHnxLjOKrQMMEe%2BONDXrx3C7yUjREIGX6LQmXabH6XVYcLGnerLvSFDJKfMKGMW5v0agg4D1FI9fwGqnYK6JSiZD9QGCMyr%2BcYow%2FItz7HbxBjBG8iivYaDi65QyjP1vssif0a4uy1m7FnAEaGmy4QGtZ5Lb211YvfP%2FOe9KdZr8EI4whZnYzwY6sAGVm755FFPDuelFXnnKYnWpAjxtT4m5T4dhCScUP5vZ3berrWswAuaFRhjvJ6cDzwNkR4au5erhrpfKwurh6cId6LUxrQzFJEQaW3UAiEFuckw3j%2FkbGaviGEB38PcRx6XKNjiqwHiC6LcoMM6fvomI7IhaJ0gnUaZJ1AFyezf9SM0zuYoK2fyhapRMIp88t3rNFA2L6qmyXeSoRKuz3ku2BETpnGwn4Qmy2ugAijW9bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=86e0aab791547e0e3da0a842e58a5315e41552d925cb486dd235326bad7d3336",
+      "file_size": 8727,
+      "type": "text/x-diff",
+      "moderated": null
+    },
+    {
+      "id": 5244569,
+      "file_name": "poc_cookie_uaf.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/h7hr0h9j1xuq9fqvijmm2udzcsvb?response-content-disposition=attachment%3B%20filename%3D%22poc_cookie_uaf.py%22%3B%20filename%2A%3DUTF-8%27%27poc_cookie_uaf.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2JLRQC3Z%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162534Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCyF6a0h%2FSd%2BZSks8Rxtl8IMUlV6CnC0EkjKPdOgZppbgIhAJFn8L8q2CGh2pHyXZ5ZMKdMaJy0NuM5GjHSVUlFDTCvKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5IgxPqaDNpE%2FTESHVWKUqjgXASGPQnvNHr2m%2FJIy2ISQVEqko3Yetjo%2F8q7I39IKV7lUxcfLD%2F1XR3w%2FIeZqxTqeeRRnn9MG4wOJuUQCz0TbJ3RYUzLp6NFNeeLUs89tSWQao3K3K1YRQpvxHyd%2FVnQLjGQL%2ByA1W8vwaggeEJOTWpMHro8OmuLbCpiojpf4c0ScAk7jIPo9nq%2BdAbGBT%2BUrarFg54aa3t9Gjb2afUvfC17M1qY0bNHwJ9Pays%2B4nfSf65gBvV8Q5%2Fkpn2Je3SSARa2gRxt8W9gAA9Yz%2F8tRQDheeLfJKjE9hsJmFjYGJtxkvZRnIoMIZtUzAY2MtoEJTGW%2BhaIRYO%2FRUewE0oTOIPtRlJWl5bAfn8xkwDxJGLCuWS3KqjYOTnjUBxC2vKaRWNUjX6wCoWcfqjFWh9kDHe%2FglTqO7%2FhymgHO0N%2FbJGPfLrXbN5nLp3basc2D8NVFFYPypZpmZoGvPODZcm6MKNiYFgL%2Be8G9kqEeW8j2uv3WRlTWjKLgMSUSdC6BU4KKWs%2BW6LgY%2FRNzZuNsvNF8Wq%2BEvh%2FNwtKZXWo6ViLVGheYXcFM%2FCxvdiO7VmMS8UFOcEw7jGaJiNuUo%2FusoO7I9jqghkw84cRFWxYNCOPOLMINynxHc%2BW22HCuCKPHpH4%2FngERDkQV2JzcTL6DXXgmaWwGRAkppif4Q%2F3GBWcIg9VrXqC%2FxvtGt3sQCbHnxLjOKrQMMEe%2BONDXrx3C7yUjREIGX6LQmXabH6XVYcLGnerLvSFDJKfMKGMW5v0agg4D1FI9fwGqnYK6JSiZD9QGCMyr%2BcYow%2FItz7HbxBjBG8iivYaDi65QyjP1vssif0a4uy1m7FnAEaGmy4QGtZ5Lb211YvfP%2FOe9KdZr8EI4whZnYzwY6sAGVm755FFPDuelFXnnKYnWpAjxtT4m5T4dhCScUP5vZ3berrWswAuaFRhjvJ6cDzwNkR4au5erhrpfKwurh6cId6LUxrQzFJEQaW3UAiEFuckw3j%2FkbGaviGEB38PcRx6XKNjiqwHiC6LcoMM6fvomI7IhaJ0gnUaZJ1AFyezf9SM0zuYoK2fyhapRMIp88t3rNFA2L6qmyXeSoRKuz3ku2BETpnGwn4Qmy2ugAijW9bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=7624907d4c250c8b351ddc425432983d36a10bab99916a2f25c07342fe252433",
+      "file_size": 12914,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 21,
+  "voters": [
+    "2026",
+    "essax",
+    "xwx1234llllll",
+    "dilkhazbarjis",
+    "brazil1",
+    "dsokey100",
+    "zwanski",
+    "vext",
+    "heykerme",
+    "williamseben",
+    "and 11 more..."
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

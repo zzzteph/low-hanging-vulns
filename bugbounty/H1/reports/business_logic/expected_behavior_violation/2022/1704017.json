@@ -1,0 +1,119 @@
+{
+  "id": 1704017,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNzA0MDE3",
+  "url": "https://hackerone.com/reports/1704017",
+  "title": "CVE-2022-32221: POST following PUT confusion",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2022-09-18T23:27:44.853Z",
+  "submitted_at": "2022-09-18T23:27:44.922Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "robbotic",
+    "url": "/robbotic",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-32221"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2022-11-26T12:02:53.622Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2022-10-27T12:02:52.182Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nThe bug I submitted at https://github.com/curl/curl/issues/9507 can have at least a few unintended security issues:\n- Information Disclosure: this bug causes an HTTP PUT to occur when the user intends for an HTTP POST to occur. The user, who intended an HTTP POST, expects the POSTed information to come from CURLOPT_POSTFIELDS. However, as an HTTP PUT is performed instead, the data that is PUT comes from a buffer specified in CURLOPT_READDATA, which may be sensitive information intended for an entirely different host (host1.com below). If CURLOPT_READDATA is not specified, this data could come from stdin!\n- Use after free: using the description above, if the user had already freed the data specified in CURLOPT_READDATA, then the unintended HTTP PUT (which was intended to be an HTTP POST) would attempt to read the freed data specified in CURLOPT_READDATA.\n\n## Steps To Reproduce:\nThe following code is similar to the code I posted at https://github.com/curl/curl/issues/9507, but now highlights the potential security issues (which I did not think wise to disclose on GitHub):\n\n```\n#include <stdio.h>\n#include <string.h>\n#include <curl/curl.h>\n\ntypedef struct\n{\n    char *buf;\n    size_t len;\n} put_buffer;\n\nstatic size_t put_callback(char *ptr, size_t size, size_t nmemb, void *stream)\n{\n    put_buffer *putdata = (put_buffer *)stream;\n    size_t totalsize = size * nmemb;\n    size_t tocopy = (putdata->len < totalsize) ? putdata->len : totalsize;\n    memcpy(ptr, putdata->buf, tocopy);\n    putdata->len -= tocopy;\n    putdata->buf += tocopy;\n    return tocopy;\n}\n\nint main()\n{\n    CURL *curl = NULL;\n    put_buffer pbuf = {};\n    char *otherdata = \"This is some other data\";\n\n    curl_global_init(CURL_GLOBAL_DEFAULT);\n\n    curl = curl_easy_init();\n\n    // PUT\n    curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);\n    curl_easy_setopt(curl, CURLOPT_READFUNCTION, put_callback);\n    pbuf.buf = strdup(\"This is highly secret and sensitive data\");\n    pbuf.len = strlen(pbuf.buf);\n    curl_easy_setopt(curl, CURLOPT_READDATA, &pbuf);\n    curl_easy_setopt(curl, CURLOPT_INFILESIZE, pbuf.len);\n    curl_easy_setopt(curl, CURLOPT_URL, \"http://host1.com/putsecretdata\");\n    curl_easy_perform(curl);\n\n    // Without this line, a PUT instead of a POST will be sent below (this is a bug in libcurl)\n    //curl_easy_setopt(curl, CURLOPT_UPLOAD, 0L);\n\n    // Without this line, the POST below will send \"This is highly secret and sensitive data\"\n    //    when instead the user intended to send \"This is some other data\"\n    // With this line, the program will attempt to use freed data, causing a segfault or any number\n    //    of potential exploits.\n    //free(pbuf.buf);\n\n    // POST (will be a PUT without the line just above)\n    curl_easy_setopt(curl, CURLOPT_POST, 1L);\n    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, otherdata);\n    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, strlen(otherdata));\n    curl_easy_setopt(curl, CURLOPT_URL, \"http://host2.com/postotherdata\");\n    curl_easy_perform(curl);\n\n    curl_easy_cleanup(curl);\n\n    curl_global_cleanup();\n\n    return 0;\n}\n```\n\n## Supporting Material/References:\nThe bug that leads to these potential security issues is documented at https://github.com/curl/curl/issues/9507\n\n## Impact\n\nAn attacker could potentially inject data, either from stdin or from an unintended buffer. Further, without even an active attacker, this could lead to segfaults or sensitive information being exposed to an unintended recipient.",
+  "weakness": {
+    "id": 659,
+    "name": "Expected Behavior Violation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2022-11-26T12:02:52.333Z",
+  "allow_singular_disclosure_after": -108277331.90482904,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "zy9ard3",
+    "shivammusic",
+    "atomicintelligence"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

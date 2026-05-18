@@ -1,0 +1,121 @@
+{
+  "id": 3558277,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTU4Mjc3",
+  "url": "https://hackerone.com/reports/3558277",
+  "title": "Fail-Open in set_tlsext_servername_callback on pyopenssl via unhandled exceptions leads to security bypass",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-02-16T22:41:43.328Z",
+  "submitted_at": "2026-02-16T22:41:43.379Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "uv3doble",
+    "url": "/uv3doble",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hr7m100985bekkkj8oo28fl219y5/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13323,
+    "url": "https://hackerone.com/pyca",
+    "handle": "pyca",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/013/323/4dab18c2c84bec17ec5b5584b3067f9b0bca44b4_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/013/323/4dab18c2c84bec17ec5b5584b3067f9b0bca44b4_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Python Cryptographic Authority",
+      "twitter_handle": "",
+      "website": "https://cryptography.io",
+      "about": "Building core cryptographic libraries for the Python ecosystem."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-03-20T16:10:03.802Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-02-18T16:10:03.072Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Fail-Open Vulnerability in `set_tlsext_servername_callback` allows Security Bypass via Unhandled Exceptions\n\n## Summary\nThe `pyopenssl` library exhibits a **Fail-Open** vulnerability in its handling of the Server Name Indication (SNI) callback (`set_tlsext_servername_callback`). The internal wrapper for this callback catches all Python exceptions raised by user code but returns `0` (Success/`SSL_TLSEXT_ERR_OK`) to the underlying OpenSSL engine.\n\nThis behavior allows a TLS connection to be successfully established even when the security validation logic inside the callback crashes or raises an exception, potentially bypassing critical access controls or authentication mechanisms implemented at the SNI layer.\n\n## Vulnerability Description\nIn `src/OpenSSL/SSL.py`, the `set_tlsext_servername_callback` method wraps the user-provided function with a decorator that does not explicitly handle exceptions to signal failure:\n\n```python\n# OpenSSL/SSL.py\n@wraps(callback)\ndef wrapper(ssl, alert, arg):\n    callback(Connection._reverse_mapping[ssl])\n    return 0  # Always returns Success (0)\n```\n\nWhen `callback(...)` raises an exception, the CFFI layer catches it, prints the traceback to stderr, and returns the default value for the declared return type (`int`), which is `0`. \n\nIn the context of the OpenSSL `SSL_CTX_set_tlsext_servername_callback`, a return value of `0` corresponds to `SSL_TLSEXT_ERR_OK`. Consequently, OpenSSL proceeds with the handshake as if the validation succeeded.\n\n**Correct Secure Behavior (Fail-Closed):**\nIf the callback raises an unhandled exception, the wrapper should catch it and return `SSL_TLSEXT_ERR_ALERT_FATAL` (or similar) to abort the handshake, ensuring a secure failure state.\n\n## Steps to Reproduce\n\n1.  Install `pyopenssl`.\n2.  Run the following Python script (`poc.py`).\n3.  Observe that the client successfully connects and receives data (\"VULNERABILITY CONFIRMED\") despite the server's validation callback raising a `ValueError`.\n\n### Proof of Concept (PoC)\n\n```python\nimport socket\nimport threading\nimport time\nfrom OpenSSL import SSL, crypto\nimport os\n\ndef generate_cert():\n    k = crypto.PKey()\n    k.generate_key(crypto.TYPE_RSA, 2048)\n    cert = crypto.X509()\n    cert.get_subject().CN = 'VulnerableServer'\n    cert.set_serial_number(1000)\n    cert.gmtime_adj_notBefore(0)\n    cert.gmtime_adj_notAfter(10*365*24*60*60)\n    cert.set_issuer(cert.get_subject())\n    cert.set_pubkey(k)\n    cert.sign(k, 'sha256')\n    return cert, k\n\ncert, key = generate_cert()\n\ndef crashing_callback(connection):\n    # Simulates a security check that crashes (e.g., DB error, logic bug)\n    print(\"\\n[SERVER] Callback executing... Raising Exception!\")\n    raise ValueError(\"Critical Security Check Failed!\")\n    # The code never reaches a point to explicitly reject the connection.\n\ndef start_server():\n    context = SSL.Context(SSL.TLS_SERVER_METHOD)\n    context.use_privatekey(key)\n    context.use_certificate(cert)\n    context.set_tlsext_servername_callback(crashing_callback)\n    \n    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    # Using port 4433 to avoid conflicts\n    try:\n        server.bind(('localhost', 4433))\n    except Exception as e:\n        print(f\"[SERVER] Bind failed (port busy?): {e}\")\n        return\n        \n    server.listen(1)\n    \n    try:\n        conn, addr = server.accept()\n        ssl_conn = SSL.Connection(context, conn)\n        ssl_conn.set_accept_state()\n        try:\n            ssl_conn.do_handshake()\n            # If we reach here, the vulnerability is triggered\n            ssl_conn.sendall(b\"VULNERABILITY CONFIRMED: Connection Accepted\")\n            ssl_conn.shutdown()\n        except Exception as e:\n            print(f\"[SERVER] Handshake Failed (Safe): {e}\")\n        finally:\n            ssl_conn.close()\n            conn.close()\n    finally:\n        server.close()\n\ndef start_client():\n    time.sleep(1)\n    context = SSL.Context(SSL.TLS_CLIENT_METHOD)\n    context.set_verify(SSL.VERIFY_NONE, lambda *args: True)\n    \n    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n    try:\n        sock.connect(('localhost', 4433))\n        ssl_conn = SSL.Connection(context, sock)\n        ssl_conn.set_connect_state()\n        ssl_conn.set_tlsext_host_name(b\"test.local\")\n        \n        try:\n            ssl_conn.do_handshake()\n            data = ssl_conn.recv(1024)\n            print(f\"\\n[CLIENT] Received: {data.decode()}\")\n        except Exception as e:\n            print(f\"\\n[CLIENT] Handshake Failed: {e}\")\n    finally:\n        sock.close()\n\nif __name__ == '__main__':\n    t = threading.Thread(target=start_server)\n    t.start()\n    start_client()\n    t.join()\n```\n\n## Impact\nThis issue allows attackers to bypass security controls implemented via SNI callbacks. \n\nIf a developer relies on `set_tlsext_servername_callback` to enforce access policies (e.g., \"Allow connection only if SNI matches X\"), an attacker who can trigger an exception in that logic (e.g., via malformed input or resource exhaustion) will successfully establish a TLS connection, bypassing the intended restriction. This violates the \"Fail-Secure\" design principle required for security-critical libraries.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-03-20T16:10:03.510Z",
+  "allow_singular_disclosure_after": -3715983.033124002,
+  "singular_disclosure_allowed": true,
+  "vote_count": 63,
+  "voters": [
+    "aboalezz",
+    "mohaned0101",
+    "2026",
+    "m3ntor",
+    "oblivionsage",
+    "6b_jjj",
+    "fauxthn",
+    "dnminh",
+    "p_v_",
+    "bltza",
+    "and 53 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 16636,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/pyca/pyopenssl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

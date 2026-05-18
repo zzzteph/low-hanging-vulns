@@ -1,0 +1,116 @@
+{
+  "id": 3645415,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjQ1NDE1",
+  "url": "https://hackerone.com/reports/3645415",
+  "title": "# SCURLOPT_SSH_KNOWNHOSTS and host fingerprint pins are silently bypassed when an SSH connection is reused from the connection pool",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "readable_substate": "N/A",
+  "created_at": "2026-04-02T18:13:23.357Z",
+  "submitted_at": "2026-04-02T18:13:23.831Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "spiderchan26",
+    "url": "/spiderchan26",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-06T09:46:26.402Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-05T21:22:33.370Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Product\n\n**libcurl** (all versions, all platforms, compiled with `USE_SSH`)  \nProtocols affected: `sftp://`, `scp://`\n\n---\n\n## Summary\n\nlibcurl's connection pool reuse logic for SSH-based protocols (SFTP, SCP) contains a security gap that allows a transfer's server-verification policy to be completely ignored.\n\nWhen an application sets `CURLOPT_SSH_KNOWNHOSTS`, `CURLOPT_SSH_HOST_PUBLIC_KEY_MD5`, or `CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256`, it is telling libcurl: *\"Before you trust this server, verify its identity against this file or fingerprint.\"* libcurl stores this instruction on the easy handle.\n\nThe problem is that when libcurl looks for an existing connection to reuse, it runs a compatibility function called `ssh_config_matches()` (`lib/url.c`, lines 705–714). This function only receives **connection-level** structs — it never receives the easy handle. So it has no way to see the verification policy. It checks only which client key files were used (which are `NULL` in both connections in the most common case, making the check a guaranteed pass), then declares the connections compatible and reuses the old one.\n\nThe SSH handshake — the only moment where `CURLOPT_SSH_KNOWNHOSTS` is actually checked — already happened on the old connection. It does not happen again. The security-critical transfer goes through an unverified channel and returns `CURLE_OK`.\n\nThe developer did everything right. libcurl silently discarded their instruction.\n\n---\n\n## Vulnerability Details\n\n### The broken function\n\n**File:** `lib/url.c`  \n**Lines:** 705–714\n\n```c\n#ifdef USE_SSH\nstatic bool ssh_config_matches(struct connectdata *one,\n                               struct connectdata *two)\n{\n  struct ssh_conn *sshc1, *sshc2;\n\n  sshc1 = Curl_conn_meta_get(one, CURL_META_SSH_CONN);\n  sshc2 = Curl_conn_meta_get(two, CURL_META_SSH_CONN);\n  return sshc1 && sshc2 && Curl_safecmp(sshc1->rsa, sshc2->rsa) &&\n         Curl_safecmp(sshc1->rsa_pub, sshc2->rsa_pub);\n}\n#endif\n```\n\nThis function is the sole gate that decides whether an SSH connection from the pool is compatible with a new transfer's security requirements. It checks exactly two things: the client's private key file path (`sshc->rsa`) and public key file path (`sshc->rsa_pub`).\n\nIt checks **nothing** about server verification:\n\n| Security Option | libcurl Option | Where It Lives | Checked? |\n|---|---|---|---|\n| Known-hosts file | `CURLOPT_SSH_KNOWNHOSTS` | `data->set.str[STRING_SSH_KNOWNHOSTS]` | ❌ Never |\n| Host key MD5 pin | `CURLOPT_SSH_HOST_PUBLIC_KEY_MD5` | `data->set.str[STRING_SSH_HOST_PUBLIC_KEY_MD5]` | ❌ Never |\n| Host key SHA256 pin | `CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256` | `data->set.str[STRING_SSH_HOST_PUBLIC_KEY_SHA256]` | ❌ Never |\n| Allowed auth methods | `CURLOPT_SSH_AUTH_TYPES` | `data->set.ssh_auth_types` | ❌ Never |\n\nAll four live on `struct Curl_easy` (the easy handle). `ssh_config_matches` only receives `struct connectdata` pointers. The easy handle is not in its parameter list.\n\n---\n\n### The easy handle is right there — just not passed in\n\n`ssh_config_matches` is called from `url_match_proto_config()` (`lib/url.c`, lines 988–992):\n\n```c\n#ifdef USE_SSH\n  if(get_protocol_family(m->needle->scheme) & PROTO_FAMILY_SSH) {\n    if(!ssh_config_matches(m->needle, conn))\n      return FALSE;\n  }\n#endif\n```\n\nThe caller's parameter is `struct url_conn_match *m`, which is defined as (`lib/url.c`, lines 717–732):\n\n```c\nstruct url_conn_match {\n  struct connectdata *found;\n  struct Curl_easy *data;   /* ← the easy handle, with the full security policy */\n  struct connectdata *needle;\n  ...\n};\n```\n\n`m->data` — the easy handle carrying the application's verification instructions — is available at this call site. It is simply never forwarded into `ssh_config_matches`.\n\n---\n\n### Why this is a guaranteed bypass in the typical case\n\n`Curl_safecmp` is defined in `lib/strcase.c`, lines 119–124:\n\n```c\nbool Curl_safecmp(const char *a, const char *b)\n{\n  if(a && b)\n    return !strcmp(a, b);\n  return !a && !b;   /* NULL, NULL → TRUE */\n}\n```\n\nIn the typical case, neither handle specifies explicit client key files. As a result, `sshc->rsa` and `sshc->rsa_pub` are both `NULL` on both connections (confirmed: `lib/vssh/libssh2.c` line 1081, `sshc->rsa_pub = sshc->rsa = NULL`).\n\n`Curl_safecmp(NULL, NULL)` → `TRUE`. `ssh_config_matches` returns `TRUE`. Connection is reused.\n\n---\n\n### Why reusing the connection silently skips verification\n\nServer verification happens in `ssh_check_fingerprint()` and `ssh_knownhost()` (`lib/vssh/libssh2.c`, lines 303–716). These functions are called during the `SSH_HOSTKEY` state — a state that only runs when a **new** SSH session is being established.\n\nWhen a connection is pulled from the pool, it is already fully negotiated. The state machine picks up at a later stage. `SSH_HOSTKEY` is never reached. Neither `ssh_knownhost` nor `ssh_check_fingerprint` is ever called. The application's `CURLOPT_SSH_KNOWNHOSTS` value is read from the easy handle, copied into local variables at the start of these functions, and then... those functions never run.\n\n---\n\n### The TLS stack does this correctly — SSH does not\n\nFor HTTPS, `url_match_ssl_config()` (`lib/url.c`, lines 1068–1079) handles the same problem:\n\n```c\nstatic bool url_match_ssl_config(struct connectdata *conn,\n                                 struct url_conn_match *m)\n{\n  if((m->needle->scheme->flags & PROTOPT_SSL) &&\n     !Curl_ssl_conn_config_match(m->data, conn, FALSE)) { /* m->data IS passed */\n    ...\n    return FALSE;\n  }\n  return TRUE;\n}\n```\n\n`Curl_ssl_conn_config_match` receives the full easy handle, reads `verifypeer`, `verifyhost`, certificate pins, CA bundles — everything — and rejects mismatched connections. SSH has no equivalent.\n\n---\n\n## Steps to Reproduce\n\n### Environment\n\n- libcurl compiled with `USE_SSH` / `USE_LIBSSH2`\n- Any OS (Linux, macOS, Windows)\n\n### Steps\n\n1. Initialize a `CURLSH` shared connection cache\n2. **Transfer 1:** Make an SFTP request with no `CURLOPT_SSH_KNOWNHOSTS` set. This opens an unverified connection and puts it in the pool.\n3. **Transfer 2:** Make a second SFTP request to the same host, same credentials, but with `CURLOPT_SSH_KNOWNHOSTS` pointing to a file that should cause rejection (either a nonexistent file, or a file that does not contain the server's key).\n4. Observe: Transfer 2 returns `CURLE_OK` and `CURLINFO_NUM_CONNECTS` reports `0` new connections — meaning the unverified connection was reused and the knownhosts policy was never enforced.\n\n---\n\n## Proof of Concept\n\n```c\n/*\n * libcurl CURLOPT_SSH_KNOWNHOSTS bypass via connection pool reuse\n * Compile: gcc -o poc poc.c -lcurl\n *\n * VULNERABLE output:\n *   [h1] Transfer result: CURLE_OK (0)\n *   [h2] Transfer result: CURLE_OK (0)   ← should NOT be OK\n *   [h2] New connections made: 0         ← means it reused h1's connection\n *   STATUS: VULNERABLE — known_hosts policy was bypassed silently.\n *\n * PATCHED output:\n *   [h2] Transfer result: CURLE_PEER_FAILED_VERIFICATION (60)\n *   [h2] New connections made: 1\n *   STATUS: SAFE — connection reuse was correctly denied.\n */\n\n#include <curl/curl.h>\n#include <stdio.h>\n\nstatic size_t discard_cb(void *p, size_t sz, size_t n, void *u)\n{\n  (void)p; (void)u;\n  return sz * n;\n}\n\nint main(void)\n{\n  CURL    *h1, *h2;\n  CURLSH  *share;\n  CURLcode res;\n  long     new_conn_count = 0;\n\n  curl_global_init(CURL_GLOBAL_DEFAULT);\n\n  /* Shared connection pool — simulates any multi-request application */\n  share = curl_share_init();\n  curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);\n\n  h1 = curl_easy_init();\n  h2 = curl_easy_init();\n\n  /* ── Handle 1: relaxed — no known_hosts check ───────────────────────── */\n  curl_easy_setopt(h1, CURLOPT_URL,           \"sftp://demo:password@test.rebex.net/readme.txt\");\n  curl_easy_setopt(h1, CURLOPT_WRITEFUNCTION, discard_cb);\n  curl_easy_setopt(h1, CURLOPT_SHARE,         share);\n  /* Intentionally no CURLOPT_SSH_KNOWNHOSTS — accepts any host key */\n\n  printf(\"[h1] Performing relaxed transfer (no host verification)...\\n\");\n  res = curl_easy_perform(h1);\n  printf(\"[h1] Transfer result: %s (%d)\\n\\n\", curl_easy_strerror(res), res);\n\n  /* ── Handle 2: strict — demands host verification ───────────────────── */\n  curl_easy_setopt(h2, CURLOPT_URL,           \"sftp://demo:password@test.rebex.net/readme.txt\");\n  curl_easy_setopt(h2, CURLOPT_WRITEFUNCTION, discard_cb);\n  curl_easy_setopt(h2, CURLOPT_SHARE,         share);\n\n  /*\n   * Point to a nonexistent known_hosts file.\n   * A correct implementation must fail — it cannot verify the host.\n   * A vulnerable implementation reuses h1's connection and returns CURLE_OK,\n   * never consulting this file at all.\n   */\n  curl_easy_setopt(h2, CURLOPT_SSH_KNOWNHOSTS, \"/nonexistent/known_hosts\");\n\n  printf(\"[h2] Performing strict transfer (CURLOPT_SSH_KNOWNHOSTS enforced)...\\n\");\n  res = curl_easy_perform(h2);\n  printf(\"[h2] Transfer result: %s (%d)\\n\", curl_easy_strerror(res), res);\n\n  curl_easy_getinfo(h2, CURLINFO_NUM_CONNECTS, &new_conn_count);\n  printf(\"[h2] New connections made: %ld\\n\\n\", new_conn_count);\n\n  if(new_conn_count == 0 && res == CURLE_OK) {\n    puts(\"STATUS: VULNERABLE — known_hosts policy was bypassed silently.\");\n    puts(\"        CURLOPT_SSH_KNOWNHOSTS had no effect.\");\n  }\n  else if(res != CURLE_OK) {\n    puts(\"STATUS: SAFE — connection reuse was correctly denied.\");\n  }\n  else {\n    printf(\"STATUS: Inconclusive (new_conns=%ld, res=%d)\\n\", new_conn_count, res);\n  }\n\n  curl_easy_cleanup(h1);\n  curl_easy_cleanup(h2);\n  curl_share_cleanup(share);\n  curl_global_cleanup();\n  return 0;\n}\n```\n\n---\n\n## Impact\n\n## Impact\n\nThis vulnerability breaks the security contract of three explicitly documented libcurl options: `CURLOPT_SSH_KNOWNHOSTS`, `CURLOPT_SSH_HOST_PUBLIC_KEY_MD5`, and `CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256`. An application that sets these options trusts libcurl to enforce them. In a shared connection pool — which is the standard setup for any server-side application, proxy, or pipeline — that trust is broken.\n\n### Who is affected\n\n- **Any server-side application** using libcurl for SFTP/SCP that handles more than one request per process lifetime. PHP-FPM workers, Node.js applications using native libcurl bindings, Python apps using pycurl, C/C++ server software, CI/CD runners, deployment agents.\n- **Any application using `CURLSH`** to share connection caches between easy handles.\n- **Any multi-handle application** using `CURLM` where multiple transfers may access the same SSH host.\n\n### What an attacker can do\n\nAn attacker who can perform a Man-in-the-Middle attack between the application server and the SFTP server needs to satisfy one prerequisite: ensure at least one transfer (even a low-value, background task) makes an unverified SFTP connection to the target host first. After that:\n\n- Every subsequent security-critical transfer that relies on `CURLOPT_SSH_KNOWNHOSTS` will silently reuse the poisoned connection.\n- The attacker can **read** all data transferred (confidentiality breach).\n- The attacker can **inject** arbitrary SFTP responses — fake file contents, directory listings, or error codes (integrity breach).\n- The application returns `CURLE_OK` and has no mechanism to detect that anything went wrong.\n\n### Why this is especially dangerous\n\nThe attack is **invisible**. There is no log entry. No error callback fires. No return code changes. The security-focused developer who carefully set `CURLOPT_SSH_KNOWNHOSTS` has no indication that their precaution had zero effect. Automated monitoring and alerting will not catch it. The only way to discover the bypass post-facto is to have full network traffic capture and notice the absence of a new TCP connection.\n\n---\n\n## Recommended Fix\n\n### Immediate: Pass the easy handle into `ssh_config_matches`\n\nThe one-line caller change:\n\n```c\n/* lib/url.c, line 990 — before */\nif(!ssh_config_matches(m->needle, conn))\n\n/* lib/url.c, line 990 — after */\nif(!ssh_config_matches(m->data, m->needle, conn))\n```\n\nUpdated function:\n\n```c\nstatic bool ssh_config_matches(struct Curl_easy *data,\n                               struct connectdata *one,\n                               struct connectdata *two)\n{\n  struct ssh_conn *sshc1, *sshc2;\n  sshc1 = Curl_conn_meta_get(one, CURL_META_SSH_CONN);\n  sshc2 = Curl_conn_meta_get(two, CURL_META_SSH_CONN);\n\n  if(!sshc1 || !sshc2)\n    return FALSE;\n  if(!Curl_safecmp(sshc1->rsa, sshc2->rsa))\n    return FALSE;\n  if(!Curl_safecmp(sshc1->rsa_pub, sshc2->rsa_pub))\n    return FALSE;\n\n  /* Deny reuse if the new transfer requests server verification\n   * that the pooled connection may not have been established with. */\n  if(data->set.str[STRING_SSH_KNOWNHOSTS])\n    return FALSE;\n  if(data->set.str[STRING_SSH_HOST_PUBLIC_KEY_MD5])\n    return FALSE;\n  if(data->set.str[STRING_SSH_HOST_PUBLIC_KEY_SHA256])\n    return FALSE;\n\n  return TRUE;\n}\n```\n\n### Long-term: Snapshot policy at connect time (mirrors the TLS approach)\n\nStore the verification fields used at connection establishment in `struct ssh_conn`. Compare those snapshots during pool lookup — the same pattern used by `Curl_ssl_conn_config_match` for TLS. This enables fine-grained matching (e.g., two transfers with the same `CURLOPT_SSH_KNOWNHOSTS` file can still share a connection) instead of the conservative deny-all above.\n\n---\n\n## Supporting References\n\nAll code references verified against the current `main` branch of the curl repository:\n\n| File | Lines | Content |\n|---|---|---|\n| `lib/url.c` | 705–714 | `ssh_config_matches()` — full function body |\n| `lib/url.c` | 717–732 | `struct url_conn_match` — confirms `m->data` is in scope |\n| `lib/url.c` | 982–1001 | `url_match_proto_config()` — call site |\n| `lib/url.c` | 1068–1079 | `url_match_ssl_config()` — TLS equivalent that works correctly |\n| `lib/strcase.c` | 119–124 | `Curl_safecmp(NULL, NULL)` returns `TRUE` |\n| `lib/vssh/libssh2.c` | 1081 | `sshc->rsa_pub = sshc->rsa = NULL` |\n| `lib/vssh/libssh2.c` | 303–454 | `ssh_knownhost()` — only runs during new session |\n| `lib/vssh/libssh2.c` | 456–716 | `ssh_check_fingerprint()` — only runs during new session |\n| `lib/urldata.h` | 963–967, 1142 | Confirms all verification options live on easy handle |",
+  "weakness": {
+    "id": 137,
+    "name": "Exposed Dangerous Method or Function"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 9,
+  "voters": [
+    "2026",
+    "spiderchan26",
+    "3d7omb",
+    "yogisking_76",
+    "pieceofcake755",
+    "coolbro10hatman",
+    "hndrrrxx4l",
+    "hash_security",
+    "anirbanbanerjeee"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

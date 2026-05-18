@@ -1,0 +1,134 @@
+{
+  "id": 1654310,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNjU0MzEw",
+  "url": "https://hackerone.com/reports/1654310",
+  "title": "Incomplete fix for CVE-2022-32209 (XSS in Rails::Html::Sanitizer under certain configurations)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2022-07-29T21:46:56.485Z",
+  "submitted_at": "2022-07-29T21:46:56.564Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "0b5cur17y",
+    "url": "/0b5cur17y",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/oQRYWBvwMZSWFYZtEEzqK5AN/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-23520"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2022-12-14T22:36:20.563Z",
+  "bug_reporter_agreed_on_going_public_at": "2022-12-14T21:03:55.222Z",
+  "team_member_agreed_on_going_public_at": "2022-12-14T22:36:20.393Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "While building a PoC for CVE-2022-32209, I noticed that I could not fix my vulnerable application by updating https://github.com/rails/rails-html-sanitizer from 1.4.2 to 1.4.3 even though the Hackerone report about this vulnerability suggested that this should fix it (see here: https://hackerone.com/reports/1530898).\n\nI built this app with Rails 7.0.3.1 by just running \"rails new\", adding `config.action_view.sanitized_allowed_tags = [\"select\", \"style\"]` to the file `config/application.rb` and creating an endpoint that reflected a parameter after sanitizing it (ERB: `<p>Hello <%= sanitize @name %></p>`). When using the payload `<select><style><script>alert(\"XSS\")</script></style></select>` for the parameter I got an alert no matter what the version of rails-html-sanitizer was.\n\nI believe the reason is the following. There are two ways you can pass the list of allowed tags to the sanitizer. One is via a list of tags stored in a class attribute, the other is via an argument passed into the `sanitize` method. The fix only considered the second way but the first one was forgotten. See the commit with the fix here: https://github.com/rails/rails-html-sanitizer/commit/c871aa4034d3d80ad67cf33a3462154b0a0fb477#diff-0daf33b9062eb5ccdeae86ed8bf2662a6e8669f1a7db590802b7f3b36ea47426R159\nThe relevant part of the code is this:\n\n```ruby\nmodule Rails\n  module Html\n    class SafeListSanitizer < Sanitizer\n      ...\n      def remove_safelist_tag_combinations(tags)\n        if !loofah_using_html5? && tags.include?(\"select\") && tags.include?(\"style\")\n          warn(\"WARNING: #{self.class}: removing 'style' from safelist, should not be combined with 'select'\")\n          tags.delete(\"style\")\n        end\n        tags\n      end\n\n      def allowed_tags(options)\n        if options[:tags]\n          remove_safelist_tag_combinations(options[:tags])\n        else\n          self.class.allowed_tags\n        end\n      end\n      ...\n    end\n  end\nend\n```\n\nMethod `remove_safelist_tag_combinations` is introduced to remove `style` from the allow list if `select` is in there. However, within method `allowed_tags` this cleanup is only applied to the tag list in the `options`, not to ` self.class.allowed_tags`, the list stored in the sanitizer class.\nHowever, it seems that the configuration in  `config/application.rb` which I've set above put the list into the class variable (I've sprinkled a few `puts` here and there to confirm that).\n\nMoreover, when moving the allow list from `config/application.rb` into the ERB template\n(`<p>Hello <%= sanitize @name, tags: [\"select\", \"style\"] %></p>`), the update from\n1.4.2 to 1.4.3 does fix the problem.\n\nThe following patch to https://github.com/rails/rails-html-sanitizer should complete the fix for CVE-2022-32209 (also added a test, which is mostly copy&paste from the test method `test_disallow_the_dangerous_safelist_combination_of_select_and_style` found in the commit linked above):\n\n```\nFrom fb9882599684f5796805107ec98f6a18bba722ec Mon Sep 17 00:00:00 2001\nFrom: Dominic Breuker <dominic.breuker@protonmail.com>\nDate: Fri, 29 Jul 2022 23:08:57 +0200\nSubject: [PATCH] disallow select and style in safelist also when specified in\n sanitizer class allowed_tags list\n\n---\n lib/rails/html/sanitizer.rb |  6 +-----\n test/sanitizer_test.rb      | 20 ++++++++++++++++++++\n 2 files changed, 21 insertions(+), 5 deletions(-)\n\ndiff --git a/lib/rails/html/sanitizer.rb b/lib/rails/html/sanitizer.rb\nindex 97503c8..4a0d43f 100644\n--- a/lib/rails/html/sanitizer.rb\n+++ b/lib/rails/html/sanitizer.rb\n@@ -155,11 +155,7 @@ module Rails\n       end\n \n       def allowed_tags(options)\n-        if options[:tags]\n-          remove_safelist_tag_combinations(options[:tags])\n-        else\n-          self.class.allowed_tags\n-        end\n+        remove_safelist_tag_combinations(options[:tags] || self.class.allowed_tags)\n       end\n \n       def allowed_attributes(options)\ndiff --git a/test/sanitizer_test.rb b/test/sanitizer_test.rb\nindex e3ce218..3f0a88a 100644\n--- a/test/sanitizer_test.rb\n+++ b/test/sanitizer_test.rb\n@@ -606,6 +606,26 @@ class SanitizersTest < Minitest::Test\n     refute_includes(sanitized, \"style\")\n   end\n \n+  def test_disallow_the_dangerous_safelist_combination_of_select_and_style_in_class_tag_list\n+    scope_allowed_tags([\"select\", \"style\"]) do\n+      input = \"<select><style><script>alert(1)</script></style></select>\"\n+      warning = /WARNING: Rails::Html::SafeListSanitizer: removing 'style' from safelist/\n+      sanitized = nil\n+      invocation = Proc.new { sanitized = safe_list_sanitize(input) }\n+\n+      if html5_mode?\n+        # if Loofah is using an HTML5 parser,\n+        #   then \"style\" should be removed by the parser as an invalid child of \"select\"\n+        assert_silent(&invocation)\n+      else\n+        # if Loofah is using an HTML4 parser,\n+        #   then SafeListSanitizer should remove \"style\" from the safelist\n+        assert_output(nil, warning, &invocation)\n+      end\n+      refute_includes(sanitized, \"style\")\n+    end\n+  end\n+\n protected\n \n   def xpath_sanitize(input, options = {})\n-- \n2.35.1\n\n\n```\n\n## Impact\n\nIt is possible to bypass Rails::Html::SafeListSanitizer filtering and perform an XSS attack.",
+  "weakness": {
+    "id": 60,
+    "name": "Cross-site Scripting (XSS) - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2023-01-13T21:03:55.341Z",
+  "allow_singular_disclosure_after": -104097628.82401365,
+  "singular_disclosure_allowed": true,
+  "vote_count": 7,
+  "voters": [
+    "jumpydata",
+    "zy9ard3",
+    "shubham_srt",
+    "003random",
+    "shivammusic",
+    "unc0v3r",
+    "meispi"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "changed",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,140 @@
+{
+  "id": 3598444,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTk4NDQ0",
+  "url": "https://hackerone.com/reports/3598444",
+  "title": "Curl_compareheader() fails to match multi-value HTTP headers",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-03-11T16:06:11.658Z",
+  "submitted_at": "2026-03-11T16:06:12.728Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "henriqueg",
+    "url": "/henriqueg",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-03-12T15:51:43.903Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-03-12T06:52:16.454Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`Curl_compareheader()` in `lib/http.c` fails to scan the full value of HTTP headers for substring matches. Due to an incorrect loop condition, only the first byte position of the header value is checked. This causes curl to miss connection options like `close` when they appear as non-first tokens in comma-separated header values such as `Connection: upgrade, close`.\n\nWhen a malicious server sends `Connection: upgrade, close`, curl fails to detect the `close` token and incorrectly keeps the connection alive in its pool. A subsequent request to the same host:port reuses this connection, sending its credentials (Authorization headers, cookies) to the still-listening attacker server.\n\n## Detailed Description\n\nThe `Connection` header field is defined in RFC 9110 §7.6.1 with ABNF grammar `Connection = #connection-option`, where `#` denotes a comma-separated list. Therefore `Connection: upgrade, close` is a valid header containing two connection options. RFC 9112 §9.6 states:\n\n> A client that receives a \"close\" connection option MUST cease sending requests on that connection and close the connection after reading the response message containing the \"close\" connection option.\n\nThe bug is in the `for` loop at `lib/http.c` line 1438:\n\n```c\nfor(len = curlx_strlen(&val); len >= curlx_strlen(&val); len--, p++) {\n```\n\nThe loop initializes `len` to the value length and then checks `len >= curlx_strlen(&val)` - the same value. After the first iteration and `len--`, the condition is false and the loop exits. Only position 0 is ever checked.\n\nThe same function is used for matching `Connection: close`, `Connection: keep-alive`, `Transfer-Encoding: chunked`, `Expect: 100-continue`, and proxy `Connection` / `Proxy-Connection` headers. All are affected.\n\nNo other major HTTP client has this bug. wget, Python `requests`, Python `http.client`, and Node.js `http` all correctly parse multi-value `Connection` headers.\n\n## Impact\n\n## Impact\nA malicious server can exploit this to steal credentials from subsequent requests via connection pool poisoning:\n\n1. Attacker's server responds to a victim request with `Connection: upgrade, close`\n2. curl misses the `close` token and keeps the connection in its pool\n3. Attacker keeps the TCP socket open (violating its own `close` declaration)\n4. Victim's next request to the same host:port reuses the poisoned connection\n5. The request - including `Authorization` headers and cookies - sent to the attacker's still-listening socket\n\nThis is exploitable in environments where curl makes sequential requests to the same host:port, such as API gateways, Kubernetes services behind shared Ingress, CI/CD pipelines, and shared hosting.\n\n### PoC - Exploitation\n\nThe PoC server (`server.py`) simulates two services behind the same host:port:\n- `/public` - attacker-controlled endpoint that poisons the connection\n- `/private` - legitimate endpoint that requires `Authorization` and returns account data\n\n**Test 1 - Direct request to /private (safe baseline):**\n\n```sh\n# Terminal 1\npython3 server.py 8000\n\n# Terminal 2\ncurl -s http://127.0.0.1:8000/private \\\n     -H \"Authorization: Bearer SECRET_TOKEN\"\n```\n\nOutput:\n```\n[private] Auth received: Authorization: Bearer SECRET_TOKEN\n[private] Returned account data (normal flow)\n{\"account\": \"user@example.com\", \"balance\": 42000}\n```\n\nCredentials go to the legitimate `/private` handler. No leak. This is the expected behavior.\n\n**Test 2 - Visit /public first, then /private (attack):**\n\n```sh\n# Terminal 1\npython3 server.py 8000\n\n# Terminal 2\ncurl -s http://127.0.0.1:8000/public \\\n     --next \\\n     -H \"Authorization: Bearer SECRET_TOKEN\" \\\n     http://127.0.0.1:8000/private\n```\n\nOutput:\n```\n[attacker] Request from 127.0.0.1: GET /public HTTP/1.1\n[attacker] Sent 'Connection: upgrade, close'\n[attacker] Waiting for leaked request on same socket...\n\n[attacker] *** INTERCEPTED REQUEST ***\n\n      GET /private HTTP/1.1\n      Host: 127.0.0.1:8000\n      User-Agent: curl/8.19.0-DEV\n      Accept: */*\n  >>> Authorization: Bearer SECRET_TOKEN\n\n[attacker] This request was meant for /private.\n[attacker] The credentials were leaked because curl\n[attacker] reused the poisoned connection.\n```\n\nRequest #1 to `/public` had NO credentials. Request #2 to `/private` carried `Authorization: Bearer SECRET_TOKEN`. But the `/private` handler never ran - the attacker's `/public` handler captured the credentials on the reused TCP socket.\n\nPS. The `--next` flag resets per-request options so `Authorization` applies only to the second URL.",
+  "weakness": {
+    "id": 659,
+    "name": "Expected Behavior Violation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5512625,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fi0uvzciocm38rohvfcjjaj9yo8u?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWCREIVXB%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162327Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJGMEQCIEdvPePbfaWbg9GApII7kroalivZUoz%2B3%2FECWiAaLIvzAiBGrxNNo6kBYT%2Fdp3teXzRGe9e%2BJzOifStmsxgRhD3M%2BiqxBQg%2FEAMaDDAxMzYxOTI3NDg0OSIMU9nmDBKw%2FxuuXov%2BKo4FMHblGWNTAIckfC7GcX33ydLGAr%2B7FiZa1kOwx3hTqWCpIh4V2mceTRYBw1nJICgjAYiWklP8JyQXDAxTKMF3oYbSzLbk%2FBVik9u%2B9E%2FF5JVHQbN%2B3ExTUj3b5eOB5xOuZTEQQFPMbR5psPWpEjIKlkosLhTFw4DcBAXYQ3EpWo4gNxXNIWiOdmRqplgfmii5nuVYdQNgWCbLncooOjB6BpD%2BUOGt0pyS6lq38IvPXFGlF0Xucq3ATSo89jB97X1h3QrYuaoBODSC5JpHHAZUQu2xEhtj9%2Bfk2ZC%2BvfasAsehIX767HFstB4vD%2FltkHF7qbKqbY0x1ZqBe2g13N2sHptoOqWJhnrfdWUH1FAqIZUCpIXh%2B%2BrkF33NaoHchwbP%2Fsbc7muzklk3khS5qGTfBHNNnAO%2FSzBlz60NuLmGGZ6BeAYWv%2FhrUaRSsYmc6vI%2BvRAQp8svg4gcjxD8XOarZvqJJUi8UqWEV7cHQd40fFl7RRVtJvr7EFZoHOGZOpRJnnP2c2zyLQykGxgepFVO0IOBTdUVaiDhMsKFMY4DY5uxG1GEEgopzOI2Jg8koMfh2lHgo2Ty%2FojzO%2FM2ahx3CAGfAlfDwODfPW7%2B9VKCkYOnGKTTSPLSpCulN625JfCbU02YWZ77IJTgsF1ajB8BzPnPYm%2BSQ%2B8CKWAHK997UXCs7YyXCYjfBApnvlU0nBIXBnSL1j8ayrkvcmyR3VI7i9qzm5Vx%2F44T%2BYrrsSrPTyrKP3SZ4FslxGTlgfbtLH%2Ffaw71CvuYJ%2BEshY0izII3NLZ9nRD5u8wvN%2BZddgTcIU9yTKvNTeCvnWMNii%2Bsoz%2BqI5H8P2kgS5Xb2ETPaLJAtMMtE%2F9%2BcvclpvC94XxbMLGA2M8GOrIB9rzxSafD28yFyQBvjnugEFFPZMADXhtgZq7SbsJ%2F5%2FZk6kbC0342HwEmETFadpjR%2Biy%2FKsIRTGI1kyBM0w91l1b%2FjtUU5wQXQDdlV%2F4AxwIig8%2BQBFF5isZT1FwPiOZeeUnwgp%2FOsDL1c8WOVl7Y3OLefvqgJ8wDwWwA3ZaSWtH5r628MtX5bgrYV4heoaV2jmadHtyyJuj3k0yYnXy6WMYqVrFrkKlqlz1L0uxfrEz89w%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f92bdf4ecdc841bf4505bf7651c611c52ac3d8b665acb67c4de7844195eb16da",
+      "file_size": 5525,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5512629,
+      "file_name": "Screenshot_2026-03-10_112650.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/8idzzuo1x6cy9g7ozfnpi0oyftxy?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-03-10_112650.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-03-10_112650.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWCREIVXB%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162327Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJGMEQCIEdvPePbfaWbg9GApII7kroalivZUoz%2B3%2FECWiAaLIvzAiBGrxNNo6kBYT%2Fdp3teXzRGe9e%2BJzOifStmsxgRhD3M%2BiqxBQg%2FEAMaDDAxMzYxOTI3NDg0OSIMU9nmDBKw%2FxuuXov%2BKo4FMHblGWNTAIckfC7GcX33ydLGAr%2B7FiZa1kOwx3hTqWCpIh4V2mceTRYBw1nJICgjAYiWklP8JyQXDAxTKMF3oYbSzLbk%2FBVik9u%2B9E%2FF5JVHQbN%2B3ExTUj3b5eOB5xOuZTEQQFPMbR5psPWpEjIKlkosLhTFw4DcBAXYQ3EpWo4gNxXNIWiOdmRqplgfmii5nuVYdQNgWCbLncooOjB6BpD%2BUOGt0pyS6lq38IvPXFGlF0Xucq3ATSo89jB97X1h3QrYuaoBODSC5JpHHAZUQu2xEhtj9%2Bfk2ZC%2BvfasAsehIX767HFstB4vD%2FltkHF7qbKqbY0x1ZqBe2g13N2sHptoOqWJhnrfdWUH1FAqIZUCpIXh%2B%2BrkF33NaoHchwbP%2Fsbc7muzklk3khS5qGTfBHNNnAO%2FSzBlz60NuLmGGZ6BeAYWv%2FhrUaRSsYmc6vI%2BvRAQp8svg4gcjxD8XOarZvqJJUi8UqWEV7cHQd40fFl7RRVtJvr7EFZoHOGZOpRJnnP2c2zyLQykGxgepFVO0IOBTdUVaiDhMsKFMY4DY5uxG1GEEgopzOI2Jg8koMfh2lHgo2Ty%2FojzO%2FM2ahx3CAGfAlfDwODfPW7%2B9VKCkYOnGKTTSPLSpCulN625JfCbU02YWZ77IJTgsF1ajB8BzPnPYm%2BSQ%2B8CKWAHK997UXCs7YyXCYjfBApnvlU0nBIXBnSL1j8ayrkvcmyR3VI7i9qzm5Vx%2F44T%2BYrrsSrPTyrKP3SZ4FslxGTlgfbtLH%2Ffaw71CvuYJ%2BEshY0izII3NLZ9nRD5u8wvN%2BZddgTcIU9yTKvNTeCvnWMNii%2Bsoz%2BqI5H8P2kgS5Xb2ETPaLJAtMMtE%2F9%2BcvclpvC94XxbMLGA2M8GOrIB9rzxSafD28yFyQBvjnugEFFPZMADXhtgZq7SbsJ%2F5%2FZk6kbC0342HwEmETFadpjR%2Biy%2FKsIRTGI1kyBM0w91l1b%2FjtUU5wQXQDdlV%2F4AxwIig8%2BQBFF5isZT1FwPiOZeeUnwgp%2FOsDL1c8WOVl7Y3OLefvqgJ8wDwWwA3ZaSWtH5r628MtX5bgrYV4heoaV2jmadHtyyJuj3k0yYnXy6WMYqVrFrkKlqlz1L0uxfrEz89w%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=04c88aad1065ec8b9daf8097480e083e8114b4282464ed6a343c6e58c9c361c9",
+      "file_size": 40039,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 28,
+  "voters": [
+    "thelem",
+    "2026",
+    "xq_a01",
+    "2_4-a",
+    "figurine",
+    "deepseax",
+    "nfrantz2139",
+    "maxiniz",
+    "f477yr",
+    "potoghina",
+    "and 18 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

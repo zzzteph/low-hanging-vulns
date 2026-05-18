@@ -1,0 +1,140 @@
+{
+  "id": 2402853,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yNDAyODUz",
+  "url": "https://hackerone.com/reports/2402853",
+  "title": "HTTP/2 PUSH_PROMISE DoS",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2024-03-05T17:05:32.550Z",
+  "submitted_at": "2024-03-05T17:05:32.731Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "w0x42",
+    "url": "/w0x42",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2024-03-27T10:53:44.183Z",
+  "bug_reporter_agreed_on_going_public_at": "2024-03-27T10:42:02.602Z",
+  "team_member_agreed_on_going_public_at": "2024-03-27T10:53:43.876Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nIn `discard_newhandle` the condition in the `if` statement is always `false` for http transfer due to a negation.\nAs a result `http2_data_done` will never be called.\n```\nstatic void discard_newhandle(struct Curl_cfilter *cf,\n                              struct Curl_easy *newhandle)\n{\n  if(!newhandle->req.p.http) {\n    http2_data_done(cf, newhandle, TRUE);\n    newhandle->req.p.http = NULL;\n  }\n  (void)Curl_close(&newhandle);\n}\n```\n\n`discard_newhandle` is supposed to close stream and free resources allocated in `http2_data_setup` \nas well as close `Curl_easy` handle when some error occurs in `push_promise`.\nFor example if `PUSH_PROMISE` frame has invailid `:scheme` pseudo header `set_transfer_url` in `push_promise` will return an error.\n```\n    rv = set_transfer_url(newhandle, &heads);\n    if(rv) {\n      discard_newhandle(cf, newhandle);\n      rv = CURL_PUSH_DENY;\n      goto fail;\n    }\n```\nAn attacker could send specially crafted `PUSH_PROMISE` frames to trigger the error.\nThis would result in a memory leak for every malformed frame received, consequently using all available memory. \n\n\n\n## Steps To Reproduce:\n\n  1. compile `nghttp2` with {F3099706} applied\n  1. compile {F3099707}\n  1. run `nghttpd -p/=/foo.bar --no-tls 8181`\n  1. run `valgrind --leak-check=full ./http2_push_headers`\n\nfor each `-p` option `nghttpd` will send 200 `PUSH_PROMISE` frames with invalid `:scheme` header\n\n## Supporting Material/References:\n\n`valgrind --leak-check=full ./http2_push_headers` output:\n```\n==5247== \n==5247== HEAP SUMMARY:\n==5247==     in use at exit: 162,946 bytes in 873 blocks\n==5247==   total heap usage: 7,170 allocs, 6,297 frees, 1,696,049 bytes allocated\n==5247== \n==5247== 70,400 bytes in 200 blocks are definitely lost in loss record 6 of 7\n==5247==    at 0x48485EF: calloc (vg_replace_malloc.c:1340)\n==5247==    by 0x48ADC29: http2_data_setup (http2.c:249)\n==5247==    by 0x48AF154: h2_duphandle (http2.c:789)\n==5247==    by 0x48AF420: push_promise (http2.c:877)\n==5247==    by 0x48AFCF6: on_stream_frame (http2.c:1065)\n==5247==    by 0x48B08C7: on_frame_recv (http2.c:1265)\n==5247==    by 0x4C36AE3: nghttp2_session_mem_recv (in /usr/lib64/libnghttp2.so.14.26.0)\n==5247==    by 0x48AE851: h2_process_pending_input (http2.c:551)\n==5247==    by 0x48B294F: h2_progress_ingress (http2.c:1930)\n==5247==    by 0x48B2B54: cf_h2_recv (http2.c:1969)\n==5247==    by 0x4877F03: Curl_conn_recv (cfilters.c:183)\n==5247==    by 0x48DB1B3: Curl_read (sendf.c:813)\n==5247== \n==5247== LEAK SUMMARY:\n==5247==    definitely lost: 70,400 bytes in 200 blocks\n==5247==    indirectly lost: 0 bytes in 0 blocks\n==5247==      possibly lost: 0 bytes in 0 blocks\n==5247==    still reachable: 92,546 bytes in 673 blocks\n==5247==         suppressed: 0 bytes in 0 blocks\n==5247== Reachable blocks (those to which a pointer was found) are not shown.\n==5247== To see them, rerun with: --leak-check=full --show-leak-kinds=all\n==5247== \n==5247== For lists of detected and suppressed errors, rerun with: -s\n==5247== ERROR SUMMARY: 1 errors from 1 contexts (suppressed: 0 from 0)\n```\n\n## Impact\n\ndenial of service",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 3099706,
+      "file_name": "nghttp_v1.59.patch",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/jyxxcikmeefskjnb1d08pskwsyyn?response-content-disposition=attachment%3B%20filename%3D%22nghttp_v1.59.patch%22%3B%20filename%2A%3DUTF-8%27%27nghttp_v1.59.patch&response-content-type=text%2Fx-diff&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTLAFP4TE%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T164734Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIBjfJaXTOx3bRWUSm2MCczXAHIWxahXT6C2I3YxSXca3AiEAph3oeHGqX%2FwVlDscybgl6B7m5oeh4O4KBzDBIL7QYmkqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDJBk4DqfVXHT4MohnSqOBVth%2Fo1kBuwhwqSIK6kPqRlczUiS6m5mko4EyinR7FbPpBkwKhDJ2II%2FySzAGXrS4Bb4JVa0lW9hx80b9A%2B3IabiocGLXzn5LFYPH8oMbtB1p2ngDNkoWi6lLXYYafJeGpbiVWnEDgZM4plxI8mcHyaR36GoHRXndAyTS3WAvBomd4S2QCuAxrAA3bfAc8w%2FQ6vV2lON7fqqN6WheGi8iobWcfmMdKxVNVW%2FGy9NQi7WUL2tNBzG7F45%2Bkau3MXuxu8fPyjCjtp%2FfirAI0RAj7js3vGWb6Wsjj%2FYx%2FIyvWIROvdC4X53%2FpYYm51FdBXtsYjyMzYLeP8oWlBN5AEFj54slXnhl8iAsktsf4epMagxrpakSTu2d2cl4Q40VsVDOh5xhK4Jy3DcuAct0LVnJSJ56fm74PNVA7MmlwM9rRoOFNCrzEEZ%2BZPDt32ZiuBMDwssJoY7Q%2FYykEywAnUlnrMiINk%2BuRjAQHRQaCdwf6kqwJNjnuw%2F8fgbhJ3tVN%2FtrA1VbKahdqp%2Bkk0X8FHtUz5ll8Gjsx8FmxlAHjdnQOg127ErHdIq9QXwAU64i1JPi%2Bx2ZibevAgZMoZnG9Sm%2Fdnx%2Forv5e0gzKwLXeLMDVQHM3JguXui9DlDZLQTn0hZVojHvc1TvBfUvzsOevHLJx%2Bvn9lYr3v8pA0vxalJAF%2BoKAkRDBKxX1ZQHnAlreL5XPGWZR8I%2BWt2pqDal9FtkHx%2FKPtU8TKhxE6RDSorX5I%2BYP2GCec9H%2B8AfCNVdCs%2FP1W3X4liJVElIrooAYErcIN2OCD2Jja9jl0%2F2xxemOwEHYuSSJ815TZqheKOh5pM2d04hrZ4M0VknwL3pLqTXfswlpdNK%2BEzerzjlanxjjDUsdjPBjqxAcQSFj1qQChU7PSgGzk2DJV9xuVpokoPGbDLAn3q98oW5MjiNJ7ZwHodlqcDL8QIqSjInq8hl8O3oCTbiGAhTpkLGwo%2B%2FvHOMDRaD7oqFzrzm5ijdJ9KjO5O8y9FNtjCpgTCY0Y8qc4ZD4NsEtVv%2FNmxwajrPw4cK5EkgYRaLhmXbtCNWskw1ih1h1uAqdq6xLaDYCTzLRVg413qobL7H6LKKWnZtr90IRFj4bsLHZ99yw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3ecb66e68fe06f5c58ffe2ad2a1124c11f1038c2c771d195a66f5c2aadb3301a",
+      "file_size": 1279,
+      "type": "text/x-diff",
+      "moderated": null
+    },
+    {
+      "id": 3099707,
+      "file_name": "http2_push_promise.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/yriyachv59bxzbhz9ixkwwr4qal0?response-content-disposition=attachment%3B%20filename%3D%22http2_push_promise.c%22%3B%20filename%2A%3DUTF-8%27%27http2_push_promise.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTLAFP4TE%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T164734Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIBjfJaXTOx3bRWUSm2MCczXAHIWxahXT6C2I3YxSXca3AiEAph3oeHGqX%2FwVlDscybgl6B7m5oeh4O4KBzDBIL7QYmkqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDJBk4DqfVXHT4MohnSqOBVth%2Fo1kBuwhwqSIK6kPqRlczUiS6m5mko4EyinR7FbPpBkwKhDJ2II%2FySzAGXrS4Bb4JVa0lW9hx80b9A%2B3IabiocGLXzn5LFYPH8oMbtB1p2ngDNkoWi6lLXYYafJeGpbiVWnEDgZM4plxI8mcHyaR36GoHRXndAyTS3WAvBomd4S2QCuAxrAA3bfAc8w%2FQ6vV2lON7fqqN6WheGi8iobWcfmMdKxVNVW%2FGy9NQi7WUL2tNBzG7F45%2Bkau3MXuxu8fPyjCjtp%2FfirAI0RAj7js3vGWb6Wsjj%2FYx%2FIyvWIROvdC4X53%2FpYYm51FdBXtsYjyMzYLeP8oWlBN5AEFj54slXnhl8iAsktsf4epMagxrpakSTu2d2cl4Q40VsVDOh5xhK4Jy3DcuAct0LVnJSJ56fm74PNVA7MmlwM9rRoOFNCrzEEZ%2BZPDt32ZiuBMDwssJoY7Q%2FYykEywAnUlnrMiINk%2BuRjAQHRQaCdwf6kqwJNjnuw%2F8fgbhJ3tVN%2FtrA1VbKahdqp%2Bkk0X8FHtUz5ll8Gjsx8FmxlAHjdnQOg127ErHdIq9QXwAU64i1JPi%2Bx2ZibevAgZMoZnG9Sm%2Fdnx%2Forv5e0gzKwLXeLMDVQHM3JguXui9DlDZLQTn0hZVojHvc1TvBfUvzsOevHLJx%2Bvn9lYr3v8pA0vxalJAF%2BoKAkRDBKxX1ZQHnAlreL5XPGWZR8I%2BWt2pqDal9FtkHx%2FKPtU8TKhxE6RDSorX5I%2BYP2GCec9H%2B8AfCNVdCs%2FP1W3X4liJVElIrooAYErcIN2OCD2Jja9jl0%2F2xxemOwEHYuSSJ815TZqheKOh5pM2d04hrZ4M0VknwL3pLqTXfswlpdNK%2BEzerzjlanxjjDUsdjPBjqxAcQSFj1qQChU7PSgGzk2DJV9xuVpokoPGbDLAn3q98oW5MjiNJ7ZwHodlqcDL8QIqSjInq8hl8O3oCTbiGAhTpkLGwo%2B%2FvHOMDRaD7oqFzrzm5ijdJ9KjO5O8y9FNtjCpgTCY0Y8qc4ZD4NsEtVv%2FNmxwajrPw4cK5EkgYRaLhmXbtCNWskw1ih1h1uAqdq6xLaDYCTzLRVg413qobL7H6LKKWnZtr90IRFj4bsLHZ99yw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f55840e87e773406e125378224fe7d0ce029d79f4478122d1c39fc03f9a6186d",
+      "file_size": 1966,
+      "type": "text/x-csrc",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 20,
+  "voters": [
+    "exec_iq",
+    "zy9ard3",
+    "cyborg_m",
+    "kichukishor",
+    "swarnimbandekar",
+    "francisco08",
+    "damauri",
+    "m2x2h",
+    "chaserjon",
+    "tastefulblatant",
+    "and 10 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,106 @@
+{
+  "id": 3736234,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM2MjM0",
+  "url": "https://hackerone.com/reports/3736234",
+  "title": "NULL pointer dereference in libcurl URL API redirect_url() with CURLU_DEFAULT_SCHEME",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "none",
+  "readable_substate": "Informative",
+  "created_at": "2026-05-14T18:30:10.199Z",
+  "submitted_at": "2026-05-14T18:30:10.462Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "mulan_dh",
+    "url": "/mulan_dh",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-17T15:31:57.176Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-15T14:17:43.020Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary A NULL pointer dereference appears to exist in libcurl's URL API path when `curl_url_set()` handles a relative URL together with `CURLU_DEFAULT_SCHEME` on a `CURLU` handle that has host/path information but no stored `u->scheme`. The issue is in `lib/urlapi.c` inside `redirect_url()`, where `u->scheme` is used in `strlen(u->scheme)` before the function checks whether the relevant inputs are valid. If the URL handle reaches this path without a stored scheme, the process can crash with SIGSEGV. Dan Fandrich from the curl security list asked me to submit this report on HackerOne for tracking. This is the same issue previously emailed to `security@curl.se`. ## Affected version - Source reviewed: curl master / 8.21.0-DEV area, `lib/urlapi.c`, `redirect_url()` - The original report stated reproduction against libcurl 8.14.1 and the current development source path. - Local reproduction environment used libcurl URL API semantics around `CURLU_DEFAULT_SCHEME`. ## Technical details In `redirect_url()`, `u->scheme` is dereferenced before a safe NULL check: ```c const char *protsep = base + strlen(u->scheme) + 3; DEBUGASSERT(base && relurl && u); if(!base)   return CURLUE_MALFORMED_INPUT; ``` The problematic path is possible because `urlget_url()` can use `DEFAULT_SCHEME` locally when `CURLU_DEFAULT_SCHEME` is supplied, without necessarily storing a scheme in `u->scheme`: ```c if(u->scheme)   scheme = u->scheme; else if(flags & CURLU_DEFAULT_SCHEME)   scheme = DEFAULT_SCHEME; else   return CURLUE_NO_SCHEME; ``` This means URL generation can succeed using a default scheme string, while the underlying `CURLU` object can still have `u->scheme == NULL`. Later, `redirect_url()` assumes `u->scheme` is non-NULL and calls `strlen(u->scheme)`. ## Steps to reproduce The following minimal PoC constructs a `CURLU` handle with host and path, but no explicit scheme, then sets a relative URL using `CURLU_DEFAULT_SCHEME`: ```c #include <stdio.h> #include <curl/curl.h> int main(void) {     CURLU *u = curl_url();     CURLUcode rc;     if(!u)         return 2;     curl_url_set(u, CURLUPART_HOST, \"example.com\", 0);     curl_url_set(u, CURLUPART_PATH, \"/original\", 0);     rc = curl_url_set(u, CURLUPART_URL, \"/newpath\", CURLU_DEFAULT_SCHEME);     printf(\"Return code: %d\\n\", rc);     curl_url_cleanup(u);     return 0; } ``` Compile and run: ```bash gcc -o curl-url-default-scheme-poc poc.c -lcurl ./curl-url-default-scheme-poc ``` Expected safe behavior: libcurl should return a `CURLUcode` error such as `CURLUE_MALFORMED_INPUT` or otherwise normalize/store the default scheme safely. Observed vulnerable behavior in the original test: process crash / segmentation fault from dereferencing `u->scheme` in `redirect_url()`. ## Suggested fix Add a `u->scheme` validation before using it in `redirect_url()`, or ensure the default scheme used by `urlget_url()` is persisted in the `CURLU` object before `redirect_url()` is called. Example defensive check: ```c if(!base || !u || !u->scheme)   return CURLUE_MALFORMED_INPUT; const char *protsep = base + strlen(u->scheme) + 3; ```\n\n## Impact\n\n## Impact A process using libcurl's URL API can be crashed by reaching this URL parsing path with attacker-controlled or otherwise untrusted relative URL input. The direct security impact is denial of service against applications that: - Build a `CURLU` handle in stages, setting host/path without an explicit scheme - Accept or process relative URLs - Use `CURLU_DEFAULT_SCHEME` for convenience or redirect-style normalization If such input is remotely controllable in an application, an attacker may be able to terminate the process by triggering the NULL pointer dereference. I do not claim code execution; this is a crash/availability issue.",
+  "weakness": {
+    "id": 51,
+    "name": "NULL Pointer Dereference"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

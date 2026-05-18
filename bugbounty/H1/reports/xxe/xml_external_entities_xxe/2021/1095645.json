@@ -1,0 +1,166 @@
+{
+  "id": 1095645,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMDk1NjQ1",
+  "url": "https://hackerone.com/reports/1095645",
+  "title": "Authenticated XXE",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2021-02-04T17:34:58.139Z",
+  "submitted_at": "2021-02-04T17:34:58.231Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "sonarsource",
+    "url": "/sonarsource",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ek9e0v6c0jrxkoyirgujw9qft5fb/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2021-05-18T13:52:04.479Z",
+  "bug_reporter_agreed_on_going_public_at": "2021-05-18T13:52:04.408Z",
+  "team_member_agreed_on_going_public_at": "2021-05-17T16:11:19.071Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Description:\n\nThe WordPress core Media Library does not securely parse XML content when running on PHP 8. By uploading a malicious .wav file, an authenticated attacker can trigger a XXE vulnerability which enables to read secret system files, DoS the web server, perform SSRF, or aim at Remote Code Execution via Phar Deserialization.\n\n## Steps To Reproduce:\n\nRequirements:\n* latest WordPress 5.6 installation\n* running on PHP 8\n* *author* user privileges in WordPress, or higher\n* another web server that is controlled by the attacker to retrieve leaked data\n\nThe vulnerability can be exploited by uploading a crafted .wav file. The attached archive contains such a .wav file with a payload for extracting the content of */etc/passwd* by loading an external DTD. To reproduce:\n\n1. Adapt the address in the 2 files in the attached PoC archive to point to a web server that you control (and that is reachable from the targeted WordPress installation).\n2. For the .wav file, the address has to be adapted at `0x000338CD` (best use a hex editor for this, doing that with a text editor might corrupt the file).\n3. Put the file *xxe.dtd* at the root of the webserver that you control.\n4. Login to WordPress as author and upload *xxe.wav*  in the media library.\n5. The content of */etc/passwd* will appear in the access logs of the web server base64 encoded (see attached screenshot).\n\n## Vulnerable Code:\n\nThe vulnerable code commit is the following:\nhttps://github.com/WordPress/WordPress/commit/03eba7beb2f5b96bd341255eaa30d6b612e62507\n\nThe vulnerable code is:\n```\n\t\t\tif (PHP_VERSION_ID < 80000) {\n\t\t\t\t// http://websec.io/2012/08/27/Preventing-XEE-in-PHP.html\n\t\t\t\t// https://core.trac.wordpress.org/changeset/29378\n\t\t\t\t// This function has been deprecated in PHP 8.0 because in libxml 2.9.0, external entity loading is\n\t\t\t\t// disabled by default, so this function is no longer needed to protect against XXE attacks.\n\t\t\t\t$loader = libxml_disable_entity_loader(true);\n\t\t\t}\n\t\t\t$XMLobject = simplexml_load_string($XMLstring, 'SimpleXMLElement', LIBXML_NOENT);\n```\n\nIt was recently modified to accommodate for the deprecation of the `libxml_disable_entity_loader()` function in PHP 8. The mistake here is to rely on the fact that XXE is no longer possible by default in PHP 8 (as it requires libxml version > 2.9). This is true, but using the `LIBXML_NOENT` flag is certainly not the default. The flag explicitly activates entity substitution (the name of the flag might be a little misleading). So if user input reaches that point as part of the `$XMLstring` variable, XXE is possible.\n\n## Impact\n\nAn attacker can:\n- read secret system files, such as *.htaccess* or *wp-config.php*\n- DoS the web server via a malicious XML document, or by loading */dev/urandom* via XXE\n- fingerprint and exploit services in the internal network by turning the XXE into SSRF\n- trigger a Phar Deserialization by using the `phar://` stream wrapper within the XXE which can lead to further vulnerabilities, depending on the gadget chains available in the WordPress core and its plugins.",
+  "weakness": {
+    "id": 54,
+    "name": "XML External Entities (XXE)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 1183994,
+      "file_name": "xxe.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/7zfrgzqktljze541dzxd4ciyp9g7?response-content-disposition=attachment%3B%20filename%3D%22xxe.zip%22%3B%20filename%2A%3DUTF-8%27%27xxe.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4LYYMHVZ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T173124Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJIMEYCIQD%2FRe9dZYiohEdGckO%2FDNFdDwa1PDzU7YzYUuU6XWBSMAIhAM8vHSudsOhxckv42bmS%2BhbzNUq6zG%2FXbfo2MtowCNl0KrEFCEIQAxoMMDEzNjE5Mjc0ODQ5IgyTBLTKtd3WF1hglOwqjgX%2BQvHImVoxpq41%2BWDuA5T9DreGZjVA71YtapQuygP6jB%2FxtWa2KKoMIjVOQx8kyRjvph66q6xhqnzTTUVNQfJXp7YCYnL%2F%2FbLcsnCMYd3hg04EM1nIrUPz3h4JZkU5%2BjcVP3tCRxbWYXu6JLgdZUVzZIFEVLK3arfh4PwyLiBdWeK5aiTluoS3veUn1Euw70KwuC%2BLukrb%2BHdEA5751ni8WcfFmtG5Q7t7A%2FE%2F8i8Ya9mt10QvUc%2BYPKw7i7BGxrb23yJmtOwT%2FWpOtRtNbcHFo49E5LHLLdSQJL6L%2FvFE%2B5sPDBsPzS%2BItCpL7pEsGl19%2BTddfXccqx1zvELOJI4hIbE1ElUEeusMyuDtpkSmr9qH%2BQZU1OFKyhB31VLWQ3trtVUmQndKOL2DsZWVHppn24Jcv%2B17fVhhu%2FltAdoONKevRZij7Ixms9zRK7BjNLLbh18NiL9YKpJkbkpEvRmZdlaas8%2FChUclwK9uhGl10H8ZE35lNQ84jVj29%2FuVfZawezpLc7fJAw7plVdJxSVI7%2BzrfOuLZSz63MfLIdm%2BrUmGmYd8Q49bYjrm4v2jnRLUD7FPjybmHmsdXid%2BS69KJo7p%2F1DSGlU5iA2SSbkvssZdKN%2FeocIFDynLjP4hlKH1AVhThpyDxjeXqU9YYLuoMP%2Fbg0C%2FU1Ooz%2BBqnU7a1SvAOEWQr%2BbeuCDAW6aokqmgCplVY8nzQMkHeWkDIsw3iHjBKO8yx532GM%2BJNGgKeRPYF6GKZ1GGCteZans6QKInzONHlriKBZlpnsfnIZrpq0t1GQLFYsWhrIWu3Z0MxkluwYTkXaXTVEHSTGZV10QNs3Jivg31Wk5AgWwDerFJTScNO7mR0AoAQiMZjZgwv9XYzwY6sAFDIZ%2Bl%2BSKNQFSBMvAn7%2FCikfvSXMf5aR%2BCJIa%2FJuxRT1dB8Mvv9ziuwQZoDqSAiJgcY1K8EmLt2JyPmfff4%2F3U3ov1BzLVnqiAiSYdq3sT9K3wEqiwH4g2imhn2MpLVNxYto3rsJCiBd298P7UNLACCjBGIbIJi0dF5eCwn4%2BgsuWyeMAiR%2FhYsX8C5jPjbpUHbHATuHbWKWiffdIx%2BJhbClxbIayZamO%2FREc%2BBn%2BqeA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=98141aaaee67bf7fd3e4930e8dc43db8a62907cf6a5ffbbe6180ddb0b8b5f28d",
+      "file_size": 38373,
+      "type": "application/zip",
+      "moderated": null
+    },
+    {
+      "id": 1183995,
+      "file_name": "screenshot.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/klcpro0o372s25nosjmtdizpxys9?response-content-disposition=attachment%3B%20filename%3D%22screenshot.png%22%3B%20filename%2A%3DUTF-8%27%27screenshot.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4LYYMHVZ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T173124Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJIMEYCIQD%2FRe9dZYiohEdGckO%2FDNFdDwa1PDzU7YzYUuU6XWBSMAIhAM8vHSudsOhxckv42bmS%2BhbzNUq6zG%2FXbfo2MtowCNl0KrEFCEIQAxoMMDEzNjE5Mjc0ODQ5IgyTBLTKtd3WF1hglOwqjgX%2BQvHImVoxpq41%2BWDuA5T9DreGZjVA71YtapQuygP6jB%2FxtWa2KKoMIjVOQx8kyRjvph66q6xhqnzTTUVNQfJXp7YCYnL%2F%2FbLcsnCMYd3hg04EM1nIrUPz3h4JZkU5%2BjcVP3tCRxbWYXu6JLgdZUVzZIFEVLK3arfh4PwyLiBdWeK5aiTluoS3veUn1Euw70KwuC%2BLukrb%2BHdEA5751ni8WcfFmtG5Q7t7A%2FE%2F8i8Ya9mt10QvUc%2BYPKw7i7BGxrb23yJmtOwT%2FWpOtRtNbcHFo49E5LHLLdSQJL6L%2FvFE%2B5sPDBsPzS%2BItCpL7pEsGl19%2BTddfXccqx1zvELOJI4hIbE1ElUEeusMyuDtpkSmr9qH%2BQZU1OFKyhB31VLWQ3trtVUmQndKOL2DsZWVHppn24Jcv%2B17fVhhu%2FltAdoONKevRZij7Ixms9zRK7BjNLLbh18NiL9YKpJkbkpEvRmZdlaas8%2FChUclwK9uhGl10H8ZE35lNQ84jVj29%2FuVfZawezpLc7fJAw7plVdJxSVI7%2BzrfOuLZSz63MfLIdm%2BrUmGmYd8Q49bYjrm4v2jnRLUD7FPjybmHmsdXid%2BS69KJo7p%2F1DSGlU5iA2SSbkvssZdKN%2FeocIFDynLjP4hlKH1AVhThpyDxjeXqU9YYLuoMP%2Fbg0C%2FU1Ooz%2BBqnU7a1SvAOEWQr%2BbeuCDAW6aokqmgCplVY8nzQMkHeWkDIsw3iHjBKO8yx532GM%2BJNGgKeRPYF6GKZ1GGCteZans6QKInzONHlriKBZlpnsfnIZrpq0t1GQLFYsWhrIWu3Z0MxkluwYTkXaXTVEHSTGZV10QNs3Jivg31Wk5AgWwDerFJTScNO7mR0AoAQiMZjZgwv9XYzwY6sAFDIZ%2Bl%2BSKNQFSBMvAn7%2FCikfvSXMf5aR%2BCJIa%2FJuxRT1dB8Mvv9ziuwQZoDqSAiJgcY1K8EmLt2JyPmfff4%2F3U3ov1BzLVnqiAiSYdq3sT9K3wEqiwH4g2imhn2MpLVNxYto3rsJCiBd298P7UNLACCjBGIbIJi0dF5eCwn4%2BgsuWyeMAiR%2FhYsX8C5jPjbpUHbHATuHbWKWiffdIx%2BJhbClxbIayZamO%2FREc%2BBn%2BqeA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=85cfb7a12c68c4d1c6ac6898086e1ff4e44433e343fd0f801cdb178e7d580fa2",
+      "file_size": 867812,
+      "type": "image/png",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2021-06-16T16:11:19.273Z",
+  "allow_singular_disclosure_after": -153883205.45134026,
+  "singular_disclosure_allowed": true,
+  "vote_count": 41,
+  "voters": [
+    "jackalpret",
+    "sonarsource",
+    "m4khn0",
+    "ali",
+    "akashhamal0x01",
+    "sudi",
+    "pacmanx",
+    "xsstestov",
+    "hckit_02",
+    "vess_razz",
+    "and 31 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 2750,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "WordPress Core",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "id": 53658,
+      "category": "researcher",
+      "content": "The WordPress core Media Library did not securely parse XML content when running on PHP 8. By uploading a malicious .wav file, an authenticated attacker could trigger a XXE vulnerability which enabled to read secret system files, DoS the web server, perform SSRF, or aim at Remote Code Execution via Phar Deserialization. Find the technical advisory in our blog: https://blog.sonarsource.com/wordpress-xxe-security-vulnerability.",
+      "updated_at": "2021-05-18T13:48:10.860Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 1500675,
+        "username": "sonarsource",
+        "name": "SonarSource",
+        "bio": "",
+        "cleared": false,
+        "verified": false,
+        "website": "https://www.sonarsource.com",
+        "location": "",
+        "created_at": "2021-02-04T16:17:58.655Z",
+        "url": "https://hackerone.com/sonarsource",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "hacker",
+        "profile_picture_urls": {
+          "small": "https://profile-photos.hackerone-user-content.com/variants/ek9e0v6c0jrxkoyirgujw9qft5fb/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+          "medium": "https://profile-photos.hackerone-user-content.com/variants/ek9e0v6c0jrxkoyirgujw9qft5fb/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a",
+          "xtralarge": "https://profile-photos.hackerone-user-content.com/variants/ek9e0v6c0jrxkoyirgujw9qft5fb/4ac84fbe897190579a137d0cf55152b233cdd4f9984435bd80ef67e5e51a0586"
+        }
+      }
+    }
+  ]
+}

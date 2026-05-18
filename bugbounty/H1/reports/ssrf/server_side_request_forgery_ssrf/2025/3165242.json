@@ -1,0 +1,159 @@
+{
+  "id": 3165242,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMTY1MjQy",
+  "url": "https://hackerone.com/reports/3165242",
+  "title": "Server-Side Request Forgery (SSRF) via Game Export API",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "critical",
+  "readable_substate": "Resolved",
+  "created_at": "2025-05-28T09:36:50.120Z",
+  "submitted_at": "2025-05-28T09:36:50.362Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "oblivionsage",
+    "url": "/oblivionsage",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ip4cyu4gxdh9vdw49fk160hphdhf/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 48242,
+    "url": "https://hackerone.com/lichess",
+    "handle": "lichess",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/CbR2hQEVmv82Z9L1cfqd9SFQ/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/CbR2hQEVmv82Z9L1cfqd9SFQ/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Lichess",
+      "twitter_handle": "",
+      "website": "https://lichess.org",
+      "about": "The free chess server. No paywall, no tracking, no ads. Just the good stuff. Source code: https://lichess.org/source"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-06-03T12:56:00.368Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-06-03T12:56:00.213Z",
+  "team_member_agreed_on_going_public_at": "2025-06-03T11:41:06.574Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Summary\n\nHello Lichess Team,\n\nI found a Server-Side Request Forgery vulnerability in the game export functionality. An attacker can make the Lichess server send HTTP requests to arbitrary URLs by manipulating the `players` parameter. This works on public endpoints that don't require any authentication\n\n\n\n\n\n# Description:\n\nThe issue is in the game export API endpoints that accept a `players` parameter. When I looked at the code, I noticed that this parameter gets passed directly to `RealPlayerApi.apply()` without any URL validation\n\n\nHere's the problematic flow I found:\n\n\n\nIn `app/controllers/Game.scala`:\n\n```bash\nval config = GameApiV2.OneConfig(\n  format = GameApiV2.Format.byRequest,\n  imported = getBool(\"imported\"),\n  flags = requestPgnFlags(extended = true),\n  playerFile = get(\"players\")  // User input taken directly\n)\n```\n\n\nThen in `modules/api/src/main/GameApiV2.scala`:\n\n\n```bash\nrealPlayers                  <- config.playerFile.so(realPlayerApi.apply)\n```\n\nAnd finally in `modules/web/src/main/RealPlayer.scala`\n\n```bash\ndef apply(url: String): Fu[Option[RealPlayers]] = cache.get(url)\n// This leads to:\nws.url(url).withRequestTimeout(3.seconds).get()\n```\n\n\nThe `get(\"players\")` method directly reads from HTTP query parameters without any validation. The `so()` method executes the function when the Option contains a value, so any URL I provide gets passed straight to the HTTP client\n\n\n\n\n# PoC\n\nNote: I discovered this vulnerability through source code analysis and then confirmed it by testing live on the official Lichess website. The following PoC demonstrates the issue as it exists in the production environment\n\n1. Pick any valid game ID from Lichess (like from a recent game)\n\n{F4390928}\n\n2. Make a request to: `/game/export/[GAME_ID]?players=http://169.254.169.254/latest/meta-data/ `\n\n3. The server will make an HTTP request to the provided URL\n\n4. You can also test with: `/api/games/export/_ids?players=[URL]` or `/api/games/user/[USERNAME]?players=[URL] `\n\n5. Monitor your server logs or use a service like webhook.site to confirm the request\n\n\n{F4390944}\n\n{F4390945}\n\n# Mitigation:\n\nTo fix this, you should:\n\n+ Add URL validation to only allow specific trusted domains for the `players` parameter\n\n+ Implement a whitelist of allowed URLs or URL patterns\n\n+ Consider removing the feature entirely if it's not critical\n\n+ Add authentication requirements for these endpoints\n\n+ Block requests to private IP ranges (127.x.x.x, 192.168.x.x, 10.x.x.x, 169.254.x.x) (For security and ethical reasons, I did not send any actual requests to these IP addresses. If required, I can provide my own IP address or any additional information for verification purposes)\n\n\nThe fix should be in `RealPlayerApi.apply()` method to validate the URL before making any HTTP requests.\n\n\nhttps://cwe.mitre.org/data/definitions/918.html\n\n## Impact\n\nAn attacker could use this to:\n\n+ Access cloud metadata services (AWS, GCP) to steal credentials and configuration\n+ Scan internal networks and discover internal services\n+ Access internal APIs and admin panels that aren't exposed to the internet\n+ Potentially read sensitive internal data or configuration files\n+ Perform port scanning of internal infrastructure\n\nThis is particularly concerning because the endpoints are public - no authentication needed. Also, since it's on a high-traffic site like Lichess, an attacker could potentially use this to bypass IP-based restrictions on internal services",
+  "weakness": {
+    "id": 68,
+    "name": "Server-Side Request Forgery (SSRF)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4390928,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/moursgngsrrqvgcuiwb5auxuotdy?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTLAFP4TE%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163546Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIBjfJaXTOx3bRWUSm2MCczXAHIWxahXT6C2I3YxSXca3AiEAph3oeHGqX%2FwVlDscybgl6B7m5oeh4O4KBzDBIL7QYmkqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDJBk4DqfVXHT4MohnSqOBVth%2Fo1kBuwhwqSIK6kPqRlczUiS6m5mko4EyinR7FbPpBkwKhDJ2II%2FySzAGXrS4Bb4JVa0lW9hx80b9A%2B3IabiocGLXzn5LFYPH8oMbtB1p2ngDNkoWi6lLXYYafJeGpbiVWnEDgZM4plxI8mcHyaR36GoHRXndAyTS3WAvBomd4S2QCuAxrAA3bfAc8w%2FQ6vV2lON7fqqN6WheGi8iobWcfmMdKxVNVW%2FGy9NQi7WUL2tNBzG7F45%2Bkau3MXuxu8fPyjCjtp%2FfirAI0RAj7js3vGWb6Wsjj%2FYx%2FIyvWIROvdC4X53%2FpYYm51FdBXtsYjyMzYLeP8oWlBN5AEFj54slXnhl8iAsktsf4epMagxrpakSTu2d2cl4Q40VsVDOh5xhK4Jy3DcuAct0LVnJSJ56fm74PNVA7MmlwM9rRoOFNCrzEEZ%2BZPDt32ZiuBMDwssJoY7Q%2FYykEywAnUlnrMiINk%2BuRjAQHRQaCdwf6kqwJNjnuw%2F8fgbhJ3tVN%2FtrA1VbKahdqp%2Bkk0X8FHtUz5ll8Gjsx8FmxlAHjdnQOg127ErHdIq9QXwAU64i1JPi%2Bx2ZibevAgZMoZnG9Sm%2Fdnx%2Forv5e0gzKwLXeLMDVQHM3JguXui9DlDZLQTn0hZVojHvc1TvBfUvzsOevHLJx%2Bvn9lYr3v8pA0vxalJAF%2BoKAkRDBKxX1ZQHnAlreL5XPGWZR8I%2BWt2pqDal9FtkHx%2FKPtU8TKhxE6RDSorX5I%2BYP2GCec9H%2B8AfCNVdCs%2FP1W3X4liJVElIrooAYErcIN2OCD2Jja9jl0%2F2xxemOwEHYuSSJ815TZqheKOh5pM2d04hrZ4M0VknwL3pLqTXfswlpdNK%2BEzerzjlanxjjDUsdjPBjqxAcQSFj1qQChU7PSgGzk2DJV9xuVpokoPGbDLAn3q98oW5MjiNJ7ZwHodlqcDL8QIqSjInq8hl8O3oCTbiGAhTpkLGwo%2B%2FvHOMDRaD7oqFzrzm5ijdJ9KjO5O8y9FNtjCpgTCY0Y8qc4ZD4NsEtVv%2FNmxwajrPw4cK5EkgYRaLhmXbtCNWskw1ih1h1uAqdq6xLaDYCTzLRVg413qobL7H6LKKWnZtr90IRFj4bsLHZ99yw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e5c4b445783d4accdce6dc2e8b28aa1923e3d77284c0537c2360b3619e26239f",
+      "file_size": 99777,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 4390944,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ve429yk8l9ahmv06hfkk0c7hmtm0?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTLAFP4TE%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163546Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIBjfJaXTOx3bRWUSm2MCczXAHIWxahXT6C2I3YxSXca3AiEAph3oeHGqX%2FwVlDscybgl6B7m5oeh4O4KBzDBIL7QYmkqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDJBk4DqfVXHT4MohnSqOBVth%2Fo1kBuwhwqSIK6kPqRlczUiS6m5mko4EyinR7FbPpBkwKhDJ2II%2FySzAGXrS4Bb4JVa0lW9hx80b9A%2B3IabiocGLXzn5LFYPH8oMbtB1p2ngDNkoWi6lLXYYafJeGpbiVWnEDgZM4plxI8mcHyaR36GoHRXndAyTS3WAvBomd4S2QCuAxrAA3bfAc8w%2FQ6vV2lON7fqqN6WheGi8iobWcfmMdKxVNVW%2FGy9NQi7WUL2tNBzG7F45%2Bkau3MXuxu8fPyjCjtp%2FfirAI0RAj7js3vGWb6Wsjj%2FYx%2FIyvWIROvdC4X53%2FpYYm51FdBXtsYjyMzYLeP8oWlBN5AEFj54slXnhl8iAsktsf4epMagxrpakSTu2d2cl4Q40VsVDOh5xhK4Jy3DcuAct0LVnJSJ56fm74PNVA7MmlwM9rRoOFNCrzEEZ%2BZPDt32ZiuBMDwssJoY7Q%2FYykEywAnUlnrMiINk%2BuRjAQHRQaCdwf6kqwJNjnuw%2F8fgbhJ3tVN%2FtrA1VbKahdqp%2Bkk0X8FHtUz5ll8Gjsx8FmxlAHjdnQOg127ErHdIq9QXwAU64i1JPi%2Bx2ZibevAgZMoZnG9Sm%2Fdnx%2Forv5e0gzKwLXeLMDVQHM3JguXui9DlDZLQTn0hZVojHvc1TvBfUvzsOevHLJx%2Bvn9lYr3v8pA0vxalJAF%2BoKAkRDBKxX1ZQHnAlreL5XPGWZR8I%2BWt2pqDal9FtkHx%2FKPtU8TKhxE6RDSorX5I%2BYP2GCec9H%2B8AfCNVdCs%2FP1W3X4liJVElIrooAYErcIN2OCD2Jja9jl0%2F2xxemOwEHYuSSJ815TZqheKOh5pM2d04hrZ4M0VknwL3pLqTXfswlpdNK%2BEzerzjlanxjjDUsdjPBjqxAcQSFj1qQChU7PSgGzk2DJV9xuVpokoPGbDLAn3q98oW5MjiNJ7ZwHodlqcDL8QIqSjInq8hl8O3oCTbiGAhTpkLGwo%2B%2FvHOMDRaD7oqFzrzm5ijdJ9KjO5O8y9FNtjCpgTCY0Y8qc4ZD4NsEtVv%2FNmxwajrPw4cK5EkgYRaLhmXbtCNWskw1ih1h1uAqdq6xLaDYCTzLRVg413qobL7H6LKKWnZtr90IRFj4bsLHZ99yw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e34c3718936572ce881ca0f0293ddead8ea96a8640484c4b8630dca1f89e4572",
+      "file_size": 21909,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 4390945,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/f6c4kw2hbgr98tbqxthr7r2maf8f?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTLAFP4TE%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163546Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIBjfJaXTOx3bRWUSm2MCczXAHIWxahXT6C2I3YxSXca3AiEAph3oeHGqX%2FwVlDscybgl6B7m5oeh4O4KBzDBIL7QYmkqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDJBk4DqfVXHT4MohnSqOBVth%2Fo1kBuwhwqSIK6kPqRlczUiS6m5mko4EyinR7FbPpBkwKhDJ2II%2FySzAGXrS4Bb4JVa0lW9hx80b9A%2B3IabiocGLXzn5LFYPH8oMbtB1p2ngDNkoWi6lLXYYafJeGpbiVWnEDgZM4plxI8mcHyaR36GoHRXndAyTS3WAvBomd4S2QCuAxrAA3bfAc8w%2FQ6vV2lON7fqqN6WheGi8iobWcfmMdKxVNVW%2FGy9NQi7WUL2tNBzG7F45%2Bkau3MXuxu8fPyjCjtp%2FfirAI0RAj7js3vGWb6Wsjj%2FYx%2FIyvWIROvdC4X53%2FpYYm51FdBXtsYjyMzYLeP8oWlBN5AEFj54slXnhl8iAsktsf4epMagxrpakSTu2d2cl4Q40VsVDOh5xhK4Jy3DcuAct0LVnJSJ56fm74PNVA7MmlwM9rRoOFNCrzEEZ%2BZPDt32ZiuBMDwssJoY7Q%2FYykEywAnUlnrMiINk%2BuRjAQHRQaCdwf6kqwJNjnuw%2F8fgbhJ3tVN%2FtrA1VbKahdqp%2Bkk0X8FHtUz5ll8Gjsx8FmxlAHjdnQOg127ErHdIq9QXwAU64i1JPi%2Bx2ZibevAgZMoZnG9Sm%2Fdnx%2Forv5e0gzKwLXeLMDVQHM3JguXui9DlDZLQTn0hZVojHvc1TvBfUvzsOevHLJx%2Bvn9lYr3v8pA0vxalJAF%2BoKAkRDBKxX1ZQHnAlreL5XPGWZR8I%2BWt2pqDal9FtkHx%2FKPtU8TKhxE6RDSorX5I%2BYP2GCec9H%2B8AfCNVdCs%2FP1W3X4liJVElIrooAYErcIN2OCD2Jja9jl0%2F2xxemOwEHYuSSJ815TZqheKOh5pM2d04hrZ4M0VknwL3pLqTXfswlpdNK%2BEzerzjlanxjjDUsdjPBjqxAcQSFj1qQChU7PSgGzk2DJV9xuVpokoPGbDLAn3q98oW5MjiNJ7ZwHodlqcDL8QIqSjInq8hl8O3oCTbiGAhTpkLGwo%2B%2FvHOMDRaD7oqFzrzm5ijdJ9KjO5O8y9FNtjCpgTCY0Y8qc4ZD4NsEtVv%2FNmxwajrPw4cK5EkgYRaLhmXbtCNWskw1ih1h1uAqdq6xLaDYCTzLRVg413qobL7H6LKKWnZtr90IRFj4bsLHZ99yw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=94f2c2d64ea71e3de287e14b9f60e1265bf76cefcb37ddf331e2caac757b170b",
+      "file_size": 76977,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 109,
+  "voters": [
+    "m4khn0",
+    "loaymorad",
+    "hacker_441",
+    "oldrashed",
+    "aboalezz",
+    "pankajhack01",
+    "orange303",
+    "alp",
+    "capablanca0",
+    "alejandroar",
+    "and 99 more..."
+  ],
+  "severity": {
+    "rating": "critical",
+    "score": 9.8,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 50174,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/lichess-org/lila",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

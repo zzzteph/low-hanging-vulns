@@ -1,0 +1,157 @@
+{
+  "id": 1531958,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNTMxOTU4",
+  "url": "https://hackerone.com/reports/1531958",
+  "title": "ReDoS in net/http affects webhooks: Sidekiq job stuck at 100% CPU for a year",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2022-04-06T05:09:58.597Z",
+  "submitted_at": "2022-04-06T05:09:58.763Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "afewgoats",
+    "url": "/afewgoats",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/Wh2oXLjukEvjyT9sbA4nJUai/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 264,
+    "url": "https://hackerone.com/gitlab",
+    "handle": "gitlab",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "GitLab",
+      "twitter_handle": "gitlab",
+      "website": "https://about.gitlab.com",
+      "about": "A single application for the entire software development lifecycle."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2022-09-13T04:42:18.678Z",
+  "bug_reporter_agreed_on_going_public_at": "2022-08-03T02:29:18.643Z",
+  "team_member_agreed_on_going_public_at": "2022-09-13T04:42:18.318Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\nA Gitlab webhook may be pointed at a malicious webhook receiver.\nThe webhook receiver can respond with a specially crafted long header.\nGitlab processes the header with Ruby's net/http where there is a regular expression operation with quadratic complexity (ReDoS).\nThis causes the `web_hook` Sidekiq job to get stuck at 100% CPU utilisation until the regular expression processing is complete (weeks later).\nThe long headers are also kept in memory and the connection can be kept open.\n\n#### Comparison to 1252116\n\nIn report #1252116, the impact was that the network connection was kept open indefinitely, potentially causing connection pool and memory exhaustion. This new report is instead about CPU exhaustion for a more serious and more powerful DoS. It also bypasses the timeout added to fix #1252116 (https://gitlab.com/gitlab-org/gitlab/-/commit/a8807ee52d0b22b68beb31f0cad6ad5b77b4caf6) (deployed in 14.9.2) as the timeout only gets hit once the regular expression has finished processing (timeout is checked between header lines).\n\n#### The root cause\n\nA Regular Expression Denial of Service (ReDoS) vulnerability in Ruby's net/http affects Gitlab webhooks.\n\nThe bug is in [net/http/response.rb#57](https://github.com/ruby/net-http/blob/7b852b1feb7c1c0bc3019687d6ee5c385ce26eb9/lib/net/http/response.rb#L57) when reading headers line by line:\n\n```rb\nline = sock.readuntil(\"\\n\", true).sub(/\\s+\\z/, '')\n```\n\nThe `sub` regex is the issue. While it looks safe and linear, the `sub` operation will actually have quadratic complexity as there is no starting anchor.\n\nA header line which contains many consecutive spaces but *does not end in a space*, such as\n\n```rb\n( \"a\" + \" \" * 950000 + \"b\" ).sub(/\\s+\\z/, '')\n```\n\nwill exhibit extreme backtracking.\n\nThe time complexity is quadratic with respect to the number of spaces in the string (doubling the number of spaces quadruples the processing time). Approximate timings from my laptop (I measured until 10,000 and then extrapolated):\n\n```\n|  Spaces  |  Seconds   |  Hours   |  Days  |\n|----------|------------|----------|--------|\n|     2000 |        1.8 |          |        |\n|     4000 |        7.2 |          |        |\n|     8000 |       28.6 |          |        |\n|    10000 |       44.7 |          |        |\n|   100000 |     4473.0 |     1.24 |   0.05 |\n|  1000000 |   447300.0 |   124.25 |   5.18 |\n| 10000000 | 44730000.0 | 12425.00 | 517.71 |\n```\n\n### Steps to reproduce\n\n1. Run the attached malicious node server on port 3000: `node ./net-http-response.js`\n2. Create a project and add webhooks for issue events to http://maliciousserver:3000/xyz.\n3. (If you hosted the malicious server on your local network, you will need to \"Allow requests to the local network from web hooks and services\" in /admin/application_settings/network.)\n4. Create an issue (or close or reopen one) to trigger the webhook. Gitlab will make a webhook request.\n5. The malicious server will respond with `HTTP/1.1 200 OK` and then a header line with 9,500,000 consecutive spaces in the middle.\n6. The `web_hook` Sidekiq job will be stuck processing at 100% CPU and will not complete for **over a year**. This can be seen in the Background Jobs panel (/admin/background_jobs) and `top`:\n\n{F1681377}\n\n{F1681378}\n\nThe ReDoS triggers on web requests made to Gitlab which trigger an external request e.g. validating the URL before repository import. However, in these cases a `RequestTimeoutException` triggers after 60 seconds of 100% CPU.\n\nThe regex runs without a timeout on project webhooks. It's not just project webhooks though. Any use of `Gitlab::HTTP.post` such as system webhooks and integrations (e.g. Mattermost) are affected.\n\nTo demonstrate the net/http bug:\n\n```rb\nrequire 'net/http'\nuri = URI('http://maliciousserver:3000/x')\nNet::HTTP.get(uri)\n```\n\n### What is the current *bug* behavior?\n\nGitlab webhooks and system hooks get stuck for years in a CPU intensive regular expression operation when receiving a malicious header from an external service.\n\n### What is the expected *correct* behavior?\n\nProcessing a webhook response should never take longer than a year. More strictly, it should obey the webhook read timeout and also not run at 100% CPU.\n\nRuby should simply use `sock.readuntil(\"\\n\", true).rstrip` instead of a regex as I think it does the same thing. I can make a PR / issue for ruby unless you want to do it yourselves - let me know if and how you want me to proceed.\n\nPotentially drop responses with very long header lines.\n\n### Relevant logs and/or screenshots\n\nnet/http is called by httparty which is called by\n```\n\"lib/gitlab/http.rb:57:in `perform_request'\",\"app/services/web_hook_service.rb:125:in `make_request'\"\n```\n\n### Output of checks\n\nThe bug happens locally. I did not test this on Gitlab.com because I'm sure it will affect it.\n\n#### Results of GitLab environment info\n\n(For installations with omnibus-gitlab package run and paste the output of:\n`sudo gitlab-rake gitlab:env:info`)\n\nRunning in docker\n\n```\nSystem information\nSystem:\nProxy:          no\nCurrent User:   git\nUsing RVM:      no\nRuby Version:   2.7.5p203\nGem Version:    3.1.4\nBundler Version:2.2.33\nRake Version:   13.0.6\nRedis Version:  6.2.6\nSidekiq Version:6.4.0\nGo Version:     unknown\n\nGitLab information\nVersion:        14.9.2-ee\nRevision:       3034418fb31\nDirectory:      /opt/gitlab/embedded/service/gitlab-rails\nDB Adapter:     PostgreSQL\nDB Version:     12.7\nURL:            https://gitlab.example.com\nHTTP Clone URL: https://gitlab.example.com/some-group/some-project.git\nSSH Clone URL:  git@gitlab.example.com:some-group/some-project.git\nElasticsearch:  no\nGeo:            no\nUsing LDAP:     no\nUsing Omniauth: yes\nOmniauth Providers: \n\nGitLab Shell\nVersion:        13.24.0\nRepository storage paths:\n- default:      /var/opt/gitlab/git-data/repositories\nGitLab Shell path:              /opt/gitlab/embedded/service/gitlab-shell\n```\n\n## Impact\n\nCPU exhaustion DoS.\nMemory exhaustion DoS.\nCPU intensive Sidekiq job runs forever (ok, not forever, but over a year) wasting energy and slowing down the system.\nAlso possible to get connection pool exhaustion by sending data slowly and keeping the socket open until the regex completes (bypassing fix for #1252116) for multiple webhook connections.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 1681377,
+      "file_name": "gitlab-high-cpu-header-regex-dos.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9fjqpmki63s6m15ljwe4p7459gnf?response-content-disposition=attachment%3B%20filename%3D%22gitlab-high-cpu-header-regex-dos.png%22%3B%20filename%2A%3DUTF-8%27%27gitlab-high-cpu-header-regex-dos.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQY7DRSLTF%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T170841Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJGMEQCIEHZaYHpJ%2FthSz8pY9acIWSCh9bdizSTHTPUCtxlK8NbAiA7zhPmItwFf8%2FQvWOsxQFvYZ8OaJnA9TFpRvJiS7WfJSqyBQhBEAMaDDAxMzYxOTI3NDg0OSIMay8Do63pGp1DLyhKKo8F2t3xOTw3GwPV29Ctt7H4E4NIiEmm6mtoz7xVioAVv4syaDq0pu2TStSJ6LNfNV86AOFoEl00daMUqLeKUlxMZEr178Lv0ho2Ami8w%2BM%2FNyVNUThcgJZG3%2BI%2BIqYw%2Bxtu97SSZ9pVOAtKv9Nko%2BcNN3gvvzREkuv5b4JR3deyHCLMceFMUADB3xlLLa8z34RZvjQr4nSvfuhGBbOzyVYQVVgoS0wxPveg8lLDvkJjQsppyNmHXItugvGZxWsqXfv%2BnwhWce3XS26Nfvbq%2BYV0lQgSsUiYicXpRheeYbVcaC%2BR%2FixBvUn1focOVf4vsV2k%2FUvbBRCv0hepxsy3yYjXKDVvr%2BphddKB%2BB5fQIIWxgpmKXbP9ijRfTvFOtZuBhcivllftEkB%2F4poRiF88sZPI1bwxCuo15XY5SmwsY0Ur%2B5katVYyiNpQOv7Q2Q32kXz6fuClNQQvHRZtzeZsGZkql9xPhLa9CYf33eO7x%2F1WsVNcW2YZbNY%2BFEat2KmBKyDqmybhrdKQjhoO7riDOaDSdOdqwTDuenJMrK6N7KYbklk69Ifre%2FuGGpmAL7QnkMGuTS6foerZEi4EfYu1RRgZTWqHaTIYSNljkmdzP3piPJ14uUuE3yBkAiDNoFbaGS3C8Iuk%2BiKAcW5Nm6OtV3kt3LgJlUk%2FBDIeWZskG3l6aqLADnlC5FZkYWRZiPGR%2FYT0Zw9oilXzMQSkxrcSgFpLj7X6bcVv1CTCLOqnKXL651ra6uxCuVd0AoO56KlQBSdA2f%2FtMxzZWopYSraj4GHXZvpAWii3GH%2BquA7mUDXSyPk55wFu3elpfBC7N9tLyT%2Fd%2Fdh5cHMae3qB4XP0JdBps6A%2B9SNGXVdDold0%2BSusjDJx9jPBjqyAeRSmkWzn5lactRPIQMopB3E5YzMa3oT9wCQ1YUZtu19GSfelYez1Q5Tv3Iv24AtPcXDFvXENhhN01OhSfczxxYiH9iaiJw7s0oPTG7sMNSf%2B2nwoyishkYD%2BHd1PdnjaLoIo6o2iSivfgCZY3M0pNh%2FTGAcgcCaeMN%2F18qhG1Dnltd2Ox6o9UPnP7quqmycgHpQgMSsH3VIgD%2BSo%2FwvNzq4df5edlhkJyAriEnVo4pqZQ4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b13d7f57a0da17e623246eb3f6f80c83948887249a3e2f66d9b66d2c7e310112",
+      "file_size": 23467,
+      "type": "image/png",
+      "moderated": null
+    },
+    {
+      "id": 1681378,
+      "file_name": "gitlab-header-regex-dos-sidekiq-background_jobs.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/hsr7k1jpnl9e5jxsvxyd5eu46kbd?response-content-disposition=attachment%3B%20filename%3D%22gitlab-header-regex-dos-sidekiq-background_jobs.png%22%3B%20filename%2A%3DUTF-8%27%27gitlab-header-regex-dos-sidekiq-background_jobs.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQY7DRSLTF%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T170841Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJGMEQCIEHZaYHpJ%2FthSz8pY9acIWSCh9bdizSTHTPUCtxlK8NbAiA7zhPmItwFf8%2FQvWOsxQFvYZ8OaJnA9TFpRvJiS7WfJSqyBQhBEAMaDDAxMzYxOTI3NDg0OSIMay8Do63pGp1DLyhKKo8F2t3xOTw3GwPV29Ctt7H4E4NIiEmm6mtoz7xVioAVv4syaDq0pu2TStSJ6LNfNV86AOFoEl00daMUqLeKUlxMZEr178Lv0ho2Ami8w%2BM%2FNyVNUThcgJZG3%2BI%2BIqYw%2Bxtu97SSZ9pVOAtKv9Nko%2BcNN3gvvzREkuv5b4JR3deyHCLMceFMUADB3xlLLa8z34RZvjQr4nSvfuhGBbOzyVYQVVgoS0wxPveg8lLDvkJjQsppyNmHXItugvGZxWsqXfv%2BnwhWce3XS26Nfvbq%2BYV0lQgSsUiYicXpRheeYbVcaC%2BR%2FixBvUn1focOVf4vsV2k%2FUvbBRCv0hepxsy3yYjXKDVvr%2BphddKB%2BB5fQIIWxgpmKXbP9ijRfTvFOtZuBhcivllftEkB%2F4poRiF88sZPI1bwxCuo15XY5SmwsY0Ur%2B5katVYyiNpQOv7Q2Q32kXz6fuClNQQvHRZtzeZsGZkql9xPhLa9CYf33eO7x%2F1WsVNcW2YZbNY%2BFEat2KmBKyDqmybhrdKQjhoO7riDOaDSdOdqwTDuenJMrK6N7KYbklk69Ifre%2FuGGpmAL7QnkMGuTS6foerZEi4EfYu1RRgZTWqHaTIYSNljkmdzP3piPJ14uUuE3yBkAiDNoFbaGS3C8Iuk%2BiKAcW5Nm6OtV3kt3LgJlUk%2FBDIeWZskG3l6aqLADnlC5FZkYWRZiPGR%2FYT0Zw9oilXzMQSkxrcSgFpLj7X6bcVv1CTCLOqnKXL651ra6uxCuVd0AoO56KlQBSdA2f%2FtMxzZWopYSraj4GHXZvpAWii3GH%2BquA7mUDXSyPk55wFu3elpfBC7N9tLyT%2Fd%2Fdh5cHMae3qB4XP0JdBps6A%2B9SNGXVdDold0%2BSusjDJx9jPBjqyAeRSmkWzn5lactRPIQMopB3E5YzMa3oT9wCQ1YUZtu19GSfelYez1Q5Tv3Iv24AtPcXDFvXENhhN01OhSfczxxYiH9iaiJw7s0oPTG7sMNSf%2B2nwoyishkYD%2BHd1PdnjaLoIo6o2iSivfgCZY3M0pNh%2FTGAcgcCaeMN%2F18qhG1Dnltd2Ox6o9UPnP7quqmycgHpQgMSsH3VIgD%2BSo%2FwvNzq4df5edlhkJyAriEnVo4pqZQ4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=94868e13ad74b6d0199406370e9b9a7c7a024fc3af30ad2e2673893e88f5910a",
+      "file_size": 145752,
+      "type": "image/png",
+      "moderated": null
+    },
+    {
+      "id": 1681405,
+      "file_name": "net-http-response.js",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/3vc1yjn62ppdlcbvysqkzct9kb0p?response-content-disposition=attachment%3B%20filename%3D%22net-http-response.js%22%3B%20filename%2A%3DUTF-8%27%27net-http-response.js&response-content-type=text%2Fjavascript&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQY7DRSLTF%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T170841Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJGMEQCIEHZaYHpJ%2FthSz8pY9acIWSCh9bdizSTHTPUCtxlK8NbAiA7zhPmItwFf8%2FQvWOsxQFvYZ8OaJnA9TFpRvJiS7WfJSqyBQhBEAMaDDAxMzYxOTI3NDg0OSIMay8Do63pGp1DLyhKKo8F2t3xOTw3GwPV29Ctt7H4E4NIiEmm6mtoz7xVioAVv4syaDq0pu2TStSJ6LNfNV86AOFoEl00daMUqLeKUlxMZEr178Lv0ho2Ami8w%2BM%2FNyVNUThcgJZG3%2BI%2BIqYw%2Bxtu97SSZ9pVOAtKv9Nko%2BcNN3gvvzREkuv5b4JR3deyHCLMceFMUADB3xlLLa8z34RZvjQr4nSvfuhGBbOzyVYQVVgoS0wxPveg8lLDvkJjQsppyNmHXItugvGZxWsqXfv%2BnwhWce3XS26Nfvbq%2BYV0lQgSsUiYicXpRheeYbVcaC%2BR%2FixBvUn1focOVf4vsV2k%2FUvbBRCv0hepxsy3yYjXKDVvr%2BphddKB%2BB5fQIIWxgpmKXbP9ijRfTvFOtZuBhcivllftEkB%2F4poRiF88sZPI1bwxCuo15XY5SmwsY0Ur%2B5katVYyiNpQOv7Q2Q32kXz6fuClNQQvHRZtzeZsGZkql9xPhLa9CYf33eO7x%2F1WsVNcW2YZbNY%2BFEat2KmBKyDqmybhrdKQjhoO7riDOaDSdOdqwTDuenJMrK6N7KYbklk69Ifre%2FuGGpmAL7QnkMGuTS6foerZEi4EfYu1RRgZTWqHaTIYSNljkmdzP3piPJ14uUuE3yBkAiDNoFbaGS3C8Iuk%2BiKAcW5Nm6OtV3kt3LgJlUk%2FBDIeWZskG3l6aqLADnlC5FZkYWRZiPGR%2FYT0Zw9oilXzMQSkxrcSgFpLj7X6bcVv1CTCLOqnKXL651ra6uxCuVd0AoO56KlQBSdA2f%2FtMxzZWopYSraj4GHXZvpAWii3GH%2BquA7mUDXSyPk55wFu3elpfBC7N9tLyT%2Fd%2Fdh5cHMae3qB4XP0JdBps6A%2B9SNGXVdDold0%2BSusjDJx9jPBjqyAeRSmkWzn5lactRPIQMopB3E5YzMa3oT9wCQ1YUZtu19GSfelYez1Q5Tv3Iv24AtPcXDFvXENhhN01OhSfczxxYiH9iaiJw7s0oPTG7sMNSf%2B2nwoyishkYD%2BHd1PdnjaLoIo6o2iSivfgCZY3M0pNh%2FTGAcgcCaeMN%2F18qhG1Dnltd2Ox6o9UPnP7quqmycgHpQgMSsH3VIgD%2BSo%2FwvNzq4df5edlhkJyAriEnVo4pqZQ4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=17451acfbb05886f1988b7e03e224f814b541ca01b2b56e81348a660192e7d60",
+      "file_size": 806,
+      "type": "text/javascript",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 9,
+  "voters": [
+    "n1m0",
+    "zy9ard3",
+    "shreyaschavhan",
+    "breno_css",
+    "big_brother_pentest",
+    "shivammusic",
+    "quise71",
+    "m4773l",
+    "simp_h"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.3,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "none",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 39022,
+    "asset_type": "OTHER",
+    "asset_identifier": "Your Own GitLab Instance",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

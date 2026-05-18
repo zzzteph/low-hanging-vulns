@@ -1,0 +1,123 @@
+{
+  "id": 3636044,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjM2MDQ0",
+  "url": "https://hackerone.com/reports/3636044",
+  "title": "HTTP/2 PUSH_PROMISE header loss on OOM bypasses scheme validation (regression of 2e8c922a89)",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-03-29T16:37:03.824Z",
+  "submitted_at": "2026-03-29T16:37:20.748Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "m42kl33",
+    "url": "/m42kl33",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-03-31T05:52:43.306Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-03-30T05:49:08.397Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\nIn `lib/http2.c:1490`, when `curl_maprintf` fails due to memory pressure, the push promise header is silently dropped but the callback returns success. If the lost header is the `:scheme` pseudo-header, the security check at line 733 that blocks HTTPS pushes over insecure connections is skipped entirely. This re-enables the vulnerability that commit `2e8c922a89` was designed to fix.\n\n## Affected version\n\n```\ncurl 8.20.0-DEV (Darwin) libcurl/8.20.0-DEV OpenSSL/3.6.1 zlib/1.2.12 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 libssh2/1.11.1 nghttp2/1.66.0 OpenLDAP/2.4.28/Apple\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns ldap ldaps mqtt mqtts pop3 pop3s rtsp scp sftp smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS brotli HSTS HTTP2 HTTPS-proxy IDN IPv6 Largefile libz SSL threadsafe TLS-SRP UnixSockets zstd\n```\n\nAll versions that contain the push scheme validation from commit `2e8c922a89` are affected.\n\n## Steps To Reproduce:\n\n1. Look at the push header callback in `lib/http2.c`, around line 1490. When `curl_maprintf` returns NULL, the header is silently dropped and the function returns 0 (success):\n\n```c\nh = curl_maprintf(\"%s:%s\", name, value);\nif(h)\n  stream->push_headers[stream->push_headers_used++] = h;\nreturn 0;\n```\n\n2. Now look at the scheme validation in `set_transfer_url()` at line 733. It depends on the `:scheme` header being present:\n\n```c\nv = curl_pushheader_byname(hp, HTTP_PSEUDO_SCHEME);\nif(v) {\n  if(!via_ssl_conn) {\n    const struct Curl_scheme *scheme = Curl_get_scheme(v);\n    if(!scheme || (scheme->flags & PROTOPT_SSL)) {\n      rc = 1;  /* reject secure scheme over insecure connection */\n      goto fail;\n    }\n  }\n}\n```\n\nIf the `:scheme` header was lost in step 1, `curl_pushheader_byname` returns NULL, the `if(v)` branch is never entered, and the entire security check is skipped. The push proceeds with the default scheme inherited from the parent request.\n\n3. The attack works as follows:\n   - A malicious HTTP/2 server communicates over a plaintext connection.\n   - It sends a PUSH_PROMISE with many large headers to create memory pressure.\n   - The `:scheme` header allocation fails, so it gets dropped silently.\n   - The scheme validation is skipped.\n   - The pushed resource is accepted as if it came from a secure origin.\n\n4. The attached PoC (`poc_b1_h2_push_oom_bypass.c`) simulates this exact flow. It collects push headers through the callback with a simulated OOM on the `:scheme` header, then runs the scheme validation. Build and run:\n\n```bash\nclang -fsanitize=address -o poc_b1 poc_b1_h2_push_oom_bypass.c && ./poc_b1\n```\n\nOutput:\n\n```\nNormal HTTPS push over insecure connection → CORRECTLY BLOCKED\nOOM drops :scheme header → ALLOWED (SECURITY BYPASS)\n```\n\n5. Note that commit `5267bf52d8` (\"http2: memory errors in the push callbacks are fatal\") already established the precedent that allocation failures in push callbacks should abort the push. The code at line 1484 correctly returns `NGHTTP2_ERR_CALLBACK_FAILURE` when `curlx_realloc` fails, but the `curl_maprintf` failure at line 1490 does not follow this same pattern.\n\n## Suggested Fix\n\nReturn `NGHTTP2_ERR_CALLBACK_FAILURE` when `curl_maprintf` returns NULL instead of silently dropping the header:\n\n```c\nh = curl_maprintf(\"%s:%s\", name, value);\nif(!h) {\n  free_push_headers(stream);\n  return NGHTTP2_ERR_CALLBACK_FAILURE;\n}\nstream->push_headers[stream->push_headers_used++] = h;\nreturn 0;\n```\n\nWe have a fix ready and can submit a PR at your convenience.\n\n## Impact\n\nUnder memory pressure, a malicious HTTP/2 server on a plaintext connection can push resources that bypass the scheme validation added in commit `2e8c922a89`. The client processes the pushed content as if it came from a secure origin.\n\nThe practical risk depends on the client running in a memory-constrained environment, which is common in embedded systems and containers with strict memory limits. The attacker can increase the likelihood of OOM by sending many large push promise headers before the critical `:scheme` header.\n\nNo authentication is required. The push promise is processed as part of the HTTP/2 connection. The application must have push enabled via `CURLMOPT_PUSHFUNCTION`.",
+  "weakness": {
+    "id": 135,
+    "name": "Improper Handling of Insufficient Permissions or Privileges"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 14,
+  "voters": [
+    "2026",
+    "dpixls",
+    "gr0va",
+    "k-4",
+    "aura_hack",
+    "aravithapa",
+    "thegreatmandalorian",
+    "colinc",
+    "hackthesoul",
+    "nawhad0x",
+    "and 4 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

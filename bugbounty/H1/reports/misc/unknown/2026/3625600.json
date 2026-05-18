@@ -1,0 +1,108 @@
+{
+  "id": 3625600,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjI1NjAw",
+  "url": "https://hackerone.com/reports/3625600",
+  "title": "Out of scope: Improper Input Validation Order on /api-internal/login via password field leads to unnecessary resource consumption",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-24T18:37:43.753Z",
+  "submitted_at": "2026-03-24T18:37:43.806Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "bereza4321",
+    "url": "/bereza4321",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 15252,
+    "url": "https://hackerone.com/portswigger",
+    "handle": "portswigger",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/015/252/60e8778f4f1fee57ea2b164a7d2ec1e2d2dd7bc8_original./235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/015/252/60e8778f4f1fee57ea2b164a7d2ec1e2d2dd7bc8_original./3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "PortSwigger Web Security",
+      "twitter_handle": "Burp_Suite",
+      "website": "https://portswigger.net",
+      "about": "Burp Suite is the leading software for web security testing"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-05-05T15:07:51.234Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-05-05T15:07:51.050Z",
+  "team_member_agreed_on_going_public_at": "2026-05-05T14:53:04.872Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Improper Input Validation Order (CWE-20) in Authentication Endpoint\n\n**Type:** Architectural Security Issue  \n**CWE:** CWE-20 – Improper Input Validation  \n**Severity:** High\n\n## Summary\n\nThe /api-internal/login authentication endpoint in Burp Suite DAST (Enterprise) internal login interface (test instance) processes user-supplied input before enforcing field-level validation, allowing extremely large payloads in the password field to be buffered and parsed prior to rejection. Domain intentionally omitted for confidentiality.\n\nThis represents an architectural flaw in the request-handling pipeline, where validation occurs only after resource-intensive operations such as request buffering, memory allocation, and JSON deserialization.\n\nThe issue is not that large inputs exist, but that the system fully processes them before validation is applied.\n\n## Description\n\nThe authentication endpoint accepts a JSON body containing user credentials.\n\nDuring testing it was observed that the application:\n\n- accepts arbitrarily large values in the password field\n- buffers the entire request body in memory\n- performs full JSON parsing/deserialization\n- only afterwards executes authentication logic and rejects the request\n\nThis behavior violates the fail-fast principle, where unreasonable or malformed input should be rejected as early as possible in the request pipeline.\n\nInstead, the system performs expensive operations on untrusted input before applying validation, including:\n\n- full request buffering\n- allocation of large string objects\n- JSON DOM parsing\n- additional CPU and memory usage\n\nThe password field currently accepts input several orders of magnitude larger than any realistic password length.\n\nTypical password sizes are generally within:\n\n- 8–128 characters\n\nHowever, the endpoint accepts multi-megabyte payloads before validation occurs.\n\nThere is no observable upper bound enforcement on the password field at the application level.\n\n**Affected Endpoint**  \n`POST /api-internal/login`\n\n**Accessibility**\n\n- Unauthenticated\n- Publicly reachable\n\nAuthentication endpoints represent a security boundary and should enforce strict validation to minimize processing of untrusted input.\n\n## Proof of Concept\n\nThe following request demonstrates that the endpoint accepts and processes an oversized password payload.\n\n```bash\ncurl -X POST https://<target-instance>/api-internal/login \\\n  -H \"Content-Type: application/json\" \\\n  --data-binary @<(python3 -c '\npayload = \"A\" * (10 * 1024 * 1024)\nprint(f\\'{{\"username\":\"admin\",\"password\":\"{payload}\"}}\\')\n')\n```\n\nThis request sends a multi-megabyte password string which is accepted and processed before the authentication attempt is rejected.\n\n## Observed Behaviour\n\nWhen submitting oversized input in the password field, the server processes the entire request body before returning a response.\n\nThe delay occurs during:\n\n- request body buffering\n- JSON parsing and deserialization\n- allocation of large string objects in memory\n\nAfter fully processing the payload, the application returns the standard authentication failure response:\n\n```json\n{\"code\":2,\"error\":\"Login failed.\"}\n```\n\nRequests exceeding upstream infrastructure limits are rejected earlier at the network layer.\nHowever, payloads below that threshold are still fully processed by the application before validation occurs.\n\nThis indicates that input size restrictions exist only at the infrastructure level and are not enforced at the application layer.\n\n## Root Cause\n\nThe issue is caused by an improper validation order in the request processing architecture.\n\n**Current flow:**\n\n```\nReceive request\n↓\nBuffer entire request body\n↓\nParse JSON payload\n↓\nAllocate large string\n↓\nExecute authentication logic\n↓\nReject invalid credentials\n```\n\n**Recommended fail-fast flow:**\n\n```\nReceive request\n↓\nValidate Content-Length\n↓\nValidate field size constraints\n↓\nParse JSON payload\n↓\nExecute authentication logic\n```\n\nIn the current design, validation occurs after resource-intensive operations instead of before them.\n\n## Impact\n\nBecause validation occurs only after full request processing, the application performs unnecessary work when handling oversized input.\n\nThis leads to asymmetric resource consumption:\n\n**Client cost**\n\n- Sending a large text payload\n\n**Server cost**\n\n- Memory allocation\n- JSON parsing\n- CPU processing\n- Garbage collection pressure\n\nAlthough the request is eventually rejected, the server still performs significant processing on untrusted input beforehand.\n\nThis behavior:\n\n- violates secure design principles for authentication endpoints\n- increases resource usage when handling malformed input\n- unnecessarily expands the attack surface of a security-critical component\n\nEven if infrastructure-level limits prevent extremely large requests, the application still processes unnecessarily large inputs below that threshold.\n\n## Expected Counterargument\n\n**Counterargument**\n\nRequest size limits are enforced by upstream infrastructure.\n\n**Response**\n\nInfrastructure-level limits do not replace the need for application-level validation.\n\nApplications should enforce field-specific constraints (such as password length) rather than relying solely on global request size limits.\n\n## Additional Observations\n\n- There is no legitimate use case for a password field to accept multi-megabyte input.\n- This behavior indicates missing input validation controls in the authentication pipeline.\n- The issue exists across multiple layers:\n  - no early size validation\n  - no field-level constraints\n  - no fail-fast rejection\n\n## Recommendation\n\n**Enforce strict password length limits**\n\nExample:\n\n- Maximum password size: 8192 bytes\n\nExample validation:\n\n```javascript\nif (password.length > 8192) {\n    return HTTP 400;\n}\n```\n\n**Reject oversized requests early**\n\nReverse proxies or load balancers should return:\n\n- HTTP 413 Payload Too Large\n\nbased on Content-Length.\n\n**Apply fail-fast validation**\n\nField constraints should be enforced before request buffering and JSON parsing whenever possible.\n\n**Avoid unnecessary request buffering**\n\nLarge request bodies should not be fully processed before basic validation checks are performed.\n\n## Conclusion\n\nThe `/api-internal/login` endpoint contains an architectural flaw where validation is performed after resource-intensive operations.\n\nAs a result, oversized input is fully buffered and parsed before rejection, which violates the fail-fast principle and results in unnecessary processing of untrusted data.\n\nImplementing early input validation and strict field size limits would align the authentication pipeline with modern secure development practices while reducing unnecessary resource usage.",
+  "bounty_amount": "200.0",
+  "formatted_bounty": "$200",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-06-04T14:53:05.113Z",
+  "allow_singular_disclosure_after": 2589230.021444462,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "bereza4321"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

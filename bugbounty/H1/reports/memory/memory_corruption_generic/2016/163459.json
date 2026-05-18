@@ -1,0 +1,110 @@
+{
+  "id": 163459,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNjM0NTk=",
+  "url": "https://hackerone.com/reports/163459",
+  "title": "potential memory corruption in or/buffers.c (particularly on 32 bit)",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2016-08-26T01:06:27.016Z",
+  "submitted_at": "2016-08-26T01:06:27.016Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "guido",
+    "url": "/guido",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/002/983/e55b0b2324777fb7efc2de4212fd8d337ca816bd_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 1800,
+    "url": "https://hackerone.com/torproject",
+    "handle": "torproject",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/001/800/6e575d0a9127b91e83833cf4a9e6be6e8b30cbc3_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/001/800/6e575d0a9127b91e83833cf4a9e6be6e8b30cbc3_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Tor",
+      "twitter_handle": "torproject",
+      "website": "https://www.torproject.org/",
+      "about": "Anonymity Online"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2017-10-19T10:15:23.431Z",
+  "bug_reporter_agreed_on_going_public_at": "2017-10-19T10:15:23.372Z",
+  "team_member_agreed_on_going_public_at": "2017-10-19T09:40:01.930Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "In ```or/buffer.s.c```:\n```c\n/** Return the allocation size we'd like to use to hold <b>target</b>\n * bytes. */\nstatic inline size_t\npreferred_chunk_size(size_t target)\n{\n  size_t sz = MIN_CHUNK_ALLOC;\n  while (CHUNK_SIZE_WITH_ALLOC(sz) < target) {\n    sz <<= 1;\n  }\n  return sz;\n}\n```\n\n```c\n#define MIN_CHUNK_ALLOC 256\n#define CHUNK_SIZE_WITH_ALLOC(memlen) ((memlen) - CHUNK_HEADER_LEN)\n```\n\nCHUNK_HEADER_LEN is usually around 30 bytes or so.\n\nThe problem with ```preferred_chunk_size``` is that for a large ```size_t target```, the function will return 0.\n\nIf you compile this program with ```-m32```:\n\n```c\n#include <stdio.h>\n#include <stdint.h>\n#define FLEXIBLE_ARRAY_MEMBER /**/\n#define DEBUG_CHUNK_ALLOC\n/** A single chunk on a buffer. */\ntypedef struct chunk_t {\n  struct chunk_t *next; /**< The next chunk on the buffer. */\n  size_t datalen; /**< The number of bytes stored in this chunk */\n  size_t memlen; /**< The number of usable bytes of storage in <b>mem</b>. */\n#ifdef DEBUG_CHUNK_ALLOC\n  size_t DBG_alloc;\n#endif\n  char *data; /**< A pointer to the first byte of data stored in <b>mem</b>. */\n  uint32_t inserted_time; /**< Timestamp in truncated ms since epoch\n                           * when this chunk was inserted. */\n  char mem[FLEXIBLE_ARRAY_MEMBER]; /**< The actual memory used for storage in\n                * this chunk. */\n} chunk_t;\n#if defined(__GNUC__) && __GNUC__ > 3\n#define STRUCT_OFFSET(tp, member) __builtin_offsetof(tp, member)\n#else\n #define STRUCT_OFFSET(tp, member) \\\n   ((off_t) (((char*)&((tp*)0)->member)-(char*)0))\n#endif\n#define MIN_CHUNK_ALLOC 256\n#define CHUNK_HEADER_LEN STRUCT_OFFSET(chunk_t, mem[0])\n#define CHUNK_SIZE_WITH_ALLOC(memlen) ((memlen) - CHUNK_HEADER_LEN)\nstatic inline size_t\npreferred_chunk_size(size_t target)\n{\n  size_t sz = MIN_CHUNK_ALLOC;\n  while (CHUNK_SIZE_WITH_ALLOC(sz) < target) {\n    sz <<= 1;\n  }\n  return sz;\n}\n\nint main(void)\n{\n    size_t i = 1024;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    printf(\"i is %08X, preferred_chunk_size is %08X\\n\", i, preferred_chunk_size(i)); i <<= 1;\n    return 0;\n}\n```\n\nthe output is:\n\n```\ni is 00000400, preferred_chunk_size is 00000800\ni is 00000800, preferred_chunk_size is 00001000\ni is 00001000, preferred_chunk_size is 00002000\ni is 00002000, preferred_chunk_size is 00004000\ni is 00004000, preferred_chunk_size is 00008000\ni is 00008000, preferred_chunk_size is 00010000\ni is 00010000, preferred_chunk_size is 00020000\ni is 00020000, preferred_chunk_size is 00040000\ni is 00040000, preferred_chunk_size is 00080000\ni is 00080000, preferred_chunk_size is 00100000\ni is 00100000, preferred_chunk_size is 00200000\ni is 00200000, preferred_chunk_size is 00400000\ni is 00400000, preferred_chunk_size is 00800000\ni is 00800000, preferred_chunk_size is 01000000\ni is 01000000, preferred_chunk_size is 02000000\ni is 02000000, preferred_chunk_size is 04000000\ni is 04000000, preferred_chunk_size is 08000000\ni is 08000000, preferred_chunk_size is 10000000\ni is 10000000, preferred_chunk_size is 20000000\ni is 20000000, preferred_chunk_size is 40000000\ni is 40000000, preferred_chunk_size is 80000000\ni is 80000000, preferred_chunk_size is 00000000\n```\n\nThe danger is that the return value of ```preferred_chunk_size``` is always used as a parameter to ```tor_malloc``` or ```tor_realloc```. It is called at these places:\n\nIn ```buf_pullup```:\n```c\n 210     newsize = CHUNK_SIZE_WITH_ALLOC(preferred_chunk_size(capacity));\n 211     newhead = chunk_grow(buf->head, newsize);\n```\n\nIn ```buf_new_with_capacity```:\n```c\n 283 /** Create and return a new buf with default chunk capacity <b>size</b>.\n 284  */\n 285 buf_t *\n 286 buf_new_with_capacity(size_t size)\n 287 {\n 288   buf_t *b = buf_new();\n 289   b->default_chunk_size = preferred_chunk_size(size);\n 290   return b;\n 291 }\n```\n\nIn ```buf_add_chunk_with_capacity```:\n```c\n 401 /** Append a new chunk with enough capacity to hold <b>capacity</b> bytes to\n 402  * the tail of <b>buf</b>.  If <b>capped</b>, don't allocate a chunk bigger\n 403  * than MAX_CHUNK_ALLOC. */\n 404 static chunk_t *\n 405 buf_add_chunk_with_capacity(buf_t *buf, size_t capacity, int capped)\n 406 {\n 407   chunk_t *chunk;\n 408 \n 409   if (CHUNK_ALLOC_SIZE(capacity) < buf->default_chunk_size) {\n 410     chunk = chunk_new_with_alloc_size(buf->default_chunk_size);\n 411   } else if (capped && CHUNK_ALLOC_SIZE(capacity) > MAX_CHUNK_ALLOC) {\n 412     chunk = chunk_new_with_alloc_size(MAX_CHUNK_ALLOC);\n 413   } else {\n 414     chunk = chunk_new_with_alloc_size(preferred_chunk_size(capacity));\n 415   }\n```\n\n```buf_new_with_capacity``` is currently called nowhere except for tests.\n```buf_add_chunk_with_capacity``` is called at various places but currently not with the ```capped``` parameter set to 0.\n\nHowever, ```buf_pullup``` is called at various places and the call to ```preferred_chunk_size``` is reachable. Whether it is reachable with a parameter large enough that it will return 0 I'm not sure about.\n\n```c\nint\ntor_main(int argc, char *argv[])\n{\n    buf_t* buf;\n    char* string;\n    size_t string_len;\n    size_t i;\n\n    buf = buf_new();\n    string_len = 0x00001000;\n    string = tor_malloc(string_len);\n    for (i = 0; i < 507904; i++)\n    {\n        write_to_buf(string, string_len, buf);\n    }\n    write_to_buf(string, 0x3FFFFFA, buf);\n    free(string);\n    buf_pullup(buf, 0x90000000); \n}\n```\n\nWhat will happen is that ```buf_pullup``` will call ```chunk_grow```\n```c\n 140 static inline chunk_t *\n 141 chunk_grow(chunk_t *chunk, size_t sz)\n 142 {\n 143   off_t offset;\n 144   size_t memlen_orig = chunk->memlen;\n 145   tor_assert(sz > chunk->memlen);\n 146   offset = chunk->data - chunk->mem;\n 147   chunk = tor_realloc(chunk, CHUNK_ALLOC_SIZE(sz));\n 148   chunk->memlen = sz;\n 149   chunk->data = chunk->mem + offset;\n```\n\n```tor_realloc``` will in effect be called with a size parameter of 0. Whether and how much legitimate heap memory ```realloc``` will allocate might be implementation-dependent. The point is that the following lines might overwrite heap memory:\n\n```c\n 148   chunk->memlen = sz;\n 149   chunk->data = chunk->mem + offset;\n```\n\nsince ```chunk``` is a memory area that has just been allocated to 0 (or 1, after correction) bytes.\n\nThe whole scenario is not very likely considering Tor's frugal memory consumption but it is nonetheless a programming fault in the buffers \"API\" that could lead to stability issues. Especially if you ever expand the use of ```buf_pullup```, ```buf_new_with_capacity```, and/or uncapped ```buf_add_chunk_with_capacity```, it'll be wise to hard-limit the amounts of right-shifts in ```preferred_chunk_size``` (a single unintended negative integer -> size_t can be conducive in establishing an exploitation path).",
+  "weakness": {
+    "id": 2,
+    "name": "Memory Corruption - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2017-11-18T09:40:01.986Z",
+  "allow_singular_disclosure_after": -266751425.79119134,
+  "singular_disclosure_allowed": true,
+  "vote_count": 6,
+  "voters": [
+    "geeknik",
+    "eveeez",
+    "mr_r3boot",
+    "spetr0x",
+    "mjhd0x1",
+    "b4155f7c29acd42c27d007a"
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

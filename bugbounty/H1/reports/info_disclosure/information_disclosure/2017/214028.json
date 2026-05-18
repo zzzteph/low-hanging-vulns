@@ -1,0 +1,131 @@
+{
+  "id": 214028,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yMTQwMjg=",
+  "url": "https://hackerone.com/reports/214028",
+  "title": "Race condition in GitLab import, giving access to other people their imports due to filename collision",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2017-03-16T22:30:03.968Z",
+  "submitted_at": "2017-03-16T22:30:03.968Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jobert",
+    "url": "/jobert",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ht4b9SmcYNqmpbyCFXd7cxHB/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 264,
+    "url": "https://hackerone.com/gitlab",
+    "handle": "gitlab",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "GitLab",
+      "twitter_handle": "gitlab",
+      "website": "https://about.gitlab.com",
+      "about": "A single application for the entire software development lifecycle."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2017-10-03T19:11:28.808Z",
+  "bug_reporter_agreed_on_going_public_at": "2017-10-03T17:46:25.354Z",
+  "team_member_agreed_on_going_public_at": "2017-10-03T19:11:28.740Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Vulnerability details\nThere's a race condition in the `Import::GitlabProjectsController#create` endpoint that allows an attacker to gain access to someone else's import file. The race condition happens when there's a collision in two or more file names uploaded at the same time, before the import gets processed by Sidekiq. The person uploading the file for the first time will see the last person's file contents instead.\n\n# Impact\nDepending on the contents of the GitLab import file, this could leak confidential information from other users on the GitLab instance.\n\n# Proof of concept\nThis is hard to reproduce without a good setup, but conceptually it's pretty easy to explain by going through the code. When someone uploads a new file, the following code gets executed:\n\n**app/controllers/import/gitlab_projects_controller.rb** (15-18)\n```ruby\nimport_upload_path = Gitlab::ImportExport.import_upload_path(filename: project_params[:file].original_filename)\n\nFileUtils.mkdir_p(File.dirname(import_upload_path))\nFileUtils.copy_entry(project_params[:file].path, import_upload_path)\n```\n\nThe `Gitlab::ImportExport.import_upload_path` method looks like this:\n\n```ruby\ndef import_upload_path(filename:)\n  File.join(storage_path, 'uploads', filename)\nend\n```\n\nThis means, when a file called `import.tar.gz` would get uploaded, it would copy the temporary file to `/var/opt/gitlab/gitlab-rails/shared/tmp/project_exports/uploads/import.tar.gz`. Next, it'll schedule an async job in Sidekiq that'll take care of unpacking the import file and restore it's contents. However, since there's a delay between when the file gets copied and when the job gets processed (depending on how busy the workers are, etc.), someone else could upload a file with the same filename. If this happens before the import job gets processed, the victim will unknowingly overwrite the attacker's import file. When the attacker's Sidekiq job gets executed, it'll unpack the victim's import file and restore the files in the attacker's repository.\n\nThe entropy of a GitLab export file is decent enough to make this extremely hard to pull off. However, when someone would rename the file to something more common, for example a repository name, project name, or something generic like `import.tar.gz`, the changes of this happening increase.\n\nTo reproduce this vulnerability locally, it is easiest to shutdown the Sidekiq workers and upload two files with the same name under two different accounts. After that, restart the Sidekiq workers. You'll notice that both repositories hold the contents of the last imported file.\n\n# Remediation advice\nGenerate a random filename instead of using the original filename or add the namespace and project URL to avoid file name collisions.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2017-11-02T17:46:25.398Z",
+  "allow_singular_disclosure_after": -268104693.43762317,
+  "singular_disclosure_allowed": true,
+  "vote_count": 22,
+  "voters": [
+    "loaymorad",
+    "jensec",
+    "sp1d3rs",
+    "bughunterninja",
+    "bl4de",
+    "shubham_srt",
+    "fa1rlight",
+    "2026",
+    "tungpun",
+    "gamliel",
+    "and 12 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "score": 3.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

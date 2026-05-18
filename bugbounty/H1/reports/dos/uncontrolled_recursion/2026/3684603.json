@@ -1,0 +1,124 @@
+{
+  "id": 3684603,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjg0NjAz",
+  "url": "https://hackerone.com/reports/3684603",
+  "title": "Stack exhaustion in MIME multipart reading with deeply nested subparts",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-04-20T06:36:49.403Z",
+  "submitted_at": "2026-04-20T06:36:49.753Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "wi110w",
+    "url": "/wi110w",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-29T06:10:18.762Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-20T07:22:24.918Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nThe MIME read path uses mutually recursive helpers for nested multipart structures without enforcing a recursion depth limit. A sufficiently deep tree of nested `curl_mime_subparts()` objects causes stack exhaustion when libcurl starts reading the MIME body. The attached PoC builds a deeply nested MIME structure and triggers an AddressSanitizer stack-overflow in `readback_bytes()` / `mime_subparts_read()`. I reproduced this on curl 8.19.0 (latest stable release) and also on the current development tip (`759f2e5`) on Linux x86_64. The affected code is in `lib/mime.c`, primarily the `readback_part()`, `read_part_content()`, and `mime_subparts_read()` call chain.\n\n## Affected version\nReproduced against:\n- **curl 8.19.0** (tag `curl-8_19_0`, commit `8c908d2`, released 2025-03-10) — current stable release\n- **curl 8.20.0-DEV** (commit `759f2e5`) — current development tip\n\nTested on Linux x86_64 with `clang` and AddressSanitizer.\n\n## Steps To Reproduce:\n1. Build curl with AddressSanitizer enabled and static libcurl available, for example:\n\n```bash\nautoreconf -fi\nCC=clang CFLAGS=\"-fsanitize=address -fno-omit-frame-pointer -g -O1\" \\\nLDFLAGS=\"-fsanitize=address\" \\\n./configure --disable-shared --with-openssl \\\n  --disable-docs --disable-manual\nmake -j\"$(nproc)\"\n# If configure fails on optional deps (e.g. libpsl), add --without-libpsl\n```\n\n2. Compile the attached `poc.c` against the built libcurl:\n\n```bash\nclang -fsanitize=address -fno-omit-frame-pointer -g -O1 \\\n  -I./include -I./lib \\\n  poc.c ./lib/.libs/libcurl.a \\\n  -lssl -lcrypto -lz -lpthread -ldl \\\n  -o /tmp/poc_curl_mime_recursion\n```\n\n3. Run it with a large nesting depth:\n\n```bash\nASAN_OPTIONS=\"halt_on_error=1:print_stacktrace=1:detect_leaks=0\" \\\n  /tmp/poc_curl_mime_recursion 10000\n```\n\n4. The PoC constructs a MIME tree with thousands of nested multipart layers and then triggers the MIME read path.\n\nObserved sanitizer output (curl 8.19.0, depth=20000):\n\n```text\nAddressSanitizer:DEADLYSIGNAL\n==25988==ERROR: AddressSanitizer: stack-overflow on address 0x7ffd763b6fa8\n    #0 0x...  in __asan_memcpy\n    #1 0x...  in readback_bytes lib/mime.c:683:3\n    #2 0x...  in mime_subparts_read lib/mime.c:918:12\n    #3 0x...  in read_part_content lib/mime.c:716:12\n    #4 0x...  in readback_part lib/mime.c:865:14\n    #5 0x...  in mime_subparts_read lib/mime.c:939:12\n    #6 0x...  in read_part_content lib/mime.c:716:12\n    #7 0x...  in readback_part lib/mime.c:865:14\n    [... pattern repeats for each nesting level ...]\nSUMMARY: AddressSanitizer: stack-overflow lib/mime.c:683:3 in readback_bytes\n```\n\n## Impact\n\nAn application that constructs or forwards attacker-influenced nested MIME structures through libcurl can be crashed through stack exhaustion. In the tested configuration this is a reliable denial of service.",
+  "weakness": {
+    "id": 134,
+    "name": "Uncontrolled Recursion"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5765187,
+      "file_name": "poc.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/so987ysvqimcxocpo58xcomvf767?response-content-disposition=attachment%3B%20filename%3D%22poc.c%22%3B%20filename%2A%3DUTF-8%27%27poc.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3RICPWTL%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162102Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJIMEYCIQCoHIFnm59avJxIaviohBUc2IssQk2j43kE5oswM4IYxAIhAIqN7MTRKufpFo%2B7pcNmclXtBhfMbb%2FO7XqZN7L7DzRQKrEFCEEQAxoMMDEzNjE5Mjc0ODQ5IgzIcCc4bF72gOqbzV4qjgVQDx4yxhZDbvV%2BWOznlf6cHIX41a848AGQBVpKqw94sFMdLU0gLGXGIwUjtvYmNJ7BmcIFST3XGqeCkvP9QfB2Ns9ZNhAiibpo1QZwt58FAk8ajJqEub%2BEJyJWjcGkURLxpz0wKptNGQ7ycwMKpdTnAcg%2BZdxkTduIcCA7URYjBX3Rq7eAhLXWu%2By0yvY3hxaaKhyUF4uF6pBDf41Vlk0PHtMgEwym%2FgFyDN7R4jjb3xc3Iy609Qf33246ClUNUDea8C%2FsKqwwmxEJU1BtI4hHM9nqqh%2FNp4nVzei%2F0rRP2eMSccroxbP6DOi%2FUpgQWRK2R45OadTpHTUmME%2FlfFD%2FM8kIswFVaipuB00b8zll08cDk4r%2FkFB6m9AQQlCDX8yJgW4yF61e%2FJoqAgPIf6fxnln9OwqeTecrLaLT89%2B8YUBFucNXwwiidbABFgZAtca5DjhfhLlQZcehRWpnMvuuLZw4S0OLozygfFdW16jZgEpzIF%2BZ43yp7Tg4Oa7IgEk8Y2BZjxLFU90AhJl2yr3iGrprS8nAl3tZ6LDNXNzEiqyh%2BnBaq4KrsnslCIhS47qKuUtJDMpL4QcTdmIMAkc7pwvMCJNmj9PuP50Hckl48CEz%2Bn%2Bd16l0Dt%2BpoKM%2BJMozu77qzRPvJa96uQZxbUCXq5u8X4YOogvpMJNC9T7EUiL1CrlFo2GS3ao6W9G6evCiQSW3fEwHeSPDWm3raU1X%2FrU%2BMUAS7zsMPXggr0%2BEhi2lCM7GBQVMVDo%2BFTKZGvPPMQgFdV9tu%2BDsC8nguRejlUAVImT8aH2Q6pkcAFKtjfTOvo77eIMt2ZORHj72dGCdju%2BWlNB1E3U%2BR5kUADF8zwgWt30zav940EGktr8w2rjYzwY6sAHFBWatOen6O8LRyklFr9ArkXlYno0O0wlztaMGS%2F0SRDUSsYLsymXjO0mhtj2S40oZLqzBaYsrrHtXYhRpe%2BeorO2UGi56aLpOlFKJK0%2BkJAmFjZaFagYwBKPL2%2FQzPDRZvatn216lrc2sd41BxczZ6GTqS3rbC201mIRntJuqpPiKAdg4isZWsUA2%2FU%2Fd3oSLYol4qhvP0WXtVRvIS5hlK5EVLNkk8G%2Br4D4QIgfi2g%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=086e9e16488feec198bd4bcf09e1bdfb4d18087e1d0b09553ca721302f103c92",
+      "file_size": 3266,
+      "type": "text/x-c++src",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 3,
+  "voters": [
+    "m2r1",
+    "johndoe0417",
+    "1wawawewa1"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

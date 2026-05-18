@@ -1,0 +1,169 @@
+{
+  "id": 1935628,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xOTM1NjI4",
+  "url": "https://hackerone.com/reports/1935628",
+  "title": "HTML injection possible with soft email confirmations when Administrator manually confirms attacker email address",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2023-04-06T00:02:03.979Z",
+  "submitted_at": "2023-04-06T00:41:55.629Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "cryptopone",
+    "url": "/cryptopone",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/uk6jjk1a2i1dp04zz14k6a4wp4o4/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 264,
+    "url": "https://hackerone.com/gitlab",
+    "handle": "gitlab",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "GitLab",
+      "twitter_handle": "gitlab",
+      "website": "https://about.gitlab.com",
+      "about": "A single application for the entire software development lifecycle."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2024-10-08T13:58:39.034Z",
+  "bug_reporter_agreed_on_going_public_at": "2024-02-21T14:45:18.408Z",
+  "team_member_agreed_on_going_public_at": "2024-10-08T13:58:38.671Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\nNote: This report is similar to #1842867 but has the administrator manually confirming an unconfirmed email on the attacker's behalf, instead of impersonating the attacker's account.\n\nAssuming a GitLab instance is configured to use soft email confirmation settings, an attacker can register an account and login, then change their email to include an HTML payload. If an administrator manually verifies the attacker's email address, the administrator might be subjected to executing *some* HTML code in the modal confirmation dialog. It appears tags such as `<form>` and `<script>` are filtered out before being displayed.\n\nThe `confirm_user_data` method in https://gitlab.com/gitlab-org/gitlab/-/blob/master/app/helpers/users_helper.rb helps demonstrate the conditions required for this to work:\n\n```ruby\n  def confirm_user_data(user)\n    message = if user.unconfirmed_email.present?\n                _('This user has an unconfirmed email address (%{email}). You may force a confirmation.') % { email: user.unconfirmed_email }\n              else\n                _('This user has an unconfirmed email address. You may force a confirmation.')\n              end\n\n    modal_attributes = Gitlab::Json.dump({\n      title: s_('AdminUsers|Confirm user %{username}?') % { username: sanitize_name(user.name) },\n      messageHtml: message,\n      actionPrimary: {\n        text: s_('AdminUsers|Confirm user'),\n        attributes: [{ variant: 'confirm', 'data-qa-selector': 'confirm_user_confirm_button' }]\n      },\n      actionSecondary: {\n        text: _('Cancel'),\n        attributes: [{ variant: 'default' }]\n      }\n    })\n\n<rest of function trimmed>\n```\n\nWe need to pass the `if user.unconfirmed_email.present?` check to have the email presented in the dialog. This only seems to occur if the attacker registers an account with soft email confirmations and then changes their e-mail afterward. If the instance has email confirmation changed to `Hard` after the attacker is setup, this exploit still triggers for this attacker but new registrations appear to follow the else condition (ie. the email is not displayed inside of the dialog).\n\n### Steps to reproduce\n\n#### Prerequisites (Administrator Account):\n1. Go to the Admin general settings page (http://gitlab.example.com/admin/application_settings/general).\n1. Expand sign-up restrictions and set \"Email confirmation settings\" to \"Soft\".\n1. Save the changes.\n\n#### Reproduction Steps (Attacker):\n1. Register an account on the instance. (ex. Username: `AttackerSoftEmail`, Email: `attackersoftemail@example.com`)\n1. Log into the account. You should now see a message at the top of the screen stating \"Please check your email (attackersoftemail@example.com) to verify that you own this address and unlock the power of CI/CD. Didn't receive it? Resend it. Wrong email address? Update it.\"\n1. Go to the user's profile (http://gitlab.example.com/-/profile).\n1. Change the e-mail address by appending `<h2>testing<img/src=http://localhost:8000/test.png>` to the end of the address.\n1. Save the changes.\n1. (Optional) Start a python3 webserver to catch the image web request by running `python3 -m http.server` within an empty directory.\n\n#### Reproduction Steps (Victim Administrator):\n1. Log into GitLab as an Administrator/root.\n1. Navigate to the Admin users panel and select the AttackerSoftEmail user (http://gitlab.example.com/admin/users/AttackerSoftEmail).\n1. Note the email address for AttackerSoftEmail does not contain HTML.\n1. Open the browser dev tools using `F12` and navigate to the Network tab.\n1. Click the \"Confirm user\" button to to confirm the e-mail address.\n1. Note the dialog text is modified due to the `<h2>` header and a broken image appears in the dialog.\n1. Confirm using the network tab that the browser requested `http://localhost:8000/test.png` and returned a 404 if a python server was running. \n\n### Impact\n\nAdministrators on self-managed instances confirming the attacker's account/email will inadvertently run *some* HTML if the attacker has not validated their email and the instance is configured to use soft email confirmation during registration.\n\nThe Administrator is not made aware of the HTML payload contained in the attacker's email address when viewing the attacker's profile from the administrator user page.\n\nMy initial report uses the following reasoning for the CVSS score:\n\n`AC:H`: An administrator manually confirming a users email address is not likely considered to be normal workflow. \n`PR:L`: Attacker requires an account but does not necessarily require special roles to perform this attack.\n`UI:R`: Administrator needs to confirm the attacker's email address to trigger the payload.\n`S:U`: Impact is localized to the exploitable component.\n`C:L`: Attacker could leak the victim's IP address using `<img>` or try to convince get the admin to click a link.\n`I:L`: Some information on the page can be altered.\n`A:N`: No Availability impact.\n\n### Examples\n\nN/A\n\n### What is the current *bug* behavior?\n\nAttacker's HTML payload is rendered within context of the self-hosted GitLab instance.\n\n### What is the expected *correct* behavior?\n\nHTML code appended to the email address should not be rendered by the browser when an administrator clicks the `Confirm user` dialog.\n\n### Relevant logs and/or screenshots\n\nAttacker updates email address containing HTML payload.\n{F2276105}\n\nAdministrator views the attacker's account in the admin user menu. Note the page does not display the HTML included in the attacker email.\n{F2276106}\n\nAdministrator clicks `Confirm user` button and the HTML is rendered.\n{F2276107}\n\nAttacker controlled server obtains victim IP address.\n{F2276108}\n\n### Output of checks\n\n#### Results of GitLab environment info\n\n```\nroot@gitlab:/# gitlab-rake gitlab:env:info\n\nSystem information\nSystem:\t\t\nProxy:\t\tno\nCurrent User:\tgit\nUsing RVM:\tno\nRuby Version:\t3.0.5p211\nGem Version:\t3.2.33\nBundler Version:2.3.15\nRake Version:\t13.0.6\nRedis Version:\t6.2.11\nSidekiq Version:6.5.7\nGo Version:\tunknown\n\nGitLab information\nVersion:\t15.10.2-ee\nRevision:\ta54d6973eae\nDirectory:\t/opt/gitlab/embedded/service/gitlab-rails\nDB Adapter:\tPostgreSQL\nDB Version:\t13.8\nURL:\t\thttp://gitlab.example.com\nHTTP Clone URL:\thttp://gitlab.example.com/some-group/some-project.git\nSSH Clone URL:\tgit@gitlab.example.com:some-group/some-project.git\nElasticsearch:\tno\nGeo:\t\tno\nUsing LDAP:\tno\nUsing Omniauth:\tyes\nOmniauth Providers: \n\nGitLab Shell\nVersion:\t14.18.0\nRepository storages:\n- default: \tunix:/var/opt/gitlab/gitaly/gitaly.socket\nGitLab Shell path:\t\t/opt/gitlab/embedded/service/gitlab-shell\nroot@gitlab:/#\n```\n\n## Impact\n\nAdministrators on self-managed instances confirming the attacker's account/email will inadvertently run *some* HTML if the attacker has not validated their email and the instance is configured to use soft email confirmation during registration.\n\nThe Administrator is not made aware of the HTML payload contained in the attacker's email address when viewing the attacker's profile from the administrator user page.\n\nMy initial report uses the following reasoning for the CVSS score:\n\n`AC:H`: An administrator manually confirming a users email address is not likely considered to be normal workflow. \n`PR:L`: Attacker requires an account but does not necessarily require special roles to perform this attack.\n`UI:R`: Administrator needs to confirm the attacker's email address to trigger the payload.\n`S:U`: Impact is localized to the exploitable component.\n`C:L`: Attacker could leak the victim's IP address using `<img>` or try to convince get the admin to click a link.\n`I:L`: Some information on the page can be altered.\n`A:N`: No Availability impact.",
+  "bounty_amount": "1060.0",
+  "formatted_bounty": "$1,060",
+  "weakness": {
+    "id": 72,
+    "name": "Resource Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 2276105,
+      "file_name": "AttackerWithHTMLTagsInEmail.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/jhjlfbtsxm69o7plqeuse0wawnp2?response-content-disposition=attachment%3B%20filename%3D%22AttackerWithHTMLTagsInEmail.png%22%3B%20filename%2A%3DUTF-8%27%27AttackerWithHTMLTagsInEmail.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T164128Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=983b467d618ded9782e34706417dcd881e5540ef28fd8776af60dd2761eeb307",
+      "file_size": 162063,
+      "type": "image/png",
+      "moderated": null
+    },
+    {
+      "id": 2276106,
+      "file_name": "AdministratorViewingUserProfileWithoutSeeingEmailTags.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/zu05fynb95c99kp23w2gdqyieo51?response-content-disposition=attachment%3B%20filename%3D%22AdministratorViewingUserProfileWithoutSeeingEmailTags.png%22%3B%20filename%2A%3DUTF-8%27%27AdministratorViewingUserProfileWithoutSeeingEmailTags.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T164128Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=52d8cf737578dae6739c411b0d16fc58a1bfa32bdfdbda271e97110b405af1ab",
+      "file_size": 126810,
+      "type": "image/png",
+      "moderated": null
+    },
+    {
+      "id": 2276107,
+      "file_name": "AdministratorConfirmingUserDialog.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/0qk8ubycfzlmhmaziber5zdj5y37?response-content-disposition=attachment%3B%20filename%3D%22AdministratorConfirmingUserDialog.png%22%3B%20filename%2A%3DUTF-8%27%27AdministratorConfirmingUserDialog.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T164128Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c1624f8bc4425deb9105cd03f3e170e6120748cb4926a1c3d26a6b9b31a1e072",
+      "file_size": 156711,
+      "type": "image/png",
+      "moderated": null
+    },
+    {
+      "id": 2276108,
+      "file_name": "AttackerControlledServerCapturesIP.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bfwgq6lyf2a9uvqjv4fnieo6hhk4?response-content-disposition=attachment%3B%20filename%3D%22AttackerControlledServerCapturesIP.png%22%3B%20filename%2A%3DUTF-8%27%27AttackerControlledServerCapturesIP.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T164128Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f6700d6095a96f60e3e4f15cde296383b0a645543439b65d5d639da223ffe44e",
+      "file_size": 15990,
+      "type": "image/png",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 59,
+  "voters": [
+    "k0ns0l",
+    "0xotachi",
+    "tinmo",
+    "faav",
+    "roland_hack",
+    "zy9ard3",
+    "alejandroar",
+    "anonxr",
+    "zorodeep",
+    "0xoroot",
+    "and 49 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "score": 3.5,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 39022,
+    "asset_type": "OTHER",
+    "asset_identifier": "Your Own GitLab Instance",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

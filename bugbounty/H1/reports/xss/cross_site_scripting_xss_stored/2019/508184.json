@@ -1,0 +1,134 @@
+{
+  "id": 508184,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC81MDgxODQ=",
+  "url": "https://hackerone.com/reports/508184",
+  "title": "Persistent XSS in Note objects",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2019-03-12T04:17:55.553Z",
+  "submitted_at": "2019-03-12T04:17:55.553Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "saltyyolk",
+    "url": "/saltyyolk",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/252/596/b03010470e2928f744f71fb5c1685806f1878341_original.jpeg/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 264,
+    "url": "https://hackerone.com/gitlab",
+    "handle": "gitlab",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "GitLab",
+      "twitter_handle": "gitlab",
+      "website": "https://about.gitlab.com",
+      "about": "A single application for the entire software development lifecycle."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2019-07-19T00:03:17.197Z",
+  "bug_reporter_agreed_on_going_public_at": "2019-07-19T00:03:17.100Z",
+  "team_member_agreed_on_going_public_at": "2019-07-18T16:50:47.322Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Summary:**\nSome cache invalidation and project import logic issues enable an attacker to import a project with XSS payloads in places like MR discussions and similar places where a Note object exists.\n\n**Description:**\nThere are basically 3 issues causing the XSS here:\nAll attributes of Note objects are controllable in `project.json`, for example `note_html` and `cached_markdown_version`.\n\nNow I can control the value of `note_html` to contain my XSS payload, but the problem is that the value of this field is a `CacheMarkdownField`, it's regenerated from the value of `note` during new object creation (when `note_object.note_html_invalidated?` returns true). The next question is how to trick GitLab that the field does not need to be regenerated.\n\nin `app/models/concerns/cache_markdown_field.rb`\n```\n      define_method(invalidation_method) do\n        changed_fields = changed_attributes.keys\n        invalidations  = changed_fields & [markdown_field.to_s, *INVALIDATED_BY]\n        invalidations.delete(markdown_field.to_s) if changed_fields.include?(\"#{markdown_field}_html\")\n\n        !invalidations.empty? || !cached_html_up_to_date?(markdown_field)\n      end\n```\n\nThere are 2 checks here (also the last 2 issues):\nthe first one is:\n```\n        INVALIDATED_BY = %w[author project].freeze\n...\n        invalidations  = changed_fields & [markdown_field.to_s, *INVALIDATED_BY]\n        invalidations.delete(markdown_field.to_s) if changed_fields.include?(\"#{markdown_field}_html\")\n```\n\n```\nnote_object.changed_attributes.keys\n=> [\"note\", \"noteable_type\", \"author_id\", \"created_at\", \"updated_at\", \"project_id\", \"line_code\", \"position\", \"original_position\", \"note_html\", \"cached_markdown_version\", \"change_position\", \"attachment\"]\n```\n\nThis check is, unfortunately, voided because\n+ Neither `author` nor `project` is in the changed_attributes list, but `author_id` and `project_id`\n+ `note` is deleted from `invalidations` because `note_html` is also changed\nSo invalidations is empty.\n\nand the other one is:\n```\n!cached_html_up_to_date?(markdown_field)\n```\nIt basically checks whether attribute `cached_markdown_version` equals to `latest_cached_markdown_version`\nThis is really interesting, because I found that `latest_cached_markdown_version` is always 917504 in my GitLab instance (also gitlab.com). Looks like `local_version` is always 0 for at least Notes in MR.\n\n```\n  def latest_cached_markdown_version\n    @latest_cached_markdown_version ||= (CacheMarkdownField::CACHE_COMMONMARK_VERSION << 16) | local_version\n  end\n\n  def local_version\n    return local_markdown_version if has_attribute?(:local_markdown_version)\n\n    settings = Gitlab::CurrentSettings.current_application_settings\n\n    if settings.respond_to?(:local_markdown_version)\n      settings.local_markdown_version\n    else\n      0\n    end\n  end\n```\n\nFinally, I could set `note_html` to the XSS payload, and `cached_markdown_version` to the magic number to avoid my payload being overwritten by GitLab. :P\n\n\n## Steps To Reproduce:\n\n(Add details for how we can reproduce the issue)\n\n  1. Create an export of a project with at least 1 discussion in at least 1 merge request.\n  1. Modify the project.json, add field `note_html` and `cached_markdown_version`\n\n```\n      \"notes\": [\n        {\n          \"id\": 1,\n          \"note\": \"interesting note here\",\n          \"note_html\": \"<img src=\\\"test\\\" onerror=\\\"alert(document.domain)\\\"></img>html overwritten\",\n          \"cached_markdown_version\": 917504,\n```\n\n  1. Import the modified project\n  1. View the only discussion of the imported project.\n\n## Supporting Material/References:\n\nCheck `https://gitlab.com/Nyangawa/xss/merge_requests/1`, you should be able to see a pop-up.\n\n## Impact\n\nThis is a typical persistent XSS issue and the link I mentioned above is accessible publicly, so all GitLab users are vulnerable theoretically.",
+  "bounty_amount": "4500.0",
+  "formatted_bounty": "$4,500",
+  "weakness": {
+    "id": 62,
+    "name": "Cross-site Scripting (XSS) - Stored"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 439816,
+      "file_name": "Screen_Shot_2019-03-12_at_11.45.35_AM.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/000/439/816/b1321e628e8982c5ded514672072b7c6d449010d/Screen_Shot_2019-03-12_at_11.45.35_AM.png?response-content-disposition=attachment%3B%20filename%3D%22Screen_Shot_2019-03-12_at_11.45.35_AM.png%22%3B%20filename%2A%3DUTF-8%27%27Screen_Shot_2019-03-12_at_11.45.35_AM.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZMNJ4J4M%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T181727Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJGMEQCIH9bRFoOUBix5Z96%2BOdMkVCDhbb81B33Sr3WpX1PXK3OAiAqWlBObDMELkje8gpuB8fP16e58eyH75FztPEK1WZI%2BCqyBQhBEAMaDDAxMzYxOTI3NDg0OSIMhMOmPeQZD3GL9insKo8FEltkSWQHNcB%2F6zlC9bsD1q9O0CF5GEuCLU937wTGodBcqKx3msdV7%2Fs1gqZR0xHi9IL6ZNHGfK%2B%2FJvEXwH5U0QDsKnJyGrrVAIuKcVLDNGRXGBTISRcGYNBbYqX4DB%2FVMOH0bSOI2G93cOnDXN5HMBhsIGns5PHRD5IcijaUqCVja1WK8AMriC66j3GnWbptQHtbqd%2FijJcp9xiO1QeYA8vsdVFtUmustgO5Me6%2Fe2Wv7wf6zyOeSbpo6cGCJeR1NjFaJQlwkSLeIYtpKXJm9exAua1kHQdlTdM6Sr0jGZYpOOo4yheC2kGni778FiCcoaTZOfAwas24qCkd4cgnY76cXP4I7gLMJhxE4BNFaYO3LNFFusnjnAKyTpTV%2F3Tsk6URg9zOnsx23NNmri%2BIuHR3oQbg5vCzC4OLG5bU9fnghXru8e0t7EcP304X8jDh0AmpDwcngt311SWOg2ZXlpkcjhgMVQzWtkPJe4jlCRLyvVDwWgPyDhpkQyYc%2BMRGP7Xsv8gb4mkguDniOHMDjrdeLW021cN9eGxyYvB05BcX2F7tq0LDVbykRx03CxjsYdMggQ63PKlkQFeQXEWzRw00tMPGIq1J6s9gzeDbsmV2WnCCmX8SFy69S9WCu5CDk9dRhmZBpYlZRvzvoQpGI0eDpCSWe9dIfzbQjaM7QJhukMkaIH%2Bu9A9nAyHeO212LcEnU7TJmU42ieGt9l9R5cVPNy2gfEvBqTCOntdqLqsmzkh1pSxw2AypkVDLP1fJye5FDI3ocCGvaFpaW0RRUeBH3vbND67WmfK4a8znnwadWkD6K7mHPW12WpbrAALWYwX9dIXh2KK2pEz%2FK3uRJx8EOyq5mdId4jYuQpJAYTCytNjPBjqyAQjNR1KSycQ3CujPIFhVgR9jRH1DD8JP3bY1%2BbXsHKTLAq8qKhQuKd0%2F7uJDxpAmUqfsLoU1YlN9H1WXZRZuS3U%2Fep9NDpyJucNFXNIxfnM2sGm%2FQo0zTmYLSa67irJSbpP5Y5F2SsjQAmHfcC%2BTjAnYbNyWeSTNgV%2BNLWqANSK44V7AJT6EFlEGlBxleFJN7xZ08mSeAtURZdjrNkyu0dh%2BHuYkWmnwCEN6lPTDaACwQYw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a3c6b86171e1580fb12acd4aa3690a4a577c07e745c0d48974347405dafa1021",
+      "file_size": 177091,
+      "type": "image/png",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 138,
+  "voters": [
+    "is-",
+    "bb4cc4200b404d13a462df1",
+    "orange303",
+    "n1m0",
+    "uceka_",
+    "byq",
+    "sp1d3rs",
+    "p1stachios",
+    "bull",
+    "rubberyduck",
+    "and 128 more..."
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18138,
+    "asset_type": "URL",
+    "asset_identifier": "gitlab.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

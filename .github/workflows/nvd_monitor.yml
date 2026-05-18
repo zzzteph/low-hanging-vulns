@@ -1,0 +1,48 @@
+name: NVD Monitor
+
+on:
+  schedule:
+    - cron: "0 */12 * * *"   # every 12 hours
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Fetch and notify new CVEs
+        id: nvd
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID:   ${{ secrets.TG_CHAT_ID }}
+          NVD_KEY:      ${{ secrets.NVD_KEY }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python nvd.py
+          new_files=$(git status --porcelain nvd/ | wc -l | tr -d ' ')
+          echo "new_cves=${new_files}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        if: steps.nvd.outputs.new_cves != '0'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add nvd/
+          git diff --cached --quiet && echo "Nothing to commit" && exit 0
+          cve_count=$(git diff --cached --name-only nvd/ | wc -l | tr -d ' ')
+          git commit -m "Auto-update with ${cve_count} new CVE(s)"
+          git push origin main

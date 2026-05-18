@@ -1,0 +1,138 @@
+{
+  "id": 696822,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC82OTY4MjI=",
+  "url": "https://hackerone.com/reports/696822",
+  "title": "Potential invocation of qsort on uninitialized memory during cookie save",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2019-09-18T01:52:21.989Z",
+  "submitted_at": "2019-09-18T01:52:21.989Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "pauldreik",
+    "url": "/pauldreik",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2021-02-08T07:54:36.887Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2021-01-08T08:23:32.030Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nIf cookiejar is set, cookies are written to file at exit. That is done by the function cookie_output() in cookie.c. The cookies are sorted before being stored, using qsort on a temporary array. That temporary array is uninitialized (gotten from malloc at https://github.com/curl/curl/blob/7c596f5dea586c1ba99dfbe7f3ce1996d82f7de0/lib/cookie.c#L1534 ). This would not be a problem unless there also is a bug in the range given to qsort \nhttps://github.com/curl/curl/blob/7c596f5dea586c1ba99dfbe7f3ce1996d82f7de0/lib/cookie.c#L1550\nwhich is numcookies. However, it should be j which is used for counting at https://github.com/curl/curl/blob/7c596f5dea586c1ba99dfbe7f3ce1996d82f7de0/lib/cookie.c#L1546.\n\nThe buffer passed to qsort is partially filled with cookie data, and the rest is uninitialized. When qsort sorts, it will dereference the supposed to be pointers to compare the elements and depending on the results jump around reading in memory.\n\n## Steps To Reproduce:\nI found this through fuzzing and I do not want to make that public until the problems I find are fixed - in case you want it now already, just hit me up. I attached the most important part of the fuzzer.\n\n\nIt is not obvious how to reproduce without the fuzzer: (c->numcookies must be nonzero and co->domain must not be set on at least one of them for this bug to be triggered. Perhaps by loading an evil cookie file from disk.\n\nTo detect it, address and undefined sanitizers are not sufficient. That is likely because qsort is a library function, so it's not instrumented. Valgrind does not always catch it either. I found it by adding an assert on pointer alignment inside the cookie_sort_ct(), and eventually found which of the 60000 test cases I had caused it.\n\n## Suggested fix\n```\ndiff --git a/lib/cookie.c b/lib/cookie.c\nindex 53ca40237..875569bb0 100644\n--- a/lib/cookie.c\n+++ b/lib/cookie.c\n@@ -1547,7 +1547,7 @@ static int cookie_output(struct CookieInfo *c, const char *dumphere)\n       }\n     }\n \n-    qsort(array, c->numcookies, sizeof(struct Cookie *), cookie_sort_ct);\n+    qsort(array, j, sizeof(struct Cookie *), cookie_sort_ct);\n \n     for(i = 0; i < j; i++) {\n       char *format_ptr = get_netscape_format(array[i]);\n\n```\n\nEven better (defence in depth) would be to allocate array with calloc instead of malloc which would cause (near null) pointer dereference instead of \"random\" values.\n\n## Supporting Material/References:\nAttached is\n  - the test case to feed as input to the fuzzer above.\n  - crash report from valgrind and assert()\n\n## Impact\n\nThis is read access, and if triggered it will perhaps cause a crash (segmentation fault), and the cookie jar is not written. So a fairly benign bug.",
+  "weakness": {
+    "id": 2,
+    "name": "Memory Corruption - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 585411,
+      "file_name": "aadaae36b4be454366dff6257c995dfa18f8d539",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/euHfmYgHLsfj33c9HHXi8Kg7?response-content-disposition=attachment%3B%20filename%3D%22aadaae36b4be454366dff6257c995dfa18f8d539%22%3B%20filename%2A%3DUTF-8%27%27aadaae36b4be454366dff6257c995dfa18f8d539&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4LYYMHVZ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T173827Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJIMEYCIQD%2FRe9dZYiohEdGckO%2FDNFdDwa1PDzU7YzYUuU6XWBSMAIhAM8vHSudsOhxckv42bmS%2BhbzNUq6zG%2FXbfo2MtowCNl0KrEFCEIQAxoMMDEzNjE5Mjc0ODQ5IgyTBLTKtd3WF1hglOwqjgX%2BQvHImVoxpq41%2BWDuA5T9DreGZjVA71YtapQuygP6jB%2FxtWa2KKoMIjVOQx8kyRjvph66q6xhqnzTTUVNQfJXp7YCYnL%2F%2FbLcsnCMYd3hg04EM1nIrUPz3h4JZkU5%2BjcVP3tCRxbWYXu6JLgdZUVzZIFEVLK3arfh4PwyLiBdWeK5aiTluoS3veUn1Euw70KwuC%2BLukrb%2BHdEA5751ni8WcfFmtG5Q7t7A%2FE%2F8i8Ya9mt10QvUc%2BYPKw7i7BGxrb23yJmtOwT%2FWpOtRtNbcHFo49E5LHLLdSQJL6L%2FvFE%2B5sPDBsPzS%2BItCpL7pEsGl19%2BTddfXccqx1zvELOJI4hIbE1ElUEeusMyuDtpkSmr9qH%2BQZU1OFKyhB31VLWQ3trtVUmQndKOL2DsZWVHppn24Jcv%2B17fVhhu%2FltAdoONKevRZij7Ixms9zRK7BjNLLbh18NiL9YKpJkbkpEvRmZdlaas8%2FChUclwK9uhGl10H8ZE35lNQ84jVj29%2FuVfZawezpLc7fJAw7plVdJxSVI7%2BzrfOuLZSz63MfLIdm%2BrUmGmYd8Q49bYjrm4v2jnRLUD7FPjybmHmsdXid%2BS69KJo7p%2F1DSGlU5iA2SSbkvssZdKN%2FeocIFDynLjP4hlKH1AVhThpyDxjeXqU9YYLuoMP%2Fbg0C%2FU1Ooz%2BBqnU7a1SvAOEWQr%2BbeuCDAW6aokqmgCplVY8nzQMkHeWkDIsw3iHjBKO8yx532GM%2BJNGgKeRPYF6GKZ1GGCteZans6QKInzONHlriKBZlpnsfnIZrpq0t1GQLFYsWhrIWu3Z0MxkluwYTkXaXTVEHSTGZV10QNs3Jivg31Wk5AgWwDerFJTScNO7mR0AoAQiMZjZgwv9XYzwY6sAFDIZ%2Bl%2BSKNQFSBMvAn7%2FCikfvSXMf5aR%2BCJIa%2FJuxRT1dB8Mvv9ziuwQZoDqSAiJgcY1K8EmLt2JyPmfff4%2F3U3ov1BzLVnqiAiSYdq3sT9K3wEqiwH4g2imhn2MpLVNxYto3rsJCiBd298P7UNLACCjBGIbIJi0dF5eCwn4%2BgsuWyeMAiR%2FhYsX8C5jPjbpUHbHATuHbWKWiffdIx%2BJhbClxbIayZamO%2FREc%2BBn%2BqeA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d36568e8d12f174019b51134b21dd57e1333a59d28d309a26f108394610e9fc6",
+      "file_size": 939,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 585415,
+      "file_name": "README.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/eFy8PgHBFyy713LxwkR8BHwa?response-content-disposition=attachment%3B%20filename%3D%22README.txt%22%3B%20filename%2A%3DUTF-8%27%27README.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4LYYMHVZ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T173827Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJIMEYCIQD%2FRe9dZYiohEdGckO%2FDNFdDwa1PDzU7YzYUuU6XWBSMAIhAM8vHSudsOhxckv42bmS%2BhbzNUq6zG%2FXbfo2MtowCNl0KrEFCEIQAxoMMDEzNjE5Mjc0ODQ5IgyTBLTKtd3WF1hglOwqjgX%2BQvHImVoxpq41%2BWDuA5T9DreGZjVA71YtapQuygP6jB%2FxtWa2KKoMIjVOQx8kyRjvph66q6xhqnzTTUVNQfJXp7YCYnL%2F%2FbLcsnCMYd3hg04EM1nIrUPz3h4JZkU5%2BjcVP3tCRxbWYXu6JLgdZUVzZIFEVLK3arfh4PwyLiBdWeK5aiTluoS3veUn1Euw70KwuC%2BLukrb%2BHdEA5751ni8WcfFmtG5Q7t7A%2FE%2F8i8Ya9mt10QvUc%2BYPKw7i7BGxrb23yJmtOwT%2FWpOtRtNbcHFo49E5LHLLdSQJL6L%2FvFE%2B5sPDBsPzS%2BItCpL7pEsGl19%2BTddfXccqx1zvELOJI4hIbE1ElUEeusMyuDtpkSmr9qH%2BQZU1OFKyhB31VLWQ3trtVUmQndKOL2DsZWVHppn24Jcv%2B17fVhhu%2FltAdoONKevRZij7Ixms9zRK7BjNLLbh18NiL9YKpJkbkpEvRmZdlaas8%2FChUclwK9uhGl10H8ZE35lNQ84jVj29%2FuVfZawezpLc7fJAw7plVdJxSVI7%2BzrfOuLZSz63MfLIdm%2BrUmGmYd8Q49bYjrm4v2jnRLUD7FPjybmHmsdXid%2BS69KJo7p%2F1DSGlU5iA2SSbkvssZdKN%2FeocIFDynLjP4hlKH1AVhThpyDxjeXqU9YYLuoMP%2Fbg0C%2FU1Ooz%2BBqnU7a1SvAOEWQr%2BbeuCDAW6aokqmgCplVY8nzQMkHeWkDIsw3iHjBKO8yx532GM%2BJNGgKeRPYF6GKZ1GGCteZans6QKInzONHlriKBZlpnsfnIZrpq0t1GQLFYsWhrIWu3Z0MxkluwYTkXaXTVEHSTGZV10QNs3Jivg31Wk5AgWwDerFJTScNO7mR0AoAQiMZjZgwv9XYzwY6sAFDIZ%2Bl%2BSKNQFSBMvAn7%2FCikfvSXMf5aR%2BCJIa%2FJuxRT1dB8Mvv9ziuwQZoDqSAiJgcY1K8EmLt2JyPmfff4%2F3U3ov1BzLVnqiAiSYdq3sT9K3wEqiwH4g2imhn2MpLVNxYto3rsJCiBd298P7UNLACCjBGIbIJi0dF5eCwn4%2BgsuWyeMAiR%2FhYsX8C5jPjbpUHbHATuHbWKWiffdIx%2BJhbClxbIayZamO%2FREc%2BBn%2BqeA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=afd85fb313824960f3ee4fcddecbb06d49fb2fa094d03b4d0b325ef34d62d3e7",
+      "file_size": 7764,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 585416,
+      "file_name": "fuzz_cookies.cc",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/XFcTWFEGgDU87v3ajPV8ju9y?response-content-disposition=attachment%3B%20filename%3D%22fuzz_cookies.cc%22%3B%20filename%2A%3DUTF-8%27%27fuzz_cookies.cc&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4LYYMHVZ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T173827Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJIMEYCIQD%2FRe9dZYiohEdGckO%2FDNFdDwa1PDzU7YzYUuU6XWBSMAIhAM8vHSudsOhxckv42bmS%2BhbzNUq6zG%2FXbfo2MtowCNl0KrEFCEIQAxoMMDEzNjE5Mjc0ODQ5IgyTBLTKtd3WF1hglOwqjgX%2BQvHImVoxpq41%2BWDuA5T9DreGZjVA71YtapQuygP6jB%2FxtWa2KKoMIjVOQx8kyRjvph66q6xhqnzTTUVNQfJXp7YCYnL%2F%2FbLcsnCMYd3hg04EM1nIrUPz3h4JZkU5%2BjcVP3tCRxbWYXu6JLgdZUVzZIFEVLK3arfh4PwyLiBdWeK5aiTluoS3veUn1Euw70KwuC%2BLukrb%2BHdEA5751ni8WcfFmtG5Q7t7A%2FE%2F8i8Ya9mt10QvUc%2BYPKw7i7BGxrb23yJmtOwT%2FWpOtRtNbcHFo49E5LHLLdSQJL6L%2FvFE%2B5sPDBsPzS%2BItCpL7pEsGl19%2BTddfXccqx1zvELOJI4hIbE1ElUEeusMyuDtpkSmr9qH%2BQZU1OFKyhB31VLWQ3trtVUmQndKOL2DsZWVHppn24Jcv%2B17fVhhu%2FltAdoONKevRZij7Ixms9zRK7BjNLLbh18NiL9YKpJkbkpEvRmZdlaas8%2FChUclwK9uhGl10H8ZE35lNQ84jVj29%2FuVfZawezpLc7fJAw7plVdJxSVI7%2BzrfOuLZSz63MfLIdm%2BrUmGmYd8Q49bYjrm4v2jnRLUD7FPjybmHmsdXid%2BS69KJo7p%2F1DSGlU5iA2SSbkvssZdKN%2FeocIFDynLjP4hlKH1AVhThpyDxjeXqU9YYLuoMP%2Fbg0C%2FU1Ooz%2BBqnU7a1SvAOEWQr%2BbeuCDAW6aokqmgCplVY8nzQMkHeWkDIsw3iHjBKO8yx532GM%2BJNGgKeRPYF6GKZ1GGCteZans6QKInzONHlriKBZlpnsfnIZrpq0t1GQLFYsWhrIWu3Z0MxkluwYTkXaXTVEHSTGZV10QNs3Jivg31Wk5AgWwDerFJTScNO7mR0AoAQiMZjZgwv9XYzwY6sAFDIZ%2Bl%2BSKNQFSBMvAn7%2FCikfvSXMf5aR%2BCJIa%2FJuxRT1dB8Mvv9ziuwQZoDqSAiJgcY1K8EmLt2JyPmfff4%2F3U3ov1BzLVnqiAiSYdq3sT9K3wEqiwH4g2imhn2MpLVNxYto3rsJCiBd298P7UNLACCjBGIbIJi0dF5eCwn4%2BgsuWyeMAiR%2FhYsX8C5jPjbpUHbHATuHbWKWiffdIx%2BJhbClxbIayZamO%2FREc%2BBn%2BqeA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c9e61c213224565a3ae4c0201d89207c453ee3cb9de7e150d98d0fe990dc6d3a",
+      "file_size": 4661,
+      "type": "text/x-c++src",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "monke"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

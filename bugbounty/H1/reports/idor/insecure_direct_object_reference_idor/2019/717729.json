@@ -1,0 +1,136 @@
+{
+  "id": 717729,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC83MTc3Mjk=",
+  "url": "https://hackerone.com/reports/717729",
+  "title": "Reporter, external users, collaborators can mark sent swag awarded to reporter as unsent",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2019-10-19T00:26:50.626Z",
+  "submitted_at": "2019-10-19T00:26:50.626Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jobert",
+    "url": "/jobert",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ht4b9SmcYNqmpbyCFXd7cxHB/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13,
+    "url": "https://hackerone.com/security",
+    "handle": "security",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/013/fa942b9b1cbf4faf37482bf68458e1195aab9c02_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/013/fa942b9b1cbf4faf37482bf68458e1195aab9c02_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "HackerOne",
+      "twitter_handle": "Hacker0x01",
+      "website": "https://hackerone.com",
+      "about": "Vulnerability disclosure should be safe, transparent, and rewarding."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": true,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2019-10-25T16:41:22.652Z",
+  "bug_reporter_agreed_on_going_public_at": "2019-10-25T15:52:21.946Z",
+  "team_member_agreed_on_going_public_at": "2019-10-25T16:41:22.550Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "An Insecure Direct Object Reference (IDOR) vulnerability allow the reporter, external users, and collaborators to mark sent swag that was awarded to the reporter as unsent. This may result in swag being sent multiple times.\n\n**Proof of concept**\nFollow the steps below to reproduce the vulnerability.\n\n* sign in to a user that is not part of any programs\n* submit a report to a program, let's assume this program has ID 1\n* sign in to a user that can award swag for program 1\n* award swag to the report, let's assume the swag object has ID 1\n* mark the swag as sent\n* sign back in to the user that submitted the report\n* create a new program in the sandbox, let's assume this program has ID 2\n* use the following GraphQL to toggle the swag back to unsent\n\n```\n{\"query\":\"mutation updateState($input_0:UpdateProgramSwagInput!) {updateProgramSwag(input:$input_0) { swag { _id } } }\",\"variables\":{\"input_0\":{\"program_id\":\"Z2lkOi8vaGFja2Vyb25lL1RlYW0vMg==\",\"swag_id\":\"Z2lkOi8vaGFja2Vyb25lL1N3YWcvMQ==\",\"sent\":false,\"clientMutationId\":\"0\"}}}\n```\n\nImportant to note here is that the current signed in user must be allowed to manage swag for the given `program_id`. However, the given `swag_id` can belong to any other program. Due to the protected schema, this will only allow the attacker to pass in swag IDs that were reported to themselves or they are an external user or collaborator in a report that was awarded swag. No additional information is leaked.\n\n**app/graphql/mutations/update_program_swag_mutation.rb**\n```ruby\n# ...\ndef resolve(program_id:, swag_id:, sent:)\n  unsafe_program = context.schema.object_from_id program_id, context\n  safe_program = context[:tics].teams_where_i_have_program_management_permission.find unsafe_program.id # <-- proper authorization check\n  swag = context.schema.object_from_id swag_id, context # <-- will return any swag object the user is authorized to see\n\n  updated_swag = Interactors::Programs::UpdateSwag.interact(\n    as_user: context[:current_user],\n    team: safe_program,\n    swag: swag, # <-- swag object is passed to the interactor\n    sent: sent,\n  ).values[:swag]\n```\n\n**app/backend/interactors/programs/update_swag.rb**\n```ruby\n# frozen_string_literal: true\n\nmodule Interactors\n  module Programs\n    class UpdateSwag < HackeroneInteractor\n      include Pavlov::StandardizedResult\n\n      attribute :team, Team\n      attribute :swag, ::Swag\n      attribute :sent, Boolean\n\n      result_value :swag, ::Swag\n\n      private\n\n      def execute\n        # ...\n\n        swag.update(sent: sent) # <-- updates the swag object without authorizing the user\n\n        # ...\n      end\n\n      def authorized?\n        can? :manage_swag, team # <-- only authorizes the user to manage swag for the passed Team\n      end\n\n      # ...\n    end\n  end\nend\n```\n\n**Recommendation**\nThe mutation or subsequent interactor can derive the team from the swag object that is passed. It could also do an additional check that the swag object belongs to the given team.\n\n## Impact\n\nThis vulnerability may result in swag being sent multiple times.",
+  "weakness": {
+    "id": 55,
+    "name": "Insecure Direct Object Reference (IDOR)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2019-11-24T15:52:22.044Z",
+  "allow_singular_disclosure_after": -203134729.79952383,
+  "singular_disclosure_allowed": true,
+  "vote_count": 75,
+  "voters": [
+    "busf4ctor",
+    "mashoud1122",
+    "base_64",
+    "kapytein",
+    "jobert",
+    "ali",
+    "sameerphad72",
+    "spam404",
+    "0xd0m7",
+    "dhakal_ananda",
+    "and 65 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.0,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 3,
+    "asset_type": "URL",
+    "asset_identifier": "hackerone.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

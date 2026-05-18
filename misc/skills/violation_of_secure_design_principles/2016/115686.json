@@ -1,0 +1,137 @@
+{
+  "id": 115686,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMTU2ODY=",
+  "url": "https://hackerone.com/reports/115686",
+  "title": "[tor] pre-emptive defenses, potential vulnerabilities",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2016-02-10T12:02:55.218Z",
+  "submitted_at": "2016-02-10T12:02:55.218Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "guido",
+    "url": "/guido",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/002/983/e55b0b2324777fb7efc2de4212fd8d337ca816bd_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 1800,
+    "url": "https://hackerone.com/torproject",
+    "handle": "torproject",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/001/800/6e575d0a9127b91e83833cf4a9e6be6e8b30cbc3_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/001/800/6e575d0a9127b91e83833cf4a9e6be6e8b30cbc3_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Tor",
+      "twitter_handle": "torproject",
+      "website": "https://www.torproject.org/",
+      "about": "Anonymity Online"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2017-11-26T13:14:04.234Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2017-10-27T13:13:57.752Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Replacing all ```tor_malloc``` calls with tor_calloc and ```tor_malloc_zero```\n==============================================================\n\nZeroing memory upon allocating it will prevent vulnerabilities that consist of transmitting data buffers which are not wholly initialized with the intended data (or contain remnants of previous contents).\n\nPseudocode:\n```c\nchar* outbuffer = tor_malloc(100);\nmemcpy(outbuffer, inbuffer, i);\nsend(outbuffer);\n```\n\nIf ```i``` is the result of a calculation whose outcome is _presumed_ to align with the outbuffer's size (100), but in practice is prone to a corner-case where the result is in fact less than 100, then whatever uninitialized memory is present in the allocated heap memory will be transmitted to the other party.\n\nBut if you're using ```tor_malloc_zero``` instead, then the uninitialized memory would simply consist of zeroes, and thus useless for a malicious recipient of the buffer.\n\n```tor_calloc``` is like ```tor_malloc_zero``` in that it zeroes the allocated memory before disclosing it to the invoking function, and moreover has the property of accepting two size_t parameters and verifying whether the product (result of multiplication) is prone to an overflow, and fails if it is. Therefore, it is ideal to use as a substitute for manual multiplication in preparation for a ```tor_malloc``` or ```tor_malloc_zero```:\n\n```c\ntor_malloc(n * sizeof(some_struct_t));\n```\n\nIn instances such as this, it is again _presumed_ that the product of ```n``` and the ```sizeof``` cannot result in an overflow. Even when this is fairly obvious, I'd say there is no reason to delegate the multiplication to ```tor_calloc``` that offers a hard guarantee that the multiplication is safe. As your code grows, and the value of ```n``` starts hinging on factors that may not be immediately obvious, or if fields are added to some_struct_t in order to cater to future requirements, overflows may become a reality without the protection that ```tor_calloc``` offers.\n\nPotential heap corruption via ```write_escaped_data``` in control.c\n==============================================================\n/** Given a <b>len</b>-character string in <b>data</b>, made of lines\n * terminated by CRLF, allocate a new string in *<b>out</b>, and copy the\n * contents of <b>data</b> into *<b>out</b>, adding a period before any period\n * that appears at the start of a line, and adding a period-CRLF line at\n * the end. Replace all LF characters sequences with CRLF.  Return the number\n * of bytes in *<b>out</b>.\n */\nSTATIC size_t\nwrite_escaped_data(const char *data, size_t len, char **out)\n{\n  size_t sz_out = len+8;\n  char *outp;\n  const char *start = data, *end;\n  int i;\n  int start_of_line;\n  for (i=0; i<(int)len; ++i) {\n    if (data[i]== '\\n')\n      sz_out += 2; /* Maybe add a CR; maybe add a dot. */\n  }\n  *out = outp = tor_malloc(sz_out+1);\n  end = data+len;\n  start_of_line = 1;\n  while (data < end) {\n    if (*data == '\\n') {\n      if (data > start && data[-1] != '\\r')\n        *outp++ = '\\r';\n      start_of_line = 1;\n    } else if (*data == '.') {\n      if (start_of_line) {\n        start_of_line = 0;\n        *outp++ = '.';\n      }\n    } else {\n      start_of_line = 0;\n    }\n    *outp++ = *data++;\n  }\n  if (outp < *out+2 || fast_memcmp(outp-2, \"\\r\\n\", 2)) {\n    *outp++ = '\\r';\n    *outp++ = '\\n';\n  }\n  *outp++ = '.';\n  *outp++ = '\\r';\n  *outp++ = '\\n';\n  *outp = '\\0'; /* NUL-terminate just in case. */\n  tor_assert((outp - *out) <= (int)sz_out);\n  return outp - *out;\n}\n\nThere are two potential vulnerabilities lurking here:\n\n1. If the input size (```len```) >= 0x80000000, then this loop will not execute at all:\n        \n```c\n  for (i=0; i<(int)len; ++i) {\n    if (data[i]== '\\n')\n      sz_out += 2; /* Maybe add a CR; maybe add a dot. */\n  }\n```\n\nBecause the condition ```i<(int)len``` is effectively ```i<(negative number)``` and ```i``` is intialized to 0, this can never be true. As a result of this, the output buffer (whose size is based on sz_out) is too small to hold the result for an input buffer containing '\\n' characters.\nTriggering this is typically only feasible on a 64-bit system, because if the input buffer is >= 0x80000000 bytes, then sz_out is set to 0x80000008 bytes, and allocating such an amount twice (one for the input buffer, and one for the output buffer) is not possible on a 32-bit system.\n\n2. If the equation (number of '\\n' characters in input buffer * 2 + size of input buffer) exceeds 0xFFFFFFFF, then this will cause heap corruption on a 32-bit system, because sz_out overflows.\n\nSee my attached proof of concept. Compile and execute like this:\n\n```c\ngcc -fsanitize=address -fomit-frame-pointer write_escaped_data.c; ./a.out 1\ngcc -m32 -fsanitize=address -fomit-frame-pointer write_escaped_data.c; ./a.out 2\n```\n\nAs for real exploitability, I spent some effort on creating a real, remote proof of concept for this, but because the data that write_escaped_data may process is the result a multitude of (to me) intricate processes it is hard to come up with a reliable attack.\n\n```write_escaped_data``` draws data from all the getinfo_helper_* functions (via ```handle_control_getinfo``` and ```handle_getinfo_helper```) as well as the amalgate of many potentially many, reasonably large strings in ```control_event_networkstatus_changed_helper```: \n\n```c\n  SMARTLIST_FOREACH(statuses, const routerstatus_t *, rs,\n    {\n      s = networkstatus_getinfo_helper_single(rs);\n      if (!s) continue;\n      smartlist_add(strs, s);\n    });\n\n  s = smartlist_join_strings(strs, \"\", 0, NULL);\n  write_escaped_data(s, strlen(s), &esc);\n```\n\nbase64_decode potential heap corruption on 32-bit systems\n==============================================================\n```c\nint\nbase64_decode(char *dest, size_t destlen, const char *src, size_t srclen)\n{\n...\n...\n  if (destlen < (srclen*3)/4)\n    return -1;\n  if (destlen > SIZE_T_CEILING)\n    return -1;\n```\n\nThe problem here is that the multiplication (by 3) occurs before the division (by 4).\n\nFor source strings larger than 0xFFFFFFFF / 3 == 0x55555555, an overflow will occur within this calculation. If the result of the overflow-affected calculation is smaller than what ```destlen``` is, then this check will be passed and memory will be corrupted.\n\nSee my proof of concept:\n\n```\n$ gcc -m32 -fsanitize=address -fomit-frame-pointer base64_decode.c; ./a.out \n=================================================================\n==32449== ERROR: AddressSanitizer: stack-buffer-overflow on address 0xfff6fe04 at pc 0x804898b bp 0xfff6fcf8 sp 0xfff6fcec\n...\n...\n```\n\nPotential heap corruption in do_getpass in routerkeys.c\n==============================================================\nAt present this cannot be triggered, but, unless this code was designed like this on purpose and you're aware of the weakness, you might want to revisit it.\n\n```do_getpass``` contains this code:\n```c\n  if (twice) {\n    const char msg[] = \"One more time:\";\n    size_t p2len = strlen(prompt) + 1;\n    if (p2len < sizeof(msg))\n      p2len = sizeof(msg);\n    prompt2 = tor_malloc(strlen(prompt)+1);\n    memset(prompt2, ' ', p2len);\n    memcpy(prompt2 + p2len - sizeof(msg), msg, sizeof(msg));\n\n    buf2 = tor_malloc_zero(buflen);\n  }\n```\n\nThere is only one call to this function in the code for which twice == 1:\n\n```code\n  if (do_getpass(\"Enter new passphrase:\", pwbuf0, sizeof(pwbuf0), 1,\n                 get_options()) < 0) {\n    log_warn(LD_OR, \"NO/failed passphrase\");\n    return -1;\n  }\n```\n\nThis will not trigger a memory corruption, but if the first parameter had been shorter, it would:\n\nCompile and run like this:\n\n```\n$ gcc -fomit-frame-pointer -fsanitize=address do_getpass.c \n$ ./a.out \"Enter new passphrase:\"\n$ ./a.out \"Enter new passphrase\"\n$ ./a.out \"Enter new passphras\"\n$ ./a.out \"Enter new passphra\"\n$ ./a.out \"Enter new passphr\"\n$ ./a.out \"Enter new passph\"\n$ ./a.out \"Enter new passp\"\n$ ./a.out \"Enter new pass\"\n$ ./a.out \"Enter new pas\"\n\n==7883== ERROR: AddressSanitizer: heap-buffer-overflow on address 0x60040000dffe at pc 0x400c0a bp 0x7fff8d9c22e0 sp 0x7fff8d9c22d8\n...\n...\n```\n\nSo it's not really a vulnerability at present, but I thought I'd mention it to you since it struck me as odd and it could become a problem if you pass a dynamic, potentially short string (for ex. created with snprintf) to do_getpass.",
+  "weakness": {
+    "id": 57,
+    "name": "Violation of Secure Design Principles"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 72882,
+      "file_name": "do_getpass.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/000/072/882/cddc74dce8b0c1cb33f907909f3b239881514b9b/do_getpass.c?response-content-disposition=attachment%3B%20filename%3D%22do_getpass.c%22%3B%20filename%2A%3DUTF-8%27%27do_getpass.c&response-content-type=text%2Fx-c&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU3IFZ2QX%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T191358Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJGMEQCIFAfmh68js%2B%2FlBBitFEU3cZumzi8Yx2ZSag6zpkHz4bgAiBERU53QqOcANm%2F0Wf8qfsWon9FjRXIAnXJSwUjSY3IYSqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMyaoLat1TtP3d2xGpKo8Fs%2FWokNjF1hq25ZtzlljX6e2vuqQOnO3XKuuAf%2BaSDiKCSLYWyykLiqnjseEEeGbSb8fYxbZ%2Fsyx%2BaKf%2FB9Bk%2BsezhyRXl7w%2BACWkqiLIkQf%2FV0YlH5iPXnszhsn5h3IRB0o1TiVNbjuw5rKcHg%2FPUkQSx7%2BGLZvP%2F%2BS7s%2FVNFDVJ%2FykyIP8oEe4SOapr4ikoIQPxOlvb011aNuRlN4yg61focrsaDVYJ6O%2BwcjnT%2BeQm7BHdosiNVL4mg1DFdeBB3h7HC9wh01I8yuePK20C%2BEqgmfoOrxNeg31kPEypRQg5fuVFWm4JWfYHf3uDC%2FHqlJYVdAiU%2F7Gtp5z1AwET%2FJMFJ5IgH%2FrOTzSRbw%2FNst62oy9in1ynGh9MRyzwj3dfVmWT08MSfz6Bp%2BOaG5RUYzxj1e7BCwbLnEgwnHuWe2JNv7rhWWuf%2Fi5t%2B5q56aaaIJSksZ67N1AC7yfKte%2FLaWyynyUE5Bv%2FucNjOqwx1vNRZ3rFJc59xVvtdsZMPrcw3ydvoWLe426%2FDTB1lLXHuG8zKUPsx%2BLazF7sg7kQJFCxx20Uoqcf5s%2BauQ7%2BUpvevtt7Y%2BVD8QTRPe00OKPR9V5y5%2FRalQ%2BnEY%2FAVOnnnYF7jYjA0cyZCMbFguePk9MGeLYaEZFSkXD3ee6SYBA4HiBVmJ2TUnNeUq1py6cFyxHFE4LFx9FbbL0oyhU7d0Ab2nAyLaZsqK1lragrzkNl22yjCjjWZs3GEzdnq4fGUrAwWE8LhWt8BUFjWA81oKuePb4nDy0OEZ82hv52O2od8n1NmMNO4KR7OEUlnfSyVA9HYWQy7oR9Kzt0jfYr3RqKzxcS8EVhPSX6YneunzS6gfUa3HX%2F9qYDA%2FKnBtY%2FmTCarNjPBjqyATEh70uF99qqAYhWRCU7XP6gG41AXjfYm6yh2X3WnnHZeltxdc%2BQAqAl4BqxJG7W4%2F60yWTmn8rl%2BMwnvyV78jjRmCZKJnR74pWU%2FRj34PADzvm6YAVBm8bvT%2FjCddoxwE7h2ryYXLV6qOAtGdVHkdiTMxnmIo%2B97KXsi2JZph%2FtEdIYf4PMaWenDJ4Rihhrfyg1amFMUlfDWDZsxEkPmpOHlFEHE%2B88Db6o5ZhPQiFeSoI%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=014089d3fab9ccb0fe689f7f06f5507ad76da292add0b7f31ffbe4c076b8f6ac",
+      "file_size": 651,
+      "type": "text/x-c",
+      "moderated": null
+    },
+    {
+      "id": 72883,
+      "file_name": "base64_decode.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/000/072/883/2a81f5207bb56e2e25405dafcbf323265d2a04fc/base64_decode.c?response-content-disposition=attachment%3B%20filename%3D%22base64_decode.c%22%3B%20filename%2A%3DUTF-8%27%27base64_decode.c&response-content-type=text%2Fx-c&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU3IFZ2QX%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T191358Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJGMEQCIFAfmh68js%2B%2FlBBitFEU3cZumzi8Yx2ZSag6zpkHz4bgAiBERU53QqOcANm%2F0Wf8qfsWon9FjRXIAnXJSwUjSY3IYSqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMyaoLat1TtP3d2xGpKo8Fs%2FWokNjF1hq25ZtzlljX6e2vuqQOnO3XKuuAf%2BaSDiKCSLYWyykLiqnjseEEeGbSb8fYxbZ%2Fsyx%2BaKf%2FB9Bk%2BsezhyRXl7w%2BACWkqiLIkQf%2FV0YlH5iPXnszhsn5h3IRB0o1TiVNbjuw5rKcHg%2FPUkQSx7%2BGLZvP%2F%2BS7s%2FVNFDVJ%2FykyIP8oEe4SOapr4ikoIQPxOlvb011aNuRlN4yg61focrsaDVYJ6O%2BwcjnT%2BeQm7BHdosiNVL4mg1DFdeBB3h7HC9wh01I8yuePK20C%2BEqgmfoOrxNeg31kPEypRQg5fuVFWm4JWfYHf3uDC%2FHqlJYVdAiU%2F7Gtp5z1AwET%2FJMFJ5IgH%2FrOTzSRbw%2FNst62oy9in1ynGh9MRyzwj3dfVmWT08MSfz6Bp%2BOaG5RUYzxj1e7BCwbLnEgwnHuWe2JNv7rhWWuf%2Fi5t%2B5q56aaaIJSksZ67N1AC7yfKte%2FLaWyynyUE5Bv%2FucNjOqwx1vNRZ3rFJc59xVvtdsZMPrcw3ydvoWLe426%2FDTB1lLXHuG8zKUPsx%2BLazF7sg7kQJFCxx20Uoqcf5s%2BauQ7%2BUpvevtt7Y%2BVD8QTRPe00OKPR9V5y5%2FRalQ%2BnEY%2FAVOnnnYF7jYjA0cyZCMbFguePk9MGeLYaEZFSkXD3ee6SYBA4HiBVmJ2TUnNeUq1py6cFyxHFE4LFx9FbbL0oyhU7d0Ab2nAyLaZsqK1lragrzkNl22yjCjjWZs3GEzdnq4fGUrAwWE8LhWt8BUFjWA81oKuePb4nDy0OEZ82hv52O2od8n1NmMNO4KR7OEUlnfSyVA9HYWQy7oR9Kzt0jfYr3RqKzxcS8EVhPSX6YneunzS6gfUa3HX%2F9qYDA%2FKnBtY%2FmTCarNjPBjqyATEh70uF99qqAYhWRCU7XP6gG41AXjfYm6yh2X3WnnHZeltxdc%2BQAqAl4BqxJG7W4%2F60yWTmn8rl%2BMwnvyV78jjRmCZKJnR74pWU%2FRj34PADzvm6YAVBm8bvT%2FjCddoxwE7h2ryYXLV6qOAtGdVHkdiTMxnmIo%2B97KXsi2JZph%2FtEdIYf4PMaWenDJ4Rihhrfyg1amFMUlfDWDZsxEkPmpOHlFEHE%2B88Db6o5ZhPQiFeSoI%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2c94836ca820ed8e7e23ee5f0729dee202ecd64cab626fc6ef53db690d71b97e",
+      "file_size": 3716,
+      "type": "text/x-c",
+      "moderated": null
+    },
+    {
+      "id": 72884,
+      "file_name": "write_escaped_data.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/000/072/884/54688db732a59d28081d671200cfc4b7efe26e79/write_escaped_data.c?response-content-disposition=attachment%3B%20filename%3D%22write_escaped_data.c%22%3B%20filename%2A%3DUTF-8%27%27write_escaped_data.c&response-content-type=text%2Fx-c&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU3IFZ2QX%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T191358Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJGMEQCIFAfmh68js%2B%2FlBBitFEU3cZumzi8Yx2ZSag6zpkHz4bgAiBERU53QqOcANm%2F0Wf8qfsWon9FjRXIAnXJSwUjSY3IYSqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMyaoLat1TtP3d2xGpKo8Fs%2FWokNjF1hq25ZtzlljX6e2vuqQOnO3XKuuAf%2BaSDiKCSLYWyykLiqnjseEEeGbSb8fYxbZ%2Fsyx%2BaKf%2FB9Bk%2BsezhyRXl7w%2BACWkqiLIkQf%2FV0YlH5iPXnszhsn5h3IRB0o1TiVNbjuw5rKcHg%2FPUkQSx7%2BGLZvP%2F%2BS7s%2FVNFDVJ%2FykyIP8oEe4SOapr4ikoIQPxOlvb011aNuRlN4yg61focrsaDVYJ6O%2BwcjnT%2BeQm7BHdosiNVL4mg1DFdeBB3h7HC9wh01I8yuePK20C%2BEqgmfoOrxNeg31kPEypRQg5fuVFWm4JWfYHf3uDC%2FHqlJYVdAiU%2F7Gtp5z1AwET%2FJMFJ5IgH%2FrOTzSRbw%2FNst62oy9in1ynGh9MRyzwj3dfVmWT08MSfz6Bp%2BOaG5RUYzxj1e7BCwbLnEgwnHuWe2JNv7rhWWuf%2Fi5t%2B5q56aaaIJSksZ67N1AC7yfKte%2FLaWyynyUE5Bv%2FucNjOqwx1vNRZ3rFJc59xVvtdsZMPrcw3ydvoWLe426%2FDTB1lLXHuG8zKUPsx%2BLazF7sg7kQJFCxx20Uoqcf5s%2BauQ7%2BUpvevtt7Y%2BVD8QTRPe00OKPR9V5y5%2FRalQ%2BnEY%2FAVOnnnYF7jYjA0cyZCMbFguePk9MGeLYaEZFSkXD3ee6SYBA4HiBVmJ2TUnNeUq1py6cFyxHFE4LFx9FbbL0oyhU7d0Ab2nAyLaZsqK1lragrzkNl22yjCjjWZs3GEzdnq4fGUrAwWE8LhWt8BUFjWA81oKuePb4nDy0OEZ82hv52O2od8n1NmMNO4KR7OEUlnfSyVA9HYWQy7oR9Kzt0jfYr3RqKzxcS8EVhPSX6YneunzS6gfUa3HX%2F9qYDA%2FKnBtY%2FmTCarNjPBjqyATEh70uF99qqAYhWRCU7XP6gG41AXjfYm6yh2X3WnnHZeltxdc%2BQAqAl4BqxJG7W4%2F60yWTmn8rl%2BMwnvyV78jjRmCZKJnR74pWU%2FRj34PADzvm6YAVBm8bvT%2FjCddoxwE7h2ryYXLV6qOAtGdVHkdiTMxnmIo%2B97KXsi2JZph%2FtEdIYf4PMaWenDJ4Rihhrfyg1amFMUlfDWDZsxEkPmpOHlFEHE%2B88Db6o5ZhPQiFeSoI%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=dba31b2290df96e5cef90b47ee15c45da7532fbc80a7cdb0dafbc1f2baae0062",
+      "file_size": 3155,
+      "type": "text/x-c",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2017-11-26T13:13:57.886Z",
+  "allow_singular_disclosure_after": -266047200.5401859,
+  "singular_disclosure_allowed": true,
+  "vote_count": 8,
+  "voters": [
+    "jensec",
+    "fa1rlight",
+    "geeknik",
+    "eveeez",
+    "cr4xerbik4sh",
+    "japz",
+    "sh3r1",
+    "captianamerica5"
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

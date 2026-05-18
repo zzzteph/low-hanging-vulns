@@ -1,0 +1,113 @@
+{
+  "id": 3734921,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM0OTIx",
+  "url": "https://hackerone.com/reports/3734921",
+  "title": "Trailing-dot IPv4 URL bypasses IP-address guard, allows wildcard DNS SAN match",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "none",
+  "readable_substate": "Informative",
+  "created_at": "2026-05-14T10:35:34.972Z",
+  "submitted_at": "2026-05-14T10:35:35.491Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-30115"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-17T15:32:07.790Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-15T21:12:55.140Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nSorry to ruin anybody's day, but we've discovered another issue when it comes to dots.\n\nWe've found a TLS certificate verification bypass that lets a trailing-dot IPv4 URL -- `https://127.0.0.1./` -- pass peer authentication against a wildcard DNS SAN certificate such as `DNS:*.0.0.1`. The IP address guard that is supposed to prevent wildcard matching on IP literals is silently bypassed because the guard still sees the un-stripped pointer `\"127.0.0.1.\"` and `inet_pton` rejects the trailing dot, so the guard returns `FALSE` and wildcard matching proceeds as if the peer were a DNS hostname.\n\nThis is in the same trailing-dot normalisation family as CVE-2022-30115 and the just-reported multi-dot HSTS bypass, but it crosses a different boundary: instead of a protocol-downgrade, you get a full certificate validation bypass on any HTTPS connection whose host happens to be a trailing-dot IPv4 address (however that certificate may come to be...).\n\nThe bug is in `lib/vtls/hostcheck.c`. `hostmatch()` correctly decrements `hostlen` to strip the trailing dot at lines 87-88, but it leaves the `hostname` pointer unchanged. The IP guard at line 96 then calls `Curl_host_is_ipnum(hostname)` with that original pointer -- `\"127.0.0.1.\"` including the dot -- and `inet_pton(AF_INET, \"127.0.0.1.\", &in)` strictly rejects any string with a stray trailing dot, returning 0. The guard returns `FALSE` and control falls through to the wildcard matching path:\n\n```c\n/* lib/vtls/hostcheck.c lines 87-96 */\n\n  /* normalize pattern and hostname by stripping off trailing dots */\n  if(hostname[hostlen - 1] == '.')  /* TRUE for \"127.0.0.1.\" */\n    hostlen--;                       /* hostlen 11 -> 10; pointer unchanged */\n  if(pattern[patternlen - 1] == '.')\n    patternlen--;\n\n  if(strncmp(pattern, \"*.\", 2))\n    return pmatch(hostname, hostlen, pattern, patternlen);\n\n  /* detect host as IP address or starting with a dot and fail if so */\n  else if(Curl_host_is_ipnum(hostname) || (hostname[0] == '.'))\n    /* ^^^ hostname is still \"127.0.0.1.\" -- inet_pton rejects it -- FALSE */\n    return FALSE;\n```\n\nThere is a second failure point upstream of `hostmatch()`. `get_peer_type()` in `lib/vtls/vtls.c` is the function that decides whether a peer is an IPv4 address, an IPv6 address, or a DNS name. It makes the same `inet_pton` call against the raw `\"127.0.0.1.\"` string and returns `CURL_SSL_PEER_DNS` instead of `CURL_SSL_PEER_IPV4`. That classification then causes `ossl_verifyhost()` in `lib/vtls/openssl.c` to enumerate DNS SANs (rather than iPAddress SANs) and send the host string into `Curl_cert_hostcheck()`, which is where the wildcard comparison runs. So even before `hostmatch()` is reached, the peer type is already wrong.\n\nThe Schannel backend has a parallel instance of the same problem at `lib/vtls/schannel_verify.c:533`: `get_num_host_info()` calls `curlx_inet_pton(AF_INET, conn_hostname, &ia)` and the trailing dot causes it to fail there too, sending the host down the DNS name comparison path.\n\nReproducer on current master (`curl 8.21.0-DEV`, `libcurl/8.21.0-DEV OpenSSL/3.4.1`):\n\n```bash\n# Generate a local CA and a server cert with only a wildcard DNS SAN -- no IP SAN\nmkdir -p /tmp/f30certs && cd /tmp/f30certs\n\nopenssl genrsa -out ca.key 2048 2>/dev/null\nopenssl req -new -x509 -days 3650 -key ca.key -out ca.pem \\\n    -subj \"/CN=TestCA-F30\" 2>/dev/null\n\nopenssl genrsa -out server.key 2048 2>/dev/null\nopenssl req -new -key server.key -out server.csr \\\n    -subj \"/CN=wildcard\" 2>/dev/null\ncat > server.ext <<'EOF'\nsubjectAltName = DNS:*.0.0.1\nEOF\nopenssl x509 -req -days 3650 -in server.csr \\\n    -CA ca.pem -CAkey ca.key -CAcreateserial \\\n    -out server.pem -extfile server.ext 2>/dev/null\n\n# Start a TLS server\nopenssl s_server -cert server.pem -key server.key -port 18450 -quiet 2>/dev/null &\nSERVER_PID=$!; sleep 2\n\ncd /path/to/curl   # adjust as needed\n```\n\nTest 1 -- trailing-dot IP (vulnerable path):\n\n```bash\n./src/curl \\\n    --resolve \"127.0.0.1.:18450:127.0.0.1\" \\\n    \"https://127.0.0.1.:18450/\" \\\n    --cacert /tmp/f30certs/ca.pem \\\n    -v 2>&1 | grep -E \\\n        \"subjectAltName|subject:|SSL certificate verified|no alternative|FAILED|SSL:|curl: \\(\"\n```\n\nOutput:\n\n```\n*   subject: CN=wildcard\n*   subjectAltName: \"127.0.0.1.\" matches cert's \"*.0.0.1\"\n* SSL certificate verified via OpenSSL.\ncurl: (52) Empty reply from server\n```\n\nExit code 52 (`CURLE_GOT_NOTHING`): the TLS handshake completed, peer verification passed, and the only reason curl didn't get content back is that `openssl s_server` sends nothing at the application layer. A real server would have served the response. Verification was bypassed.\n\nTest 2 -- plain IP (correctly rejected):\n\n```bash\n./src/curl \\\n    --resolve \"127.0.0.1:18450:127.0.0.1\" \\\n    \"https://127.0.0.1:18450/\" \\\n    --cacert /tmp/f30certs/ca.pem \\\n    -v 2>&1 | grep -E \\\n        \"subjectAltName|subject:|SSL certificate verified|no alternative|FAILED|SSL:|curl: \\(\"\n```\n\nOutput:\n\n```\n*   subject: CN=wildcard\n*  subjectAltName does not match ipv4 address 127.0.0.1\n* SSL: no alternative certificate subject name matches target ipv4 address '127.0.0.1'\ncurl: (60) SSL: no alternative certificate subject name matches target ipv4 address '127.0.0.1'\n```\n\nExit code 60 (`CURLE_PEER_FAILED_VERIFICATION`). Without the trailing dot, `get_peer_type()` correctly identifies `CURL_SSL_PEER_IPV4`, `ossl_verifyhost()` looks for an iPAddress SAN, finds none, and rejects the certificate.\n\nThe full self-contained PoC (cert generation, server startup, and both test invocations) is in `reports/F30_poc.sh`.\n\nThe fix is a one-pointer inconsistency in `hostmatch()`. After `hostlen` is decremented, `hostname` still points at the nul-terminated original string including the dot. The IP guard needs to see a nul-terminated copy whose length matches `hostlen`:\n\n```c\n/* lib/vtls/hostcheck.c: replace the guard at line 96 */\n\n  else {\n    char hostcopy[NI_MAXHOST];\n    if(hostlen >= sizeof(hostcopy))\n      return FALSE;\n    memcpy(hostcopy, hostname, hostlen);\n    hostcopy[hostlen] = '\\0';\n    if(Curl_host_is_ipnum(hostcopy) || (hostcopy[0] == '.'))\n      return FALSE;\n  }\n```\n\nFor defence in depth, `get_peer_type()` in `lib/vtls/vtls.c` should also strip the trailing dot before calling `inet_pton` so that the peer type is classified correctly upstream of `ossl_verifyhost()`. The same treatment is needed for `conn_hostname` before `get_num_host_info()` in `lib/vtls/schannel_verify.c:533`. A higher-level alternative is to have `ipv4_normalize()` in `lib/urlapi.c` recognise and strip trailing-dot IPv4 forms early, so the dot never reaches TLS peer setup at all.\n\nTwo preconditions are needed: a trailing-dot IPv4 URL (which arises naturally when software constructs URLs from DNS PTR records, passes Host headers through normalisation layers, or when operators append a dot to suppress search-domain suffix lookups), and an attacker-held certificate with a matching wildcard DNS SAN (straightforward to obtain from any private or internal CA, and those are the norm in the enterprise and cloud environments where structured IP ranges like `10.0.x.y` make the wildcard useful).\n\nAffected backends: OpenSSL (and forks: AWS-LC, BoringSSL, LibreSSL, quictls) and Schannel. Not affected: rustls, GnuTLS, mbedTLS (each verifies hostnames independently without going through `hostmatch()`).\n\nThank you,\nAISLE Research Team\n\n## Impact\n\n## Summary:\n\nA client can incorrectly accept a certificate with only a wildcard `dNSName` SAN for a trailing-dot IPv4 HTTPS URL, causing a full server-identity verification bypass for that connection. An attacker who can present a trusted cert like `DNS:*.0.0.1` in an environment where `https://127.0.0.1./`-style URLs occur could impersonate the target host and terminate TLS successfully.",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

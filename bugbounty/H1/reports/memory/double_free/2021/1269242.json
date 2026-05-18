@@ -1,0 +1,136 @@
+{
+  "id": 1269242,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMjY5MjQy",
+  "url": "https://hackerone.com/reports/1269242",
+  "title": "CVE-2021-22945: UAF and double-free in MQTT sending",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2021-07-19T18:20:56.555Z",
+  "submitted_at": "2021-07-19T18:20:56.643Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "z2_",
+    "url": "/z2_",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/5eld4c9eg34za1r92ipvd757pa9d/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2021-22945"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2021-09-15T14:24:16.296Z",
+  "bug_reporter_agreed_on_going_public_at": "2021-09-15T14:24:16.231Z",
+  "team_member_agreed_on_going_public_at": "2021-09-15T07:25:48.258Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Vulnerability Description\nlibcurl version 7.77.0 has a [Use-After-Free](https://github.com/curl/curl/blob/curl-7_77_0/lib/mqtt.c#L559) and a [Double-Free](https://github.com/curl/curl/blob/curl-7_77_0/lib/mqtt.c#L560) in `lib/mqtt.c` in the function `mqtt_doing` on [lines 556 - 563](https://github.com/curl/curl/blob/curl-7_77_0/lib/mqtt.c#L556):\n```c\nif(mq->nsend) {\n  /* send the remainder of an outgoing packet */\n  char *ptr = mq->sendleftovers;\n  result = mqtt_send(data, mq->sendleftovers, mq->nsend);\n  free(ptr);\n  if(result)\n    return result;\n}\n```\nAs can be seen in the code above `mq->sendleftovers` gets freed in line 560 but not set to `NULL`. If `mqtt_doing` gets called repeatedly and the values of `mq->nsend` and `mq->sendleftovers` don't change this can result in\n1. Sending the metadata of the freed chunk over the network via `mqtt_send`\n2. Freeing `mq->sendleftovers` multiple times\n\n`mq->nsend` and `mq->sendleftovers` get set in the function `mqtt_send` if `Curl_write` cannot send all bytes in the write-buffer at once. This can e.g. happen if `write()` returns `EAGAIN` or `EWOULDBLOCK`. Then `Curl_write` sets the number of written bytes to `0` and returns `CURLE_OK`.     \nThis can trigger the vulnerabilities as follows:\n1. Supply an `mqtt://` URL to curl\n2. Have some successfull transmissions with `mqtt_send`\n3. At some point have an unsuccessfull transmission such that not all bytes of the write-buffer can be sent.\nThis causes `mq->sendleftovers` and `mq->nsend` to be set.\n4. Have another invocation of `mqtt_doing`. The code mentioned above gets executed. `mq->sendleftovers` gets freed.\nIf `mqtt_send` could send all remaining bytes successfully `mq->sendleftovers` and `mq->nsend` don't get reset.\n5. Have another invocation of `mqtt_doing`. Since `mq->nsend` didn't change curl tries to send the leftover bytes again, triggering the vulnerabilities\n\n# How to reproduce the bug\n1. Checkout tag `curl-7_77_0` in the curl repository\n2. Apply the following patch that artificially creates a scenario as described above:\n```\ndiff --git a/lib/sendf.c b/lib/sendf.c\nindex e41bb805f..773d4b5b6 100644\n--- a/lib/sendf.c\n+++ b/lib/sendf.c\n@@ -294,6 +294,7 @@ void Curl_failf(struct Curl_easy *data, const char *fmt, ...)\n  * If the write would block (CURLE_AGAIN), we return CURLE_OK and\n  * (*written == 0). Otherwise we return regular CURLcode value.\n  */\n+static int CUSTOM_blocked = 0;\n CURLcode Curl_write(struct Curl_easy *data,\n                     curl_socket_t sockfd,\n                     const void *mem,\n@@ -322,8 +323,13 @@ CURLcode Curl_write(struct Curl_easy *data,\n   }\n #endif\n   bytes_written = conn->send[num](data, num, mem, len, &result);\n+  if(!CUSTOM_blocked) {\n+    bytes_written = 0;\n+    CUSTOM_blocked = 1;\n+  }\n \n   *written = bytes_written;\n+\n   if(bytes_written >= 0)\n     /* we completely ignore the curlcode value when subzero is not returned */\n     return CURLE_OK;\n\n```\n3. Rebuild curl\n4. Start a simple netcat session with: `nc -lp 5678`\n5. Invoke curl with: `curl mqtt://127.0.0.1:5678/`\n\nThe output:\n```\nfree(): double free detected in tcache 2\n[1]    199104 abort (core dumped)  ./curl mqtt://127.0.0.1:5678\n```\n\nAnd in the terminal where netcat was launched it can be seen\nthat the content of the freed heap chunk was sent.\n\n## Impact\n\nSince double frees of tcache chunks are not detected until glibc version 2.29\nthis vulnerability is perfectly exploitable for operationg systems using an older\nglibc. Causing `write()` to return `EAGAIN` is more difficult but not impossible\nto manage, e.g. this can always be the case if the peer is not reading as fast as\nthe curl client is writing ([source](https://stackoverflow.com/questions/36539580/write-to-tcp-socket-keeps-returning-eagain/36539632#36539632)).\nAt minimum this can be used to leak heap metadata which can help in exploitation.",
+  "weakness": {
+    "id": 49,
+    "name": "Double Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 1382088,
+      "file_name": "patch",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bcnsmtmzouctlpnk0iap0ycdvxz8?response-content-disposition=attachment%3B%20filename%3D%22patch%22%3B%20filename%2A%3DUTF-8%27%27patch&response-content-type=text%2Fx-diff&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXTI3ZXE6%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T172428Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCIAMFDo2Ti7D7PGhpiV4K9rLJIEQ0iTj2aOwjGOf35FtUAiA1A7ZOAnPQlyw17MYgBl0WLJIZ2b%2Bkp6kr5QN9A2Ii1CqyBQhAEAMaDDAxMzYxOTI3NDg0OSIMkgJgRdLBUeNdsbU4Ko8FfIICDE5Zp3Gow0N70LC%2BW54UQbYp3Beoyoz5%2BJ62ADMdZdJ2BJ6UuFFymbMgwMvRe6RqJHp2fcRcJDJ7u2a5OBGf6shAoeH7UKsge61QDnttfHfwqN6VGaQppCCtGO2D3dTJ2J%2F6wWApyw0LkRcoZiMr7oUGKXAyUEEkgKjqS6NdTrSpl9WDYsVOdAA1irnIJ4kZkTGJJiLfxmhxtVRfdzYeiMcfX0EvMClAp9qtKZawyfLcVMZcO27PXsiXE%2B7gIPVG5Q8I1FQ6eSLUMDNMxBpXSKJzGoLb5IkWcpMoTw5cDBYIBZF1ZydD%2FZuu0H%2F2VPaCzf%2BSMuyXTpRYtyD3GFMv15Bpfa%2BgzTsEiw4hgl0eDNsnv4hJRubajMjv9O0h87NzUScxHQsDfIqSHpF9ZhHUDv%2BJ7ZzX7j3muv7H6u%2BM9T1ojiwZ1JVHb1QJWjjf2z%2FtxhvBHLFC3KnA%2FZWycMkNAlZFPr%2Fe1iPhl3RpFOH9uuSWSQ%2BD39QoRMOQQM6LygLAz%2BLn1kZcSxg8Sb9ExDjgMLP3YIRDXfgPbvCx60P1kQvn5Mh7213IeA4lQqiQNB5UvhdB8GQKXSowt60Rux4oRUgazydvxqX%2BcvZhsKYp1v%2BM8nK%2FfSTaZ8oBErDvBl2Pl03rJXF6q2TSz2iJGIqOd79onq8Ex0%2FFbrgaWSF4WqXk8xV2M6eUVx04hbktMO3HCUb7ArjHETAc6b4j55uyQj6mRwsWfUsdkQ0%2BZOGcXVzCiWD0wyxfP3Y6twOMtz0uGWfUYy%2BHw9BGNzOO%2B8vu%2FoPmhNTVR9Kq5dTHy81ZVtvfQ%2FDav3np8mYz8rZm8%2F4jsgC3P1fCntm%2BP9aMgYGKjwvn%2Bj%2FqEyhbjrsK%2FTDHntjPBjqyAYB%2F%2BEVuGpkT2ffQxp%2FSGqr2GT9GMnUs02oWCHARA%2BLd8CGtbaGpsyLGDNODv%2Bzubqq5xUbPK6aXSuSFqTfJLGY2CdieJ7w954ciBo0g%2FXN4x9w4eR4xuQ65528H4AfBY7JdmTo3lG%2Fx6JB6jtlZDQ9rNX8mUtl1LuRjnOhYuMTAWThat5WLNTjeRraqZL5SUAEMJw0h9VfHXCfwi2Vd7aqR9lwslnfl77mrFFi%2BjUz6x4Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=59104572cdcec836e538702fd3a9f454e84f0caab5d12918fca8519324f6ae95",
+      "file_size": 870,
+      "type": "text/x-diff",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2021-10-15T07:25:48.358Z",
+  "allow_singular_disclosure_after": -143459919.6952152,
+  "singular_disclosure_allowed": true,
+  "vote_count": 14,
+  "voters": [
+    "z2_",
+    "alp",
+    "fanimalikhack",
+    "akashhamal0x01",
+    "0xwise",
+    "khizer47",
+    "fat-fingers",
+    "shivpalbilada",
+    "xcess",
+    "0rootshell",
+    "and 4 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

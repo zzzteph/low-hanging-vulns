@@ -1,0 +1,123 @@
+{
+  "id": 3442060,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDQyMDYw",
+  "url": "https://hackerone.com/reports/3442060",
+  "title": "Infinite loop issue in the state machine of the curl project",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "readable_substate": "N/A",
+  "created_at": "2025-11-26T08:34:03.763Z",
+  "submitted_at": "2025-11-26T08:34:04.402Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "kak1",
+    "url": "/kak1",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-11-26T09:32:38.306Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-11-26T09:01:02.461Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\nVulnerability impact: When curl attempts to download files from a malicious FTP server, it triggers an infinite loop in the code execution.\n\nI discovered this issue in the FTP functionality of the curl project .As described in https://github.com/curl/curl/blob/master/docs/cmdline-opts/disable-epsv.md, curl uses EPSV mode as the default FTP file transfer method. In simple terms, the EPSV mode works as follows: the FTP server opens a TCP port and waits for the client to connect, then sends data to the client through this port.\n\nIn the state machine of curl, the `state_performing` function in `/lib/multi.c` calls the `Curl_sendrecv` function at [1] to receive data from the peer:\n```\nstatic CURLMcode state_performing(struct Curl_easy *data,\n                                  struct curltime *nowp,\n                                  bool *stream_errorp,\n                                  CURLcode *resultp)\n{\n  char *newurl = NULL;\n  bool retry = FALSE;\n  CURLMcode rc = CURLM_OK;\n  CURLcode result = *resultp = CURLE_OK;\n  *stream_errorp = FALSE;\n\n  if(mspeed_check(data, nowp) == CURLE_AGAIN)\n    return CURLM_OK;\n\n  /* read/write data if it is ready to do so */\n  result = Curl_sendrecv(data, nowp); // [1] call Curl_sendrecv\n\n  if(data->req.done || (result == CURLE_RECV_ERROR)) {\n    /* If CURLE_RECV_ERROR happens early enough, we assume it was a race\n     * condition and the server closed the reused connection exactly when we\n     * wanted to use it, so figure out if that is indeed the case.\n     */\n    CURLcode ret = Curl_retry_request(data, &newurl);\n    if(!ret)\n      retry = !!newurl;\n    else if(!result)\n      result = ret;\n\n    if(retry) {\n      /* if we are to retry, set the result to OK and consider the\n         request as done */\n      result = CURLE_OK;\n      data->req.done = TRUE;\n    }\n  }\n...\n```\n\n\nThe `Curl_sendrecv` function calls `sendrecv_dl` at [2]:\n```\nCURLcode Curl_sendrecv(struct Curl_easy *data, struct curltime *nowp)\n{\n  struct SingleRequest *k = &data->req;\n  CURLcode result = CURLE_OK;\n\n  DEBUGASSERT(nowp);\n  if(Curl_xfer_is_blocked(data)) {\n    result = CURLE_OK;\n    goto out;\n  }\n\n  /* We go ahead and do a read if we have a readable socket or if the stream\n     was rewound (in which case we have data in a buffer) */\n  if(k->keepon & KEEP_RECV) {\n    result = sendrecv_dl(data, k); //[2] call sendrecv_dl\n    if(result || data->req.done)\n      goto out;\n  }\n  \n...\n```\n\nThe `sendrecv_dl` function further calls `xfer_recv_resp` to receive data. If our malicious FTP server opens an EPSV port but does not send any data to the client, `xfer_recv_resp` will return `-1`, and the value of `result`  will be set to `CURLE_AGAIN`. Subsequently, at [4], the `result` is set to `CURLE_OK`. This means that even if `xfer_recv_resp` fails to receive any data, the `sendrecv_dl` function still returns `CURLE_OK`.\n\n```\nstatic CURLcode sendrecv_dl(struct Curl_easy *data,\n                            struct SingleRequest *k)\n{\n...\n    rcvd_eagain = FALSE;\n    nread = xfer_recv_resp(data, buf, bytestoread, is_multiplex, &result); // [3] call xfer_recv_resp\n    if(nread < 0) {\n      if(CURLE_AGAIN != result)\n        goto out; /* real error */\n      rcvd_eagain = TRUE;\n      result = CURLE_OK; //[4]set result to CURLE_OK\n      if(data->req.download_done && data->req.no_body &&\n         !data->req.resp_trailer) {\n        DEBUGF(infof(data, \"EAGAIN, download done, no trailer announced, \"\n               \"not waiting for EOS\"));\n        nread = 0;\n        /* continue as if we received the EOS */\n      }\n      else\n        break; /* get out of loop */\n    }\n...\n```\n\n\nLet's continue examining the `state_performing` function:\n```\nstatic CURLMcode state_performing(struct Curl_easy *data,\n                                  struct curltime *nowp,\n                                  bool *stream_errorp,\n                                  CURLcode *resultp)\n{\n  char *newurl = NULL;\n  bool retry = FALSE;\n  CURLMcode rc = CURLM_OK;\n  CURLcode result = *resultp = CURLE_OK;\n  *stream_errorp = FALSE;\n\n  if(mspeed_check(data, nowp) == CURLE_AGAIN)\n    return CURLM_OK;\n\n  /* read/write data if it is ready to do so */\n  result = Curl_sendrecv(data, nowp);\n\n  if(data->req.done || (result == CURLE_RECV_ERROR)) { // [5] data->req.done == 0, result==CURLE_OK\n    /* If CURLE_RECV_ERROR happens early enough, we assume it was a race\n     * condition and the server closed the reused connection exactly when we\n     * wanted to use it, so figure out if that is indeed the case.\n     */\n    CURLcode ret = Curl_retry_request(data, &newurl);\n    if(!ret)\n      retry = !!newurl;\n    else if(!result)\n      result = ret;\n\n    if(retry) {\n      /* if we are to retry, set the result to OK and consider the\n         request as done */\n      result = CURLE_OK;\n      data->req.done = TRUE;\n    }\n  }\n#ifndef CURL_DISABLE_HTTP\n  else if((CURLE_HTTP2_STREAM == result) &&\n          Curl_h2_http_1_1_error(data)) {\n    CURLcode ret = Curl_retry_request(data, &newurl);\n\n    if(!ret) {\n      infof(data, \"Downgrades to HTTP/1.1\");\n      streamclose(data->conn, \"Disconnect HTTP/2 for HTTP/1\");\n      data->state.http_neg.wanted = CURL_HTTP_V1x;\n      data->state.http_neg.allowed = CURL_HTTP_V1x;\n      /* clear the error message bit too as we ignore the one we got */\n      data->state.errorbuf = FALSE;\n      if(!newurl)\n        /* typically for HTTP_1_1_REQUIRED error on first flight */\n        newurl = strdup(data->state.url);\n      if(!newurl) {\n        result = CURLE_OUT_OF_MEMORY;\n      }\n      else {\n        /* if we are to retry, set the result to OK and consider the request\n          as done */\n        retry = TRUE;\n        result = CURLE_OK;\n        data->req.done = TRUE;\n      }\n    }\n    else\n      result = ret;\n  }\n#endif\n\n  if(result) { //[6] result==CURLE_OK\n    /*\n     * The transfer phase returned error, we mark the connection to get closed\n     * to prevent being reused. This is because we cannot possibly know if the\n     * connection is in a good shape or not now. Unless it is a protocol which\n     * uses two \"channels\" like FTP, as then the error happened in the data\n     * connection.\n     */\n\n    if(!(data->conn->handler->flags & PROTOPT_DUAL) &&\n       result != CURLE_HTTP2_STREAM)\n      streamclose(data->conn, \"Transfer returned error\");\n\n    multi_posttransfer(data);\n    multi_done(data, result, TRUE);\n  }\n  else if(data->req.done && !Curl_cwriter_is_paused(data)) { //[7] data->req.done == 0\n    const struct Curl_handler *handler = data->conn->handler;\n\n    /* call this even if the readwrite function returned error */\n    multi_posttransfer(data);\n\n    /* When we follow redirects or is set to retry the connection, we must to\n       go back to the CONNECT state */\n    if(data->req.newurl || retry) {\n      followtype follow = FOLLOW_NONE;\n      if(!retry) {\n        /* if the URL is a follow-location and not just a retried request then\n           figure out the URL here */\n        free(newurl);\n        newurl = data->req.newurl;\n        data->req.newurl = NULL;\n        follow = FOLLOW_REDIR;\n      }\n      else\n        follow = FOLLOW_RETRY;\n      (void)multi_done(data, CURLE_OK, FALSE);\n      /* multi_done() might return CURLE_GOT_NOTHING */\n      result = multi_follow(data, handler, newurl, follow);\n      if(!result) {\n        multistate(data, MSTATE_SETUP);\n        rc = CURLM_CALL_MULTI_PERFORM;\n      }\n    }\n    else {\n      /* after the transfer is done, go DONE */\n\n      /* but first check to see if we got a location info even though we are\n         not following redirects */\n      if(data->req.location) {\n        free(newurl);\n        newurl = data->req.location;\n        data->req.location = NULL;\n        result = multi_follow(data, handler, newurl, FOLLOW_FAKE);\n        if(result) {\n          *stream_errorp = TRUE;\n          result = multi_done(data, result, TRUE);\n        }\n      }\n\n      if(!result) {\n        multistate(data, MSTATE_DONE);\n        rc = CURLM_CALL_MULTI_PERFORM;\n      }\n    }\n  }\n  else { /* not errored, not done */\n    mspeed_check(data, nowp); // [8]\n  }\n  free(newurl);\n  *resultp = result;\n  return rc;\n}\n\n```\n\nSince no data was received, the `data->req.done` flag remains 0. Furthermore, because the result is `CURLE_OK`, the conditional checks at [5], [6], and [7] all evaluate to false. The code then proceeds to [8] (not errored, not done).\n\nThis causes curl's current state machine flag (`data->mstate`) to remain unchanged, still set to `MSTATE_PERFORMING`. Subsequently, the curl code repeatedly enters the `state_performing` function, resulting in an infinite loop.\n\n\n\n## Affected version\n\ncurl : https://github.com/curl/curl/archive/refs/tags/curl-8_17_0.tar.gz\nplatform : ubuntu22.04\n\n```\n➜  src ./curl -V \ncurl 8.17.0-DEV (x86_64-pc-linux-gnu) libcurl/8.17.0-DEV zlib/1.2.11 libpsl/0.19.1\nRelease-Date: [unreleased]\nProtocols: dict file ftp gopher http imap ipfs ipns mqtt pop3 rtsp smtp telnet tftp ws\nFeatures: alt-svc AsynchDNS IPv6 Largefile libz PSL threadsafe UnixSockets\n```\n## Steps To Reproduce:\n\n1. Download the attached ./ftp_poc.py file and run: sudo python3 ./ftp_poc.py. This will start a malicious FTP service on port 21 of the current machine.\n2. Run the following curl command, replacing 192.168.23.1 in the command with the address of your own malicious FTP server:\n```\n./curl -u anonymous:123 'ftp://192.168.23.1/test' -o ./test\n```\n\n3. The curl program will enter an infinite code loop and will not exit on its own.\n\n## Impact\n\n## Summary:\nWhen curl attempts to download files from a malicious FTP server, it triggers an infinite loop in the code execution.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5049867,
+      "file_name": "ftp_poc.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/5rcizlc87y0k30giu598wjp6pl4s?response-content-disposition=attachment%3B%20filename%3D%22ftp_poc.py%22%3B%20filename%2A%3DUTF-8%27%27ftp_poc.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2JLRQC3Z%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T163000Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJIMEYCIQCyF6a0h%2FSd%2BZSks8Rxtl8IMUlV6CnC0EkjKPdOgZppbgIhAJFn8L8q2CGh2pHyXZ5ZMKdMaJy0NuM5GjHSVUlFDTCvKrEFCEAQAxoMMDEzNjE5Mjc0ODQ5IgxPqaDNpE%2FTESHVWKUqjgXASGPQnvNHr2m%2FJIy2ISQVEqko3Yetjo%2F8q7I39IKV7lUxcfLD%2F1XR3w%2FIeZqxTqeeRRnn9MG4wOJuUQCz0TbJ3RYUzLp6NFNeeLUs89tSWQao3K3K1YRQpvxHyd%2FVnQLjGQL%2ByA1W8vwaggeEJOTWpMHro8OmuLbCpiojpf4c0ScAk7jIPo9nq%2BdAbGBT%2BUrarFg54aa3t9Gjb2afUvfC17M1qY0bNHwJ9Pays%2B4nfSf65gBvV8Q5%2Fkpn2Je3SSARa2gRxt8W9gAA9Yz%2F8tRQDheeLfJKjE9hsJmFjYGJtxkvZRnIoMIZtUzAY2MtoEJTGW%2BhaIRYO%2FRUewE0oTOIPtRlJWl5bAfn8xkwDxJGLCuWS3KqjYOTnjUBxC2vKaRWNUjX6wCoWcfqjFWh9kDHe%2FglTqO7%2FhymgHO0N%2FbJGPfLrXbN5nLp3basc2D8NVFFYPypZpmZoGvPODZcm6MKNiYFgL%2Be8G9kqEeW8j2uv3WRlTWjKLgMSUSdC6BU4KKWs%2BW6LgY%2FRNzZuNsvNF8Wq%2BEvh%2FNwtKZXWo6ViLVGheYXcFM%2FCxvdiO7VmMS8UFOcEw7jGaJiNuUo%2FusoO7I9jqghkw84cRFWxYNCOPOLMINynxHc%2BW22HCuCKPHpH4%2FngERDkQV2JzcTL6DXXgmaWwGRAkppif4Q%2F3GBWcIg9VrXqC%2FxvtGt3sQCbHnxLjOKrQMMEe%2BONDXrx3C7yUjREIGX6LQmXabH6XVYcLGnerLvSFDJKfMKGMW5v0agg4D1FI9fwGqnYK6JSiZD9QGCMyr%2BcYow%2FItz7HbxBjBG8iivYaDi65QyjP1vssif0a4uy1m7FnAEaGmy4QGtZ5Lb211YvfP%2FOe9KdZr8EI4whZnYzwY6sAGVm755FFPDuelFXnnKYnWpAjxtT4m5T4dhCScUP5vZ3berrWswAuaFRhjvJ6cDzwNkR4au5erhrpfKwurh6cId6LUxrQzFJEQaW3UAiEFuckw3j%2FkbGaviGEB38PcRx6XKNjiqwHiC6LcoMM6fvomI7IhaJ0gnUaZJ1AFyezf9SM0zuYoK2fyhapRMIp88t3rNFA2L6qmyXeSoRKuz3ku2BETpnGwn4Qmy2ugAijW9bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ce975a351b569dffd04add4411eb5e29afab3381fc2146d4fe943b9b80cfd563",
+      "file_size": 4120,
+      "type": "text/x-python",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 17,
+  "voters": [
+    "2026",
+    "kamekame",
+    "chandrapal_choudhary",
+    "letchu_pkt",
+    "metagoofili",
+    "ongunakay",
+    "soldier_6",
+    "arizion",
+    "glitchraith",
+    "h0110ween",
+    "and 7 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

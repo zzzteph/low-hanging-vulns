@@ -1,0 +1,127 @@
+{
+  "id": 2669852,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yNjY5ODUy",
+  "url": "https://hackerone.com/reports/2669852",
+  "title": "CVE-2024-8096: OCSP stapling bypass with GnuTLS",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2024-08-19T17:31:44.551Z",
+  "submitted_at": "2024-08-19T17:31:45.091Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "kurohiro",
+    "url": "/kurohiro",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2024-8096"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2024-09-11T14:50:38.654Z",
+  "bug_reporter_agreed_on_going_public_at": "2024-09-11T14:50:38.495Z",
+  "team_member_agreed_on_going_public_at": "2024-09-11T05:50:11.573Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nWhen the TLS backend is GnuTLS, there is an issue with the OCSP stapling validation process. As a result, even if the certificate is revoked, the connection can be established without resulting in an error.\n\nWhen the OCSP stapling status response is \"revoked,\" gnutls_certificate_verify_peers2() returns an error. However, gnutls_certificate_verify_peers2() only returns an error when the OCSP status is \"revoked.\" For other statuses, gnutls_certificate_verify_peers2() returns a successful result.\n\nIn curl, the verification of the OCSP stapling status response is performed not only with the above function but also with gnutls_ocsp_status_request_is_checked(). However, this function returns a non-zero value if the OCSP stapling status response exists. As a result, if any response exists, it is treated as a successful case, and the verification process concludes.\n\n```\n  if(config->verifystatus) {\n    if(gnutls_ocsp_status_request_is_checked(session, 0) == 0) {\n      gnutls_datum_t status_request;\n      gnutls_ocsp_resp_t ocsp_resp;\n\n      gnutls_ocsp_cert_status_t status;\n      gnutls_x509_crl_reason_t reason;\n\n      rc = gnutls_ocsp_status_request_get(session, &status_request);\n\n      infof(data, \" server certificate status verification FAILED\");\n\n      if(rc == GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE) {\n        failf(data, \"No OCSP response received\");\n        return CURLE_SSL_INVALIDCERTSTATUS;\n      }\n\n      if(rc < 0) {\n        failf(data, \"Invalid OCSP response received\");\n        return CURLE_SSL_INVALIDCERTSTATUS;\n      }\n\n      gnutls_ocsp_resp_init(&ocsp_resp);\n\n      rc = gnutls_ocsp_resp_import(ocsp_resp, &status_request);\n      if(rc < 0) {\n        failf(data, \"Invalid OCSP response received\");\n        return CURLE_SSL_INVALIDCERTSTATUS;\n      }\n\n      (void)gnutls_ocsp_resp_get_single(ocsp_resp, 0, NULL, NULL, NULL, NULL,\n                                        &status, NULL, NULL, NULL, &reason);\n\n      switch(status) {\n      case GNUTLS_OCSP_CERT_GOOD:\n        break;\n\n      case GNUTLS_OCSP_CERT_REVOKED: {\n        const char *crl_reason;\n\n        switch(reason) {\n          default:\n          case GNUTLS_X509_CRLREASON_UNSPECIFIED:\n            crl_reason = \"unspecified reason\";\n            break;\n\n          case GNUTLS_X509_CRLREASON_KEYCOMPROMISE:\n            crl_reason = \"private key compromised\";\n            break;\n\n          case GNUTLS_X509_CRLREASON_CACOMPROMISE:\n            crl_reason = \"CA compromised\";\n            break;\n\n          case GNUTLS_X509_CRLREASON_AFFILIATIONCHANGED:\n            crl_reason = \"affiliation has changed\";\n            break;\n\n          case GNUTLS_X509_CRLREASON_SUPERSEDED:\n            crl_reason = \"certificate superseded\";\n            break;\n\n          case GNUTLS_X509_CRLREASON_CESSATIONOFOPERATION:\n            crl_reason = \"operation has ceased\";\n            break;\n\n          case GNUTLS_X509_CRLREASON_CERTIFICATEHOLD:\n            crl_reason = \"certificate is on hold\";\n            break;\n\n          case GNUTLS_X509_CRLREASON_REMOVEFROMCRL:\n            crl_reason = \"will be removed from delta CRL\";\n            break;\n\n          case GNUTLS_X509_CRLREASON_PRIVILEGEWITHDRAWN:\n            crl_reason = \"privilege withdrawn\";\n            break;\n\n          case GNUTLS_X509_CRLREASON_AACOMPROMISE:\n            crl_reason = \"AA compromised\";\n            break;\n        }\n\n        failf(data, \"Server certificate was revoked: %s\", crl_reason);\n        break;\n      }\n\n      default:\n      case GNUTLS_OCSP_CERT_UNKNOWN:\n        failf(data, \"Server certificate status is unknown\");\n        break;\n      }\n\n      gnutls_ocsp_resp_deinit(ocsp_resp);\n\n      return CURLE_SSL_INVALIDCERTSTATUS;\n    }\n    else\n      infof(data, \"  server certificate status verification OK\");\n  }\n  else\n    infof(data, \"  server certificate status verification SKIPPED\");\n\n```\n\n## Steps To Reproduce:\nI have set up a test site, so please try it out.\nOCSP stapling status response is configured to return \"unauthorized (6).\"\n\n  1. Prepare curl with GnuTLS  backend.\n  2. curl https://ocsp4test.sytes.net:4433 --cert-status\n\nAn error will occur if the TLS backend is OpenSSL.\n\nI noticed while researching that starting from GnuTLS 3.1.2, OCSP stapling is enabled by default with gnutls_init. As a result, whether you specify --cert-status or not, the behavior remains the same (currently, in the curl source code, it is not possible to disable OCSP stapling).\nhttps://www.gnutls.org/manual/html_node/Session-initialization.html\n\n## Impact\n\nBypassing OCSP verification.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2024-10-11T05:50:11.833Z",
+  "allow_singular_disclosure_after": -49114321.44329946,
+  "singular_disclosure_allowed": true,
+  "vote_count": 36,
+  "voters": [
+    "aboalezz",
+    "selmelc",
+    "zy9ard3",
+    "thalaivar304",
+    "ahmed_xyz",
+    "cyborg_m",
+    "dipeshxd",
+    "garvkataria",
+    "sifouone",
+    "kghost97",
+    "and 26 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

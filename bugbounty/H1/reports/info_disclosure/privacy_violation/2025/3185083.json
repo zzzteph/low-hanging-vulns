@@ -1,0 +1,136 @@
+{
+  "id": 3185083,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMTg1MDgz",
+  "url": "https://hackerone.com/reports/3185083",
+  "title": "Connection Count Bug in Monero Node Enables Outbound Peer Reset Attack",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2025-06-10T02:55:33.988Z",
+  "submitted_at": "2025-06-10T02:55:34.082Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "yulge",
+    "url": "/yulge",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-05-06T17:11:17.921Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-06T17:11:17.573Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nWe disclosed a vulnerability that could cause all outbound connections of a Monero node to be dropped. The vulnerability exploits a flaw in how the Monero node incorrectly counts the number of current outbound connections. An attacker can take advantage of this flaw to trick the node into mistakenly believing it has exceeded the outbound connection maximum limit, prompting it to actively disconnect legitimate outbound connections.\n\n## Releases Affected:\n\n  * Versions v0.18.4.0 and earlier. \n\n## Attack Mechanism: \n\nA Monero node may disconnect outbound connections for reasons such as executing [update_sync_search](https://github.com/monero-project/monero/commit/eef164f7cc805ecf1881812cebb972ad0ce58edb) every 101 seconds, or when an outbound connection times out waiting for response to Timed Sync request. After disconnecting an outgoing connection, the Monero node checks whether the current number of outgoing connections (calculated in real-time by the `get_outgoing_connections_count` function) is below the outgoing connection maximum limit (default: 12). If so, it will attempt to establish a new outgoing connection. When attempting to establish a new outgoing connection, the Monero node will first disconnect existing connections if the outgoing connection maximum limit is exceeded, randomly dropping one from all active outgoing connections. \n\nHowever, **when the Monero node calculates the current number of outgoing connections** (computed once per second in the `mPeersLoggerThread` thread), **it counts both fully-handshaked outgoing connections and temporary outgoing connections created solely for sending Ping requests.**\n\nThis counting mechanism enables a potential attack. An attacker can flood the target node with numerous Handshake requests, each originating from a different IP address. Each incoming Handshake request forces the target node to initiate a new outgoing connection to the attacker's IP in order to send Ping request. This causes the target node's calculated outgoing connection count to significantly exceed the outbound connection maximum limit, triggering random disconnection of existing outbound connections (including legitimate fully-handshaked ones). We classify this attack as a Handshake Flood attack.\n\nTherefore, the following situation may occur:\n\n(1) The target node disconnects from one outbound connection due to `update_sync_search` or a timeout waiting for a Timed Sync response.\n\n(2) While the target node updates the number of outbound connections every second in the `mPeersLoggerThread` thread, the attacker is performing Handshake Flood attack. As a result, the updated `m_current_number_of_out_peers` greatly exceeds the outbound connection maximum limit.\n\n(3) When the attacker is not executing a Handshake Flood attack, the target node runs its periodic `connections_maker()` function (triggered every second). Since the node's real-time calculated outgoing connections remain below the outbound connection maximum limit, it will proceed to establish new outgoing connections.\n\n(4) When the target node attempts to establish new outgoing connections, its `try_to_connect_and_handshake_with_new_peer()` function evaluates the current outgoing connection count (`m_current_number_of_out_peers`) as exceeding the maximum limit. This triggers disconnection of legitimate fully-handshaked outgoing connections. Since the `connections_maker()` function invokes `try_to_connect_and_handshake_with_new_peer()` multiple times, this results in multiple legitimate outbound connections being disconnected.\n\nFrom the above description, it's evident that the attacker cannot sustain the Handshake Flood attack continuously. Otherwise, in step (3), the target node would never detect its real-time outgoing connections as being below the maximum limit, thus preventing subsequent attack phases.\n\n## Steps To Reproduce:\n\nAn attack was carried out on a controllable target node running version v0.18.4.0. The target machine was equipped with a 4-core CPU and 13 GB of RAM.\n\nA Handshake Flood attack was launched using 1,000 IP addresses. Each of these IPs sent Handshake requests to the controllable node, while also monitoring incoming connections and Ping requests from the node, accepting incoming connections and responding to Ping requests accordingly.\n\nAfter completing the Handshake Flood attack, the program sleeps for 5 seconds to give the controllable node an opportunity, as described in step (3) of the attack mechanism to assess that the real-time current number of outbound connections is below the limit. This attack process is then repeated.\n\n## Supporting Material/References:\nWe modified the target node’s source code to log the number of outbound connections obtained in the `get_outgoing_connections_count()` function, the number of outbound connections obtained in the `mPeersLoggerThread` thread, and to record when connections are dropped in `try_to_connect_and_handshake_with_new_peer()` due to exceeding the limit.\n\nThe log of the target node is provided in the attached `bitmonero.log` file. After approximately three minutes of attack (from 12:05 to 12:08 on June 9, 2025), the target node disconnected all outbound connections.\n\nA portion of the typical logs during the attack is shown below:\n\n```c++\n2025-06-09 12:05:54.472\tI in mPeersLoggerThread, Update m_current_number_of_out_peers: 12\n// -! Step (1) in the attack mechanism: the target node disconnects from one outbound connection\n2025-06-09 12:05:54.972\tI in get_outgoing_connections_count(), out conn count is : 11\n2025-06-09 12:05:54.972\tI in get_outgoing_connections_count(), out conn count is : 11\n2025-06-09 12:05:54.973\tI in get_outgoing_connections_count(), out conn count is : 11\n2025-06-09 12:05:54.973\tI in get_outgoing_connections_count(), out conn count is : 11\n2025-06-09 12:05:54.996\tI in get_outgoing_connections_count(), out conn count is : 11\n2025-06-09 12:05:54.996\tI in get_outgoing_connections_count(), out conn count is : 11\n2025-06-09 12:05:54.997\tI in get_outgoing_connections_count(), out conn count is : 11\n2025-06-09 12:05:55.472\tI in mPeersLoggerThread, Update m_current_number_of_out_peers: 11\n2025-06-09 12:05:55.998\tI in get_outgoing_connections_count(), out conn count is : 11\n2025-06-09 12:05:56.473\tI in mPeersLoggerThread, Update m_current_number_of_out_peers: 11\n2025-06-09 12:05:57.474\tI in mPeersLoggerThread, Update m_current_number_of_out_peers: 11\n2025-06-09 12:05:58.398\tI in get_outgoing_connections_count(), out conn count is : 14\n2025-06-09 12:05:58.400\tI in get_outgoing_connections_count(), out conn count is : 14\n2025-06-09 12:05:58.401\tI in get_outgoing_connections_count(), out conn count is : 14\n2025-06-09 12:05:58.480\tI in mPeersLoggerThread, Update m_current_number_of_out_peers: 26\n2025-06-09 12:05:59.414\tI in get_outgoing_connections_count(), out conn count is : 211\n2025-06-09 12:05:59.423\tI in get_outgoing_connections_count(), out conn count is : 213\n2025-06-09 12:05:59.431\tI in get_outgoing_connections_count(), out conn count is : 213\n2025-06-09 12:05:59.585\tI in mPeersLoggerThread, Update m_current_number_of_out_peers: 214\n2025-06-09 12:06:00.433\tI in get_outgoing_connections_count(), out conn count is : 278\n2025-06-09 12:06:00.435\tI in get_outgoing_connections_count(), out conn count is : 276\n2025-06-09 12:06:00.463\tI in get_outgoing_connections_count(), out conn count is : 278\n// -! Step (2) in the attack mechanism: While the target node updates the number of outbound connections every second in the `mPeersLoggerThread` thread, the attacker is performing Handshake Flood attack. As a result, the updated `m_current_number_of_out_peers` greatly exceeds the outbound connection maximum limit.\n2025-06-09 12:06:00.585\tI in mPeersLoggerThread, Update m_current_number_of_out_peers: 362\n2025-06-09 12:06:01.464\tI in get_outgoing_connections_count(), out conn count is : 11\n2025-06-09 12:06:01.464\tI in get_outgoing_connections_count(), out conn count is : 11\n2025-06-09 12:06:01.464\tI in get_outgoing_connections_count(), out conn count is : 11\n// -! Step (3) in the attack mechanism: When the attacker is not executing a Handshake Flood attack, the target node runs its periodic `connections_maker()` function (triggered every second). Since the node's real-time calculated outgoing connections remain below the outbound connection maximum limit, it will proceed to establish new outgoing connections.\n2025-06-09 12:06:01.464\tI in get_outgoing_connections_count(), out conn count is : 11\n// -! Step (4) in the attack mechanism: When the target node attempts to establish new outgoing connections, its `try_to_connect_and_handshake_with_new_peer()` function evaluates the current outgoing connection count (`m_current_number_of_out_peers`) as exceeding the maximum limit. This triggers disconnection of legitimate fully-handshaked outgoing connections. \n2025-06-09 12:06:01.471\tI in try_to_connect_and_handshake_with_new_peer, current out count 362 is more than 12, del_out_connections\n2025-06-09 12:06:01.477\tI in try_to_connect_and_handshake_with_new_peer, current out count 361 is more than 12, del_out_connections\n2025-06-09 12:06:01.484\tI in try_to_connect_and_handshake_with_new_peer, current out count 360 is more than 12, del_out_connections\n2025-06-09 12:06:01.485\tI in get_outgoing_connections_count(), out conn count is : 8\n2025-06-09 12:06:01.485\tI in get_outgoing_connections_count(), out conn count is : 8\n2025-06-09 12:06:01.485\tI in try_to_connect_and_handshake_with_new_peer, current out count 359 is more than 12, del_out_connections\n2025-06-09 12:06:01.486\tI in try_to_connect_and_handshake_with_new_peer, current out count 358 is more than 12, del_out_connections\n2025-06-09 12:06:01.486\tI in try_to_connect_and_handshake_with_new_peer, current out count 357 is more than 12, del_out_connections\n2025-06-09 12:06:01.487\tI in get_outgoing_connections_count(), out conn count is : 5\n2025-06-09 12:06:01.586\tI in mPeersLoggerThread, Update m_current_number_of_out_peers: 5\n2025-06-09 12:06:02.487\tI in get_outgoing_connections_count(), out conn count is : 5\n2025-06-09 12:06:02.587\tI in mPeersLoggerThread, Update m_current_number_of_out_peers: 5\n2025-06-09 12:06:03.488\tI in get_outgoing_connections_count(), out conn count is : 5\n2025-06-09 12:06:03.488\tI in get_outgoing_connections_count(), out conn count is : 5\n2025-06-09 12:06:03.488\tI in get_outgoing_connections_count(), out conn count is : 5\n```\n\nThe specific source code modifications are as follows:\n\n1. log the number of outbound connections obtained in the `get_outgoing_connections_count()` function\n\n   ```c++\n   mPeersLoggerThread.reset(new boost::thread([&]()\n   {\n     //......\n     zone.second.m_current_number_of_in_peers = number_of_in_peers;\n     zone.second.m_current_number_of_out_peers = number_of_out_peers;\n     MGINFO(\"in mPeersLoggerThread, Update m_current_number_of_out_peers: \" << zone.second.m_current_number_of_out_peers);\t//add this code\n     //......\n   })); // lambda\n   ```\n   \n2. log the number of outbound connections obtained in the `mPeersLoggerThread` thread\n\n   ```c++\n   else if (zone.m_current_number_of_out_peers > zone.m_config.m_net_config.max_out_connection_count)\n   {\n     MGINFO(\"in try_to_connect_and_handshake_with_new_peer, current out count \" << zone.m_current_number_of_out_peers << \" is more than 12, del_out_connections\");\t//add this code\n     zone.m_net_server.get_config_object().del_out_connections(1);\n     --(zone.m_current_number_of_out_peers); // atomic variable, update time = 1s\n     return false;\n   }\n   ```\n   \n3. record when connections are dropped in `try_to_connect_and_handshake_with_new_peer()` due to exceeding the limit\n\n   ```c++\n   size_t node_server<t_payload_net_handler>::get_outgoing_connections_count(network_zone& zone)\n   {\n   //......\n   MGINFO(\"in get_outgoing_connections_count(), out conn count is : \"<< count);\t//add this code\n   return count;\n   }\n   ```\n\n## Housekeeping\n\nXMR Address: 44srHrZEhspX1k1f7jvFBB6XBnEUvEJNnD455cRBSPvxKupT8YDFuibgAow7AMmFzGfiyiXhBbm7nSWJdMiWhZsNCA6oP3w\n\n## Impact\nAn attacker with a large number of IPs ( for example, 1,000 IPs) can disconnect many outgoing connections of a node. Combined with the peerlist occupation method in the ndss2025 paper [\"Eclipse attack on menero's peer to peer network\"](https://www.ndss-symposium.org/wp-content/uploads/2025-95-paper.pdf), attackers can occupy the outgoing connections of a node.\n\n## Mitigating factors\n\nWhen calculating the current number of outgoing connections, only the fully-handshaked outgoing connections are counted.\n\n## Impact\n\nAn attacker with a large number of IPs ( for example, 1,000 IPs) can disconnect many outgoing connections of a node. Combined with the peerlist occupation method in the ndss2025 paper [\"Eclipse attack on menero's peer to peer network\"](https://www.ndss-symposium.org/wp-content/uploads/2025-95-paper.pdf), attackers can occupy the outgoing connections of a node.",
+  "weakness": {
+    "id": 46,
+    "name": "Privacy Violation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4433021,
+      "file_name": "bitmonero.log",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/j50s3f3xr3thw5jucv0s4rfzwwus?response-content-disposition=attachment%3B%20filename%3D%22bitmonero.log%22%3B%20filename%2A%3DUTF-8%27%27bitmonero.log&response-content-type=text%2Fx-log&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ4KOTUZJ%2F20260506%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260506T173442Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjENf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQD%2FeVVRipA8fSYTc8Btsyufr9HqHFaXAyMhTP5L6GSOowIhANtwuuNluHziYAaQY1wVIzLHTl00OF7W9fBZPj3FSo6YKroFCKD%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5Igy1B0xC7HQ82O81uyMqjgXPifVD8%2B1OM1a9zd2NlOAAv3PcUR7VsEJ8ROefK5Ijh5w3CPYS4CJTNAccFVK%2FWOQygcoqn4IqICukjPuEXlmEdj2KECIvedYFTrEo%2FvVLVOmN%2FQeH0foj34RSiCA%2FAHLf%2FyCVXcFSdqUHztRBnyiFJyOrTZpDCEKYsjl1qtMHbRhfo%2FQu27Hxxsfq30C3IdrgvHPjMIhPGQ9jJcrF5smIvv30pdU8KIRXB5Uk1%2FBgh6p9bNuuf38b6QEo5zuDbYcOcUEj5ORNZFI8UOoswPkfT0b11%2FASqmD4qPDAYGti65GwjtiyJ64n4fefXDlxATr5LApliPGGalZXXbnGRK9CWcUr7%2BsaqlGF1ayRGswV8CLz6HfQxuq1QVrdWU9l59vIqvcbGT5Y7lE0I6Qhdnp%2FQbx7iSGTHwxT8LYBT9%2FmD7YKAoDAHEG8%2FL2XKHWdmBC82nMGTzG%2BXueopuqdsf4kPVeMHWZvy6e9q%2Bg6LqoMhvOgNElqMjMDKOh9oN5GdS1WRL1Rso%2B0bzhDFY9UPXo8rqJVWJQmZQwfys6tRSU66J4iXEqkO8MMXKjhNA9tM6y4oGf8t87C3dfUlNofaJhHe51xfKtoC6V%2Bw3P0rPJQaVrefMF8iIxQwki9eN0OI0v4ExVkp6qcZ4g5w%2BPbXXxYzASesrEw%2BCMzKt2d4ymVeo57ICOKVsZ3SAzt5GsRQTNDARczSczuj8dZMGCRfM%2BXKTWq2ycduh4IqIQD6Uzx9MW3RGFWqt2O0DFzW37hV5QnGf26YUNQTt9ahfOs8lmQAOuzR4ne2HEBFvkP1xaH1%2FDwPancbbWw%2BWBi0Qizx4A5y3zNWckZiq15p7fxliblNPrXFc0jAD1AUBLoDQgw9qntzwY6sAFF2LMEPvQ1PpClHLalL147K3uYcKbfAa%2BJCRPERw65PLNWPcV71rS2o2icAHQ%2BAb0LjlaK%2F2tyEVyDIeNwqLXSfQ8AIWITBr4W%2BRvALJ6vqjmKHfzRUAVKLkHvsI4NNeNXQO18Pu2huXoXl3dpSafokbTH8%2Bvf421Tp8mkO8nbX9Myf0vuGMhODoaORyYtJ6Jy%2F3H7szJn8Us4L5887DJeNL73gUpSZY2%2FxCFu%2BUWMKQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=42cbaf8dc4765f82f38aad9f4dd8dbd45c255cd700bc667b7b09cce17d3631e0",
+      "file_size": 141493,
+      "type": "text/x-log",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-05-06T17:11:17.724Z",
+  "allow_singular_disclosure_after": -1405.064351111,
+  "singular_disclosure_allowed": true,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "id": 706051,
+      "category": "researcher",
+      "content": "An attacker can exploit this  vulnerability to control all outgoing connection of the victim nodes and do further attacking.\nFor example,\n(1) For the node with the upper limit of incoming connections, the attacker can do eclipse attacks successfully.\n(2) For the node without  the upper limit of incoming connections, the attaker can infer the originating transaction of the victim nodes when the nodes are in fluff status.",
+      "updated_at": "2025-06-10T13:34:30.417Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 3296686,
+        "username": "yulge",
+        "name": "YuL Ge",
+        "bio": "",
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": "",
+        "created_at": "2024-07-09T06:50:33.894Z",
+        "url": "https://hackerone.com/yulge",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "hacker",
+        "profile_picture_urls": {
+          "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "medium": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "xtralarge": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+        }
+      }
+    }
+  ]
+}

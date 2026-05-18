@@ -1,0 +1,134 @@
+{
+  "id": 1103258,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMTAzMjU4",
+  "url": "https://hackerone.com/reports/1103258",
+  "title": "Stored DOM XSS via Mermaid chart",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2021-02-14T17:05:15.273Z",
+  "submitted_at": "2021-02-14T17:05:15.425Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "taraszelyk",
+    "url": "/taraszelyk",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 264,
+    "url": "https://hackerone.com/gitlab",
+    "handle": "gitlab",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "GitLab",
+      "twitter_handle": "gitlab",
+      "website": "https://about.gitlab.com",
+      "about": "A single application for the entire software development lifecycle."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2021-07-12T23:00:30.698Z",
+  "bug_reporter_agreed_on_going_public_at": "2021-07-12T23:00:30.523Z",
+  "team_member_agreed_on_going_public_at": "2021-07-12T22:51:14.032Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Prologue\n\nGitlab supports Mermaid as part of GFM to allow users to generate diagrams and flowcharts from text.\n\nIn version 8.6.0, Mermaid added a support of directives to add more control over styles(themes) applied to the diagrams.\n\nYou can read more about how this works here: https://mermaid-js.github.io/mermaid/#/directives\n\nSyntax for declaring the directive is `%%{init: {<JSON_OBJECT>}}%%`\n\nDirectives can be used to overwrite default theme properties like `fontFamily` or `fontSize` to the graph.\n\nBehind the scenes, library takes `JSON_OBJECT` from directive and merges it with config object. Later that config is used to generate new CSS rules:\n\n```\n  let userStyles = '';\n  // user provided theme CSS\n  if (cnf.themeCSS !== undefined) {\n    userStyles += `\\n${cnf.themeCSS}`;\n  }\n  // user provided theme CSS\n  if (cnf.fontFamily !== undefined) {\n    userStyles += `\\n:root { --mermaid-font-family: ${cnf.fontFamily}}`;\n  }\n  // user provided theme CSS\n  if (cnf.altFontFamily !== undefined) {\n    userStyles += `\\n:root { --mermaid-alt-font-family: ${cnf.altFontFamily}}`;\n  }\n```\n\n## Vulnerability description\n\nProblem is that there is no sanitization of user-supplied values, which are added to `style` tag via `innerHTML` method afterwards:\n```\n  const stylis = new Stylis();\n  const rules = stylis(`#${id}`, getStyles(graphType, userStyles, cnf.themeVariables));\n\n  const style1 = document.createElement('style');\n  style1.innerHTML = rules;\n  svg.insertBefore(style1, firstChild);\n```\n\nThis leads to Cross-Site Scripting attack via following directive:\n```\n%%{init: { 'fontFamily': '\\\"></style><img src=x onerror=alert(document.cookie)>'} }%%\n```\n## Steps to reproduce\n\n1. Create an issue in any repository\n2. Create mermaid diagram with following payload:\n```\n%%{init: { 'fontFamily': '\\\"></style><img src=x onerror=alert(document.cookie)>'} }%%\nsequenceDiagram\nAlice->>Bob: Hi Bob\nBob->>Alice: Hi Alice\n```\n\n3. Save the issue. XSS will be triggered every time a user opens a page with this issue.\n\n## PoC\nVisit https://gitlab.com/bugbountyuser1/asdf/-/issues/3\nYou will see CSP errors in the console. \n\n{F1195539}\n\n## What is the current *bug* behavior?\n\nMermaid fails to properly sanitize user-supplied input via directive which leads to XSS.\n\n## What is the expected *correct* behavior?\n\nMermaid strips/encodes malicious characters, so there is no way to perform XSS attack.\n\n## Output of checks\n\nThis vulnerability was tested on gitlab.com. CSP blocks XSS from executing, but I have an idea on how to bypass CSP.\nOn a local Gitlab instance with a newer version(same as gitlab.com) of Mermaid, it works too.\n\n### Results of GitLab environment info\n\n(For installations with omnibus-gitlab package run and paste the output of:\n`sudo gitlab-rake gitlab:env:info`)\n\n(For installations from source run and paste the output of:\n`sudo -u git -H bundle exec rake gitlab:env:info RAILS_ENV=production`)\n\n## Impact\n\nThe Impact is standard as for any Stored XSS. User interaction is minimal - the user needs to navigate to a page with a Mermaid chart(issues page, etc). CSP is blocking XSS on gitlab.com, but I can work on XSS bypass if it is needed to show the impact/increase bounty amount. So let me know if you need CSP bypass too.",
+  "bounty_amount": "3000.0",
+  "formatted_bounty": "$3,000",
+  "weakness": {
+    "id": 62,
+    "name": "Cross-site Scripting (XSS) - Stored"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 1195539,
+      "file_name": "2021-02-14_19-00.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/2a2fct4tbhdvjgxnnl5vhivj6ifz?response-content-disposition=attachment%3B%20filename%3D%222021-02-14_19-00.png%22%3B%20filename%2A%3DUTF-8%27%272021-02-14_19-00.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3SRQEQ2G%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T172813Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJIMEYCIQC8trxOBkRyeWxuwKXmPrwzPfZm5ZZfGVSVL8V0L0M6CAIhAIv5HWjy6PTK5yddX5QM%2BMaAXMlZrgSK6xtnra38chPKKrEFCEEQAxoMMDEzNjE5Mjc0ODQ5IgyYu4mDXlQcYgnPmd4qjgUwJwdE%2BKknl%2F070UDCBh4gXsyc27fwfXC1RfXK5CJACZkvLYB8ijoZo%2FrcxRSt%2BnmCo8bsGZ0AOXrDRGf25%2Fl%2BZnSZIJDjJrPd7adHAuATaUTDyfyFzs16MhZZqEPbdlxeeVi%2BYecEAs9LerYo6IF8HeP84da%2Bjv%2BoUV5ezlo%2FbFuPPyMEEuXWEj1UVK%2Be%2BCtXShU43baYOBBmDU9iwOINYFfwzHdllJ%2FGfkKXSufTBm61bZryuJhbENpL%2FGncc1OlU6GdQgXrOf6UxJpathpF0EXhBXbXMJmne3f3PAn3%2BP7D%2FYHVAyKtzyMeUZ94%2FIigAjGuuE30abfaiVYeXf83%2FteoSDq4fNUD7I%2B9xo7jN4fFxx9JHp9IOhUbRULNXJkdUhOnAWfJyGN3xhjWtbHMgoa5XGaghDDdC9cOjPIM6zlMbar1BE5EcjCUvk6ZHnCAk%2FY16Zcg5fV9zxKOSFK%2FlT1AkAyqJiz1yXldnWVew8p97Q7h2bolJrWPQ8VMMdKVEXRuLLO3SiCGkDTFLbP6%2FrnhM8bRvEaHLmcXnz1EryqmkrsJOF%2FsqyjHe7cwZz66Szze0RXl%2BK48zCUh%2B51ejT0PGG9QH8P%2F1m71Nm67zBGjtYZU5yYbqopLkQvbbL7K5WSUSX235jrD82c9evDZkXjGJbQkmyVZpR%2BfEL7o9oLkdt7Hfe1cpxvPmJBtOMcFYrwvyou6Nik2h%2BpWch6xDhLickafP6u21QAh5736VrTVOFoyBUBZ5Y9GYyR3vQUFCnhXZIZEO1xtT3t%2BRp5Qm33c7%2BFUSj1xTRQGattxBX6VqTcY4PlW0TDKDepx%2FH8oZNJr8hIInS3pFFBmCZTNT9GGpGP%2B3eqd%2BxCJZqUw6bXYzwY6sAE4jkgX8hyFM7e%2FF9WSHuTIZUVwCx691VaEjEMLcXZFrfz2%2BuQdof96%2BMSumM6gf48UAO6Efa3OF1y4QKpW9HTmXRX7lZc2gZY6OaH58av4yPt%2F8YlJJ9k%2FK8mB0Ao%2BeyTnmwAiO4Ii0JuziBFHkoHOw2F898CA5%2FPbwyyhfbnhwREyrdlpsla9hVoLxmarroU5iSVlWVRyqP%2Bp%2BAMoKczMvELvoMgwgkcY59R7MR%2Fvyg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b34c99cfa3d2bf59a1a699e0784d8a9d826fbb9247232b80e71629dcd41866ef",
+      "file_size": 174880,
+      "type": "image/png",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 27,
+  "voters": [
+    "5h4l",
+    "n1m0",
+    "xenx",
+    "bombon",
+    "osman1337",
+    "iambouali",
+    "ali",
+    "imranhudaa",
+    "akashhamal0x01",
+    "h4x0r_dz",
+    "and 17 more..."
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18138,
+    "asset_type": "URL",
+    "asset_identifier": "gitlab.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

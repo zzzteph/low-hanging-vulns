@@ -1,0 +1,118 @@
+{
+  "id": 511317,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC81MTEzMTc=",
+  "url": "https://hackerone.com/reports/511317",
+  "title": "Potential use-after-free due to struct array_entry_t lacking an explicit copy constructor",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2019-03-17T16:55:25.401Z",
+  "submitted_at": "2019-03-17T16:55:25.401Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "guido",
+    "url": "/guido",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/002/983/e55b0b2324777fb7efc2de4212fd8d337ca816bd_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2019-05-10T20:02:23.754Z",
+  "bug_reporter_agreed_on_going_public_at": "2019-04-10T20:02:20.346Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "```struct array_entry_t``` in ```contrib/epee/include/storages/portable_storage_base.h``` does not implement a copy constructor.\n\nWherever there is code that attempts to copy-construct ```array_entry_t```, the compiler inserts a copy constructor for ```array_entry_t``` that merely copies over the values.\n\nThe struct possesses an iterator (```mutable typename entry_container<t_entry_type>::type::const_iterator m_it```) which is copied over by the implicit copy constructor (inserted ad-hoc by the compiler).\n\nThis leads to a situation where ```m_it``` points to a different ```m_array_entry```. If that ```m_array_entry``` is deleted, then dereferencing ```m_it``` constitutes a use-after-free bug.\n\n```cpp\n#include <storages/portable_storage_base.h>\n\nint main(void)\n{\n    /* Construct the first array_entry_t */\n    auto ae = new epee::serialization::array_entry_t<uint64_t>;\n\n    /* Insert two values */\n    ae->insert_first_val(111);\n    ae->insert_next_value(999);\n\n    /* Moves the iterator from the first element to the second element. */\n    ae->get_first_val();\n    /* The iterator is now at the value 999 */\n\n    /* Construct a new array_entry_t using the one already created.\n     * Invokes the copy constructor.\n     */\n    auto ae2 = new epee::serialization::array_entry_t<uint64_t>(*ae);\n\n    /* Delete the first array_entry_t */\n    delete ae;\n\n    /* ae2.m_it now still points to the array of the first array_entry_t,\n     * but that array was deleted in the statement above, so dereferencing it\n     * will be a use after free.\n     *\n     * Let's try:\n     */\n\n    auto res = ae2->get_next_val();\n    if ( res != nullptr ) {\n        /* Dereferencing freed pointer (use after free) */\n        printf(\"%zu\\n\", *res);\n    }\n\n    delete ae2;\n\n    return 0;\n}\n```\n\nCompile (from the monero source root path):\n\n```\nclang++ -g -I contrib/epee/include/ poc.cpp -fsanitize=address\n```\n\nNote that the implicit copy constructor is in fact called when serialization is performed using ```epee::serialization::portable_storage::load_from_binary```.\nHowever, I haven't observed an actual use-after-free, hence 'low' severity for this report.\nIn my opinion it is nonetheless something that ought to be addressed because future code dealing with ```array_entry_t``` and its methods could inadvertently lead to use-after-free.\n\nPatch:\n```\nFrom da7c7fe3766777eadd058a4682de5527bc5f5904 Mon Sep 17 00:00:00 2001\nFrom: Guido Vranken <guidovranken@gmail.com>\nDate: Sun, 17 Mar 2019 17:39:37 +0100\nSubject: [PATCH] Implement array_entry_t copy constructor\n\nManually initialize the array_entry_t iterator to ensure it points\nto the correct m_array, thereby preventing a potential use-after-free\nsituation.\n\nSigned-off-by: Guido Vranken <guidovranken@gmail.com>\n---\n contrib/epee/include/storages/portable_storage_base.h | 1 +\n 1 file changed, 1 insertion(+)\n\ndiff --git a/contrib/epee/include/storages/portable_storage_base.h b/contrib/epee/include/storages/portable_storage_base.h\nindex da84fd8e..ca7c81dd 100644\n--- a/contrib/epee/include/storages/portable_storage_base.h\n+++ b/contrib/epee/include/storages/portable_storage_base.h\n@@ -82,6 +82,7 @@ namespace epee\n     struct array_entry_t\n     {\n       array_entry_t():m_it(m_array.end()){}        \n+      array_entry_t(const array_entry_t& other):m_array(other.m_array), m_it(m_array.end()){}\n \n       const t_entry_type* get_first_val() const \n       {\n-- \n2.17.1\n\n\n```\n\n## Impact\n\nUse-after-free; information disclosure, RCE",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2019-05-10T20:02:20.398Z",
+  "allow_singular_disclosure_after": -220227458.07091382,
+  "singular_disclosure_allowed": true,
+  "vote_count": 9,
+  "voters": [
+    "ali",
+    "cryptographer",
+    "odvlv",
+    "t3kk1",
+    "xakerwan",
+    "masterward",
+    "aarohakkinen",
+    "caffeine_",
+    "javier_vel"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

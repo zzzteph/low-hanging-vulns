@@ -1,0 +1,129 @@
+{
+  "id": 706934,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC83MDY5MzQ=",
+  "url": "https://hackerone.com/reports/706934",
+  "title": "Variant of CVE-2013-0269 (Denial of Service and Unsafe Object Creation Vulnerability in JSON)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2019-10-03T05:19:48.551Z",
+  "submitted_at": "2019-10-03T05:19:48.551Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jeremyevans",
+    "url": "/jeremyevans",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7724,
+    "url": "https://hackerone.com/ruby",
+    "handle": "ruby",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/724/bb067434deef370d6a0b16c2cbbc030b57c75e92_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/724/bb067434deef370d6a0b16c2cbbc030b57c75e92_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby",
+      "twitter_handle": "",
+      "website": "https://www.ruby-lang.org",
+      "about": "A Programmer's Best Friend"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2013-0269"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2020-04-23T08:36:22.261Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2020-03-24T08:36:17.096Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "During my recent keyword argument separation work on `rb_scan_args` in the master branch, I discovered what I now think is a vulnerability.\n\nWhile the CVE-2013-0269 change fixed most usage of `JSON.parse`, it ended up not fixing `Kernel#JSON`.  The reason behind this is that internally, in `JSON::Parser#initialize` (in `cParser_initialize` in `ext/json/parser/parser.c`), there is a separate branch taken depending on whether an option hash was provided.  The fix for CVE-2013-026 only fixed one of these branches (when a option hash is provided).  It did not fix the other branch (when no option hash is provided).\n\n`Kernel#JSON` is able to easily hit the case where no option hash is provided, because it does:\n\n```ruby\n  def JSON(object, *args)\n    if object.respond_to? :to_str\n      JSON.parse(object.to_str, args.first)\n```\n\nIn the common case, no extra arguments are provided, and `args.first` is `nil`.  Historically, Ruby has allowed the `rb_scan_args` `:` character to handle a `nil` option hash like no option hash was provided.  This is deprecated in the master branch, and a warning is issued, but it is still supported.\n\nI fixed this in the master branch in the `rb_scan_args` commit, as it was needed to avoid the warning:\nhttps://github.com/ruby/ruby/commit/80b5a0ff2a7709367178f29d4ebe1c54122b1c27#diff-59fb0f5411be4c22009691e1a7f5a185 .  It was only later, when I was going to report this issue upstream that I realized the security implications.\n\nI believe all previously released versions of Ruby since 1.9 (when JSON was included in stdlib) are vulnerable to this. I think this fix should be backported to Ruby 2.4, 2.5, and 2.6, and another CVE issued.\n\nIn addition to `Kernel#JSON`, there are some other vulnerable calls, though they are likely to be less common.\n\nFull example code:\n\n```ruby\n  require 'json'\n\n  class A < Struct.new(:a)\n    def self.json_create(object)\n      new(*object['args'])\n    end\n\n    def to_json(*args)\n      {\n        'json_class'  => self.class.name,\n        'args'        => [ a ],\n      }.to_json(*args)\n    end\n  end\n\n  js = A.new(1).to_json\n  p JSON.parse(js) #=> {\"json_class\"=>\"A\", \"args\"=>[1]}\n  p JSON(js)       #=> #<struct A a=1>\n\n  # Also vulnerable, resulting in #<struct A a=1>\n  p JSON.parse(js, nil)\n  p JSON[js, nil]\n  p JSON::Parser.new(js).parse\n```\n\n## Impact\n\nThis highly depends on the application using in question.  In order to be vulnerable, `Kernel#JSON` or one of the other vulnerable calls must be called with user provided input.\n\nI am not sure this results in denial of service since Ruby 2.2, due to the support of dynamic symbols.  However, I have not analyzed the related JSON code to determine if it creates dynamic or static symbols when `create_additions` is used.\n\nAssuming that `Kernel#JSON` is called with user-provided input, this allows creation of arbitrary objects where there is a named class that has a `json_create` singleton method..  More precisely, this allows calling `json_create` methods on any named constant with arbitrary arguments (assuming the constant returns a true value for `json_createable?`).  Many Ruby applications use libraries that have objects in constants that support `method_missing` and could possibly be vulnerable.  However, I have not done any research into possible exploitability, which is why I listed severity as Medium.\n\nIf any `json/add/*` files have been required, this could possibly be very dangerous, as those can allow the creation of arbitrary core/stdlib objects.  For example `json/add/ostruct` being required, when combined with this vulnerability, allows the creation of arbitrary objects that support attacker-defined methods with attacker-defined values of any type supported by JSON.  `json/add/regexp` allows the creation of arbitrary Regexps which could easily lead to denial of service, and combined with a vulnerability in the regexp engine (Onigmo), could potentially lead to remote code execution.",
+  "bounty_amount": "500.0",
+  "formatted_bounty": "$500",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2020-04-23T08:36:17.166Z",
+  "allow_singular_disclosure_after": -190113747.1100837,
+  "singular_disclosure_allowed": true,
+  "vote_count": 20,
+  "voters": [
+    "a_d_a_m",
+    "iam_a_jinchuriki",
+    "mohaned0101",
+    "thalaivar304",
+    "mik317",
+    "what_web",
+    "b69fb2ebda43240ece9dbeb",
+    "dabyain",
+    "spykid08",
+    "adeeshajayanath",
+    "and 10 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 28212,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/ruby/ruby",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

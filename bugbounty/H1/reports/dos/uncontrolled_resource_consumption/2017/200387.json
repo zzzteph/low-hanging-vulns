@@ -1,0 +1,123 @@
+{
+  "id": 200387,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yMDAzODc=",
+  "url": "https://hackerone.com/reports/200387",
+  "title": "Incorrect code generation with redo inside NODE_RESCUE.",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2017-01-22T18:09:42.398Z",
+  "submitted_at": "2017-01-22T18:09:42.398Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "dgaletic",
+    "url": "/dgaletic",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 15668,
+    "url": "https://hackerone.com/shopify-scripts",
+    "handle": "shopify-scripts",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/015/668/ebbe467de8ef2fc936053593e1289e30f04c3b06_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/015/668/ebbe467de8ef2fc936053593e1289e30f04c3b06_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "shopify-scripts",
+      "twitter_handle": "",
+      "website": "",
+      "about": ""
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2017-02-28T13:30:14.189Z",
+  "bug_reporter_agreed_on_going_public_at": "2017-02-28T13:30:14.146Z",
+  "team_member_agreed_on_going_public_at": "2017-02-27T23:30:32.152Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "The following code causes mruby to use up all available memory:\n\n`class A redo\nrescue c\nend`\n\nFollowing the execution, we see the code in codegen.c jumping between\nCASE(OP_ONERR) and CASE(OP_JMP). CASE(OP_ONERR) uses realloc to double\nthe size of mrb->c->rescue, and since it is stuck in an infinite loop\nbetween the two instructions, it runs out of memory.\n\nThe problematic jump is visible in the bytcode (emphasis added).\n\n00001 NODE_SCOPE:\n00001   NODE_BEGIN:\n00001     NODE_CLASS:\n00003       :A\n00003       body:\n00001         NODE_RESCUE:\n00003           body:\n00001             NODE_BEGIN:\n00001               NODE_REDO\n00003           rescue:\n00003             handle classes:\n00002               NODE_FCALL:\n00002                 NODE_SELF\n00002                 method='c' (670)\n00003             rescue body:\n00003               NODE_BEGIN:\n\nirep 0x715200 nregs=3 nlocals=1 pools=0 syms=1 reps=1\n    1 000 OP_LOADNIL    R1\n    1 001 OP_LOADNIL    R2\n    1 002 OP_CLASS      R1      :A\n    1 003 OP_EXEC       R1      I(+1)\n    1 004 OP_STOP\n\nirep 0x71b400 nregs=4 nlocals=1 pools=0 syms=2 reps=0\n    **1 000 OP_ONERR      003**   <------- Infinite loop\n    **1 001 OP_JMP        000**   <------- created here.\n    1 002 OP_JMP        013\n    1 003 OP_RESCUE     R1\n    2 004 OP_LOADSELF   R2\n    2 005 OP_SEND       R2      :c      0\n    2 006 OP_MOVE       R3      R1\n    2 007 OP_SEND       R2      :===    1\n    2 008 OP_JMPIF      R2      010\n    2 009 OP_JMP        012\n    3 010 OP_LOADNIL    R1\n    3 011 OP_JMP        014\n    3 012 OP_RAISE      R1\n    3 013 OP_POPERR     1\n    3 014 OP_RETURN     R1      return\n\nTesting the same code with MRI Ruby shows that MRI Ruby rejects it as a syntax\nerror. It would seem MRI Ruby forbids the use of `redo` in the context of\n`rescue` so the patch below disallows the related LOOP_* types. The test suite\nruns successfully with the patch. The bug is mitigated inside the mruby-engine\nsandbox because it triggers the instruction quota.\n\n```\n--- a/mrbgems/mruby-compiler/core/codegen.c\n+++ b/mrbgems/mruby-compiler/core/codegen.c\n@@ -2031,7 +2031,7 @@ codegen(codegen_scope *s, node *tree, int val)\n     break;\n \n   case NODE_REDO:\n-    if (!s->loop) {\n+    if (!s->loop || s->loop->type == LOOP_BEGIN || s->loop->type == LOOP_RESCUE) {\n       raise_error(s, \"unexpected redo\");\n     }\n     else {\n```\n",
+  "bounty_amount": "100.0",
+  "formatted_bounty": "$100",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 154258,
+      "file_name": "0001-Fix-incorrect-code-generation-with-redo-inside-NODE_.patch",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/000/154/258/ce6d3f538a4a9f1ce241c078b3eed528a411f0ee/0001-Fix-incorrect-code-generation-with-redo-inside-NODE_.patch?response-content-disposition=attachment%3B%20filename%3D%220001-Fix-incorrect-code-generation-with-redo-inside-NODE_.patch%22%3B%20filename%2A%3DUTF-8%27%270001-Fix-incorrect-code-generation-with-redo-inside-NODE_.patch&response-content-type=text%2Fx-diff&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU57BT6FW%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T193539Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHsaCXVzLXdlc3QtMiJIMEYCIQDCK1q1fF0VXIIDbU1yycMzcZIW03Ivo3VaZLEXWmSB7gIhANRqdBmvGVk1ZTN8FGlpv5dSOTaOLTOiHXsgg8QY6lyPKrEFCEQQAxoMMDEzNjE5Mjc0ODQ5Igxm%2FOlnGcbKV%2BxQc18qjgWdC%2FFC967t1z7arXk9wBuaV%2BaQvpykdIJ5g8TRdMNa2KHnF8fbMZ0n6nXi6FxmMIVuYDvtlrrHe2tAC68fA22Nd%2Fd7xprwG%2BlrD%2FRZ1jvul3p2vfTWrtt6Ou5%2B58D1iMMiSdmEP0Euu3N%2Fc3HZnrG%2BoeUdKJfdIpS9GbWfXYd0S9hX3ZeN0Nx3yLUW%2Bq3TD6tLF54G%2FUD8pYKd31R8IlzaEtl%2FavvT5rutEVHOcGgpsHwecNg2d49J9%2Bc1V7hlXQm6dCJOi%2FV7a67B5UWx5Ef1iP3WqP0Uwj3Tuqg5JorFUXKzqNsb1y3Z6XnwGmECz8PgEpq7lLpjuXt2KsAqYXqMDy7BLafQPrq9kwGTQCPKjPaCfq7xy2%2FpSTJQomqsDayU%2FUdpc6NduvuAglJ7zydNgG2E1rb9QPx1Uo8cf%2BXWrsLIRJYZyYahuWq3RkV%2FS2LU1SVc%2FFpYvGyB6jhIctmsNWpFqMDX5urL0NG5etYlTWQHFMjNrBz4tnaeAvwCEpRv%2BpyduicmODR%2Bw%2FHQT1MbTbBDlHGSV%2B%2BeIRNlCmrAQnnwubKLtr%2FJ7%2B%2Fk5kDk2eABgRfXQiczrwqFSKiqmbYTcioQjWHEYl3kAnufuY8sq7rSHldRaKGiZOrWceiH3CTmf8VbJzuccUy%2FesgPwoh2UE4uurTheMTyu%2BCsOikZE7KyuDl%2FftuXM0%2FELM44qfyd2Se86kmdXEiXUqDY238ppMAXX07zcth%2BXCWUlI9360dJ7Zn%2FvfHIkJANiuzzlyQVUuMHv0mJM5XOGAjr9MKLr4X0o%2BfHeRnvA%2BDCFSTd%2FaJmSmvZUYHylz4a%2FUd8LlTuABK52HjbVb979%2F%2FWpgddChah157HWq9QrPCwUzsw94rZzwY6sAFNsHL3D79EOZaqJGT7fYh%2FEmMMLkmBwB8F8ogCThPMIidVmUvMLuNgn7gsRQRIZgL8qDd1%2FbedvkwUGoPN58jOhCzYTt7X1JL0urTtfvgkMju4torO1QnhX0AhlryAj2JzABJ6955v7ILE%2BKSfIrB8ie%2BoDoiG%2B2GPNfab%2FYjofA%2Bc18sKkkYf%2BAYD5MHtgBfEZqC5QhubYS%2B02HdTEsg2jtHLZGdZdfbZT7IP3iDo2g%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=353cb64e19e0dc16967817639b35ded51d0fd86c5125388a669b049c3ed53dc4",
+      "file_size": 825,
+      "type": "text/x-diff",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2017-03-29T23:30:32.185Z",
+  "allow_singular_disclosure_after": -286920307.49749905,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "eveeez",
+    "spetr0x",
+    "mstuhin23"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

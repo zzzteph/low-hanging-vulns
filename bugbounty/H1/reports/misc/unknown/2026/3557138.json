@@ -1,0 +1,143 @@
+{
+  "id": 3557138,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTU3MTM4",
+  "url": "https://hackerone.com/reports/3557138",
+  "title": "Arbitrary Code Execution via Scanner Bypass in **aws-diagram-mcp-server** `exec()` Namespace",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "none",
+  "readable_substate": "Informative",
+  "created_at": "2026-02-16T08:11:06.487Z",
+  "submitted_at": "2026-02-16T08:11:06.833Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "locus-x64",
+    "url": "/locus-x64",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 84809,
+    "url": "https://hackerone.com/aws_vdp",
+    "handle": "aws_vdp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "AWS VDP",
+      "twitter_handle": "amazon",
+      "website": "https://aws.amazon.com/",
+      "about": "Amazon Web Services (AWS) is a secure cloud services platform, offering compute power and other functionality to help businesses scale and grow. "
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-03-09T15:39:16.320Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-03-09T15:39:15.946Z",
+  "team_member_agreed_on_going_public_at": "2026-03-09T15:34:00.696Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Description:** The `aws-diagram-mcp-server` contains an arbitrary code execution vulnerability in diagrams_tools.py. User-supplied Python code is executed via `exec(code, namespace)` at line 305 with a namespace containing the full `os` module, `urlretrieve`, and Python `__builtins__`. A security scanner (scanner.py) attempts to block dangerous calls using string pattern matching (e.g., blocking literal `os.system`, `exec(`, `eval(`), but this is trivially bypassed using Python reflection such as `getattr(os, 'system')('cmd')`, `os.__dict__['system']('cmd')`, or `open('/etc/passwd').read()`, none of which match the blocked literal patterns. Additionally, `urlretrieve` is injected into the namespace but not blocked at all. The AST-based import validator is sound but irrelevant since dangerous modules are pre-loaded into the exec namespace by the server itself. This allows full shell command execution, arbitrary file read/write, environment variable exfiltration (including AWS credentials), and network access — all running with the privileges of the server process.\n\n## Steps To Reproduce:\n\n1. Clone the repository and install dependencies for the diagram server:\n   ```\n   git clone https://github.com/awslabs/mcp.git && cd mcp/src/aws-diagram-mcp-server\n   uv venv && uv sync --all-groups\n   ```\n\n2. Launch the MCP Inspector connected to the server:\n   ```\n   npx @modelcontextprotocol/inspector uv --directory /path/to/mcp/src/aws-diagram-mcp-server run awslabs.aws-diagram-mcp-server\n   ```\n   Open `http://localhost:6274` in browser, click **Connect**, go to **Tools** tab, click **List Tools**, then select **`generate_diagram`**.\n\n3. In the `code` input field, paste the following payload and click **Run Tool**:\n   ```python\n   getattr(os, 'system')('echo PWNED > /tmp/mcp_poc_proof.txt')\n   with Diagram(\"PoC\", show=False):\n       pass\n   ```\n   Then verify in a terminal: `cat /tmp/mcp_poc_proof.txt` -- it outputs `PWNED`. The scanner does not block this because `getattr(os, 'system')` does not match the literal pattern `os.system` checked in `scanner.py:check_dangerous_functions()`.\n\n4. Additional bypass payloads that also pass the scanner and execute successfully:\n   - **File read:** `open('/etc/hostname').read()` — `open()` is not in the blocked list\n   - **Command capture:** `getattr(os, 'popen')('whoami').read()` — avoids literal `os.popen`\n   - **Env exfil:** `getattr(os, 'environ')` — exposes all environment variables including potential AWS credentials\n   - **Network download:** `urlretrieve('https://example.com', '/tmp/downloaded.html')` — not blocked at all despite being in the exec namespace\n   - **File write:** `open('/tmp/arbitrary_file', 'w').write('attacker content')` — unrestricted write access\n\n## Impact\n\n## Summary\nAn attacker who can influence the `code` parameter sent to the `generate_diagram` tool, either directly as a connected MCP client or indirectly via prompt injection through an LLM, can execute arbitrary operating system commands with the full privileges of the server process. This enables:\n\n- **Credential theft:** Exfiltrating AWS access keys, session tokens, and other secrets from environment variables\n- **Data exfiltration:** Reading arbitrary files from the host filesystem (source code, config files, private keys)\n- **System compromise:** Writing files, installing backdoors, or modifying system configuration\n- **Lateral movement:** Using the server's network access and IAM role to pivot into cloud infrastructure\n- **Denial of service:** Killing processes, deleting files, or exhausting system resources\n\nThe vulnerability is especially dangerous in agentic workflows where users paste untrusted content that the LLM may incorporate into a diagram generation request without human review.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 42,
+  "voters": [
+    "aboalezz",
+    "mohaned0101",
+    "alimuhannad",
+    "2026",
+    "vaib25vicky",
+    "lucasfutures",
+    "2_4-a",
+    "nextb0x",
+    "atrbne",
+    "danimals553",
+    "and 32 more..."
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 753793,
+    "asset_type": "WILDCARD",
+    "asset_identifier": "https://github.com/awslabs/*",
+    "max_severity": "none"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 826526,
+      "category": "team",
+      "content": "This is an informative report is related to a feature that was included in response to previous unrelated feedback in an open source repository. We thank @locus-x64 for this report, and the commitment to the security of AWS customers.",
+      "updated_at": "2026-03-09T15:39:56.560Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 4026306,
+        "username": "bitdumpster",
+        "name": "bitdumpster",
+        "bio": "",
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": "",
+        "created_at": "2025-06-18T11:51:56.029Z",
+        "url": "https://hackerone.com/bitdumpster",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "https://profile-photos.hackerone-user-content.com/variants/nppyxdeqr78gq4d7n8jpy5iusoy6/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+          "medium": "https://profile-photos.hackerone-user-content.com/variants/nppyxdeqr78gq4d7n8jpy5iusoy6/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a",
+          "xtralarge": "https://profile-photos.hackerone-user-content.com/variants/nppyxdeqr78gq4d7n8jpy5iusoy6/4ac84fbe897190579a137d0cf55152b233cdd4f9984435bd80ef67e5e51a0586"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

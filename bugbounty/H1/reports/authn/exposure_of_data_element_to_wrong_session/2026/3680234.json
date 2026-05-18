@@ -1,0 +1,156 @@
+{
+  "id": 3680234,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjgwMjM0",
+  "url": "https://hackerone.com/reports/3680234",
+  "title": "libcurl reuses a learned RTSP Session header across different hosts on the same easy handle, enabling cross-host session leak and replay",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-04-17T14:41:38.194Z",
+  "submitted_at": "2026-04-17T14:41:41.809Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "skksndk",
+    "url": "/skksndk",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-04-18T19:37:36.452Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-04-17T16:04:15.871Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nlibcurl automatically learns RTSP `Session:` headers from server responses and stores them in `data->set.str[STRING_RTSP_SESSION_ID]` in `lib/rtsp.c:1015-1033`. On later RTSP requests using the same easy handle, `rtsp_do()` reads that easy-handle-scoped value at `lib/rtsp.c:373` and unconditionally emits `Session: %s` into the next request at `lib/rtsp.c:513-515`, without any host, port, or origin boundary check. Because the value lives in `data->set` / `struct UserDefined` rather than request-scoped state (`lib/urldata.h:878-883`, `lib/urldata.h:1143`, `lib/urldata.h:1405-1406`), it survives across subsequent RTSP requests to different hosts until manually cleared with `CURLOPT_RTSP_SESSION_ID = NULL` (`lib/setopt.c:2346-2351`) or the easy handle is destroyed (`lib/url.c:156-164`). In the attached PoC, request 1 to a victim RTSP server learns `Session: VICTIM-SESSION-123456`, request 2 to an attacker RTSP server on the same easy handle leaks that value, and a fresh handle can then replay the leaked session back to the victim with `PLAY` successfully accepted. A new-easy-handle control and a manual-clear control both suppress the leak. I reproduced this on curl 8.19.0 / libcurl 8.19.0 on x86_64 Linux and attached a zip with the PoC, logs, and a line-level root-cause note.\n\n## Affected version\nReproduced on:\n`curl 8.19.0 (x86_64-pc-linux-gnu) libcurl/8.19.0 OpenSSL/3.5.5 zlib/1.3.1 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.21.5 libssh2/1.11.1 nghttp2/1.68.1 ngtcp2/1.21.0 nghttp3/1.15.0 librtmp/2.3 mit-krb5/1.22.1 OpenLDAP/2.6.10`\nPlatform:\n`Linux x86_64`\n\n## Steps To Reproduce:\n1. Start the local RTSP harness from the attached PoC directory:\n   `python3 -u rtsp_session_leak_server.py`\n2. Run the attached PoC:\n   `python3 poc_rtsp_session_leak.py`\n3. Observe the base case in the client output:\n   - request 1: `SETUP rtsp://127.0.0.1:18201/media` returns `Session: VICTIM-SESSION-123456`\n   - request 2: `OPTIONS rtsp://127.0.0.1:18202/evil` on the same easy handle sends `Session: VICTIM-SESSION-123456`\n4. Observe the controls:\n   - with a new easy handle for the attacker request, no `Session:` header is sent\n   - after clearing `CURLOPT_RTSP_SESSION_ID` on the reused handle, no `Session:` header is sent\n5. Observe the replay control:\n   - a fresh handle sending `PLAY` to the victim without a session gets `RTSP/1.0 454 Session Not Found`\n   - a fresh handle sending `PLAY` to the victim with the leaked `Session: VICTIM-SESSION-123456` gets `RTSP/1.0 200 OK`\n6. Observe the attached sink-side server log:\n   - attacker receives `{\"role\":\"attacker\",\"method\":\"OPTIONS\",\"session\":\"VICTIM-SESSION-123456\",...}`\n   - victim then receives `{\"role\":\"victim\",\"method\":\"PLAY\",\"session\":\"VICTIM-SESSION-123456\",\"session_ok\":true,...}`\n\n## Line-Level Root Cause\n- The RTSP session identifier is automatically learned from server responses and stored on the easy handle.\n  - `lib/rtsp.c:1015-1033` parses the `Session:` header from RTSP responses.\n  - If `data->set.str[STRING_RTSP_SESSION_ID]` is not already set, `lib/rtsp.c:1031` stores the received value there.\n  - `STRING_RTSP_SESSION_ID` is defined in `lib/urldata.h:955`.\n- That storage is easy-handle scoped, not request scoped.\n  - The `UserDefined` structure in `lib/urldata.h:878-883` is documented as data set once and reused across independent connections.\n  - `data->set` is the easy handle’s `struct UserDefined` in `lib/urldata.h:1405-1406`.\n  - The backing string array is `lib/urldata.h:1143`: `char *str[STRING_LAST];`\n- The stored `Session:` value is then automatically attached to later RTSP requests.\n  - `lib/rtsp.c:373` loads `p_session_id = data->set.str[STRING_RTSP_SESSION_ID];`\n  - `lib/rtsp.c:513-515` emits `Session: %s` whenever that value is present.\n  - There is no host, port, or origin boundary check between the read at line 373 and the emitted header at line 514.\n- The state is not automatically cleared when the RTSP target changes.\n  - The explicit setter/clear path is `lib/setopt.c:2346-2351` via `CURLOPT_RTSP_SESSION_ID`, so applications can clear it manually by setting it to `NULL`, but libcurl does not clear it automatically when switching to a different RTSP host.\n  - The public getter in `lib/getinfo.c:159-161` reads the same field, confirming that the “most recent” RTSP session ID is stored on the handle.\n  - Generic cleanup only happens when the easy handle is destroyed in `lib/url.c:156-164`, where `Curl_freeset()` frees `data->set.str[i]`.\n  - In this tree, references to `STRING_RTSP_SESSION_ID` only appear in the manual setter, getter, RTSP response parse/store path, and RTSP request auto-attach path. There is no pretransfer, host-change, or per-request reset path that clears the field when the RTSP URL changes to a different host or port.\n\n## Impact\n\n## Summary:\nAn attacker-controlled RTSP server contacted later on the same easy handle can receive a `Session:` token that was learned from a different RTSP server. In the attached PoC, that leaked token is replayable: a fresh handle can send `PLAY` back to the victim with the leaked session ID and the victim accepts it, while the same request without the session is rejected with `454 Session Not Found`. This turns the issue from a cross-host RTSP session leak into replayable session control mix-up on reused easy handles.",
+  "weakness": {
+    "id": 700,
+    "name": "Exposure of Data Element to Wrong Session"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5752743,
+      "file_name": "rtsp_session_leak_evidence.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/zzvkr21j27m0qzoyq33sguza5fwq?response-content-disposition=attachment%3B%20filename%3D%22rtsp_session_leak_evidence.zip%22%3B%20filename%2A%3DUTF-8%27%27rtsp_session_leak_evidence.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQV6NUNJUN%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162129Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJHMEUCIQDlsIh5oucLOGFMM90fA86CqAk4zAluUhzc7pqyT2kMjwIgE6EUOFMqocAxZBbTN2BYmz1ZlIAkQ1RlzSQ1QL8ZdIoqsQUIPxADGgwwMTM2MTkyNzQ4NDkiDBceOQSsmetrore2XiqOBWKNFXDn1YyOOacO0OFfmqgJP2gMkzU7TbCBb%2BR6mVFAIwWwvbYXltotAexIliKTGLN1WylF3HKQSOUZdooAa9CkPWK3Y1a7qCpUTfrsCqjl1gonPo5twkpLc95yJ%2FttwvEpWbYAkrt7NwGqgSOogV5XsuJFo%2FWnWSlKzuuLSQdrW%2B%2BTGyzE8UBuIwS28NY%2FLWoklSUmFQcxfASZwdAoyDhTyHW1I2%2BPd548euRtBsiHglP9O%2FbW1oZ7dfh4gnyxxyTlGymFyJlpgTicuZJLoN%2Fxg1v0LeRgYMxKVNbaFHAC9ZGQkzNWUqSCDZxvC%2FW%2FtDOCJoxbDwfrFtNqfJUTdSzTrjIqqqGEMy0stPdILat0GRh86EeVPoJqDyTdQRVcJha%2FgLM1s2EM2cuKEdUxThJdH5TEguKHKF%2FOgsF0in0Z14eK5WhxVNGfRd7roYgyjl2Mo3tuOkg0ij8hKvKmuTs4YyOsVTG1VY5bMAK549noc1JlgqrCFGNadJjOPcFohHv68Ix7Uc3e02fkSBCry973xbD2ia%2FKMehtK45A3%2BGC0uyKgIt%2FBZyCJ06%2FGydNvg75E%2BlhZvUbe5oEt%2FHySRqsVk%2Fd%2FuJsFlm%2FU8w5o2RG3hZIccZDyz3S6HO6d%2BcaHvTQ0qpduPHFGHeOEPpNxfE%2BWVDBW5bAsQbFODUe9XC9V2KFWTrEaGJOyjY5RmJPqZPZUhh1TGrSuRv9%2BJZJtfp9VXsnx8h68Kr4lf1O6WW2FqRLIelaDHp139vJpridOUdVMEUMJpRFZhbFoAXI95eqxGZ%2BCciD7PfTO3D0nLqYZtWrmlcbi7AcWV2KlMEgkf5n22YX2CZA9R9Ilmv%2FFdkg8RQKnFlLbs4JyUePDTDHgdjPBjqxAc1xfk%2FJ48z63MGE%2FlN1sSPctpfqXSI5CLWQ1hhQFoq6Xzh08TAe8yTOOS6z5Nf1YYrjNNPJiTtTTUDDkymh0x7nrgma%2FYoWvWyDX8a0Ac13BE728emfF8vIPMtRRAZVmPxaesDoOx4vbzkC84xVuASE5kwPJz3FFRxq32leFY4IGVrAtB4zmmNQ12W7ss33yl8Zb9AdxrmGIuLiVkGMIGQf1vU3Aca7KkY2%2F0LAcD5M5A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=7623b4ae3aea2749f231002f1181d77e8965ef607d15b45415ee75f4b2a76cb9",
+      "file_size": 7647,
+      "type": "application/zip",
+      "moderated": null
+    },
+    {
+      "id": 5752745,
+      "file_name": "Screenshot_2026-04-17_212201.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bwjtkw2yj6t2c71nusaqdqbdsxsl?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-04-17_212201.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-04-17_212201.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQV6NUNJUN%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162129Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJHMEUCIQDlsIh5oucLOGFMM90fA86CqAk4zAluUhzc7pqyT2kMjwIgE6EUOFMqocAxZBbTN2BYmz1ZlIAkQ1RlzSQ1QL8ZdIoqsQUIPxADGgwwMTM2MTkyNzQ4NDkiDBceOQSsmetrore2XiqOBWKNFXDn1YyOOacO0OFfmqgJP2gMkzU7TbCBb%2BR6mVFAIwWwvbYXltotAexIliKTGLN1WylF3HKQSOUZdooAa9CkPWK3Y1a7qCpUTfrsCqjl1gonPo5twkpLc95yJ%2FttwvEpWbYAkrt7NwGqgSOogV5XsuJFo%2FWnWSlKzuuLSQdrW%2B%2BTGyzE8UBuIwS28NY%2FLWoklSUmFQcxfASZwdAoyDhTyHW1I2%2BPd548euRtBsiHglP9O%2FbW1oZ7dfh4gnyxxyTlGymFyJlpgTicuZJLoN%2Fxg1v0LeRgYMxKVNbaFHAC9ZGQkzNWUqSCDZxvC%2FW%2FtDOCJoxbDwfrFtNqfJUTdSzTrjIqqqGEMy0stPdILat0GRh86EeVPoJqDyTdQRVcJha%2FgLM1s2EM2cuKEdUxThJdH5TEguKHKF%2FOgsF0in0Z14eK5WhxVNGfRd7roYgyjl2Mo3tuOkg0ij8hKvKmuTs4YyOsVTG1VY5bMAK549noc1JlgqrCFGNadJjOPcFohHv68Ix7Uc3e02fkSBCry973xbD2ia%2FKMehtK45A3%2BGC0uyKgIt%2FBZyCJ06%2FGydNvg75E%2BlhZvUbe5oEt%2FHySRqsVk%2Fd%2FuJsFlm%2FU8w5o2RG3hZIccZDyz3S6HO6d%2BcaHvTQ0qpduPHFGHeOEPpNxfE%2BWVDBW5bAsQbFODUe9XC9V2KFWTrEaGJOyjY5RmJPqZPZUhh1TGrSuRv9%2BJZJtfp9VXsnx8h68Kr4lf1O6WW2FqRLIelaDHp139vJpridOUdVMEUMJpRFZhbFoAXI95eqxGZ%2BCciD7PfTO3D0nLqYZtWrmlcbi7AcWV2KlMEgkf5n22YX2CZA9R9Ilmv%2FFdkg8RQKnFlLbs4JyUePDTDHgdjPBjqxAc1xfk%2FJ48z63MGE%2FlN1sSPctpfqXSI5CLWQ1hhQFoq6Xzh08TAe8yTOOS6z5Nf1YYrjNNPJiTtTTUDDkymh0x7nrgma%2FYoWvWyDX8a0Ac13BE728emfF8vIPMtRRAZVmPxaesDoOx4vbzkC84xVuASE5kwPJz3FFRxq32leFY4IGVrAtB4zmmNQ12W7ss33yl8Zb9AdxrmGIuLiVkGMIGQf1vU3Aca7KkY2%2F0LAcD5M5A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e8313164a263ef76ac620d4c083e119e8506669e57f78c9dfc3894c742acc694",
+      "file_size": 250642,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5752746,
+      "file_name": "Screenshot_2026-04-17_212218.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/h7hb0jlrj4r8b8pumzqeob6fsjvq?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-04-17_212218.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-04-17_212218.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQV6NUNJUN%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162129Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJHMEUCIQDlsIh5oucLOGFMM90fA86CqAk4zAluUhzc7pqyT2kMjwIgE6EUOFMqocAxZBbTN2BYmz1ZlIAkQ1RlzSQ1QL8ZdIoqsQUIPxADGgwwMTM2MTkyNzQ4NDkiDBceOQSsmetrore2XiqOBWKNFXDn1YyOOacO0OFfmqgJP2gMkzU7TbCBb%2BR6mVFAIwWwvbYXltotAexIliKTGLN1WylF3HKQSOUZdooAa9CkPWK3Y1a7qCpUTfrsCqjl1gonPo5twkpLc95yJ%2FttwvEpWbYAkrt7NwGqgSOogV5XsuJFo%2FWnWSlKzuuLSQdrW%2B%2BTGyzE8UBuIwS28NY%2FLWoklSUmFQcxfASZwdAoyDhTyHW1I2%2BPd548euRtBsiHglP9O%2FbW1oZ7dfh4gnyxxyTlGymFyJlpgTicuZJLoN%2Fxg1v0LeRgYMxKVNbaFHAC9ZGQkzNWUqSCDZxvC%2FW%2FtDOCJoxbDwfrFtNqfJUTdSzTrjIqqqGEMy0stPdILat0GRh86EeVPoJqDyTdQRVcJha%2FgLM1s2EM2cuKEdUxThJdH5TEguKHKF%2FOgsF0in0Z14eK5WhxVNGfRd7roYgyjl2Mo3tuOkg0ij8hKvKmuTs4YyOsVTG1VY5bMAK549noc1JlgqrCFGNadJjOPcFohHv68Ix7Uc3e02fkSBCry973xbD2ia%2FKMehtK45A3%2BGC0uyKgIt%2FBZyCJ06%2FGydNvg75E%2BlhZvUbe5oEt%2FHySRqsVk%2Fd%2FuJsFlm%2FU8w5o2RG3hZIccZDyz3S6HO6d%2BcaHvTQ0qpduPHFGHeOEPpNxfE%2BWVDBW5bAsQbFODUe9XC9V2KFWTrEaGJOyjY5RmJPqZPZUhh1TGrSuRv9%2BJZJtfp9VXsnx8h68Kr4lf1O6WW2FqRLIelaDHp139vJpridOUdVMEUMJpRFZhbFoAXI95eqxGZ%2BCciD7PfTO3D0nLqYZtWrmlcbi7AcWV2KlMEgkf5n22YX2CZA9R9Ilmv%2FFdkg8RQKnFlLbs4JyUePDTDHgdjPBjqxAc1xfk%2FJ48z63MGE%2FlN1sSPctpfqXSI5CLWQ1hhQFoq6Xzh08TAe8yTOOS6z5Nf1YYrjNNPJiTtTTUDDkymh0x7nrgma%2FYoWvWyDX8a0Ac13BE728emfF8vIPMtRRAZVmPxaesDoOx4vbzkC84xVuASE5kwPJz3FFRxq32leFY4IGVrAtB4zmmNQ12W7ss33yl8Zb9AdxrmGIuLiVkGMIGQf1vU3Aca7KkY2%2F0LAcD5M5A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=4f1b95d332e4a2330398c25efc8b8ac7d8ab97b62ac92f81400a64ef4a4585e2",
+      "file_size": 313084,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5752747,
+      "file_name": "Screenshot_2026-04-17_212234.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/o8lu9rlvvvkekc3zsdxuwu24ktwf?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-04-17_212234.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-04-17_212234.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQV6NUNJUN%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T162129Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHYaCXVzLXdlc3QtMiJHMEUCIQDlsIh5oucLOGFMM90fA86CqAk4zAluUhzc7pqyT2kMjwIgE6EUOFMqocAxZBbTN2BYmz1ZlIAkQ1RlzSQ1QL8ZdIoqsQUIPxADGgwwMTM2MTkyNzQ4NDkiDBceOQSsmetrore2XiqOBWKNFXDn1YyOOacO0OFfmqgJP2gMkzU7TbCBb%2BR6mVFAIwWwvbYXltotAexIliKTGLN1WylF3HKQSOUZdooAa9CkPWK3Y1a7qCpUTfrsCqjl1gonPo5twkpLc95yJ%2FttwvEpWbYAkrt7NwGqgSOogV5XsuJFo%2FWnWSlKzuuLSQdrW%2B%2BTGyzE8UBuIwS28NY%2FLWoklSUmFQcxfASZwdAoyDhTyHW1I2%2BPd548euRtBsiHglP9O%2FbW1oZ7dfh4gnyxxyTlGymFyJlpgTicuZJLoN%2Fxg1v0LeRgYMxKVNbaFHAC9ZGQkzNWUqSCDZxvC%2FW%2FtDOCJoxbDwfrFtNqfJUTdSzTrjIqqqGEMy0stPdILat0GRh86EeVPoJqDyTdQRVcJha%2FgLM1s2EM2cuKEdUxThJdH5TEguKHKF%2FOgsF0in0Z14eK5WhxVNGfRd7roYgyjl2Mo3tuOkg0ij8hKvKmuTs4YyOsVTG1VY5bMAK549noc1JlgqrCFGNadJjOPcFohHv68Ix7Uc3e02fkSBCry973xbD2ia%2FKMehtK45A3%2BGC0uyKgIt%2FBZyCJ06%2FGydNvg75E%2BlhZvUbe5oEt%2FHySRqsVk%2Fd%2FuJsFlm%2FU8w5o2RG3hZIccZDyz3S6HO6d%2BcaHvTQ0qpduPHFGHeOEPpNxfE%2BWVDBW5bAsQbFODUe9XC9V2KFWTrEaGJOyjY5RmJPqZPZUhh1TGrSuRv9%2BJZJtfp9VXsnx8h68Kr4lf1O6WW2FqRLIelaDHp139vJpridOUdVMEUMJpRFZhbFoAXI95eqxGZ%2BCciD7PfTO3D0nLqYZtWrmlcbi7AcWV2KlMEgkf5n22YX2CZA9R9Ilmv%2FFdkg8RQKnFlLbs4JyUePDTDHgdjPBjqxAc1xfk%2FJ48z63MGE%2FlN1sSPctpfqXSI5CLWQ1hhQFoq6Xzh08TAe8yTOOS6z5Nf1YYrjNNPJiTtTTUDDkymh0x7nrgma%2FYoWvWyDX8a0Ac13BE728emfF8vIPMtRRAZVmPxaesDoOx4vbzkC84xVuASE5kwPJz3FFRxq32leFY4IGVrAtB4zmmNQ12W7ss33yl8Zb9AdxrmGIuLiVkGMIGQf1vU3Aca7KkY2%2F0LAcD5M5A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=07618e9ebafa3d8579d62411f60d3d6c5d09d7c2c4b019351b871f4ab852dbd5",
+      "file_size": 286307,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 12,
+  "voters": [
+    "2026",
+    "nwicks",
+    "johndoe417",
+    "r6rosinaldonevesr6",
+    "mohamski",
+    "rhaditya",
+    "0xkrtn",
+    "9illcodelli6",
+    "egrek",
+    "omarkch",
+    "and 2 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

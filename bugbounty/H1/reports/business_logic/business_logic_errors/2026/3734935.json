@@ -1,0 +1,106 @@
+{
+  "id": 3734935,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM0OTM1",
+  "url": "https://hackerone.com/reports/3734935",
+  "title": "rustls backend silently ignores CURLOPT_CRLFILE when native CA store is active",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-05-14T10:40:50.637Z",
+  "submitted_at": "2026-05-14T10:40:51.091Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-18T13:24:54.115Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-15T21:56:07.600Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nWhen the rustls backend is configured to use the OS native CA store (`--ca-native` / `CURLSSLOPT_NATIVE_CA`), any CRL file supplied via `--crlfile` / `CURLOPT_CRLFILE` is silently ignored. The option is accepted — `CURLE_OK` from `curl_easy_setopt`, exit 0 from the command line — and revoked certificates pass TLS verification without any error or warning at any verbosity level.\n\nThe short version: `Curl_ssl_rustls` advertises `SSLSUPP_CRLFILE` unconditionally, so `setopt` accepts the path and stores it in `conn_config->CRLfile` on every rustls handle regardless of which verifier will actually be used. By the time `cr_init_backend()` runs, that path has been accepted by the library and there is nothing left to complain about. The verifier-selection ladder then silently discards it.\n\nThe ladder at `lib/vtls/rustls.c:1040-1061` has three mutually exclusive arms. When `verifypeer` is off, a no-op verifier is installed. When `ssl_config->native_ca_store` is set, `init_config_builder_platform_verifier()` is called and the function returns — `conn_config->CRLfile` is never examined on this path. The `else if(ca_info_blob || ssl_cafile)` branch is where `init_config_builder_verifier()` lives, and *that* function checks `conn_config->CRLfile` at lines 752-758 and calls through to `rustls_web_pki_server_cert_verifier_builder_add_crl()`. But the native-CA and explicit-CA branches are mutually exclusive; you can't be on both at once.\n\n```c\nelse if(ssl_config->native_ca_store) {              /* branch A — CRLfile never touched */\n    result = init_config_builder_platform_verifier(data, config_builder);\n    if(result != CURLE_OK) {\n      rustls_client_config_builder_free(config_builder);\n      return result;\n    }\n}\nelse if(ca_info_blob || ssl_cafile) {               /* branch B — CRL wiring is here */\n    result = init_config_builder_verifier(data, config_builder,\n                                          conn_config, ca_info_blob, ssl_cafile);\n    ...\n}\n```\n\nThe reason branch A has no CRL wiring isn't an oversight in the curl code so much as a hard limitation in rustls-ffi: `rustls_platform_server_cert_verifier()` returns a fully-constructed opaque `rustls_server_cert_verifier *` with no subsequent mutation API. The webpki path has a builder pattern — `rustls_web_pki_server_cert_verifier_builder_new()`, then `_add_crl()`, then `_build()` — but there is no equivalent `rustls_platform_server_cert_verifier_builder_*` family. You cannot attach a CRL to the platform verifier at the rustls-ffi 0.15 level, full stop. The curl-side problem is that this upstream limitation is invisible to the caller: the API says yes, the transfer succeeds, and a revoked certificate walks right through.\n\nReproduction — tested against `curl 8.21.0-DEV libcurl/8.21.0-DEV rustls-ffi/0.15.0/rustls/0.23.25/aws-lc-rs`:\n\n```bash\nCURL=curl/bld-rustls/src/curl\nWORKDIR=/tmp/f28-poc\nmkdir -p $WORKDIR/ca/{newcerts,private}\ntouch $WORKDIR/ca/index.txt\nprintf '01\\n' > $WORKDIR/ca/serial\nprintf '01\\n' > $WORKDIR/ca/crlnumber\n\n# generate CA\nopenssl genrsa -out $WORKDIR/ca/private/cakey.pem 4096 2>/dev/null\nopenssl req -new -x509 -days 3650 \\\n    -key $WORKDIR/ca/private/cakey.pem \\\n    -out $WORKDIR/ca/cacert.pem \\\n    -subj \"/CN=F28 Test CA/O=PoC/C=AU\"\n\n# issue server cert with SAN (platform verifier requires it)\ncat > $WORKDIR/san.ext <<'EOF'\n[req]\nreq_extensions = v3_req\ndistinguished_name = req_distinguished_name\n[req_distinguished_name]\n[v3_req]\nsubjectAltName = @alt_names\n[alt_names]\nDNS.1 = localhost\nIP.1 = 127.0.0.1\nEOF\n\nopenssl genrsa -out $WORKDIR/server.key 2048 2>/dev/null\nopenssl req -new -key $WORKDIR/server.key -out $WORKDIR/server.csr \\\n    -subj \"/CN=localhost/O=PoC/C=AU\" -config $WORKDIR/san.ext\nopenssl x509 -req -in $WORKDIR/server.csr \\\n    -CA $WORKDIR/ca/cacert.pem -CAkey $WORKDIR/ca/private/cakey.pem \\\n    -CAcreateserial -out $WORKDIR/server.crt -days 365 \\\n    -extensions v3_req -extfile $WORKDIR/san.ext\n\n# revoke it and generate CRL\ncat > $WORKDIR/ca/openssl.cnf <<'EOF'\n[ca]\ndefault_ca = CA_default\n[CA_default]\ndir               = /tmp/f28-poc\ndatabase          = /tmp/f28-poc/ca/index.txt\nnew_certs_dir     = /tmp/f28-poc/ca/newcerts\ncertificate       = /tmp/f28-poc/ca/cacert.pem\nserial            = /tmp/f28-poc/ca/serial\nprivate_key       = /tmp/f28-poc/ca/private/cakey.pem\ncrlnumber         = /tmp/f28-poc/ca/crlnumber\ndefault_crl_days  = 30\ndefault_md        = sha256\npolicy            = policy_anything\ncopy_extensions   = copy\n[policy_anything]\ncountryName            = optional\ncommonName             = supplied\nEOF\n\nopenssl ca -config $WORKDIR/ca/openssl.cnf -revoke $WORKDIR/server.crt 2>/dev/null\nopenssl ca -config $WORKDIR/ca/openssl.cnf -gencrl -out $WORKDIR/revoked.crl 2>/dev/null\n\n# install CA into OS trust store\nsudo cp $WORKDIR/ca/cacert.pem /usr/local/share/ca-certificates/f28-test-ca.crt\nsudo update-ca-certificates\n\n# start server presenting the revoked cert\nopenssl s_server \\\n    -cert $WORKDIR/server.crt -key $WORKDIR/server.key \\\n    -CAfile $WORKDIR/ca/cacert.pem \\\n    -accept 18443 -www -quiet &\n```\n\nTest A — `--cacert` + `--crlfile` (branch B, CRL enforced):\n\n```\n$ $CURL -s --cacert /tmp/f28-poc/ca/cacert.pem \\\n             --crlfile /tmp/f28-poc/revoked.crl \\\n             https://localhost:18443/\n* rustls_connection_process_new_packets: invalid peer certificate: Revoked\ncurl: (60) rustls_connection_process_new_packets: invalid peer certificate: Revoked\n$ echo $?\n60\n```\n\nTest B — `--ca-native` + `--crlfile` (branch A, CRL silently ignored):\n\n```\n$ $CURL -s --ca-native \\\n             --crlfile /tmp/f28-poc/revoked.crl \\\n             https://localhost:18443/\n<HTML><BODY BGCOLOR=\"#ffffff\">...\n$ echo $?\n0\n```\n\nThe certificate, the CRL file, and the server are identical across both runs. The only difference is which verifier branch `cr_init_backend()` takes. Test A exits 60 with a clear rejection message. Test B exits 0 with the HTTP body and no indication whatsoever that revocation was not checked.\n\nThe immediate fix is a three-line guard at the top of the `native_ca_store` branch:\n\n```diff\n--- a/lib/vtls/rustls.c\n+++ b/lib/vtls/rustls.c\n@@ -1043,6 +1043,13 @@\n   else if(ssl_config->native_ca_store) {\n+    if(conn_config->CRLfile) {\n+      failf(data, \"rustls: --crlfile is not supported with --ca-native; \"\n+            \"the platform verifier has no CRL attachment API\");\n+      rustls_client_config_builder_free(config_builder);\n+      return CURLE_NOT_BUILT_IN;\n+    }\n     result = init_config_builder_platform_verifier(data, config_builder);\n```\n\nThat converts silent non-enforcement into a clear, actionable error — `CURLE_NOT_BUILT_IN` (77) plus a descriptive message, the same result as setting `CURLOPT_CRLFILE` on a backend that declares no support for it. The unconditional `SSLSUPP_CRLFILE` in `Curl_ssl_rustls` is also a candidate for removal or conditionalization so the rejection happens at setopt time rather than connection time, but the in-`cr_init_backend()` guard is the safe immediate path. The longer-term path is a rustls-ffi upstream feature request for a builder pattern around the platform verifier; if `rustls_platform_server_cert_verifier_builder_add_crl()` ever exists, the guard can be relaxed and actual CRL enforcement on the native-CA path becomes possible.\n\nThank you,\nAISLE Research Team\n\n## Impact\n\nwhen curl uses the rustls native OS verifier path with --ca-native, a supplied --crlfile can be accepted by the API but never applied, so a certificate that should be rejected as revoked may still verify successfully and the HTTPS connection proceeds as trusted. In current curl source, CRL handling is wired into the webpki verifier builder path, while the native verifier path constructs an opaque platform verifier directly, and curl's public docs still say CURLOPT_CRLFILE works with Rustls, so this is best described as a real silent-security-failure / policy-bypass bug rather than intended behavior.",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

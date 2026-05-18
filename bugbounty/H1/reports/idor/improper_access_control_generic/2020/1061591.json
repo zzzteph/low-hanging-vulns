@@ -1,0 +1,152 @@
+{
+  "id": 1061591,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8xMDYxNTkx",
+  "url": "https://hackerone.com/reports/1061591",
+  "title": "Acting under any different user via DB-stored credentials",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2020-12-18T12:53:55.604Z",
+  "submitted_at": "2020-12-18T12:53:55.658Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "alexanderhofstaetter",
+    "url": "/alexanderhofstaetter",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2021-22877"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2021-03-01T11:02:24.045Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2021-03-01T11:00:27.015Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "The issue is related to all Nextcloud versions. It is not patched yet. All versions (18-20) seems to be vulnerable. The issue came up in the following environment:\n\n- nextcloud docker image (20.0.2 and 20.0.3)\n- LDAP authentication\n- external SMB shares via DB stored credentials\n\nThe problem came up after several users could not access their mounted SMB shares. When I checked, what was going on, it seems that DB credentials are getting stored from the session (table `oc_storages_credentials`) to the DB. The problem is, that there is no check if the current user in the session is the same as the user for whom the credentials get stored.\n\nIt seems that the credentials saved in the corresponding table (`oc_storages_credentials`) are wrong and therefore all SMB shares are showing errors.\n\nWhen I initially add the external storage SMB mounts in the settings and then a user logs in the first time, the SMB shares work (with the correct login) which gets correctly saved in the DB.\n\nAfterwards I can find one single entry on the `oc_storages_credentials`-table\n\nHowever, when I (as an admin) navigate to: `https://cloud.example.org/settings/users` the table `oc_storages_credentials` gets (pre)populated with all the users (and some random credentials) - this also includes all users who weren´t logged-in yet. When the user logs in afterwards the credentials entry is already there and does not get updated.\n\n### Steps to reproduce\n1. Add external SMB mount with option \"credentials saved in database\"\n2. Manually check the MYSQL table `oc_storages_credentials` - it should be empty\n3. As an admin: navigate to (`/settings/users`) \n4. Recheck the MYSQL table `oc_storages_credentials` - there is an entry for every user now\n5. The stored credentials in the DB are now the admin credentials\n6. user can act as the admin user (their LDAP / AD password is stored in `oc_storages_credentials` for every user\n\n### Expected behaviour\n1. Do not populate the table `oc_storages_credentials` on \"user list settings page\"\n2. If the current user credentials does not match the ones in the DB -> update it\n\n### Actual behaviour\n- `password::logincredentials/credentials` entries are getting deployed initially from the admin user ...\n\n### Bugfix / Patch\n\nThere should be two files affected:\n- `/apps/files_external/lib/Lib/Auth/Password/LoginCredentials.php`\n- `/apps/files_external/lib/Listener/StorePasswordListener.php`\n\n\nIt looks like there is a form of wrong impersonation going on here. -> The git-Diff for a security conform bugfix is attached.\n\n### Server configuration\n\nI am using this docker image (no modifications): https://github.com/nextcloud/docker/tree/master/.examples/dockerfiles/full/fpm-alpine\n\n**Operating system:** Docker on Ubuntu 20.04.1 LTS\n**Web server:** nginx with php-fpm\n**Database:** mariadb 10.5 as docker container\n**PHP version:** 7php .4\n**Nextcloud version:** 20.0.2\n**Updated from an older Nextcloud/ownCloud or fresh install:** updated from nextcloud 18.0.11 -> 19.0 -> 20.0.3\n**Where did you install Nextcloud from:**\n\n## Impact\n\n- Acting as a different user (as admin credentials are stored for every user in the DB)\n- get a normal user account and accessing SMB shares on the network with higher privileges as himself\n- getting access to internal ressources via external shared links",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 1121157,
+      "file_name": "external-storage-credentials.diff",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/msupil02jt6ci1sxuwsol5w390st?response-content-disposition=attachment%3B%20filename%3D%22external-storage-credentials.diff%22%3B%20filename%2A%3DUTF-8%27%27external-storage-credentials.diff&response-content-type=text%2Fx-patch&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWJA2XIOQ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T173637Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJIMEYCIQCmyM9hWEmo6JckvlxOd5HDDYdKdp7upjRsPv%2BjysPqcgIhANGAQoirxev7ceTn7q3MZjhfbSFubXszgZGP0GyiQqtZKrEFCEIQAxoMMDEzNjE5Mjc0ODQ5Igw29EXwDinx4MNBu9wqjgWGyVls8Jbqlmew%2BNFHwh2eQ%2FEXbLDG2iOoi5fk5rSC1xZ5vgucg%2B8Z5QpSqJdssY1pAnPPySzlrneDMS8RhYth4cPHcsh7LHgfoPX4KnDeXg98dYh0UAUm7R1g1mDjDmoeZ5UgoeDhu6MOH6bIMaoA9Sfwo0ff09rHWu%2F9rf%2BWYNbH%2Fs6sZ8sEDacDykXrpB0rq4gzWgXQv1z56wKmjrejREs63tofVGikvnFCSD%2BVgJ2mxuJT4hRMd7T7E7wIPm%2Bf%2FGv6F0JZy0A8TcX23haMkEXmwjvWJ1EMijkSw63Z0iYCxw38VLjFihnG%2F6BLqqFPvjwm5A364L3r7oYjbXp4zmY0BF%2BJU5DEBZJmTl3qmFRHEdJwjSE6%2FHx6Hzes%2BEuP3KQLZRId1IRx8c5E1ig2YYvC8cikzPQXnUH2M241rwss6WzCS6pC6t8OYIBhHuFPK5GHLjbSYKjXuUGCPAP%2BOozq19YKGfO7gjMHPAcJXKDb0xu3HuDX35xIL38Dq%2Bl6%2Bg8VWVsSdTC3aieZGlJgaPO6JxFRQSO07IVDrgkAm2pUdtXqL7CNiKEXLieV%2BGqCzxoTMD1oViB67xU%2FuKiO%2BVFj4QV0x1iDi29xaMO3mz934VFLGRwnNq4JgxRblEE6JsAIOiX8BQqbbxqL3iHOpTJyKbIJ6m64fJRvgvC2OJu8bhmeYleOijjHXGHjZkboRaNC69IW9a09fVzVrswFmpZjU07gWHTBeuretpl4QE1pKa5AopMt2Wip2K2rJXJ3c0tNZdYqdpKS5zpb9CTIJhVA134H7SJNxUesnxBbiNh0zXBfI8E6sRPxeQoVxkWT5IEsu0BgKlqdJaQ%2Bf3PTX%2FhAUoUQT1zKw6Yr7fww2dnYzwY6sAHcaEIRWUIvDCFeV70yE9zgTK0X%2BnDEvPXOdm0InUKakYqmozwi527rjlqXZM5knhVX7kjNBFVoUxTm%2Fid7s1xQpHxocvwPL2pOJWtJlUmi69Mtve9K932CRE9pOEPeVjNCpmyf5IuuIK5fA6uPLv1dWj0v9ajMkvtx8IRhssmOu%2BFUNCvK0qNxcy6tUeEixW5LqbZxZUaggXm5anJVDet8TbZFhSoChD%2BXjYq915Soug%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=023d6b36173b7dcdbb9f054cbda760fc5ee5cf036ab47f4eaa0ae9bb853306fd",
+      "file_size": 1565,
+      "type": "text/x-patch",
+      "moderated": null
+    },
+    {
+      "id": 1121158,
+      "file_name": "logs-and-debugging-info.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ap6a8cnxfgnu4g7z7277mw86vp1l?response-content-disposition=attachment%3B%20filename%3D%22logs-and-debugging-info.txt%22%3B%20filename%2A%3DUTF-8%27%27logs-and-debugging-info.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWJA2XIOQ%2F20260502%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260502T173637Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHkaCXVzLXdlc3QtMiJIMEYCIQCmyM9hWEmo6JckvlxOd5HDDYdKdp7upjRsPv%2BjysPqcgIhANGAQoirxev7ceTn7q3MZjhfbSFubXszgZGP0GyiQqtZKrEFCEIQAxoMMDEzNjE5Mjc0ODQ5Igw29EXwDinx4MNBu9wqjgWGyVls8Jbqlmew%2BNFHwh2eQ%2FEXbLDG2iOoi5fk5rSC1xZ5vgucg%2B8Z5QpSqJdssY1pAnPPySzlrneDMS8RhYth4cPHcsh7LHgfoPX4KnDeXg98dYh0UAUm7R1g1mDjDmoeZ5UgoeDhu6MOH6bIMaoA9Sfwo0ff09rHWu%2F9rf%2BWYNbH%2Fs6sZ8sEDacDykXrpB0rq4gzWgXQv1z56wKmjrejREs63tofVGikvnFCSD%2BVgJ2mxuJT4hRMd7T7E7wIPm%2Bf%2FGv6F0JZy0A8TcX23haMkEXmwjvWJ1EMijkSw63Z0iYCxw38VLjFihnG%2F6BLqqFPvjwm5A364L3r7oYjbXp4zmY0BF%2BJU5DEBZJmTl3qmFRHEdJwjSE6%2FHx6Hzes%2BEuP3KQLZRId1IRx8c5E1ig2YYvC8cikzPQXnUH2M241rwss6WzCS6pC6t8OYIBhHuFPK5GHLjbSYKjXuUGCPAP%2BOozq19YKGfO7gjMHPAcJXKDb0xu3HuDX35xIL38Dq%2Bl6%2Bg8VWVsSdTC3aieZGlJgaPO6JxFRQSO07IVDrgkAm2pUdtXqL7CNiKEXLieV%2BGqCzxoTMD1oViB67xU%2FuKiO%2BVFj4QV0x1iDi29xaMO3mz934VFLGRwnNq4JgxRblEE6JsAIOiX8BQqbbxqL3iHOpTJyKbIJ6m64fJRvgvC2OJu8bhmeYleOijjHXGHjZkboRaNC69IW9a09fVzVrswFmpZjU07gWHTBeuretpl4QE1pKa5AopMt2Wip2K2rJXJ3c0tNZdYqdpKS5zpb9CTIJhVA134H7SJNxUesnxBbiNh0zXBfI8E6sRPxeQoVxkWT5IEsu0BgKlqdJaQ%2Bf3PTX%2FhAUoUQT1zKw6Yr7fww2dnYzwY6sAHcaEIRWUIvDCFeV70yE9zgTK0X%2BnDEvPXOdm0InUKakYqmozwi527rjlqXZM5knhVX7kjNBFVoUxTm%2Fid7s1xQpHxocvwPL2pOJWtJlUmi69Mtve9K932CRE9pOEPeVjNCpmyf5IuuIK5fA6uPLv1dWj0v9ajMkvtx8IRhssmOu%2BFUNCvK0qNxcy6tUeEixW5LqbZxZUaggXm5anJVDet8TbZFhSoChD%2BXjYq915Soug%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=eba337b4f8f74998ab4614d89476c247e44f38c9dacc09c913adfc93bf24a3b5",
+      "file_size": 63415,
+      "type": "text/plain",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2021-03-31T11:00:27.206Z",
+  "allow_singular_disclosure_after": -160554970.50849345,
+  "singular_disclosure_allowed": true,
+  "vote_count": 8,
+  "voters": [
+    "wi11",
+    "foobar7",
+    "ali",
+    "tess",
+    "salahhasoneh",
+    "demonia",
+    "gaurax",
+    "destinedtohack"
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 8.7,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "high",
+      "user_interaction": "none",
+      "scope": "changed",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 13,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "nextcloud/server",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

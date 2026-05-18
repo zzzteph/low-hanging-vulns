@@ -1,0 +1,127 @@
+{
+  "id": 2559516,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8yNTU5NTE2",
+  "url": "https://hackerone.com/reports/2559516",
+  "title": "CVE-2024-6197: freeing stack buffer in utf8asn1str",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2024-06-18T23:00:06.739Z",
+  "submitted_at": "2024-06-18T23:00:07.495Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "z2_",
+    "url": "/z2_",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/5eld4c9eg34za1r92ipvd757pa9d/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2024-6197"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2024-07-24T06:48:26.496Z",
+  "bug_reporter_agreed_on_going_public_at": "2024-07-24T06:48:26.367Z",
+  "team_member_agreed_on_going_public_at": "2024-07-24T06:42:35.514Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Libcurl at commit [04739054cdac5a0614fb94e3655e313c03399f35](https://github.com/curl/curl/tree/04739054cdac5a0614fb94e3655e313c03399f35) contains an invalid invocation of `free()` in the function `utf8asn1str()` at [lib/vtls/x509asn1.c:397](https://github.com/curl/curl/blob/04739054cdac5a0614fb94e3655e313c03399f35/lib/vtls/x509asn1.c#L397).\n\nThe relevant code can be seen below:\n```c\nstatic CURLcode\nutf8asn1str(struct dynbuf *to, int type, const char *from, const char *end)\n{\n    // --- snip ---\n    \n    if(type == CURL_ASN1_UTF8_STRING) {\n        // --- snip ---\n    }\n    else {\n        while(!result && (from < end)) {\n            char buf[4]; /* decode buffer */\n            \n            // --- snip ---\n        \n            if(wc >= 0x00200000) {\n                free(buf);\n                /* Invalid char. size for target encoding. */\n                return CURLE_WEIRD_SERVER_REPLY;\n            }\n        }\n    }\n}\n```\n\n`buf` is located on the stack and not the heap, which means that `buf` will be falsely treated as a heap chunk.\nThis poses a security risk because the address of `buf` can be returned in subsequent calls to `malloc()`, which causes\nthe stack contents at that point to be overwritten.\nThe stack holds data that determines the control flow of the application. This can either be local variables that indirectly\ndetermine the control flow of their corresponding functions or security-critical metadata liked saved framepointers or return addresses.\nIf an attacker manages to overwrite these kinds of stack contents he/she can gain control over the control flow of the application.\n\n# Exploit Scenario\nConsider the following scenario that demonstrates how to leverage the invalid `free()` to overwrite return addresses:\n\n1. The attacker sets up a malicious server with a TLS certificate that triggers the invalid `free()`\n2. An application using libcurl connects to the server and during the connect() phase parses the invalid certificate.\n   This causes the stack address to be put into the freelist of the allocator.\n3. The attacker interacts with the client in a way that causes the stack address to be returned by a `malloc()` call\n   and used to store data from the attacker\n4. Depending on the state of the stack, the attacker can now overwrite local variables, pointers or security-critical metadata.\n   The worst case would be that a return address gets overwritten with a [ROP-chain](https://en.wikipedia.org/wiki/Return-oriented_programming) in order to\n   gain control over the execution of the program\n   \nOne environment where that scenario could work out is Ubuntu bionic, where the glibc does not check whether the argument to `free()` actually refers to a valid heap chunk.\n\n# Patch\nThe fix for this vulnerability is pretty straight forward, just remove the call to `free()`:\n```diff\ndiff --git a/lib/vtls/x509asn1.c b/lib/vtls/x509asn1.c\nindex cea88e668..ddfb65344 100644\n--- a/lib/vtls/x509asn1.c\n+++ b/lib/vtls/x509asn1.c\n@@ -394,7 +394,6 @@ utf8asn1str(struct dynbuf *to, int type, const char *from, const char *end)\n         if(wc >= 0x00000800) {\n           if(wc >= 0x00010000) {\n             if(wc >= 0x00200000) {\n-              free(buf);\n               /* Invalid char. size for target encoding. */\n               return CURLE_WEIRD_SERVER_REPLY;\n             }\n```\n\n## Impact\n\nI assess the impact of this vulnerability to be  \"High\" because\n1. The invalid `free()` is easy to trigger since it happens during the TLS handshake\n2. An overwrite of memory contents with attacker-controlled data poses a great security risk",
+  "weakness": {
+    "id": 793,
+    "name": "Free of Memory not on the Heap"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2024-08-23T06:42:35.707Z",
+  "allow_singular_disclosure_after": -53344880.33187614,
+  "singular_disclosure_allowed": true,
+  "vote_count": 34,
+  "voters": [
+    "z2_",
+    "3kh0",
+    "nimbusedge",
+    "zy9ard3",
+    "thalaivar304",
+    "v7l3nt1m",
+    "iwasday",
+    "zyjwork",
+    "skrcprst",
+    "polo1245",
+    "and 24 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
