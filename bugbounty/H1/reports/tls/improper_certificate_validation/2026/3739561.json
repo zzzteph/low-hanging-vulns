@@ -1,0 +1,110 @@
+{
+  "id": 3739561,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM5NTYx",
+  "url": "https://hackerone.com/reports/3739561",
+  "title": "SSL session-cache peer key omits signature_algorithms: strict-sigalg handle silently resumes a permissive sibling's session",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-05-16T02:59:17.371Z",
+  "submitted_at": "2026-05-16T02:59:17.821Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "hexproof",
+    "url": "/hexproof",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2020-8231"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-19T13:53:24.453Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-16T21:33:43.572Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# `CURLOPT_SSL_SIGNATURE_ALGORITHMS` policy bypass: SSL session cache key omits sigalgs, allowing a strict-sigalg handle to resume a session negotiated under a permissive policy\n\n## AI disclosure\n\nThis report was prepared with the assistance of an AI coding assistant\n(Claude). The behavioral diff (pre/post patch) reproduces\ndeterministically on a real OpenSSL-backed curl build against\n`openssl s_server`; full verbose logs are attached. Code-reading\nclaims have been double-checked against the source at the commit\nlisted below (`vtls.c` matcher vs. `vtls_scache.c` peer-key builder).\nThis vulnerability class has a direct precedent in CVE-2020-8231\n(where the same asymmetry existed between the connection-cache\nmatcher and the peer-key builder for a different field).\n\n## Affected versions\n\nIntroduced in commit `a638828c88` (\"TLS: add\nCURLOPT_SSL_SIGNATURE_ALGORITHMS and --sigalgs\", Andrei Florea,\n2025-04-02) — the option's introducing commit added sigalgs to\n`match_ssl_primary_config` and the clone path, but not to\n`Curl_ssl_peer_key_make` (the session-cache key builder).\nFirst affected release: **curl 8.14.0** (`git describe\n--tags --contains a638828c88` → `curl-8_14_0~167`). Affected\nthrough **curl 8.20.0** (current latest released) and master\n(`curl-8_20_0-78-ga32a2b0b77`, `LIBCURL_VERSION \"8.21.0-DEV\"`).\nConfirmed on master built with\n`--with-openssl=/opt/homebrew/opt/openssl@3`. The patch applies\ncleanly to all of them.\n\n## Summary\n\n`Curl_ssl_peer_key_make` (`lib/vtls/vtls_scache.c`) builds the cache\nkey used to look up cached SSL sessions for reuse. It includes fields\nlike `cipher_list13` and `curves`, but **omits**\n`signature_algorithms`. Meanwhile, `match_ssl_primary_config`\n(`lib/vtls/vtls.c:219`) **does** compare `signature_algorithms` when\ndeciding whether two SSL primary configs match.\n\nThe result: two `CURL` handles that differ only in\n`CURLOPT_SSL_SIGNATURE_ALGORITHMS` produce **identical peer cache\nkeys**. If they share an SSL session cache (via `CURLSH` with\n`CURL_LOCK_DATA_SSL_SESSION`), a handle with a **strict** sigalg\npolicy can resume a session that was negotiated under a **permissive**\npolicy on a sibling handle — silently bypassing its own stricter\npolicy: the resumed handshake does not present a certificate, so the\nsigalg constraint (which is applied during certificate validation)\nnever runs.\n\nThis is the same defect class as CVE-2020-8231 (peer-cache-key omits\na field the matcher uses).\n\n## Source-level evidence (pre-patch)\n\n`lib/vtls/vtls_scache.c`, `Curl_ssl_peer_key_make`:\n\n```c\n  if(ssl->cipher_list13) {\n    r = curlx_dyn_addf(&buf, \":CIPHER13-%s\", ssl->cipher_list13);\n    if(r) goto out;\n  }\n  if(ssl->curves) {\n    r = curlx_dyn_addf(&buf, \":CURVES-%s\", ssl->curves);\n    if(r) goto out;\n  }\n  /* <-- signature_algorithms NOT added to peer key */\n  if(ssl->verifypeer) {\n    …\n  }\n```\n\n`lib/vtls/vtls.c:194-225`, `match_ssl_primary_config` (the predicate\nused by the connection-reuse decision):\n\n```c\nstatic bool match_ssl_primary_config(struct Curl_easy *data,\n                                     struct ssl_primary_config *c1,\n                                     struct ssl_primary_config *c2)\n{\n  (void)data;\n  if((c1->version == c2->version) &&\n     (c1->version_max == c2->version_max) &&\n     (c1->ssl_options == c2->ssl_options) &&\n     (c1->verifypeer == c2->verifypeer) &&\n     (c1->verifyhost == c2->verifyhost) &&\n     (c1->verifystatus == c2->verifystatus) &&\n     blobcmp(c1->cert_blob, c2->cert_blob) &&\n     blobcmp(c1->ca_info_blob, c2->ca_info_blob) &&\n     blobcmp(c1->issuercert_blob, c2->issuercert_blob) &&\n     Curl_safecmp(c1->CApath, c2->CApath) &&\n     Curl_safecmp(c1->CAfile, c2->CAfile) &&\n     Curl_safecmp(c1->issuercert, c2->issuercert) &&\n     Curl_safecmp(c1->clientcert, c2->clientcert) &&\n#ifdef USE_TLS_SRP\n     !Curl_timestrcmp(c1->username, c2->username) &&\n     !Curl_timestrcmp(c1->password, c2->password) &&\n#endif\n     curl_strequal(c1->cipher_list, c2->cipher_list) &&\n     curl_strequal(c1->cipher_list13, c2->cipher_list13) &&\n     curl_strequal(c1->curves, c2->curves) &&\n     curl_strequal(c1->signature_algorithms,        /* line 219 */\n                   c2->signature_algorithms) &&\n     curl_strequal(c1->CRLfile, c2->CRLfile) &&\n     curl_strequal(c1->pinned_key, c2->pinned_key))\n    return TRUE;\n\n  return FALSE;\n}\n```\n\nThe asymmetry: the connection-reuse matcher considers\n`signature_algorithms` (line 219, `curl_strequal`), but the session-\ncache key builder does not (no `:SIGALGS-` line in\n`Curl_ssl_peer_key_make`). Two handles with the same host/port/CA but\ndifferent sigalgs therefore agree on cache-key equality (wrong) while\ndisagreeing on connection-config equivalence (correct). The session-\ncache becomes the weak link.\n\n## Reproduction\n\nBuild curl with OpenSSL backend (any backend that implements\n`CURLOPT_SSL_SIGNATURE_ALGORITHMS`):\n\n```\n./configure --with-openssl=<path> --enable-debug --enable-curldebug\nmake\n```\n\nTest cert (server, signed with ECDSA+SHA256):\n\n```\nopenssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \\\n  -keyout key.pem -out cert.pem -days 1 -nodes -subj \"/CN=localhost\"\n```\n\nRun a TLS 1.3 server that supports session tickets:\n\n```\nopenssl s_server -accept 14443 -cert cert.pem -key key.pem -tls1_3 -www -quiet\n```\n\nPoC (single C file, ~80 lines, attached as `poc_sigalgs_bypass.c`):\n\n```c\nCURLSH *sh = curl_share_init();\ncurl_share_setopt(sh, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);\n\nCURL *easy = curl_easy_init();\n\n/* Handle A: permissive sigalgs (includes ECDSA+SHA256 which the\n   server's cert can satisfy). Populates the session cache. */\ncurl_easy_setopt(easy, CURLOPT_URL, \"https://localhost:14443/\");\ncurl_easy_setopt(easy, CURLOPT_SHARE, sh);\ncurl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0L);\ncurl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 0L);\ncurl_easy_setopt(easy, CURLOPT_SSL_SIGNATURE_ALGORITHMS,\n                 \"ECDSA+SHA1:ECDSA+SHA256\");\ncurl_easy_perform(easy);   /* succeeds, caches session under permissive */\n\n/* Handle B: strict sigalgs (only ECDSA+SHA384). The server cert is\n   ECDSA+SHA256 — under B's stated policy, the handshake MUST fail. */\ncurl_easy_reset(easy);\ncurl_easy_setopt(easy, CURLOPT_URL, \"https://localhost:14443/\");\ncurl_easy_setopt(easy, CURLOPT_SHARE, sh);\ncurl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0L);\ncurl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 0L);\ncurl_easy_setopt(easy, CURLOPT_SSL_SIGNATURE_ALGORITHMS, \"ECDSA+SHA384\");\nCURLcode rc = curl_easy_perform(easy);\nprintf(\"B rc=%d (%s)\\n\", rc, curl_easy_strerror(rc));\n```\n\n## Observed behavior\n\n**Pre-patch (vulnerable):**\n\n```\n=== A_permissive: sigalgs=\"ECDSA+SHA1:ECDSA+SHA256\" ===\nSSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768 / id-ecPublicKey\n    A_permissive rc=0\n=== B_strict: sigalgs=\"ECDSA+SHA384\" ===\nSSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / X25519MLKEM768 / UNDEF\n    B_strict rc=0   <-- SHOULD HAVE FAILED\n```\n\n`B_strict` connects successfully despite the server cert being signed\nwith ECDSA+SHA256 (which B's policy excludes). The `UNDEF` curve in\nthe second connection is the TLS 1.3 resumption marker — no fresh\nkey exchange occurred. B reused A's session, so B's stricter\nsigalg policy never got a chance to reject the cert.\n\n**Post-patch (with `:SIGALGS-` added to peer key):**\n\n```\n=== A_permissive: sigalgs=\"ECDSA+SHA1:ECDSA+SHA256\" ===\n    A_permissive rc=0\n=== B_strict: sigalgs=\"ECDSA+SHA384\" ===\n    B_strict rc=35 (SSL connect error)   <-- correctly enforced\n```\n\n`B_strict` no longer finds A's session in the cache (different peer\nkey), does a fresh handshake under its own policy, and the server's\nECDSA+SHA256 cert is correctly rejected.\n\n## Impact\n\n- **Policy bypass:** any application that uses\n  `CURLOPT_SSL_SIGNATURE_ALGORITHMS` for tiered authentication\n  (e.g., stricter sigalgs for high-value endpoints, more permissive\n  for legacy/internal) and shares an SSL session cache across handles\n  silently inherits the weakest policy ever used against the host.\n- **TLS 1.3 verified, TLS 1.2 plausibly equivalent:** TLS 1.3\n  resumption is PSK-based and skips the Certificate message\n  entirely (verified empirically here, see the `UNDEF` curve marker\n  in the pre-fix verbose log). TLS 1.2 abbreviated handshakes\n  (both session-ID and ticket-based) likewise omit Certificate;\n  the same bypass shape applies but has not been verified\n  empirically in this report.\n- **No memory safety, no cryptographic break.** This is a policy-\n  laundering bug, identical in class to CVE-2020-8231 (which had a\n  CVE assigned for the analogous case in another field).\n- **Real-world reach:** narrow but unsympathetic. Applications\n  that set `CURLOPT_SSL_SIGNATURE_ALGORITHMS` per handle are by\n  definition applications that want differentiated sigalg\n  enforcement — the exact use case this defect undoes. Common\n  pattern: PQ-ready or non-SHA1 policy on high-value endpoints,\n  legacy on internal services. Either tier of caller, when sharing\n  an SSL session cache with a more-permissive sibling, inherits\n  the weaker policy silently.\n\n## Suggested fix\n\n`lib/vtls/vtls_scache.c`, inside `Curl_ssl_peer_key_make`, add the\n`signature_algorithms` field to the peer key alongside the other\nssl-config fields:\n\n```diff\n   if(ssl->curves) {\n     r = curlx_dyn_addf(&buf, \":CURVES-%s\", ssl->curves);\n     if(r)\n       goto out;\n   }\n+  /* signature_algorithms must be part of the peer key: the connection\n+     cache matcher (match_ssl_primary_config) compares this field, so\n+     two handles differing only in CURLOPT_SSL_SIGNATURE_ALGORITHMS\n+     must not share a cached session. Without this, the stricter\n+     handle inherits the permissive handle's negotiated session,\n+     bypassing its policy. */\n+  if(ssl->signature_algorithms) {\n+    r = curlx_dyn_addf(&buf, \":SIGALGS-%s\", ssl->signature_algorithms);\n+    if(r)\n+      goto out;\n+  }\n   if(ssl->verifypeer) {\n     …\n```\n\nAfter applying, the e2e test in this report flips from `B rc=0` to\n`B rc=35` (correct policy enforcement).\n\n## Attachments\n\n- `poc_sigalgs_bypass.c` — single-file libcurl PoC (~80 lines)\n- `verbose-pre-patch.txt` — full curl verbose log, pre-fix run\n  (B succeeds with `UNDEF` curve TLS 1.3 resumption marker)\n- `verbose-post-patch.txt` — full curl verbose log, post-fix run\n  (B fails rc=35 SSL connect error)\n- `suggested-patch.diff` — unified diff adding `:SIGALGS-%s` to\n  `Curl_ssl_peer_key_make`\n\n## Impact\n\nApplications that use CURLOPT_SSL_SIGNATURE_ALGORITHMS for tiered authentication (stricter sigalgs for high-value endpoints, more permissive for legacy/internal) and share an SSL session cache silently inherit the weakest policy ever used against a given host. Verified empirically on TLS 1.3 (PSK resumption, no Certificate message — UNDEF curve marker in the attached log). TLS 1.2 abbreviated handshakes (session-ID and ticket) also omit Certificate,  so the same bypass shape applies but was not verified empirically here. No memory-safety impact; this is policy laundering via the session cache.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

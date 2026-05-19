@@ -1,0 +1,111 @@
+{
+  "id": 3734095,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM0MDk1",
+  "url": "https://hackerone.com/reports/3734095",
+  "title": "TLS verifyhost bypass in rustls, mbedTLS, and wolfSSL when verifypeer=0",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-05-13T23:33:02.924Z",
+  "submitted_at": "2026-05-13T23:33:03.224Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2013-4545",
+    "CVE-2014-0139"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-19T13:52:43.454Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-15T21:57:35.730Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "The now-well-known `CURLOPT_SSL_VERIFYHOST`-bypass-when-`CURLOPT_SSL_VERIFYPEER=0` defect exists in three of curl's TLS backends: rustls (EXPERIMENTAL), mbedTLS, and wolfSSL (DNS hostnames only). The documented contract at `docs/libcurl/opts/CURLOPT_SSL_VERIFYPEER.md:57-59`:\n\n> The check that the host name in the certificate is valid for the hostname you are connecting to is done independently of the CURLOPT_SSL_VERIFYPEER(3) option.\n\nListed under \"TLS-backend: All\" with no caveats — the rustls EXPERIMENTAL status does not carve out an exception. The same class of defect was fixed for schannel in `889c071d3c` (2022-12-08, \"schannel: verify hostname independent of verify cert\"). rustls, mbedTLS, and wolfSSL were not updated at that time, and no regression test enforces the invariant across backends.\n\nBackend matrix at `(verifypeer=0, verifyhost=2, wrong CN)`:\n\n| Backend | Result | Reason |\n|---------|--------|--------|\n| OpenSSL | CURLE_PEER_FAILED_VERIFICATION (correct) | `ossl_verifyhost` unconditional, `lib/vtls/openssl.c:4776-4781` |\n| GnuTLS | CURLE_PEER_FAILED_VERIFICATION (correct) | `gnutls_x509_crt_check_hostname` unconditional, `lib/vtls/gtls.c:1824-1828` |\n| schannel | CURLE_PEER_FAILED_VERIFICATION (correct) | `!verifypeer && verifyhost` routes to `Curl_verify_host`, `lib/vtls/schannel.c:1473-1483` (fixed `889c071d3c`) |\n| wolfSSL (IP) | CURLE_PEER_FAILED_VERIFICATION (correct) | post-handshake `wolfSSL_X509_check_ip_asc`, `lib/vtls/wolfssl.c:1758-1773` |\n| rustls | CURLE_OK (**bug**) | no-op verifier replaces entire chain+hostname check |\n| mbedTLS | CURLE_OK (**bug**) | `BADCERT_CN_MISMATCH` flag discarded by verify callback |\n| wolfSSL (DNS) | CURLE_OK (**bug**) | `CheckHostName` silenced by `WOLFSSL_VERIFY_NONE` |\n\n---\n\n**rustls** (`lib/vtls/rustls.c`, EXPERIMENTAL)\n\nIntroducing commit: `43a56e34e1` (2021-02-26, \"rustls: support CURLOPT_SSL_VERIFYPEER\"). The install site at `lib/vtls/rustls.c:1040-1043`:\n\n```c\nif(!conn_config->verifypeer) {\n  rustls_client_config_builder_dangerous_set_certificate_verifier(\n    config_builder, cr_verify_none);\n}\n```\n\nThe verifier at `lib/vtls/rustls.c:381-389`:\n\n```c\nstatic uint32_t cr_verify_none(void *userdata,\n                               const rustls_verify_server_cert_params *params)\n{\n  (void)userdata;\n  (void)params;\n  return RUSTLS_RESULT_OK;\n}\n```\n\n`params->server_name` (populated from the hostname passed to `rustls_client_connection_new` at `:1097-1099`) is dropped on the floor. In rustls' FFI, `dangerous_set_certificate_verifier` *replaces* the verifier entirely — there is no \"still check hostname after success\" hook — so once `cr_verify_none` is installed, no hostname check happens regardless of what SNI was set.\n\nMinimal fix — fail loudly instead of silently accepting a forged cert:\n\n```diff\n  if(!conn_config->verifypeer) {\n+   if(conn_config->verifyhost) {\n+     failf(data, \"rustls: CURLOPT_SSL_VERIFYHOST requires \"\n+           \"CURLOPT_SSL_VERIFYPEER to be set; the rustls backend \"\n+           \"cannot perform a hostname-only check\");\n+     rustls_client_config_builder_free(config_builder);\n+     return CURLE_SSL_CONNECT_ERROR;\n+   }\n    rustls_client_config_builder_dangerous_set_certificate_verifier(\n      config_builder, cr_verify_none);\n  }\n```\n\nProper fix: fetch the leaf cert via `rustls_connection_get_peer_certificate(rconn, 0, ...)` post-handshake and run it through `lib/vtls/x509asn1.c`'s SAN/CN matcher — the same machinery `ossl_verifyhost` and `Curl_cert_hostcheck` (`lib/hostcheck.c`) use. schannel's `Curl_verify_host` in `lib/vtls/schannel_verify.c:500` is the working template.\n\n---\n\n**mbedTLS** (`lib/vtls/mbedtls.c`)\n\nThe verify-flags callback at `lib/vtls/mbedtls.c:456-459`:\n\n```c\nif(!conn_config->verifypeer)\n  *flags = 0;\nelse if(!conn_config->verifyhost)\n  *flags &= ~MBEDTLS_X509_BADCERT_CN_MISMATCH;\n```\n\nWhen `verifypeer=0`, every flag is cleared — including `MBEDTLS_X509_BADCERT_CN_MISMATCH`, which is the verifyhost result. The `else if` that preserves the CN check never fires. mbedTLS itself does the right work: the hostname is registered via `mbedtls_ssl_set_hostname` at `lib/vtls/mbedtls.c:941-949`, the chain check runs under `MBEDTLS_SSL_VERIFY_REQUIRED` at `:839`, the mismatch flag is set — and the curl callback then discards it. There is no out-of-band hostname check elsewhere, so the connection succeeds with a mismatched cert. This is strictly more permissive than the rustls case in the sense that mbedTLS actually detects the mismatch and curl throws the finding away.\n\nRegression dates to `0b9fadf81f` (2018-12-19); the current `*flags = 0` shape was restated in `88cae145509` (2024-08-05). The contract has been broken on mbedTLS for ~6 years.\n\nFix:\n\n```diff\n-  if(!conn_config->verifypeer)\n-    *flags = 0;\n+  if(!conn_config->verifypeer) {\n+    if(conn_config->verifyhost)\n+      *flags &= MBEDTLS_X509_BADCERT_CN_MISMATCH;\n+    else\n+      *flags = 0;\n+  }\n   else if(!conn_config->verifyhost)\n     *flags &= ~MBEDTLS_X509_BADCERT_CN_MISMATCH;\n```\n\n---\n\n**wolfSSL** (`lib/vtls/wolfssl.c`, DNS hostnames only)\n\nThe verify-mode setting at `lib/vtls/wolfssl.c:1402-1403`:\n\n```c\nwolfSSL_CTX_set_verify(wctx->ssl_ctx, conn_config->verifypeer ?\n                       WOLFSSL_VERIFY_PEER : WOLFSSL_VERIFY_NONE, NULL);\n```\n\npaired with DNS-hostname registration at `lib/vtls/wolfssl.c:1537-1542`:\n\n```c\nif(conn_config->verifyhost && connssl->peer.sni) {\n  if(wolfSSL_check_domain_name(wssl->ssl, connssl->peer.sni) !=\n     WOLFSSL_SUCCESS) {\n    return CURLE_SSL_CONNECT_ERROR;\n  }\n}\n```\n\n`wolfSSL_check_domain_name` only *registers* the name into `ssl->buffers.domainName`; the actual `CheckHostName` runs inside wolfSSL's `ProcessPeerCerts`, which is silenced when `ssl->options.verifyNone` is set under `WOLFSSL_VERIFY_NONE`. The registration call returns success unconditionally at pre-handshake time, so `verifypeer=0` silently drops the DNS check. This shape dates to `1394cad30f` (2012-11-03, \"SSL: Several SSL-backend related fixes\") on the old CyaSSL backend, surviving every rename since.\n\nFor IP destinations wolfSSL is correct: the post-handshake block at `lib/vtls/wolfssl.c:1758-1773` runs `wolfSSL_X509_check_ip_asc` directly on the peer cert, gated only on `verifyhost && !peer.sni` with no dependence on the verify mode (added in `692c7f133e`, 2025-10-27). Applying the same pattern to DNS names:\n\n```diff\n+  if(ret == WOLFSSL_SUCCESS &&\n+     !conn_config->verifypeer && conn_config->verifyhost &&\n+     connssl->peer.sni) {\n+    WOLFSSL_X509 *cert = wolfSSL_get_peer_certificate(wssl->ssl);\n+    if(!cert) {\n+      failf(data, \"unable to get peer certificate\");\n+      return CURLE_PEER_FAILED_VERIFICATION;\n+    }\n+    if(wolfSSL_X509_check_host(cert, connssl->peer.sni,\n+                               strlen(connssl->peer.sni), 0, NULL)\n+       != WOLFSSL_SUCCESS)\n+      detail = DOMAIN_NAME_MISMATCH;\n+    wolfSSL_X509_free(cert);\n+  }\n```\n\n---\n\n**PoC**\n\nNote: `curl --insecure` cannot exercise this because it sets both `VERIFYPEER=0` and `VERIFYHOST=0` (`src/config2setopts.c:393-396`); the contract can only be tested at the libcurl API level.\n\n```bash\nopenssl req -x509 -newkey rsa:2048 -keyout /tmp/wrongcn.key \\\n    -out /tmp/wrongcn.crt -days 1 -nodes -subj \"/CN=wrong.example.com\"\nopenssl s_server -cert /tmp/wrongcn.crt -key /tmp/wrongcn.key \\\n    -accept 28443 -www &\n./F14_poc https://evil.test:28443/\n```\n\nClient (`F14_poc.c`):\n\n```c\n/*\n * F14 PoC: CURLOPT_SSL_VERIFYHOST bypass when CURLOPT_SSL_VERIFYPEER=0.\n * Reproduces on rustls, mbedTLS, and wolfSSL (DNS destinations).\n *\n * Documented contract (CURLOPT_SSL_VERIFYPEER.md):\n *   \"The check that the host name in the certificate is valid for the\n *    hostname you are connecting to is done independently of the\n *    CURLOPT_SSL_VERIFYPEER(3) option.\"\n *\n * Expected: curl_easy_perform() == CURLE_PEER_FAILED_VERIFICATION (60)\n * Actual on buggy backends: curl_easy_perform() == CURLE_OK (0)\n *\n * Compare: rebuild against OpenSSL/GnuTLS/schannel — those return 60.\n * wolfSSL IP variant (swap URL to https://127.0.0.1:28443/) also returns 60.\n */\n#include <stdio.h>\n#include <curl/curl.h>\n\nstatic size_t devnull(void *p, size_t s, size_t n, void *u)\n{\n  (void)p; (void)u;\n  return s * n;\n}\n\nint main(int argc, char **argv)\n{\n  CURL *curl;\n  CURLcode rc;\n  struct curl_slist *resolve = NULL;\n  const char *url = (argc > 1) ? argv[1] : \"https://evil.test:28443/\";\n  curl_version_info_data *v = curl_version_info(CURLVERSION_NOW);\n\n  fprintf(stderr, \"[poc] curl %s, ssl backend: %s\\n\",\n          v->version, v->ssl_version ? v->ssl_version : \"(none)\");\n  fprintf(stderr, \"[poc] URL: %s\\n\", url);\n  fprintf(stderr, \"[poc] CURLOPT_SSL_VERIFYPEER = 0  (trust chain off)\\n\");\n  fprintf(stderr, \"[poc] CURLOPT_SSL_VERIFYHOST = 2  (hostname check on)\\n\");\n\n  curl_global_init(CURL_GLOBAL_DEFAULT);\n  curl = curl_easy_init();\n\n  resolve = curl_slist_append(NULL, \"evil.test:28443:127.0.0.1\");\n  curl_easy_setopt(curl, CURLOPT_RESOLVE, resolve);\n  curl_easy_setopt(curl, CURLOPT_URL, url);\n  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);\n  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);\n  curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);\n  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);\n  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, devnull);\n\n  rc = curl_easy_perform(curl);\n\n  fprintf(stderr, \"\\n[result] curl_easy_perform = %d (%s)\\n\",\n          rc, curl_easy_strerror(rc));\n\n  if(rc == CURLE_OK)\n    fprintf(stderr, \"[result] BUG: TLS handshake succeeded despite \"\n            \"CN mismatch and verifyhost=2\\n\");\n  else if(rc == CURLE_PEER_FAILED_VERIFICATION)\n    fprintf(stderr, \"[result] OK: correctly rejected with \"\n            \"CURLE_PEER_FAILED_VERIFICATION\\n\");\n  else\n    fprintf(stderr, \"[result] other error: %d - re-check whether \"\n            \"TLS handshake actually completed\\n\", rc);\n\n  curl_slist_free_all(resolve);\n  curl_easy_cleanup(curl);\n  curl_global_cleanup();\n  return rc == CURLE_OK ? 1 : 0;\n}\n```\n\nOpenSSL build (correct):\n\n```text\n[poc] curl 8.21.0-DEV, ssl backend: OpenSSL/3.4.1\n[poc] CURLOPT_SSL_VERIFYPEER = 0  (trust chain off)\n[poc] CURLOPT_SSL_VERIFYHOST = 2  (hostname check on)\n* SSL Trust: peer verification disabled\n* Server certificate:\n*   subject: CN=wrong.example.com\n* SSL: certificate subject name 'wrong.example.com' does not match target hostname 'evil.test'\n* closing connection #0\n\n[result] curl_easy_perform = 60 (SSL peer certificate or SSH remote key was not OK)\n[result] OK: correctly rejected with CURLE_PEER_FAILED_VERIFICATION\n```\n\nrustls build (bug):\n\n```text\n[poc] curl 8.21.0-DEV, ssl backend: rustls-ffi/0.15.0/rustls/0.23.25/aws-lc-rs\n[poc] CURLOPT_SSL_VERIFYPEER = 0  (trust chain off)\n[poc] CURLOPT_SSL_VERIFYHOST = 2  (hostname check on)\n* rustls: handshake complete, TLSv1.3, ciphersuite: TLS13_AES_256_GCM_SHA384, key exchange group: X25519\n* Established connection to 127.0.0.1 (127.0.0.1 port 28443) from 127.0.0.1 port 49990\n* Connection #0 to host evil.test:28443 left intact\n\n[result] curl_easy_perform = 0 (No error)\n[result] BUG: TLS handshake succeeded despite CN mismatch and verifyhost=2\n```\n\nmbedTLS build (bug):\n\n```text\n[poc] curl 8.21.0-DEV, ssl backend: Mbed TLS/3.6.x\n[poc] CURLOPT_SSL_VERIFYPEER = 0  (trust chain off)\n[poc] CURLOPT_SSL_VERIFYHOST = 2  (hostname check on)\n* mbedTLS: Certificate verification without CA.\n* Server certificate:\n*   subject: CN=wrong.example.com\n* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384\n\n[result] curl_easy_perform = 0 (No error)\n[result] BUG: TLS handshake succeeded despite CN mismatch and verifyhost=2\n```\n\nwolfSSL build, DNS destination (bug):\n\n```text\n[poc] curl 8.21.0-DEV, ssl backend: wolfSSL/5.7.x\n[poc] CURLOPT_SSL_VERIFYPEER = 0  (trust chain off)\n[poc] CURLOPT_SSL_VERIFYHOST = 2  (hostname check on)\n* SSL connection using TLSv1.3 / TLS_AES_128_GCM_SHA256\n\n[result] curl_easy_perform = 0 (No error)\n[result] BUG: TLS handshake succeeded despite CN mismatch and verifyhost=2\n```\n\nwolfSSL build, IP destination (`https://127.0.0.1:28443/`) — correct: post-handshake `wolfSSL_X509_check_ip_asc` catches the mismatch and returns 60.\n\n---\n\nA backend-parametric tool test asserting `CURLE_PEER_FAILED_VERIFICATION` on `(verifypeer=0, verifyhost=2, mismatched cert)` across every enabled TLS backend would catch the whole cluster. The schannel fix landed in 2022 without such a test; that gap is why rustls, mbedTLS and wolfSSL drifted into the same shape undetected.\n\nThis is seemingly the same issue as CVE-2013-4545, but in different backends.\n\nCheers,\nJoshua\n\n## Impact\n\nAn application that disables CA verification (CURLOPT_SSL_VERIFYPEER=0) but keeps hostname checking enabled (CURLOPT_SSL_VERIFYHOST=2) — a documented-safe combination — silently connects to a server presenting a mismatched certificate on three of curl's TLS backends. The hostname check the docs guarantee runs independently does not run, so a connection a developer believes is hostname-validated is not.",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
