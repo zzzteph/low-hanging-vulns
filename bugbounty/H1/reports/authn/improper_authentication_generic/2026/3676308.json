@@ -1,0 +1,122 @@
+{
+  "id": 3676308,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjc2MzA4",
+  "url": "https://hackerone.com/reports/3676308",
+  "title": "POST /api/bitcoinWithdrawalFees returns financial data without authentication despite being documented as a USER OPERATION (private endpoint)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-15T21:11:17.777Z",
+  "submitted_at": "2026-04-15T21:11:18.050Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "glferreira-devsecops",
+    "url": "/glferreira-devsecops",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/m4lqau1gjjzzggohm88mc2znakau/e7fbbe664de1e668142d438ef3a3213b1552f6c68f7875dc6c1f6fe9ba81840b"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 440,
+    "url": "https://hackerone.com/coinmate",
+    "handle": "coinmate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/440/e3088fe967412b4eabd1c6f7f62d26bcee9a177f_original.jpg/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/440/e3088fe967412b4eabd1c6f7f62d26bcee9a177f_original.jpg/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "CoinMate.io",
+      "twitter_handle": "CoinmateBT",
+      "website": "https://coinmate.io",
+      "about": "CoinMate.io is a crypto trading platform"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-05-20T09:26:54.084Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-04-20T09:26:49.491Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe `POST /api/bitcoinWithdrawalFees` endpoint returns real-time Bitcoin withdrawal fee data **without requiring any authentication**, despite being explicitly documented as a **\"USER OPERATION\"** (private endpoint) in the [official CoinMate API documentation](https://github.com/coinmate-io/coinmate-api-examples/blob/main/resources/doc.md#bitcoin-withdrawal-fees-bitcoinwithdrawalfees).\n\nThis is the **only** private endpoint that does not enforce authentication. All other `USER OPERATION` endpoints (e.g., `/api/balances`, `/api/openOrders`, `/api/bitcoinDepositAddresses`) correctly reject unauthenticated requests with `{\"error\": true, \"errorMessage\": \"Invalid request\"}`.\n\n## Root Cause\n\nThe authentication middleware/filter on the `/api/bitcoinWithdrawalFees` endpoint is misconfigured, allowing the request to bypass HMAC-SHA256 signature verification. This is confirmed by the fact that all three official API client libraries (Java, TypeScript, Python) invoke this endpoint via their `postPrivate()` methods, which attach `clientId`, `nonce`, `publicKey`, and `signature` parameters.\n\n## Evidence from Official Documentation\n\nFrom [`resources/doc.md` (line 1230-1246)](https://github.com/coinmate-io/coinmate-api-examples/blob/main/resources/doc.md):\n\n```\n## Bitcoin withdrawal fees [/bitcoinWithdrawalFees]\n**USER OPERATION**\n\n### POST [POST]\n+ Request (application/x-www-form-urlencoded)\n\n        clientId=1038&nonce=15270794730&signature=94933BF157B9405A1C2F330902987300B3A73DE620023E1782635AAF16984729\n```\n\nThe documentation explicitly shows authentication parameters (`clientId`, `nonce`, `signature`) as **required** for this endpoint.\n\n## Evidence from Official Client Libraries\n\n**TypeScript** ([CoinmateClient.ts](https://github.com/coinmate-io/coinmate-api-examples/blob/main/typescript/src/client/CoinmateClient.ts)):\n```typescript\nasync getBitcoinWithdrawalFees(): Promise<CoinmateResponse<any>> {\n    return this.httpClient.postPrivate('/bitcoinWithdrawalFees');\n    //                      ^^^^^^^^^^^ — treated as PRIVATE\n}\n```\n\n**Java** ([CoinmateClient.java](https://github.com/coinmate-io/coinmate-api-examples/blob/main/java/main/java/org/example/coinmate/client/CoinmateClient.java)):\n```java\npublic JsonObject getBitcoinWithdrawalFees() throws IOException {\n    return httpClient.postPrivate(\"/bitcoinWithdrawalFees\", Map.of());\n    //                ^^^^^^^^^^^ — treated as PRIVATE\n}\n```\n\n## Steps to Reproduce\n\n### Step 1: Send unauthenticated request to the vulnerable endpoint\n\n```\ncurl -s -X POST https://coinmate.io/api/bitcoinWithdrawalFees\n```\n\n**Response (HTTP 200 — data returned WITHOUT authentication):**\n```json\n{\n  \"error\": false,\n  \"errorMessage\": null,\n  \"data\": {\n    \"low\": 0.000011,\n    \"high\": 0.000019,\n    \"timestamp\": 1776286189432\n  }\n}\n```\n\n### Step 2: Confirm other private endpoints correctly reject unauthenticated requests\n\n```\ncurl -s -X POST https://coinmate.io/api/balances\n```\n\n**Response (correctly blocked):**\n```json\n{\n  \"error\": true,\n  \"errorMessage\": \"Invalid request\",\n  \"data\": null\n}\n```\n\n### Step 3: Confirm the endpoint ignores arbitrary authentication parameters\n\n```\ncurl -s -X POST https://coinmate.io/api/bitcoinWithdrawalFees \\\n  -d \"clientId=999&publicKey=FAKE_KEY&nonce=12345&signature=AAAAAAAAAAAAAAAAAAAAAA\"\n```\n\n**Response (still returns data — authentication is completely bypassed):**\n```json\n{\n  \"error\": false,\n  \"errorMessage\": null,\n  \"data\": {\n    \"low\": 0.000011,\n    \"high\": 0.000019,\n    \"timestamp\": 1776286189615\n  }\n}\n```\n\nThis confirms the authentication middleware is **not invoked at all** for this endpoint.\n\n### Step 4: Confirm GET is not allowed (POST-only API endpoint)\n\n```\ncurl -s -X GET https://coinmate.io/api/bitcoinWithdrawalFees\n```\n\n**Response (HTTP 405):**\n```json\n{\n  \"type\": \"about:blank\",\n  \"title\": \"Method Not Allowed\",\n  \"status\": 405,\n  \"detail\": \"Method 'GET' is not supported.\",\n  \"instance\": \"/api/bitcoinWithdrawalFees\"\n}\n```\n\n## Authentication Enforcement Comparison\n\n| Endpoint | Classification | Auth Required? | Unauthenticated Response |\n|:---------|:--------------|:--------------:|:-------------------------|\n| POST /api/balances | USER OPERATION | Yes | \"Invalid request\" |\n| POST /api/openOrders | USER OPERATION | Yes | \"Invalid request\" |\n| POST /api/traderFees | USER OPERATION | Yes | \"Invalid request\" |\n| POST /api/bitcoinDepositAddresses | USER OPERATION | Yes | \"Invalid request\" |\n| POST /api/transactionHistory | USER OPERATION | Yes | \"Invalid request\" |\n| POST /api/tradeHistory | USER OPERATION | Yes | \"Invalid request\" |\n| POST /api/orderHistory | USER OPERATION | Yes | \"Invalid request\" |\n| POST /api/transferHistory | USER OPERATION | Yes | \"Invalid request\" |\n| **POST /api/bitcoinWithdrawalFees** | **USER OPERATION** | **No** | **Returns data** |\n\nThe endpoint is the only one in its category that fails to enforce authentication.\n\n## Cross-Origin Exploitation\n\nThe response includes `Access-Control-Allow-Origin: *`, meaning any website on the internet can read this data cross-origin via JavaScript:\n\n```javascript\n// Any website can execute this:\nfetch('https://coinmate.io/api/bitcoinWithdrawalFees', {method: 'POST'})\n  .then(r => r.json())\n  .then(d => console.log('Fee data:', d.data));\n```\n\nSee the attached `cors_poc.html` for a working demonstration.\n\n## Recommended Fix\n\nApply the same authentication middleware used by all other `USER OPERATION` endpoints to `/api/bitcoinWithdrawalFees`.\n\n## Impact\n\n## Security Impact\n\n**1. Broken Access Control (OWASP A01:2021):**\nA private endpoint designed to require HMAC-SHA256 authentication (`clientId` + `nonce` + `publicKey` + `signature`) is fully accessible without any credentials. This demonstrates a gap in the authentication enforcement layer — the endpoint was classified as `USER OPERATION` in the official documentation, its official client libraries (TypeScript, Java, Python) all invoke it via `postPrivate()`, and the documented request example includes full authentication parameters. Yet the server does not validate any of them.\n\n**2. Information Disclosure of Internal Operational Data:**\nThe endpoint exposes real-time internal fee calculation data that changes dynamically:\n- `low`: Current minimum BTC withdrawal fee (e.g., 0.000011 BTC)\n- `high`: Current maximum BTC withdrawal fee (e.g., 0.000019 BTC)  \n- `timestamp`: Exact millisecond server-side timestamp of the last fee recalculation\n\nThis data reflects CoinMate's internal fee engine state and is not equivalent to static fee schedules published on marketing pages.\n\n**3. Cross-Origin Data Theft via CORS Misconfiguration:**\nThe response includes `Access-Control-Allow-Origin: *`, which means any malicious website can silently read this data via JavaScript without the user's knowledge. A phishing page or compromised ad could harvest fee data in the background. See the attached `cors_poc.html` for a working demonstration.\n\n**4. Authentication Framework Inconsistency:**\nThis is the **only** `USER OPERATION` endpoint (out of 14+ tested) that does not enforce authentication. All others (`/api/balances`, `/api/openOrders`, `/api/traderFees`, `/api/bitcoinDepositAddresses`, `/api/transactionHistory`, `/api/tradeHistory`, `/api/orderHistory`, `/api/transferHistory`) correctly reject unauthenticated requests with `{\"error\": true, \"errorMessage\": \"Invalid request\"}`. This inconsistency strongly indicates a configuration error rather than an intentional design decision, and raises the concern that other endpoints may have similar gaps that have not yet been discovered.\n\n**5. Potential for Broader Impact:**\nIf the root cause is a missing filter/interceptor registration for this specific path, the same class of misconfiguration could affect other endpoints that were recently added, refactored, or moved between public and private scopes.",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5741811,
+      "file_name": "cors_poc.html",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/8tl7u4pk52y40a3dun8x4i8nhe28?response-content-disposition=attachment%3B%20filename%3D%22cors_poc.html%22%3B%20filename%2A%3DUTF-8%27%27cors_poc.html&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVGRK2Y4L%2F20260520%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260520T110229Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECIaCXVzLXdlc3QtMiJIMEYCIQD%2F%2Bi4KZ4c%2FBNd3dFZ7HK%2FvWGTDN7FVMnUiCRuEjlhE%2BQIhANyyMXdKuPi0HiMlKat8elixqysPOhbhnNRo0bEtgY0UKrsFCOv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxXldkaBv99U1mnI7kqjwVJ4WLgxtlnEl06P%2FDMhBhWFBx9ZuwA3slY9im3wZjvOQyNqWQn%2Bp52EFzFmncJ86g8sfcKCvGEFhRkbjX8GoArC6OX4XQn4nO7303TQnJHZNIad062ds02yZ9F6%2BnSlcRZE%2BZytWL%2Fbic5uxOn9XZ%2Fn0hvinhLLK3DUToJsk6RewU2SKekiCpx9421Io05x7w%2FlRXrF3ehTIDPqhWfeg8dILFhm8vlYCNqhViO3KAQWAz3x7oThFtZSpSKpIepvpPzK%2BPSKi1LSCqVfz0wKSvdXsDl4O5V6mjYmtIMBRI%2FFGtXr0xiZJ8hgzccE%2FXKihThvBW%2F0q17CSznucRrbfWmYwTUSi3Jhcfocu82MrsmK8Ywx%2BO%2BXEujDN65QNLgmuau1Ap71b%2By9SvDL8UWRjWEwEHXc%2FGEZY%2FaPYcxpH%2FLIHzR5b4EfGmNjk2wtUX9FOaYgoQK4lgMAK3MFqrKfLE6zaT1enM1B4kCcV30O1X%2B5C9vJAAIAfT8k9ydcr0C4WlCmWI4O5gTtXugqSNsaA1ikjHOvbd0gHgaCE3sgARPlEnxqnHKVZvy61WshzWROxXItEseocY8iADekPQH5pYVqlU5%2BIg9Caq15ID6YxjtdUHLyHturH5QzeDQd5fhnK%2FvZv6HGHWfEppwHvgk2wPafMZBRoSA0WPSZXvYZro5sqnjB%2FWRtR5UU9tAMKId9Q9ZzExJ6P47pQZc4G80eJniYCGvHrIjQHWO9oPZiU%2BqA%2FzZW8%2Bhsiymy4%2BQfUgx8RTEfInzzw7q7PZJUVPQnFJB85gRaDICY%2F09TXmR3oq5yAAc4m2yl%2Fzve4sndIRzrnUPopUFeC2xleWCobRvhegkOzz5pulw%2By2vx4lKvnPHMMuJttAGOrABGxbOUALF1yTV2pf43Fi3%2Fjy5Td2BlEmV96Shc8VBKM%2BH%2BeThZ5aq2%2B0A%2BFAJCbAt9IZT18KSYYG2VNgODodRQ6YxS04v0BPjJBJLb948g9xAwYwGBjEjmFIJVl62WA3UHZSG%2B%2Bpct85Wm4d6s5ElhYYj36br8qvdPhBf2ZA7htQesg3qvD%2F4PPsipQ95DR%2F14UZsDsAkIubBYngID9jajNw2epzLexonWvMfAOogCyc%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=5798dcda2c44320b356074529cbb1787d775a5998ddfae30e52c86eb41c8da80",
+      "file_size": 5236,
+      "type": "text/html",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-05-20T09:26:49.611Z",
+  "allow_singular_disclosure_after": -5740.378154932,
+  "singular_disclosure_allowed": true,
+  "vote_count": 4,
+  "voters": [
+    "glferreira-devsecops",
+    "thawndev",
+    "0xdarknode",
+    "quark_spin"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
