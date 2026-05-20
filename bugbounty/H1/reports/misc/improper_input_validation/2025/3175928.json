@@ -1,0 +1,167 @@
+{
+  "id": 3175928,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMTc1OTI4",
+  "url": "https://hackerone.com/reports/3175928",
+  "title": "ImageId Format Injection in Image Upload Endpoint",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2025-06-03T14:51:33.780Z",
+  "submitted_at": "2025-06-03T14:51:34.197Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "oblivionsage",
+    "url": "/oblivionsage",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ip4cyu4gxdh9vdw49fk160hphdhf/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 48242,
+    "url": "https://hackerone.com/lichess",
+    "handle": "lichess",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/CbR2hQEVmv82Z9L1cfqd9SFQ/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/CbR2hQEVmv82Z9L1cfqd9SFQ/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Lichess",
+      "twitter_handle": "",
+      "website": "https://lichess.org",
+      "about": "The free chess server. No paywall, no tracking, no ads. Just the good stuff. Source code: https://lichess.org/source"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2025-06-06T17:43:33.725Z",
+  "bug_reporter_agreed_on_going_public_at": "2025-06-06T15:02:58.496Z",
+  "team_member_agreed_on_going_public_at": "2025-06-06T17:43:33.420Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Summary\n\nHello Again Lichess Team,\n\nI found an input validation issue in the image upload endpoint that lets me inject special characters into the `rel` parameter. This breaks the expected ImageId format that the application uses to identify uploaded images. While testing upload functionality, I noticed that colon characters aren't properly sanitized, which could cause parsing issues in other parts of the application\n\n\n# Description\n\nThe `/upload/image/user/{rel}` endpoint doesn't validate the `rel` parameter properly. This parameter gets combined with random strings to create an ImageId that should follow a specific format: `{rel}:{random12}:{random8}.{extension}`\n\nThe issue is that the application accepts colon characters in the `rel` parameter without sanitization. This happens because the validation only checks for MongoDB injection patterns (like `$ne`) but misses format-breaking characters\n\n\nLooking at the code in `modules/memo/src/main/Picfit.scala`:\n\n\n```bash\nval image = PicfitImage(\n  id = ImageId(s\"$rel:${ThreadLocalRandom.nextString(8)}.$extension\"),\n  // rel parameter used directly without validation\n  rel = rel,\n  // ...\n)\n```\n\n\nSo when I inject colons, instead of getting the expected 3-part format, I get multiple parts that could break parsing logic elsewhere\n\n\n#  Steps to Reproduce\n\n1.  Login to Lichess and grab your session cookie\n2. Create a small test image file (test.png)\n\n```bash\n# Create a small test image (1x1 pixel PNG)\necho -e '\\x89PNG\\r\\n\\x1a\\n\\x00\\x00\\x00\\rIHDR\\x00\\x00\\x00\\x01\\x00\\x00\\x00\\x01\\x08\\x02\\x00\\x00\\x00\\x90wS\\xde\\x00\\x00\\x00\\x0cIDATx\\x9cc\\xf8\\x00\\x00\\x00\\x01\\x00\\x01\\x00\\x00\\x00\\x00\\x16\\x1d\\xb3\\x00\\x00\\x00\\x00IEND\\xaeB`\\x82' > test.png\n```\n\n3. Send this request:\n\n```bash\ncurl -X POST \"https://lichess.org/upload/image/user/test:evil:format:break\" \\\n  -b \"lila2=YOUR_SESSION_COOKIE\" \\\n  -H \"Origin: https://lichess.org\" \\\n  -H \"Referer: https://lichess.org/\" \\\n  -F \"image=@test.png\"\n```\n\n**Expected Result**: The application should reject the request or sanitize the colons\n**Actual Result**: The request succeeds and returns:\n\nNormal Request :\n\n{F4409970}\n\n{F4409974}\n\nActual Request with inject :\n\n{F4409975}\n\n{F4409976}\n\n\n```bash\n{\"imageUrl\":\"https://image.lichess1.org/display?...&path=test:evil:format:break:ePU9oRLnNvCz:iFZRITKQ.png&...\"}\n```\n\n\nNotice how the ImageId now has 6 parts instead of the expected 3: `test:evil:format:break:ePU9oRLnNvCz:iFZRITKQ.png`\n\n\nhttps://cwe.mitre.org/data/definitions/20.html\n\n\n# Mitigation\n\n\nTo fix this, you should sanitize the `rel` parameter in the image upload handler. Something like:\n\n```bash\n// Validate rel parameter format\nval sanitizedRel = rel.replaceAll(\"[^a-zA-Z0-9_-]\", \"_\")\n```\n\nOr add validation in the `uploadSource` method in `PicfitApi.scala` to reject `rel` values containing colons or other format-breaking characters.Also consider documenting the expected ImageId format since the current code assumes a specific structure that could break if the format changes.\n\n## Impact\n\nAn attacker could potentially cause issues in other parts of the application that expect ImageIds to follow the standard 3-part format. I noticed there's regex parsing logic in `findInMarkdown` that might not handle malformed ImageIds correctly .This could cause issues in logging, image lookup, or markdown parsing where the format of imageId is implicitly assumed. In production environments with chained handlers or analytics relying on this structure, this might lead to edge-case bugs or silent failures\n\nHowever, I couldn't demonstrate concrete security impact beyond breaking the data format. The images still upload successfully and get stored properly\n\nThank you for your time and reviewing my report",
+  "weakness": {
+    "id": 107,
+    "name": "Improper Input Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4409970,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ogz6wc94gh4xiiehbn9z6t1sfjt4?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5R2LC2KX%2F20260520%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260520T223135Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECoaCXVzLXdlc3QtMiJGMEQCIBYh8mYhp%2FVIEM9%2F%2Bp6JXVnQQLUw54gAJE%2F5%2BISIjYGFAiB%2FBvG%2Fka4xgT24zN1dKzYwgtxqXdbAsF5YYa1yT6VNzyq6BQjz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMl6ASAy6w2CqGuR2JKo4FHSOC%2FytdsFiyq7JxpnNDJJjYWHWwPWBWLKHvLaj4zr53%2B1ZCTwS0m%2BUm9UF7%2BP8YOImvGSeooLvJqHQC4iwgZci%2FP7AsHiQYci1%2FaZ2onjWFjXq85Y50zVRAwoPab31WSLHG1N6fH%2BMwe0O8F4cvi9JwCIyR73jh%2BpH5q2tcSAn0xzx4bE5jjrtShVgwTcskDPPsn7RiYKy7qA5%2BY843POqIzn1b8tmaCf%2FQsjJaiFW%2FXM6T1XCmza2%2Fhoe4KeZxvzYOg6fW3oYhw0XyAO8je%2BvrPJx9ym6VVQxKZmXN2Dyb9L6ZMNh86B1kMD5W8wwdnE6ko%2BWSa5uz2YJ3NUiOucIRKKG44o1tWKRG2fgtH24vdQaOy1Y2XrSlLQa1DB4IUmhAXD2uiryE%2Bb1E%2FmMswIWu2jP2l%2FuOpoS4F2xpcuA8NtpI8a6m%2BQ2EtquaVUXhbk3M2YIWoOWK9Jq1kGe2qmFE7rUBTUdZEh7yWUcGTBRBf1LtLySxczFHmCLNIkH%2BsPWiZW%2FZQSnf3T8DHZ8SYld%2Bqn7EuHWVRK1BPhHbFkb49183AWGKVMooyA0LOygzNHzVrkFahWTrJxkyiD3K3LcMHEO1u9J9hC5grPwDCkg0RI7xR%2BLQ9rV6h5PEm9C9Q0OcDrozpmg2%2Fhq%2BYGxlkP0BQ8LbQ9jeaZDHo2Jw9R15SL1Slxog7TvJQDiKFsSACcmj3VsF%2F6PS5jxubNpVkZ6CaPRI223332%2BxqZ58%2BQhu8hJiPKUKvzV4y7itDpqLWHCK2FLCnjdzxm8DdIKuFIL7CiAkILdtjdd8kfgF4zNaSWjLEtkRQML%2BeJ%2Bj60oQ%2BdYijw14BfK9MQG8jGRFrdVqCIf%2F205r37Tazlh7MN7it9AGOrIBVPQcH4mQevyqOykroO8AZJ0JZ%2Bia0jcKxJ%2Fjlw%2FEx8OiozVNAJQK3JvMqu7viijRqQp21tnN4SLqRHwFgnbZU22OImijMqcJeJy93gHfLgIrk%2FoGua4EK5RUi0MnR8xnMhDK6x24G3LzpCtpD09w45c8lC6KxBKVUpawZDnFHDwmkiJoVRNh8Tn%2Bh%2FPzGW5VVA%2FuRA%2BZY5Cmabq2NCHHkGXhBA%2BicHZiG5kEKasj4zHXxQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6a362aed8c0118213c1a14c39f14740c1ce257b9c56bfe544ef20219bf6a958b",
+      "file_size": 80096,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 4409974,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/iggzv6hg7mx79c94p9abj1sp4c7f?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5R2LC2KX%2F20260520%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260520T223135Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECoaCXVzLXdlc3QtMiJGMEQCIBYh8mYhp%2FVIEM9%2F%2Bp6JXVnQQLUw54gAJE%2F5%2BISIjYGFAiB%2FBvG%2Fka4xgT24zN1dKzYwgtxqXdbAsF5YYa1yT6VNzyq6BQjz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMl6ASAy6w2CqGuR2JKo4FHSOC%2FytdsFiyq7JxpnNDJJjYWHWwPWBWLKHvLaj4zr53%2B1ZCTwS0m%2BUm9UF7%2BP8YOImvGSeooLvJqHQC4iwgZci%2FP7AsHiQYci1%2FaZ2onjWFjXq85Y50zVRAwoPab31WSLHG1N6fH%2BMwe0O8F4cvi9JwCIyR73jh%2BpH5q2tcSAn0xzx4bE5jjrtShVgwTcskDPPsn7RiYKy7qA5%2BY843POqIzn1b8tmaCf%2FQsjJaiFW%2FXM6T1XCmza2%2Fhoe4KeZxvzYOg6fW3oYhw0XyAO8je%2BvrPJx9ym6VVQxKZmXN2Dyb9L6ZMNh86B1kMD5W8wwdnE6ko%2BWSa5uz2YJ3NUiOucIRKKG44o1tWKRG2fgtH24vdQaOy1Y2XrSlLQa1DB4IUmhAXD2uiryE%2Bb1E%2FmMswIWu2jP2l%2FuOpoS4F2xpcuA8NtpI8a6m%2BQ2EtquaVUXhbk3M2YIWoOWK9Jq1kGe2qmFE7rUBTUdZEh7yWUcGTBRBf1LtLySxczFHmCLNIkH%2BsPWiZW%2FZQSnf3T8DHZ8SYld%2Bqn7EuHWVRK1BPhHbFkb49183AWGKVMooyA0LOygzNHzVrkFahWTrJxkyiD3K3LcMHEO1u9J9hC5grPwDCkg0RI7xR%2BLQ9rV6h5PEm9C9Q0OcDrozpmg2%2Fhq%2BYGxlkP0BQ8LbQ9jeaZDHo2Jw9R15SL1Slxog7TvJQDiKFsSACcmj3VsF%2F6PS5jxubNpVkZ6CaPRI223332%2BxqZ58%2BQhu8hJiPKUKvzV4y7itDpqLWHCK2FLCnjdzxm8DdIKuFIL7CiAkILdtjdd8kfgF4zNaSWjLEtkRQML%2BeJ%2Bj60oQ%2BdYijw14BfK9MQG8jGRFrdVqCIf%2F205r37Tazlh7MN7it9AGOrIBVPQcH4mQevyqOykroO8AZJ0JZ%2Bia0jcKxJ%2Fjlw%2FEx8OiozVNAJQK3JvMqu7viijRqQp21tnN4SLqRHwFgnbZU22OImijMqcJeJy93gHfLgIrk%2FoGua4EK5RUi0MnR8xnMhDK6x24G3LzpCtpD09w45c8lC6KxBKVUpawZDnFHDwmkiJoVRNh8Tn%2Bh%2FPzGW5VVA%2FuRA%2BZY5Cmabq2NCHHkGXhBA%2BicHZiG5kEKasj4zHXxQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f7724a5d0155d31ff2fa4777d4d3a91dd6a359d001eda14d528e8ef8761e88d2",
+      "file_size": 30106,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 4409975,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/yk090cc3dnhmlg75596v7gz3303s?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5R2LC2KX%2F20260520%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260520T223135Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECoaCXVzLXdlc3QtMiJGMEQCIBYh8mYhp%2FVIEM9%2F%2Bp6JXVnQQLUw54gAJE%2F5%2BISIjYGFAiB%2FBvG%2Fka4xgT24zN1dKzYwgtxqXdbAsF5YYa1yT6VNzyq6BQjz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMl6ASAy6w2CqGuR2JKo4FHSOC%2FytdsFiyq7JxpnNDJJjYWHWwPWBWLKHvLaj4zr53%2B1ZCTwS0m%2BUm9UF7%2BP8YOImvGSeooLvJqHQC4iwgZci%2FP7AsHiQYci1%2FaZ2onjWFjXq85Y50zVRAwoPab31WSLHG1N6fH%2BMwe0O8F4cvi9JwCIyR73jh%2BpH5q2tcSAn0xzx4bE5jjrtShVgwTcskDPPsn7RiYKy7qA5%2BY843POqIzn1b8tmaCf%2FQsjJaiFW%2FXM6T1XCmza2%2Fhoe4KeZxvzYOg6fW3oYhw0XyAO8je%2BvrPJx9ym6VVQxKZmXN2Dyb9L6ZMNh86B1kMD5W8wwdnE6ko%2BWSa5uz2YJ3NUiOucIRKKG44o1tWKRG2fgtH24vdQaOy1Y2XrSlLQa1DB4IUmhAXD2uiryE%2Bb1E%2FmMswIWu2jP2l%2FuOpoS4F2xpcuA8NtpI8a6m%2BQ2EtquaVUXhbk3M2YIWoOWK9Jq1kGe2qmFE7rUBTUdZEh7yWUcGTBRBf1LtLySxczFHmCLNIkH%2BsPWiZW%2FZQSnf3T8DHZ8SYld%2Bqn7EuHWVRK1BPhHbFkb49183AWGKVMooyA0LOygzNHzVrkFahWTrJxkyiD3K3LcMHEO1u9J9hC5grPwDCkg0RI7xR%2BLQ9rV6h5PEm9C9Q0OcDrozpmg2%2Fhq%2BYGxlkP0BQ8LbQ9jeaZDHo2Jw9R15SL1Slxog7TvJQDiKFsSACcmj3VsF%2F6PS5jxubNpVkZ6CaPRI223332%2BxqZ58%2BQhu8hJiPKUKvzV4y7itDpqLWHCK2FLCnjdzxm8DdIKuFIL7CiAkILdtjdd8kfgF4zNaSWjLEtkRQML%2BeJ%2Bj60oQ%2BdYijw14BfK9MQG8jGRFrdVqCIf%2F205r37Tazlh7MN7it9AGOrIBVPQcH4mQevyqOykroO8AZJ0JZ%2Bia0jcKxJ%2Fjlw%2FEx8OiozVNAJQK3JvMqu7viijRqQp21tnN4SLqRHwFgnbZU22OImijMqcJeJy93gHfLgIrk%2FoGua4EK5RUi0MnR8xnMhDK6x24G3LzpCtpD09w45c8lC6KxBKVUpawZDnFHDwmkiJoVRNh8Tn%2Bh%2FPzGW5VVA%2FuRA%2BZY5Cmabq2NCHHkGXhBA%2BicHZiG5kEKasj4zHXxQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c4327a539fb6aeb14ba7449253fc8e152b6f624e577dcbece1f244447f587a53",
+      "file_size": 82888,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 4409976,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9jfk9vj6e4zj38w9rngoyidi9es1?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5R2LC2KX%2F20260520%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260520T223135Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECoaCXVzLXdlc3QtMiJGMEQCIBYh8mYhp%2FVIEM9%2F%2Bp6JXVnQQLUw54gAJE%2F5%2BISIjYGFAiB%2FBvG%2Fka4xgT24zN1dKzYwgtxqXdbAsF5YYa1yT6VNzyq6BQjz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMl6ASAy6w2CqGuR2JKo4FHSOC%2FytdsFiyq7JxpnNDJJjYWHWwPWBWLKHvLaj4zr53%2B1ZCTwS0m%2BUm9UF7%2BP8YOImvGSeooLvJqHQC4iwgZci%2FP7AsHiQYci1%2FaZ2onjWFjXq85Y50zVRAwoPab31WSLHG1N6fH%2BMwe0O8F4cvi9JwCIyR73jh%2BpH5q2tcSAn0xzx4bE5jjrtShVgwTcskDPPsn7RiYKy7qA5%2BY843POqIzn1b8tmaCf%2FQsjJaiFW%2FXM6T1XCmza2%2Fhoe4KeZxvzYOg6fW3oYhw0XyAO8je%2BvrPJx9ym6VVQxKZmXN2Dyb9L6ZMNh86B1kMD5W8wwdnE6ko%2BWSa5uz2YJ3NUiOucIRKKG44o1tWKRG2fgtH24vdQaOy1Y2XrSlLQa1DB4IUmhAXD2uiryE%2Bb1E%2FmMswIWu2jP2l%2FuOpoS4F2xpcuA8NtpI8a6m%2BQ2EtquaVUXhbk3M2YIWoOWK9Jq1kGe2qmFE7rUBTUdZEh7yWUcGTBRBf1LtLySxczFHmCLNIkH%2BsPWiZW%2FZQSnf3T8DHZ8SYld%2Bqn7EuHWVRK1BPhHbFkb49183AWGKVMooyA0LOygzNHzVrkFahWTrJxkyiD3K3LcMHEO1u9J9hC5grPwDCkg0RI7xR%2BLQ9rV6h5PEm9C9Q0OcDrozpmg2%2Fhq%2BYGxlkP0BQ8LbQ9jeaZDHo2Jw9R15SL1Slxog7TvJQDiKFsSACcmj3VsF%2F6PS5jxubNpVkZ6CaPRI223332%2BxqZ58%2BQhu8hJiPKUKvzV4y7itDpqLWHCK2FLCnjdzxm8DdIKuFIL7CiAkILdtjdd8kfgF4zNaSWjLEtkRQML%2BeJ%2Bj60oQ%2BdYijw14BfK9MQG8jGRFrdVqCIf%2F205r37Tazlh7MN7it9AGOrIBVPQcH4mQevyqOykroO8AZJ0JZ%2Bia0jcKxJ%2Fjlw%2FEx8OiozVNAJQK3JvMqu7viijRqQp21tnN4SLqRHwFgnbZU22OImijMqcJeJy93gHfLgIrk%2FoGua4EK5RUi0MnR8xnMhDK6x24G3LzpCtpD09w45c8lC6KxBKVUpawZDnFHDwmkiJoVRNh8Tn%2Bh%2FPzGW5VVA%2FuRA%2BZY5Cmabq2NCHHkGXhBA%2BicHZiG5kEKasj4zHXxQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=de804a5752aeb615c0af414e8cfdb75009d11f6d4f49f83b8b1c586139723b7e",
+      "file_size": 31169,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 73,
+  "voters": [
+    "rejection",
+    "aboalezz",
+    "loaymorad",
+    "hacker_441",
+    "almuntadhar0x01",
+    "mohaned0101",
+    "thalaivar304",
+    "cosmossec",
+    "ezrel",
+    "2026",
+    "and 63 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.1,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "none",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 50174,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/lichess-org/lila",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
