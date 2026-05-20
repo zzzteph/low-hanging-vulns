@@ -1,6 +1,6 @@
 """
 Maps HackerOne weakness class slugs to generic security categories.
-Used by h1_fetch.py (path construction) and h1_index.py (grouping).
+Used by fetch.py (path construction) and index.py (grouping).
 
 Category slugs (filesystem-safe):
   xss, sqli, rce, ssrf, xxe, lfi, http_injection, injection,
@@ -242,21 +242,19 @@ _MAP: dict[str, str] = {
     "llm05_supply_chain_vulnerabilities": "llm",
     "llm06_sensitive_information_disclosure": "llm",
 
-    # ── Misc / Fuzzing ────────────────────────────────────────────────────────
-    "improper_input_validation": "misc/fuzzing",
-    "acceptance_of_extraneous_untrusted_data_with_trusted_data": "misc/fuzzing",
-    "misinterpretation_of_input": "misc/fuzzing",
-    "improper_validation_of_syntactic_correctness_of_input": "misc/fuzzing",
-    "improper_handling_of_unexpected_data_type": "misc/fuzzing",
-    "improper_handling_of_url_encoding_hex_encoding": "misc/fuzzing",
-    "encoding_error": "misc/fuzzing",
-
-    # ── Misc / Skills ─────────────────────────────────────────────────────────
-    "violation_of_secure_design_principles": "misc/skills",
-    "security_through_obscurity": "misc/skills",
-    "use_of_inherently_dangerous_function": "misc/skills",
-    "use_of_incorrectly_resolved_name_or_reference": "misc/skills",
-    "asi05_unexpected_code_execution_rce": "misc/skills",
+    # ── Misc / catch-all ──────────────────────────────────────────────────────
+    "improper_input_validation": "misc",
+    "acceptance_of_extraneous_untrusted_data_with_trusted_data": "misc",
+    "misinterpretation_of_input": "misc",
+    "improper_validation_of_syntactic_correctness_of_input": "misc",
+    "improper_handling_of_unexpected_data_type": "misc",
+    "improper_handling_of_url_encoding_hex_encoding": "misc",
+    "encoding_error": "misc",
+    "violation_of_secure_design_principles": "misc",
+    "security_through_obscurity": "misc",
+    "use_of_inherently_dangerous_function": "misc",
+    "use_of_incorrectly_resolved_name_or_reference": "misc",
+    "asi05_unexpected_code_execution_rce": "misc",
 }
 
 # Human-readable labels for display
@@ -289,8 +287,6 @@ CATEGORY_LABELS: dict[str, str] = {
     "file_upload": "File Upload",
     "llm": "LLM / AI",
     "misc": "Miscellaneous",
-    "misc/fuzzing": "Misc / Fuzzing",
-    "misc/skills": "Misc / Skills",
 }
 
 

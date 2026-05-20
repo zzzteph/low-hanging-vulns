@@ -9,10 +9,7 @@ from categories import get_category
 GRAPHQL_URL = "https://hackerone.com/graphql"
 INDEX_FILE  = "bugbounty/H1/reports.json"
 REPORTS_DIR = "bugbounty/H1/reports"
-MISC_DIR    = "misc"
 
-# Categories routed to top-level misc/ instead of bugbounty/H1/reports/
-_MISC_CATEGORIES = {"misc/fuzzing", "misc/skills"}
 PAGE_SIZE = 25
 MAX_OFFSET = 10000
 HEADERS = {
@@ -186,8 +183,7 @@ def download_reports(entries: list[dict]) -> None:
             year = _report_year(data)
             slug = _weakness_slug(data)
             category = get_category(slug)
-            base = MISC_DIR if category in _MISC_CATEGORIES else REPORTS_DIR
-            out_dir = os.path.join(base, category, slug, year)
+            out_dir = os.path.join(REPORTS_DIR, category, slug, year)
             os.makedirs(out_dir, exist_ok=True)
             out_path = os.path.join(out_dir, f"{report_id}.json")
             with open(out_path, "w", encoding="utf-8") as f:

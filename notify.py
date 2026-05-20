@@ -3,6 +3,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import time
 
 import requests
 
@@ -19,8 +20,10 @@ SEVERITY_EMOJI = {
 
 
 def _new_report_paths() -> list[str]:
+    # -uall expands new untracked directories so individual JSON files are listed,
+    # not collapsed to a single `?? dir/` line that the .json filter would drop.
     result = subprocess.run(
-        ["git", "status", "--porcelain", "bugbounty/H1/reports/", "misc/"],
+        ["git", "status", "--porcelain", "-uall", "bugbounty/H1/reports/"],
         capture_output=True, text=True,
     )
     paths = []
@@ -46,13 +49,8 @@ def _bounty_emoji(amount: float) -> str:
 
 
 def _category_from_path(path: str) -> str:
-    parts = pathlib.Path(path).parts
-    # misc/{subcategory}/... → return subcategory
-    if "misc" in parts:
-        idx = next(i for i, p in enumerate(parts) if p == "misc")
-        if idx + 1 < len(parts):
-            return parts[idx + 1]
     # bugbounty/H1/reports/{category}/... → return category
+    parts = pathlib.Path(path).parts
     idx = next((i for i, p in enumerate(parts) if p == "reports"), -1)
     if idx >= 0 and idx + 1 < len(parts):
         return parts[idx + 1]
@@ -132,7 +130,11 @@ def main() -> None:
         return
 
     sent = skipped = failed = 0
-    for path in paths:
+    for i, path in enumerate(paths):
+        # Telegram rate limit on a single channel is ~1 msg/sec sustained;
+        # bursting 378+ messages back-to-back triggers HTTP 429.
+        if i > 0:
+            time.sleep(2)
         try:
             with open(path, encoding="utf-8") as f:
                 report = json.load(f)
