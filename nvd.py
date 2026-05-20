@@ -6,8 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
-TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
-TG_CHAT_ID   = os.environ.get("TG_CHAT_ID")
+TG_BOT_TOKEN = os.environ.get("TELEGRAM_BOT")
+TG_CHAT_ID   = os.environ.get("TELEGRAM_GROUP")
 NVD_KEY      = os.environ.get("NVD_KEY")
 
 NVD_DIR = "nvd"
@@ -195,7 +195,7 @@ def _send(text: str) -> None:
 
 def main() -> None:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("TG_BOT_TOKEN or TG_CHAT_ID not set — skipping notifications.")
+        print("TELEGRAM_BOT or TELEGRAM_GROUP not set — skipping notifications.")
 
     print("Fetching CVEs from NVD (last 24h)...")
     data = fetch_cve_data()

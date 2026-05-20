@@ -7,8 +7,8 @@ import time
 
 import requests
 
-TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN")
-TG_CHAT_ID   = os.environ.get("TG_CHAT_ID")
+TG_BOT_TOKEN = os.environ.get("TELEGRAM_BOT")
+TG_CHAT_ID   = os.environ.get("TELEGRAM_GROUP")
 
 SEVERITY_EMOJI = {
     "critical": "🔴",
@@ -121,7 +121,7 @@ def _send(text: str) -> None:
 
 def main() -> None:
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
-        print("TG_BOT_TOKEN or TG_CHAT_ID not configured — skipping notifications.")
+        print("TELEGRAM_BOT or TELEGRAM_GROUP not configured — skipping notifications.")
         return
 
     paths = sys.argv[1:] if len(sys.argv) > 1 else _new_report_paths()
