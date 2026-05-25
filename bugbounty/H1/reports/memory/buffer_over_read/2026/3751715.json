@@ -1,0 +1,106 @@
+{
+  "id": 3751715,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzUxNzE1",
+  "url": "https://hackerone.com/reports/3751715",
+  "title": "Heap-OOB read in urlapi `redirect_url()` via `CURLU_GUESS_SCHEME` + `CURLU_NO_GUESS_SCHEME` flow",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-05-20T19:43:47.810Z",
+  "submitted_at": "2026-05-20T19:43:48.627Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-25T21:06:34.871Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-22T05:49:28.613Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nWe've found an issue in `lib/urlapi.c` where `redirect_url()` reads past the end of a heap buffer when the source URL it operates on lacks a \"scheme://\" prefix. This is reachable through documented public APIs (`curl_url_set`) when the caller mixes `CURLU_GUESS_SCHEME` with a subsequent `CURLU_NO_GUESS_SCHEME` set on the same handle.\n\n`redirect_url()` at `lib/urlapi.c:1241` computes:\n\n```c\nconst char *protsep = base + strlen(scheme) + 3;\n```\n\nassuming `base` begins with `\"<scheme>://\"`. But `urlget_url()` at `lib/urlapi.c:1527-1530` deliberately omits the \"scheme://\" prefix when `CURLU_NO_GUESS_SCHEME` is set and `u->guessed_scheme` is true:\n\n```c\nif(!(flags & CURLU_NO_GUESS_SCHEME) || !u->guessed_scheme)\n    curl_msnprintf(schemebuf, sizeof(schemebuf), \"%s://\", scheme);\nelse\n    schemebuf[0] = 0;\n```\n\n`set_url()` forwards the caller's flags to `urlget_url` and then to `redirect_url`. With a short host like `\"a.b\"`, `base` is the 4-byte string `\"a.b/\"`, so `protsep` ends up 7 bytes past the start of a 4-byte buffer, i.e. 2-3 bytes past the NUL terminator. The subsequent `strchr(protsep, '/')` / `'?'` / `'#'` calls walk into adjacent heap memory.\n\nThe bug requires two commits to coexist. `655d44d139` (2024-06-01, \"urlapi: add CURLU_NO_GUESS_SCHEME\") first taught `urlget_url` to emit URLs without the \"scheme://\" prefix when `NO_GUESS_SCHEME` is set on a previously-guessed scheme. Then `bc24c60512` (2025-02-26, \"urlapi: fix redirect from file:// with query, and simplify\") added the unconditional `protsep = base + strlen(scheme) + 3` pointer arithmetic in `redirect_url` that depends on a \"scheme://\" prefix being present. (The recent commit `f9b9d3b141` addressed a sibling NULL-scheme variant by introducing a `DEFAULT_SCHEME` fallback, but the missing-prefix-due-to-guessed-scheme variant remains unfixed.)\n\n## Reproducer\n\nSave as `poc.c`:\n\n```c\n#include <stdio.h>\n#include <curl/curl.h>\nint main(void) {\n    CURLU *u = curl_url();\n    curl_url_set(u, CURLUPART_URL, \"a.b\", CURLU_GUESS_SCHEME);\n    curl_url_set(u, CURLUPART_URL, \"/x\", CURLU_NO_GUESS_SCHEME);\n    curl_url_cleanup(u);\n    return 0;\n}\n```\n\nBuild curl with ASan:\n\n```sh\nautoreconf -fi\nmkdir build && cd build\nCFLAGS='-O1 -g -fsanitize=address' LDFLAGS='-fsanitize=address' CC=clang \\\n  ../configure --with-openssl --enable-debug --enable-maintainer-mode --disable-shared\nmake -j\n\nclang -fsanitize=address -g -I../include poc.c \\\n  ./lib/.libs/libcurl.a -lssl -lcrypto -lz -lnghttp2 -lidn2 -lzstd \\\n  -lbrotlidec -lldap -llber -o poc\n./poc\n```\n\n## Observed output\n\n```\n=================================================================\n==658666==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x70ef1b7e00c0 at pc 0x571b3b990b40 bp 0x7ffea09786b0 sp 0x7ffea0977e78\nREAD of size 34 at 0x70ef1b7e00c0 thread T0\n[..]\n```\n\n(p.s. the above snippet is limited because for whatever reason, the poc simply hangs when running it after that ASAN message; absolutely no clue, and my local LLM couldn't tell me why either).\n\n## Suggested fix\n\nStrip `CURLU_NO_GUESS_SCHEME` from the flags `set_url` passes through to its internal `curl_url_get`, so the rendered base always carries the `\"scheme://\"` prefix `redirect_url` assumes:\n\n```diff\n--- a/lib/urlapi.c\n+++ b/lib/urlapi.c\n@@ -1732,7 +1732,8 @@ static CURLUcode set_url(CURLU *u, CURLUPart part, size_t nalloc,\n   /* if the old URL is incomplete (we cannot get an absolute URL in\n      'oldurl'), replace the existing with the new */\n-  uc = curl_url_get(u, CURLUPART_URL, &oldurl, flags);\n+  /* always include \"scheme://\" so redirect_url's pointer arithmetic is valid */\n+  uc = curl_url_get(u, CURLUPART_URL, &oldurl, flags & ~CURLU_NO_GUESS_SCHEME);\n   if(uc == CURLUE_OUT_OF_MEMORY)\n     return uc;\n   else if(uc)\n```\n\nCheers,\nAISLE Research Team\n\n## Impact\n\nbuffer overread.",
+  "weakness": {
+    "id": 9,
+    "name": "Buffer Over-read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
