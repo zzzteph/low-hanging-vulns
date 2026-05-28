@@ -1,0 +1,113 @@
+{
+  "id": 3620753,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjIwNzUz",
+  "url": "https://hackerone.com/reports/3620753",
+  "title": "V2Plugin.Decrypt panics on empty ciphertext (Remote DoS)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-22T04:44:59.520Z",
+  "submitted_at": "2026-03-22T04:44:59.704Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "misop00p",
+    "url": "/misop00p",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0wxw2jz29b71jpni2kbvdimr8woa/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 84809,
+    "url": "https://hackerone.com/aws_vdp",
+    "handle": "aws_vdp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "AWS VDP",
+      "twitter_handle": "amazon",
+      "website": "https://aws.amazon.com/",
+      "about": "Amazon Web Services (AWS) is a secure cloud services platform, offering compute power and other functionality to help businesses scale and grow. "
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-28T16:35:27.859Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-05-28T00:33:24.921Z",
+  "team_member_agreed_on_going_public_at": "2026-05-28T16:35:23.681Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Component:** pkg/plugin/plugin_v2.go:182\n**Affected Version:** aws-encryption-provider @ 4341c70 (all versions)\n**Found by:** Fuzz testing (FuzzV2Decrypt, seed#0: empty []byte{})\n**TLP:** TLP:Amber\n\n---\n\n## Summary\n\n`V2Plugin.Decrypt()` accesses `request.Ciphertext[0]` without checking that the slice is non-empty. Same root cause as BUG-001 but in the V2 (KMS v2) API path. Crashes the entire gRPC server process.\n\n---\n\n## Vulnerable Code\n\n```go\n// pkg/plugin/plugin_v2.go:178-189\nfunc (p *V2Plugin) Decrypt(ctx context.Context, request *pb.DecryptRequest) (*pb.DecryptResponse, error) {\n    zap.L().Debug(\"starting decrypt operation\")\n\n    startTime := time.Now()\n    storageVersion := kmsplugin.KMSStorageVersion(request.Ciphertext[0])  // <-- LINE 182: PANIC\n    switch storageVersion {\n    case kmsplugin.KMSStorageVersionV2:\n        request.Ciphertext = request.Ciphertext[1:]\n    default:\n        return nil, fmt.Errorf(\"version %s in Ciphertext doesn't match kmsplugin\", storageVersion)\n    }\n```\n\n## Root Cause\n\nIdentical to BUG-001. The `KMSStorageVersion` type conversion indexes `request.Ciphertext[0]` without a length check. The gRPC `DecryptRequest.Ciphertext` field is a `[]byte` that can be empty or nil.\n\n## Reproducer\n\n```bash\n$ go test -fuzz FuzzV2Decrypt -fuzztime 10s ./pkg/plugin/\n--- FAIL: FuzzV2Decrypt (0.00s)\n    --- FAIL: FuzzV2Decrypt/seed#0 (0.00s)\npanic: runtime error: index out of range [0] with length 0\n    sigs.k8s.io/aws-encryption-provider/pkg/plugin.(*V2Plugin).Decrypt\n        ████████\n```\n\nMinimal gRPC client reproducer:\n```go\nconn, _ := grpc.Dial(\"unix:///var/run/kmsplugin/socket.sock\", grpc.WithInsecure())\nclient := v2pb.NewKeyManagementServiceClient(conn)\n// This crashes the server:\nclient.Decrypt(context.Background(), &v2pb.DecryptRequest{Ciphertext: []byte{}})\n```\n\n\n## Suggested Fix\n\n```go\nfunc (p *V2Plugin) Decrypt(ctx context.Context, request *pb.DecryptRequest) (*pb.DecryptResponse, error) {\n    zap.L().Debug(\"starting decrypt operation\")\n\n    startTime := time.Now()\n    if len(request.Ciphertext) == 0 {\n        return nil, fmt.Errorf(\"invalid empty ciphertext\")\n    }\n    storageVersion := kmsplugin.KMSStorageVersion(request.Ciphertext[0])\n```\n\n## Platform\n\nTested on macOS arm64, Go 1.26.1. Bug is platform-independent (pure Go).\n\n## Impact\n\n## Impact\n\nSame as another my bug https://hackerone.com/reports/3620748: unrecoverable server crash, Kubernetes Secrets unavailable during restart. Both V1 and V2 APIs are vulnerable — a single server process hosts both, so crashing via either API takes down both.\n\n- **Server crash:** The panic is unrecovered — it kills the entire aws-encryption-provider process\n- **Kubernetes secret unavailability:** While the pod restarts, kube-apiserver cannot encrypt/decrypt any Secrets at rest, blocking pod creation, configmap reads, service account token issuance\n- **No authentication required:** The gRPC server has no auth — any process with access to the Unix socket can trigger this\n- **Trivially exploitable:** Single gRPC call with empty ciphertext, no valid KMS credentials needed\n- **Affects both nil and empty slices:** Both `Cipher: nil` and `Cipher: []byte{}` trigger the panic",
+  "weakness": {
+    "id": 12,
+    "name": "Array Index Underflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "misop00p"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 680615,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/kubernetes-sigs/aws-encryption-provider",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
