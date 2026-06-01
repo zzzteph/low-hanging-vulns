@@ -1,0 +1,120 @@
+{
+  "id": 3769293,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzY5Mjkz",
+  "url": "https://hackerone.com/reports/3769293",
+  "title": "Low priority HSTS bypass in curl_easy_duphandle()",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-05-29T09:18:15.039Z",
+  "submitted_at": "2026-05-29T09:18:15.432Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "ajohnston3825",
+    "url": "/ajohnston3825",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-01T00:17:12.063Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-06-01T00:17:11.771Z",
+  "team_member_agreed_on_going_public_at": "2026-05-31T21:52:24.379Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\ncurl_easy_duphandle() creates a fresh HSTS store for the cloned handle and populates it from the configured files and callbacks, but never copies entries acquired from Strict-Transport-Security response headers during the parent's lifetime. This means the client using a cloned handle may accidentally send secrets to servers in plain text when it was already instructed not to do so.\n\n## Affected version\n\nCommit:  efc3f2309e1c87c67700350f7df8da508cd307cd\nDate: 2026-05-26.\n\nTested on WSL2. clang-19 w/ ASAN and GNU ldd. I have a test bench attached you can run. It uses Python to call a C extension that uses socketpair() and direct C calls to talk to libcurl. \n\n## Steps To Reproduce:\n\n(I am really hoping the patch is super obvious.) \n\nUntar the attached `cyber.tgz` in the top level of curl (` tar xzf cyber.tgz`) so it creates `curl/cyber`. `cd` into  `curl/cyber` and run `build.sh`. Then run ` ./run.sh lib_easy.c_duphandle_hsts.py`\n\nWith the patch I get:\n\n```\n...\n* Switched from HTTP to HTTPS due to HSTS => https://x.test/secret\n* Alt-svc check wanted=1, allowed=1\n* check Alt-Svc for host 'x.test'\n...\n* SSL Trust: peer verification disabled\n* TLS connect error: error:00000000:lib(0)::reason(0)\n* OpenSSL SSL_connect: Broken pipe in connection to x.test:443 \n* closing connection #0\n...\n```\n\nWithout the patch I get:\n\n```\n...\n Established connection to x.test (127.0.0.1 port 80) from  port 0 \n* using HTTP/1.x\n* sending last upload chunk of 115 bytes\n* Curl_xfer_send(len=115, eos=1) -> 0, 115\n> GET /secret HTTP/1.1\nHost: x.test\nAccept: */*\nTE: gzip\nAccept-Encoding: deflate, gzip, zstd\nConnection: TE\n\n* Request completely sent off\n< HTTP/1.1 200 OK\n< Content-Length: 58\n< Connection: close\n< Content-Type: text/plain\n* shutting down connection #0...\n...\n```\n\n## Patch:\n\n```c\nFrom 4de23f2cdf034fd7d405fd262367fb792ccec6be: Mon Sep 17 00:00:00 2001\nFrom: Adrian Johnston <ajohnston54637@gmail.com>\nDate: Fri, 29 May 2026 00:00:15 -0700\nSubject: [PATCH] hsts_bypass_easy_duphandle\n\n---\n lib/easy.c |  3 +++\n lib/hsts.c | 18 ++++++++++++++++++\n lib/hsts.h |  1 +\n 3 files changed, 22 insertions(+)\n\ndiff --git a/lib/easy.c b/lib/easy.c\nindex a472d6ddc5..10f814d093 100644\n--- a/lib/easy.c\n+++ b/lib/easy.c\n@@ -1052,6 +1052,9 @@ CURL *curl_easy_duphandle(CURL *curl)\n       (void)Curl_hsts_loadfile(outcurl,\n                                outcurl->hsts, outcurl->set.str[STRING_HSTS]);\n     (void)Curl_hsts_loadcb(outcurl, outcurl->hsts);\n+    /* copy runtime-learned entries (from Strict-Transport-Security headers) */\n+    if(Curl_hsts_copy(outcurl->hsts, data->hsts))\n+      goto fail;\n   }\n #endif\n \ndiff --git a/lib/hsts.c b/lib/hsts.c\nindex 94738874b5..a5275200c6 100644\n--- a/lib/hsts.c\n+++ b/lib/hsts.c\n@@ -130,6 +130,24 @@ static CURLcode hsts_create(struct hsts *h,\n   return CURLE_OK;\n }\n \n+/* Copy all live entries from src into dst. Used by curl_easy_duphandle so the\n+ * clone inherits runtime-learned STS entries, not just file/callback ones. */\n+CURLcode Curl_hsts_copy(struct hsts *dst, struct hsts *src)\n+{\n+  struct Curl_llist_node *e;\n+  time_t now = time(NULL);\n+  for(e = Curl_llist_head(&src->list); e; e = Curl_node_next(e)) {\n+    struct stsentry *sts = Curl_node_elem(e);\n+    if(sts->expires > now) {\n+      CURLcode rc = hsts_create(dst, sts->host, strlen(sts->host),\n+                                sts->includeSubDomains, sts->expires);\n+      if(rc)\n+        return rc;\n+    }\n+  }\n+  return CURLE_OK;\n+}\n+\n /*\n  * Return the matching HSTS entry, or NULL if the given hostname is not\n  * currently an HSTS one.\ndiff --git a/lib/hsts.h b/lib/hsts.h\nindex d4c7fe826b..1ff1667759 100644\n--- a/lib/hsts.h\n+++ b/lib/hsts.h\n@@ -65,6 +65,7 @@ CURLcode Curl_hsts_loadcb(struct Curl_easy *data,\n CURLcode Curl_hsts_loadfiles(struct Curl_easy *data);\n \n bool Curl_hsts_applies(struct hsts *h, const struct Curl_peer *dest);\n+CURLcode Curl_hsts_copy(struct hsts *dst, struct hsts *src);\n \n #else\n #define Curl_hsts_cleanup(x)\n--\n2.51.0\n```\n\n## Impact\n\n## Summary:\n\nThis is not an \"attack vector.\" It just introduces the risk that clients of libcurl using it in a particular manner may accidentally send secrets like passwords or API keys in plain text when the server has instructed them not to.\n\nI spent a lot of time working on this and reviewed and tested the information I am sending you carefully. If you have an issue with me using AI I understand. I find it is a productivity multiplier even if I have to spend 1/2 my time teaching it how to be a senior engineer over and over.",
+  "weakness": {
+    "id": 113,
+    "name": "Information Exposure Through Sent Data"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6005728,
+      "file_name": "cyber.tgz",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/gfnmh9g1l8bdywqwtobp1tln146l?response-content-disposition=attachment%3B%20filename%3D%22cyber.tgz%22%3B%20filename%2A%3DUTF-8%27%27cyber.tgz&response-content-type=application%2Fgzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQW34OH7VV%2F20260601%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260601T004210Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEDcaCXVzLXdlc3QtMiJHMEUCICi7fU%2BX5sZ6XNIp5A9aAm5B%2BkoNCgWnlGLZRF775xFKAiEA75ENGbbauOz9MA8GfWXn7KMIlC2m32205HpWFkRg7X4qsQUIABADGgwwMTM2MTkyNzQ4NDkiDNnQKxT98MDylPqQFCqOBagp5W6P63eY4XlaUSGO8DHn1IOywCFB208Ydk8jmk9Fw4bhDlLxt9J00Z8ELf%2BSA8lP88JyhZOrvFK0ti2GtoDT%2Fj2c0KWggdu4hKF%2B4WCNek1NL1%2BYa1Qe9S7HoPu%2FgS2fSV47Pabdt8F9cfM2ZQSj0nEAK3LQ90M6hkWwHV0iyUHQT997ESpsaGKWV43%2FoYeSawaN8%2BeCVhAzysOdITTuSQ6YE5cGNyiU7A79qx%2FPtTppqUPBQ9dvh47voDFS7N1lqJiN4kPBb877Hckbt0w3Cdqa6agZX7gCsE7ie%2FhTl38xIqT7WSeUCajpViw%2Bb9Pw93ag5hGVmO7KnlkcfqmB%2B8MfW%2FXzRBoCkuJLvUD2qr8TOSV6TAINaNGgWAS7n3sP1TmqQlhv1ZAnmZ8bipETqtUyRc7bI%2FMClKv3b8Msa%2BB9WY4yVFC4eCPSnavFp2SBzYH5Km8Hbt1TihNez%2FfFfHv7m54IuJQNHtr1rO%2BFFE2MRlbH%2FwuSyihRaS849n3mUImBhN5AS6rrg0fdLroo0HSd8fevy26ojRbQenvogmsjocMcHYTFxH%2F2%2BdH%2FM1QvIySPsQCOJz%2FaGFoXXIFaoXXnwPM140965EfavtEzo1rIqnRF%2BhqVBpPtsPcbgmOZg7T5GmACbkr6RIR4tRzQ1BkNRC%2FZO%2BXGb24HxLOU9JPQs%2B%2FVjDBiyZod9sJG6M%2FYmr5VUhLaddn%2Fs%2Ftkzjp2%2BZtdG9tuV%2BQ3cw3jOg3aT8gfhYepUzcJtbLjdO76dCcrbGm5HKmxVHyI1wFyBPP9P73qc27X%2BvM1S9oFSXvO%2B6mn8xiFwtsQiq%2B0yHGyFAeMnQbZA7JgtUsL7TExwI%2FChsz18Ws%2BlML0X3tZEzC59fLQBjqxAUSh029hj8KLpbDRcbLFV2EkZ%2Bqy0kHWBQqyUP%2F1d%2Bqv2lWi6MGMREYp0zXbrHB2FtkY62v6HcSNGSMyHgYM5chkWDEySvflo34NKyPH7kJL1w466q2%2BOV%2FShdlVuIwIQqouI7nmdEt8FYFsIOXOYofGHnfg5UCMa310NQ7orelqdHNLqUB6eH9kHYiTixxaIAVs6Rq%2BSsQqYB6FOuDAXI%2BASG36fPkXkVigtAdki6iOyg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=743b6c05a8cced4926ee010de6b6daea401cf957a5df1fba76f13a046cd68dae",
+      "file_size": 14478,
+      "type": "application/gzip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
