@@ -1,0 +1,116 @@
+{
+  "id": 3773293,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzczMjkz",
+  "url": "https://hackerone.com/reports/3773293",
+  "title": "curl/libcurl 8.20.0 NOPROXY bypass via uppercase-hex IPv4 aliases leaks off-proxy Basic credentials to the configured proxy",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-05-31T17:50:14.756Z",
+  "submitted_at": "2026-05-31T17:50:15.069Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "arkss",
+    "url": "/arkss",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-03T08:02:40.890Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-01T10:23:48.306Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\ncurl/libcurl 8.20.0 fails to enforce `CURLOPT_NOPROXY`, `--noproxy`, and `NO_PROXY` consistently for uppercase-hex IPv4 aliases such as `0X7f.1` on glibc-based systems that accept these legacy numeric IPv4 forms.\n\nWhen a canonical IP literal is excluded from proxying, curl sends the canonical form directly as configured. However, an equivalent uppercase-hex alias for the same IP is not recognized by the no-proxy matching path and is instead sent to the configured proxy.\n\nIn my reproductions, this causes built-in HTTP Basic credentials to be disclosed to the proxy. This is a proxy-boundary bypass / policy-vs-resolution mismatch, not an SSRF claim.\n\n## Steps To Reproduce:\nThe main reproduction below uses the non-debug 8.20.0 CLI path and `NO_PROXY`, which I found to be the strongest and most common policy path. The same root cause also reproduces through `--noproxy` and `CURLOPT_NOPROXY`; supporting artifacts are attached.\n\n1. Build curl 8.20.0 from the official release tarball as a non-debug build:\n   cd /tmp\n   curl -fsSLO https://curl.se/download/curl-8.20.0.tar.xz\n   mkdir /tmp/curl-8.20.0-src /tmp/curl-8.20.0-relbuild2\n   tar -xf /tmp/curl-8.20.0.tar.xz -C /tmp/curl-8.20.0-src --strip-components=1\n   cd /tmp/curl-8.20.0-relbuild2\n   /tmp/curl-8.20.0-src/configure \\\n     --with-openssl \\\n     --without-libidn2 \\\n     --without-libpsl \\\n     --without-brotli \\\n     --without-zstd \\\n     --without-libssh2 \\\n     --without-nghttp2 \\\n     --disable-ldap \\\n     --disable-ldaps \\\n     --disable-ftp \\\n     --disable-file \\\n     --disable-tftp \\\n     --disable-rtsp \\\n     --disable-dict \\\n     --disable-telnet \\\n     --disable-pop3 \\\n     --disable-imap \\\n     --disable-smb \\\n     --disable-smtp \\\n     --disable-gopher \\\n     --disable-mqtt \\\n     --disable-manual\n   make -j2\n\n2. Start the attached local target/proxy logger:\npython3 /tmp/curl_proxy_boundary_probe.py\n\nThis starts:\na target on 127.0.0.1:18081\na logging proxy on 127.0.0.1:18082\n\n3. Run the canonical control request:\nNO_PROXY=127.0.0.1 \\\n/tmp/curl-8.20.0-relbuild2/src/curl -sv \\\n  --proxy http://127.0.0.1:18082 \\\n  -u alice:sekret --basic \\\n  http://127.0.0.1:18081/\n\nObserve:\ncurl connects directly to 127.0.0.1:18081\nthe response is 200\n\n4. Run the uppercase-hex alias request with the same policy:\nNO_PROXY=127.0.0.1 \\\n/tmp/curl-8.20.0-relbuild2/src/curl -sv \\\n  --proxy http://127.0.0.1:18082 \\\n  -u alice:sekret --basic \\\n  http://0X7f.1:18081/\n\nObserve:\ncurl prints Uses proxy env variable NO_PROXY == '127.0.0.1'\nthe request is sent to the proxy instead of directly to the target\nthe response is 502 from the logging proxy\nbuilt-in Authorization: Basic YWxpY2U6c2VrcmV0 is visible in the proxy-side request\n\n5. Check the server-side log:\nsed -n '1,20p' /tmp/curl_proxy_boundary_probe.log\n\nRepresentative result:\ntarget ... GET / ... Host: 127.0.0.1:18081 Authorization: Basic YWxpY2U6c2VrcmV0\nproxy ... GET http://0X7f.1:18081/ ... Host: 0X7f.1:18081 Authorization: Basic YWxpY2U6c2VrcmV0\n\n6. Additional verified variants included in the attached bundle:\n--noproxy 127.0.0.1\nNO_PROXY=127.0.0.0/8\nCURLOPT_NOPROXY through a non-debug libcurl PoC\ninternal/private target classes reproduced in controlled local setups:\n10.0.0.0/8\n172.16.0.0/12\n192.168.0.0/16\n169.254.169.254\nsecond full runtime reproduction in a Debian bookworm-slim container\n\n###Affected version\nPrimary affected release reproduced locally from the official source tarball:\ncurl 8.20.0 (x86_64-pc-linux-gnu) libcurl/8.20.0 OpenSSL/3.6.1 zlib/1.3.1\nRelease-Date: 2026-04-29\nProtocols: http https ipfs ipns ws wss\nFeatures: alt-svc AsynchDNS HSTS HTTPS-proxy IPv6 Largefile libz SSL threadsafe TLS-SRP UnixSockets\n\nEnvironment details:\nhost runtime reproduction on glibc 2.42\nsecond full runtime reproduction in Debian bookworm-slim (glibc 2.36)\n\nI also reproduced the same sink on current master at commit:\n24874a4f04\n\n###Supporting Material/References:\nAttached bundle: curl_noproxy_uppercase_hex_bundle_2026-06-01.zip\nKey included artifacts:\nnoproxy_env_loopback.log\ndebian_container_probe.log\ncurl_noproxy_alias_poc.c\ncurl_proxy_boundary_probe.py\nrun_debian_container_noproxy_probe.sh\nrun_noproxy_private_ns_probe.sh\nREPORT_curl_noproxy_uppercase_hex.md\n\nRoot cause notes:\nlib/noproxy.c only takes the IP/CIDR matching path when inet_pton() accepts the host string as IPv4\nlib/urlapi.c normalizes lowercase 0x numeric IPv4 forms, but not uppercase 0X\nglibc-based resolvers used in my reproductions still accept uppercase-hex legacy numeric IPv4 aliases and resolve them to the same target IP\nthis creates a policy-vs-resolution mismatch: the configured off-proxy exclusion is not consistently honored for equivalent numeric forms\n\n## Impact\n\nThis issue breaks the documented off-proxy routing boundary enforced by `CURLOPT_NOPROXY`, `--noproxy`, and `NO_PROXY`.\n\nOn affected glibc-based systems, an uppercase-hex alias for a loopback, RFC1918, or link-local target can cause:\n- requests that should stay off-proxy to be sent to the configured proxy instead\n- built-in HTTP Basic credentials generated by curl/libcurl to be disclosed to the proxy\n- proxy exclusion policy for sensitive internal targets to be bypassed",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6016088,
+      "file_name": "curl_noproxy_uppercase_hex_bundle_2026-06-01.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/vul488bnxkusumnwn26ls57q1z68?response-content-disposition=attachment%3B%20filename%3D%22curl_noproxy_uppercase_hex_bundle_2026-06-01.zip%22%3B%20filename%2A%3DUTF-8%27%27curl_noproxy_uppercase_hex_bundle_2026-06-01.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRTGD7GSP%2F20260603%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260603T093641Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHAaCXVzLXdlc3QtMiJHMEUCIFw59l3fglUKzAGwmcpboRKjBVCRWjaou%2BjuaqUEosKgAiEAqo0IK3x4ROVX%2Fv4sO3SHITSOs%2BZAAAwjhFTB%2BD%2BnlEUqsQUIORADGgwwMTM2MTkyNzQ4NDkiDOkKQf2oJqfHvo96CiqOBeihA%2F8PBxCussH3wqDltVx5hDeqLeQ%2BiLoU1OsvwQqkLUw4b1xoKs8NAWfNoxXGMn3tWc%2BTJqCA8KYsw2GPT8m7JZrVOVASSYYj5R77IWXNWdL%2FWlIaPw9%2BwK7TcvfA2HL7wz2Ko2ALmqyUBMz9k0cl58TVUpy1d77Ot3tmq%2BboAEhybU%2FoKVDC%2BTx11JAtNKFSS2LY4i0meLe%2Bi56o5hwDn988ye935iz8l2z0iKbL2ZTijzYuloSOaUrdrMfioMcIsh6gmfHueAa1PPjs6kGzrWMbvyv1vbKbfrv%2BxMkC9qvNUtd4jswXIFohGgDao3V6ovfPOYtM27WqeLH%2BJGn0XJL3EvUsjPnktRR%2FQyyCOLqKFBzobUPbioakJLJRKt%2BnUWROuU29mUxOr4AmFUq1y6Sr%2BVM4ChkdvIh%2FLDd0SMHB5WxuemAllddNJVgg5nKErAqabqILvY3mIFf1ptmJS8dr1RrGaZVunufs4ob8RWJFWxBmwlpt8JUU0NykuYNTSMMEJieYYI9%2BoTshD1FP19DTqugcFXF6D73hT3QAYPh9G8DUfY8o707UZofQOgWim1RyuEtfKsAkC4Itmr80wP00CINqxN2H6fQ95Ho6yIJUggtBfaMZ2hXrvrB9wiXOAm6%2BI4%2FayOSxTbcotb9qBeI8tzD5%2FfbqbR0kwptuPDWQ5drzSXE%2FaMyUWIA0M1JSuu%2FFl8PaoA7tyoovymbb83q17bnoFkFWnoEOEpBbCm2S5aJSdOiBaqXbymrnRzrfMknMjBNGroZBBj%2BJcL1lAbHjOufBcie27K66tqB%2FW2WpcsC5MBDZFy1VoPPn7uFE8TfuBnoEbWkkK1Yagy9IBv3bcDAkDewkdKPWsTDgv%2F%2FQBjqxAa0dXBOtgmSdh9T409O3UGC03c8qHc3w22HViA84krz%2FyN88jR%2B06AGwsVTy%2F8pzr3xVwFmN1HPXSegkV0IjYEYsaflnvJ7Fix5nmsKW9o%2BIzof83ItJBw3RgUl7bfNGIT6X3Vz71Nl5P%2FEYJhC%2BihE7WCYz6NsmCrfj66xnLsld%2BI48jKAi33%2Fc2sYQs1rMIs3o1IeqDHVa4tomAYimHRvPzEPske8sz%2BtXv1tpUgImbg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3d747f4b83b3943940e18fd023ce1804cbe34cbc4741f22a73de6fd157dd7945",
+      "file_size": 43586,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

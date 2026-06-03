@@ -1,0 +1,115 @@
+{
+  "id": 3777381,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzc3Mzgx",
+  "url": "https://hackerone.com/reports/3777381",
+  "title": "PRE_PROXY change leaks stale Proxy Digest state across proxy-chain boundary",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "readable_substate": "N/A",
+  "created_at": "2026-06-02T15:52:44.100Z",
+  "submitted_at": "2026-06-02T15:56:29.755Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "hungly09",
+    "url": "/hungly09",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-03T09:06:28.368Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-06-03T09:06:27.964Z",
+  "team_member_agreed_on_going_public_at": "2026-06-03T09:02:21.873Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nAfter a Digest-authenticated HTTP proxy transfer, changing only\n`CURLOPT_PRE_PROXY` on the same libcurl easy handle does not clear stale proxy\nDigest/auth state. If the new SOCKS pre-proxy resolves the same HTTP proxy\nhostname to a different proxy endpoint, the second proxy receives a preemptive\n`Proxy-Authorization: Digest` header built from the first proxy's challenge.\n\nThis reproduces on current master. In the proof, `CURLOPT_PROXY` stays\nbyte-identical and only `CURLOPT_PRE_PROXY` changes.\n\n## Affected Version\n\nReproduced on: `curl 8.20.0 (Darwin) libcurl/8.20.0 OpenSSL/3.6.2 zlib/1.2.12 brotli/1.2.0 zstd/1.5.7 libssh2/1.11.1 nghttp2/1.69.0`\n\nPlatform: Darwin x86_64\n\nAlso reproduced on current master: `curl 8.21.0-DEV (Darwin) libcurl/8.21.0-DEV OpenSSL/3.6.2 zlib/1.2.12 brotli/1.2.0 zstd/1.5.7 libssh2/1.11.1 nghttp2/1.69.0`\n\nCurrent master commit used: `ba600296d2a1d8a4e53a36eb4bd30c1f0d0152cc`\n\n## Root Cause\n\nCurrent master clears proxy auth state when `CURLOPT_PROXY` changes:\n\n```text\nlib/setopt.c:1639: static CURLcode setproxy(...)\nlib/setopt.c:1646: changeproxy(data);\nlib/setopt.c:1745: return setproxy(data, ptr);\n```\n\n`CURLOPT_PRE_PROXY` does not use the same cleanup path:\n\n```text\nlib/setopt.c:1746: case CURLOPT_PRE_PROXY:\nlib/setopt.c:1753: return Curl_setstropt(&s->str[STRING_PRE_PROXY], ptr);\n```\n\nAs a result, `data->state.proxydigest` and `data->state.authproxy` can survive a\nproxy-chain boundary change.\n\n## Steps To Reproduce\n\nExtract the attached `curl_preproxy_digest_state_leak_bundle.tar.gz`. It contains\nthese files:\n\n```text\ndocker-compose.yml\nDockerfile.socks\nsockd.conf\ndigest_proxy.py\nreplay_leaked_digest.py\npreproxy_digest_chain_client.c\nrun_lab.sh\n```\n\nPrerequisites: Docker Compose, Python 3, a C compiler, and a curl/libcurl build\nwith HTTP proxy, SOCKS, and Digest auth support.\n\nBuild curl normally, then run the bundle script with `CURL_SRC` pointing to the\ncurl source checkout and `CURL_BUILD` pointing to the build/install directory\nthat contains `lib/libcurl.*`. If the library name is not `libcurl`, set\n`LIB_NAME` accordingly.\n\nExample:\n\n```bash\ntar -xzf curl_preproxy_digest_state_leak_bundle.tar.gz\ncd curl_preproxy_digest_state_leak_bundle\nCURL_SRC=/path/to/curl \\\nCURL_BUILD=/path/to/curl/build \\\nLIB_NAME=curl \\\n./run_lab.sh\n```\n\nThe lab uses two real Dante SOCKS gateways in separate Docker networks:\n\n```text\nsocks1 -> shared.proxy.test:18080 -> p1\nsocks2 -> shared.proxy.test:18080 -> p2\n```\n\nThe libcurl client keeps `CURLOPT_PROXY` unchanged:\n\n```text\nhttp://shared.proxy.test:18080\n```\n\nOnly `CURLOPT_PRE_PROXY` changes between the two transfers:\n\n```text\nsocks5h://127.0.0.1:11081\nsocks5h://127.0.0.1:11082\n```\n\n## Observed Result\n\nP2 receives P1's Digest challenge state on its first request:\n\n```text\nlogs/p2.log:1\n\"proxy_authorization\": \"Proxy-Authorization: Digest username=\\\"user\\\", realm=\\\"p1realm\\\", nonce=\\\"p1nonce\\\", uri=\\\"/resource\\\", ... nc=00000002 ...\"\n```\n\nThe client trace confirms that the second transfer uses the second pre-proxy\nwhile still sending P1's Digest state:\n\n```text\nlogs/chain-client.stderr\nOpened SOCKS connection ... to shared.proxy.test port 18080 (via 127.0.0.1 port 11082)\nProxy-Authorization: Digest username=\"user\", realm=\"p1realm\", nonce=\"p1nonce\", ... nc=00000002 ...\n```\n\nThe leaked P1 Digest response has authentication value. Replaying it to P1 for\nthe same URI returns `200 OK`; replaying it for a mismatched URI returns `407`:\n\n```text\nlogs/replay-to-p1.txt\n=== replay same URI ===\nHTTP/1.1 200 OK\n\n=== replay mismatched URI ===\nHTTP/1.1 407 Proxy Authentication Required\n```\n\n## Negative Controls\n\nA fresh easy handle does not leak the header to P2:\n\n```text\nlogs/p2.log:2\n\"proxy_authorization\": \"\"\n```\n\nChanging the main `CURLOPT_PROXY` instead of only `CURLOPT_PRE_PROXY` also does\nnot leak, which shows that the stale state is tied to the pre-proxy change path:\n\n```text\nlogs/p2.log:3\n\"proxy_authorization\": \"\"\n```\n\nAs a local patch check, adding a `setpreproxy()` helper that calls\n`changeproxy(data)` before updating `STRING_PRE_PROXY` stops the leak:\n\n```text\npatched control\n\"proxy_authorization\": \"\"\n```\n\n\n\n## Documentation Note\n\n`CURLOPT_PRE_PROXY` is documented as a production libcurl option. Its manpage\nsays setting the option multiple times makes the last string override the\nprevious one; I did not find documentation saying that changing it requires\n`CURLOPT_FRESH_CONNECT` to avoid stale proxy authentication state.\n\n## Impact\n\nA later proxy endpoint in a proxy chain can receive a `Proxy-Authorization:\nDigest` response derived from an earlier proxy's challenge. In the local proof,\nthat leaked Digest response is replayable to the first proxy for the same URI\nwithout knowing the proxy password.\n\nThis is not a custom-header redirect case: the application does not set\n`Proxy-Authorization` manually. libcurl generates the leaked header from stale\nproxy Digest/auth state after a documented `CURLOPT_PRE_PROXY` option change.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6026751,
+      "file_name": "curl_preproxy_digest_state_leak_bundle.tar.gz",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/qkwobeupskjnnx0sb0b2qcv9zsv5?response-content-disposition=attachment%3B%20filename%3D%22curl_preproxy_digest_state_leak_bundle.tar.gz%22%3B%20filename%2A%3DUTF-8%27%27curl_preproxy_digest_state_leak_bundle.tar.gz&response-content-type=application%2Fgzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQU2GS7JD%2F20260603%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260603T093641Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHAaCXVzLXdlc3QtMiJHMEUCIQCXYG9rsiZTMBoma%2FSErix6IVqEsRAIFGFIA%2BYH1%2FaEUQIgNyTxZpTJVXNzfL2ndfA7jlElt47EzjcYqNnDOPeR%2BhkqsQUIORADGgwwMTM2MTkyNzQ4NDkiDEBJNcWT6CN6x70bAiqOBdMGMV9XL%2FS03Z9pWBeijSIONBprKGTpC%2F71uP6aktPCy0Nw%2FBbOz9gPIFxXahloOBz4OspgAdtaYbYr0pNGCnJ9dGT5p%2FqJZGmlxmHi78aBI%2BwvC17kHE6gMlfsg8cxUtnsb%2BpbayoRZ92sw4zm5gcfhN8oQ7p%2BAXfuz13LnumPbYd2DM2VZJ3gTedts2O4T7GHcB3urkUmsqbcUOchy5XndCYrQZIPdPciRiZ5MLW1PbuCtM37r%2FtBJfPli1D0JmVANU1kCuQR%2F5x4Tti9Q3G8pkFpVcrjDjyY8c%2BmEGBjsVmUg7tdAkhQxobBeBjpEgpkFWya57CijAXMX8gBgqO010qtZDjU3CnMXXax8DVp82eYfnICLXS3ED%2FaYNJVzKa7dIMwn1oEyMi3b8397prhUBOLeocqZW1O0xxVO1TokoDB6sd9S2Iwx4nyWZ%2BMyf3InGMvLvf%2BkpKJuUvvyP6gnw68dqlevRsRu6tRtgC8ZsbJYikVDVKTKrVhUp3BYWE2kZKHnzZK1UHl9bmCCpK0vZ5lT0%2BK1j%2F%2FTySJH33SC2U3PRd0j%2F9InCJnKWfDZoRSeYyyTZRuLUQKL1AGz83vWieIIyG%2B2o9dboSyEihoUX040Exb%2FzNrquKJlC2%2FDVUKQkRhP1YsKPyy1bMMGU3U9Q8Nx3Y7XofV1aEmbIfHMWPD2%2FxvfA%2Feb3WXpJ64pp%2BDvuBXbAYjGlzUKdmCQNBhGvlJf6r95MUt1yqMbzQMMycd%2FXf9XYxMY6OXXuQ0lPsdkQaxUcgZSOgzAZizXOl1TjK44R6Yp8iET8qYaS8RU9DKhpd1Mt40bjao2%2FZw4EeUw%2FIDbb%2FotfrJgDJQahJkKq%2FrVR5jicqaXyK6ITDYxP%2FQBjqxAZbLkKPr5oIMGKOGWh%2Bu9z983LyQesERt9u7WwQUljTLIeyiHMNV7ktipa8MfmXUettTwuRinN%2FQ8Zwm3CcMr7HKqNeA%2F%2Fg7z6gDpK8AcPd9Qe44VRR1DW%2Fn6a7kJpi0WJVe3pVGAdLdjNJnZSBrMBsNPYypNErM15E7x4%2B3Ppm%2B%2BBEIOKJsXkxCcTBS9TruDA8ElcjLxK4N%2B8Iz9%2B%2Fjb6Ps6D67%2FJ11%2FBxmbMrNzLXFYw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d1e96695adf7284f9c753930d3ca42c1e6456f45727f1453bfe14bdff503de3c",
+      "file_size": 7575,
+      "type": "application/gzip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
