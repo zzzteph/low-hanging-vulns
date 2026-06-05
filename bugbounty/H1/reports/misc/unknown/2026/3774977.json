@@ -1,0 +1,116 @@
+{
+  "id": 3774977,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzc0OTc3",
+  "url": "https://hackerone.com/reports/3774977",
+  "title": "libcurl 8.20.0 ignores HTTP Digest domain protection space and preemptively leaks Digest auth outside the declared scope",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-06-01T15:28:56.906Z",
+  "submitted_at": "2026-06-01T15:28:57.250Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "skksndk",
+    "url": "/skksndk",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-05T05:49:45.067Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-02T09:19:00.091Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nlibcurl 8.20.0 ignores the server-declared HTTP Digest `domain` protection space for origin authentication and reuses stored Digest state too broadly on the same easy handle.\n\nAfter a successful Digest-authenticated request, a later request on the same easy handle can receive a preemptive `Authorization: Digest ...` header even when the new request is outside the `domain` scope declared by the server's original `WWW-Authenticate` challenge.\n\nIn my strongest reproduction:\n\n- request 1 receives `WWW-Authenticate: Digest realm=\"realmA\", nonce=\"nonceA\", algorithm=MD5, domain=\"/first\"`\n- request 2 on the same easy handle to `/reuse2` sends a preemptive `Authorization: Digest ...`\n- a fresh easy handle to `/fresh2` sends no `Authorization` at all\n- forcing a fresh TCP connection for request 2 still leaks the Digest header\n\nThis is a Digest protection-space violation with concrete confidentiality impact: Digest auth transcripts are disclosed outside the declared scope and can be used for offline password guessing against low-entropy passwords.\n\n## Affected version\nPrimary reproduced target: curl/libcurl 8.20.0 on Linux x86_64.\n\nI reproduced this using a local build from the official curl 8.20.0 release source.\n\nRepresentative runtime output from the reproduced build:\ncurl 8.20.0 (x86_64-pc-linux-gnu) libcurl/8.20.0 OpenSSL/3.6.1 zlib/1.3.1\nRelease-Date: 2026-04-29\nProtocols: http https ipfs ipns ws wss\nFeatures: alt-svc AsynchDNS HSTS HTTPS-proxy IPv6 Largefile libz SSL threadsafe TLS-SRP UnixSockets\n\nI also reproduced the same sink on current master at:\n24874a4f04cbbafd878441ccef11e3caa5897db5\n\n###Steps To Reproduce:\n1. Build curl 8.20.0 locally and build the attached PoC against the resulting libcurl.so.\ncd /tmp\ngit clone https://github.com/curl/curl.git curl-8.20.0-wt\ncd /tmp/curl-8.20.0-wt\ngit checkout curl-8_20_0\nautoreconf -fi\n\nmkdir -p /tmp/curl-8.20.0-build\ncd /tmp/curl-8.20.0-build\n/tmp/curl-8.20.0-wt/configure \\\n  --with-openssl \\\n  --without-libidn2 \\\n  --without-libpsl \\\n  --without-brotli \\\n  --without-zstd \\\n  --without-libssh2 \\\n  --without-nghttp2 \\\n  --without-libgsasl \\\n  --without-gssapi \\\n  --disable-ldap \\\n  --disable-ldaps \\\n  --disable-ftp \\\n  --disable-file \\\n  --disable-tftp \\\n  --disable-rtsp \\\n  --disable-dict \\\n  --disable-telnet \\\n  --disable-pop3 \\\n  --disable-imap \\\n  --disable-smb \\\n  --disable-smtp \\\n  --disable-gopher \\\n  --disable-mqtt \\\n  --disable-manual\nmake -j2\n\ncc -I/tmp/curl-8.20.0-wt/include \\\n  digest_reuse_probe.c \\\n  /tmp/curl-8.20.0-build/lib/.libs/libcurl.so \\\n  -Wl,-rpath,/tmp/curl-8.20.0-build/lib/.libs \\\n  -o /tmp/digest_reuse_probe_8200\n\n2. Start the attached plan-driven Digest challenge server with the attached domain-scope plan.\npython3 digest_challenge_server.py \\\n  --plan digest_plan_domain_scope.json \\\n  --log /tmp/digest_domain_scope.log\n\nThe attached plan serves:\n/first: first response 401 with WWW-Authenticate: Digest realm=\"realmA\", nonce=\"nonceA\", algorithm=MD5, domain=\"/first\", then 200\n/reuse2: 200 without ever challenging\n/fresh2: 200 without ever challenging\n\n3. Run the PoC against the local build.\n/tmp/digest_reuse_probe_8200 \\\n  alice:sekret \\\n  http://127.0.0.1:18111/first \\\n  http://127.0.0.1:18111/reuse2 \\\n  http://127.0.0.1:18111/fresh2\n\nExpected client output:\nsame_1 res=0 code=200\nsame_2 res=0 code=200\nfresh_2 res=0 code=200\n\n4. Check the server-side log.\nsed -n '1,20p' /tmp/digest_domain_scope.log\n\nRepresentative result:\n{\"authorization\": null, \"path\": \"/first\", \"reqno\": 1}\n{\"authorization\": \"Digest username=\\\"alice\\\", realm=\\\"realmA\\\", nonce=\\\"nonceA\\\", uri=\\\"/first\\\", response=\\\"faf2faf3d759b97cd2d6bcf94dda7cbb\\\", algorithm=MD5\", \"path\": \"/first\", \"reqno\": 2}\n{\"authorization\": \"Digest username=\\\"alice\\\", realm=\\\"realmA\\\", nonce=\\\"nonceA\\\", uri=\\\"/reuse2\\\", response=\\\"1114f220dfe6109d1466c303466aff70\\\", algorithm=MD5\", \"path\": \"/reuse2\", \"reqno\": 3}\n{\"authorization\": null, \"path\": \"/fresh2\", \"reqno\": 4}\n\nThis shows:\nthe first request negotiates Digest for /first\na later request on the same easy handle preemptively sends Digest auth to /reuse2, outside domain=\"/first\"\na fresh easy handle to /fresh2 sends no Digest header\n\n5. Run the fresh-connection control to rule out keep-alive artifacts.\nDIGEST_FRESH_SECOND=1 \\\n/tmp/digest_reuse_probe_8200 \\\n  alice:sekret \\\n  http://127.0.0.1:18111/first \\\n  http://127.0.0.1:18111/reuse2 \\\n  http://127.0.0.1:18111/fresh2\n\nThe same preemptive Digest header still appears on /reuse2, showing this is reused Digest easy-handle state, not keep-alive connection reuse.\n\n###Supporting Material/References:\nattached bundle: curl_digest_domain_scope_bundle_2026-06-01.zip\nincluded client PoC: digest_reuse_probe.c\nincluded plan-driven server: digest_challenge_server.py\nincluded strongest plan: digest_plan_domain_scope.json\nincluded logs:\ndigest_domain_scope.log\ndigest_domain_scope_master.log\ndigest_domain_scope_master_freshconn.log\nincluded write-up: REPORT_digest_domain_scope_preemptive_leak.md\n\nRoot cause notes:\nthe preemptive Digest send path in lib/http_digest.c reuses stored Digest state on the easy handle\nlib/vauth/digest.c parses and stores fields such as nonce, realm, opaque, qop, and algorithm, but does not parse or enforce the domain directive\nas a result, the server-declared Digest protection space is effectively widened to the full origin for later preemptive reuse on the same easy handle\n\n## Impact\n\nIn the reproduced flow, a path outside `domain=\"/first\"` receives:\n- `username`\n- `realm`\n- `nonce`\n- `uri`\n- `response`\n\nfrom a preemptively forwarded Digest header that should not have been sent there.\n\nThis leaked Digest transcript can be used for offline password guessing in realistic low-entropy-password deployments. I verified that the captured transcript in the attached PoC is sufficient to recover the sample password `sekret` from a small dictionary.\n\nThis is not an SSRF claim and not a keep-alive reuse artifact. The security claim is limited to preemptive Digest auth disclosure outside the server-declared protection space.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6020323,
+      "file_name": "curl_digest_domain_scope_bundle_2026-06-01.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/cxofbdye8nujpbmb3hkhh5yfj5og?response-content-disposition=attachment%3B%20filename%3D%22curl_digest_domain_scope_bundle_2026-06-01.zip%22%3B%20filename%2A%3DUTF-8%27%27curl_digest_domain_scope_bundle_2026-06-01.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7PH7W4XR%2F20260605%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260605T072907Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCZ38wvsL0Oq55TMobcQ%2Bi8TFM9XrTe4xy0MtHYlhbbdQIgL0yN995TFazTw1fEsf7cIt%2FO9lALUAfLkhjploZ7VLQqsQUIZxADGgwwMTM2MTkyNzQ4NDkiDA83UHACjN35cNL0ZyqOBUqfPxe4iLF4aZ1tLer1Egc2tjgqNQScSpqu3c6QsZ3Ib2dKt4IcgWTfpc4kdzkFY2lGbFVwslvNj%2FJwefNrqz9xXy41Jva29V3%2FN3xKufHTlZVSqkjus2Q0ajOHj3lJ02OYY4b0CSzHRY9ecdhxznnXKdy7%2B2gwmbK81qesjHLtl859fy6V5tSN71cI%2F9U6YQtWmiN6r9n4vpz5s%2Bru53toyuD9HSP%2FWTYqeRBFHcv%2BAgIPAuCmki2TxBFbsABensfZ2cEQ07igY%2F8Bdbja84sn1AAOKZf6c1056CF2aOL%2FvL6bv30NdaHM2A4%2BkZ%2BXS4KqDj2jHFuJbjauhDlgAZT0zW6s8laJQT0VfyMrsHz58BGSihj3EiRNU4foO9P4fbYHikQJjDtD3%2FaJtngHaxweBcJoGTLpH5XhjnjzjB7Noewf99Q7SlFJ4FxNBzKiRY8xN6yyQf0eRZ%2BdcjwZX%2B9D3Chh0Wlp%2BgUjskkg7ogrdocFu8arpSQy5nEJERO%2F6IBbgXsmdaoJW4dn4EqAsrc%2B6dwRJFpMq8jKrukOUeQ1WWb5BQy68vhzmd2ICcg1iEEDv2l2J139PrzTTqL20P%2BpxKefng5k8zbFEycYhrxbGX1TCCQGlIQ7BAZHMz0JN%2BJiHBQVOuHqklKo%2B97dVIPWG3W3YTeqP0lc6TA9R75sV5Qnth5FUntsCV%2BOeysN6AKbx2iZG3keTOYdZ%2BHdEQwpOAs0rfF8RVbfe6GfFtqoM9Qf6ChZYwDVHxfn3%2BLOK54wtpJPye%2FuQjys2I%2FzGRtQXg5Nv1K2Qsv5iVOlDMEbCvlKKGbYtzYnm6GGn2IYAoAh5vHER1qL1ZfslZmi97AG7AlB8q4V382novF%2FoTCExInRBjqxAcKLoJwnXkR6sPzafum%2BD60w9B2iPPJjNdKzWiofNP2ICUzdGu3rVXxw%2BYkvioF6XkBLqGAXtsD8di%2BVgyenk3a9Ue0fBRGUy9E9K39w55nUr%2FjTUuYkZv21u7ZjpUSp9tMv65aqtg%2Bw3zSHpatwoAWV2k0lWtVCe9kE3rDRhrTBkP8Wio6Z2EiFXIYHvZcF6OAj0MqXEwXKFS6HNXV4TRbi45HlH50%2F5QagoV8Q7FqwMQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a0adf8046ef49e216fd3be89dffaaa19790b9e0afb4cfa6bbefd8a44e16d69d3",
+      "file_size": 39062,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

