@@ -1,0 +1,113 @@
+{
+  "id": 3791191,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzkxMTkx",
+  "url": "https://hackerone.com/reports/3791191",
+  "title": "Trailing-Dot Hostname in Redirect Silently Strips Client Certificate and Auth Credentials",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-06-09T02:20:11.959Z",
+  "submitted_at": "2026-06-09T02:20:12.377Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "azraelxuemo",
+    "url": "/azraelxuemo",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/235acf2ba808c3a51a94888fb977392c26f8fb0ccf77a81a4546c5e4065c06f1",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3f1ab5c6a9b6dadada1e6c8121700b884388bd0a43471fee1897a38ce57d0b2c"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-27774"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-10T21:52:50.172Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-09T15:15:21.491Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\nWhen curl follows a redirect where the `Location` header contains a hostname with a trailing dot (e.g., `https://example.com./path`), `Curl_peer_equal()` in `peer.c:321-330` compares the original hostname (`example.com`) against the redirect target (`example.com.`) using `curl_strequal`, which does not normalize trailing dots. Since `example.com` ≠ `example.com.`, the function incorrectly determines the origins differ. This false mismatch causes `Curl_ssl_easy_config_complete()` (`vtls_config.c:280-307`) to clear all client certificate fields (clientcert, cert_blob, key, key_blob, key_passwd, cert_type), and `Curl_auth_allowed_to_origin()` (`vauth.c:148-149`) to suppress all HTTP auth credentials (Basic, Digest, NTLM, Negotiate, Bearer). The redirected request is sent in an unauthenticated state. Per RFC, `example.com` and `example.com.` are semantically identical — the trailing dot represents the DNS root.\n\nThis is an internal inconsistency: `hsts.c:156-158` correctly strips trailing dots before comparison, but `peer_same_hostname` does not. The `Curl_peer_equal` check is the implementation of the security boundary documented in `CREDENTIALS.md`: \"Credential information from CURLOPT_* settings is only applicable for the initial origin. Any followup request going to another origin must not use it.\" The boundary logic is correct; it is triggered incorrectly because `peer_same_hostname` fails to recognize the same origin.\n\nPoC (requires a server that redirects with trailing dot):\n```c\nCURL *easy = curl_easy_init();\ncurl_easy_setopt(easy, CURLOPT_URL, \"https://localhost:18443/page1\");\ncurl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1L);\ncurl_easy_setopt(easy, CURLOPT_SSLCERT, \"client.pem\");\ncurl_easy_setopt(easy, CURLOPT_SSLKEY, \"client.key\");\ncurl_easy_setopt(easy, CURLOPT_CAINFO, \"ca.pem\");\n// Server returns: Location: https://localhost.:18443/page2\n// Observed: second TLS handshake has no CERT verify → empty certificate sent\ncurl_easy_perform(easy);\n```\n\n### Affected version\n\n```\ncurl 8.21.0-DEV (x86_64-pc-linux-gnu) libcurl/8.21.0-DEV OpenSSL/3.0.13\n```\nAll versions with `Curl_peer_equal` / `peer_same_hostname` (introduced with the peer comparison refactor) are affected. All 6 TLS backends, all platforms.\n\n### Steps To Reproduce\n\n1. Generate CA, server, and client certificates for mTLS:\n```bash\n# CA\nopenssl req -x509 -newkey rsa:2048 -keyout ca.key -out ca.pem -days 365 -nodes -subj \"/CN=TestCA\"\n# Server cert (SAN: DNS:localhost, DNS:localhost.)\nopenssl req -newkey rsa:2048 -keyout server.key -out server.csr -nodes -subj \"/CN=localhost\"\nopenssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out server.pem -days 365 -extfile <(echo \"subjectAltName=DNS:localhost,DNS:localhost.\")\n# Client cert\nopenssl req -newkey rsa:2048 -keyout client.key -out client.csr -nodes -subj \"/CN=client\"\nopenssl x509 -req -in client.csr -CA ca.pem -CAkey ca.key -CAcreateserial -out client.pem -days 365\n```\n\n2. Start an HTTPS server that requires client certs and redirects `/page1` to `https://localhost.:PORT/page2` (trailing dot):\n```python\n# Simplified — see verification/finding004_mock_required.py for full code\nclass Handler(BaseHTTPRequestHandler):\n    def do_GET(self):\n        if self.path == '/page1':\n            self.send_response(302)\n            self.send_header('Location', f'https://localhost.:{PORT}/page2')\n            self.end_headers()\n        else:\n            self.send_response(200)\n            self.end_headers()\n```\n\n3. Run the test program (or curl CLI):\n```bash\n# CLI:\ncurl -v --cacert ca.pem --cert client.pem --key client.key -L https://localhost:PORT/page1\n\n# Observe:\n# - First TLS handshake: \"CERT verify (15) OUT\" → client cert sent ✓\n# - Second TLS handshake: no \"CERT verify\" → empty cert, server rejects ✗\n#   \"tlsv13 alert certificate required\"\n```\n\n4. Control test (normal redirect without trailing dot) — both connections succeed with client cert.\n\n## Impact\n\n**Client certificate authentication bypass**: In mTLS environments, a malicious server can send a redirect with a trailing dot appended to its own hostname. curl silently strips the client certificate on the redirected connection. In strict mTLS deployments this causes a DoS (server rejects). In deployments where client auth is optional but grants different privilege levels, the request succeeds with **reduced privileges** without the user's knowledge.\n\n**HTTP auth credential suppression**: The same `Curl_peer_equal` mismatch also suppresses all HTTP authentication types (Basic, Digest, NTLM, Negotiate, Bearer), TLS-SRP, and proxy auth on the redirected request. A trailing-dot redirect causes `Authorization` headers to be dropped even though the origin is unchanged.\n\nThis follows the same security boundary as CVE-2022-27774 (redirect credential handling). CVE-2022-27774 was credential *leakage* to a different origin; this is credential *stripping* from the same origin misidentified as different.",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
