@@ -1,0 +1,143 @@
+{
+  "id": 3701692,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzAxNjky",
+  "url": "https://hackerone.com/reports/3701692",
+  "title": "Malicious Conflux Endpoint Can Leave Stale Global OOO Queue Accounting After Teardown",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-28T18:05:32.958Z",
+  "submitted_at": "2026-04-28T18:05:33.648Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "aptupdate",
+    "url": "/aptupdate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/3lfgetb1fcq7ic6s5o9rmimf4wi9/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 1800,
+    "url": "https://hackerone.com/torproject",
+    "handle": "torproject",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/001/800/6e575d0a9127b91e83833cf4a9e6be6e8b30cbc3_original.jpg/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/001/800/6e575d0a9127b91e83833cf4a9e6be6e8b30cbc3_original.jpg/1d3351b56b27c9bb56ce22821a57514a7210186a77aefb760cd2113272723c1f"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Tor",
+      "twitter_handle": "torproject",
+      "website": "https://www.torproject.org/",
+      "about": "Anonymity Online"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-06-16T07:16:47.913Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-05-17T07:16:25.662Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nTor's Conflux OOO queue accounting can remain inflated after a Conflux set is\ntorn down. A malicious Conflux-capable endpoint relay can send a real\n`CONFLUX_SWITCH` gap followed by `RELAY_DATA` cells, causing the client to queue\nout-of-order messages. When teardown happens before normal dequeue,\n`conflux_free_()` frees those messages but does not subtract their cost from\n`total_ooo_q_bytes`.\n\nThe victim client is unmodified in the PoC. Only the attacker-controlled exit\nrelay is patched so it emits hostile Conflux traffic through Tor's normal\nrelay-cell send path.\n\n## Root Cause\n\nThe accounting is balanced on normal dequeue, but not on teardown.\n\nIn `src/core/or/conflux.c`, OOO enqueue increments both counters:\n\n```c\ntotal_ooo_q_bytes += cost;\ncfx->ooo_q_alloc_cost += cost;\n```\n\nThe normal dequeue path subtracts the same cost:\n\n```c\ntotal_ooo_q_bytes -= cost;\ncfx->ooo_q_alloc_cost -= cost;\n```\n\nBut `src/core/or/conflux_pool.c:conflux_free_()` frees queued messages without\nthe matching accounting update:\n\n```c\nSMARTLIST_FOREACH(cfx->ooo_q, conflux_msg_t *, cell,\n                  conflux_relay_msg_free(cell));\nsmartlist_free(cfx->ooo_q);\n```\n\nThat leaves `total_ooo_q_bytes` counting memory that has already been freed.\nThis stale value is later included in `src/core/or/relay.c:cell_queues_check_size()`:\n\n```c\nconst size_t conflux_total = conflux_get_total_bytes_allocation();\nalloc += conflux_total;\n```\n\nIf the global allocation total reaches `MaxMemInQueues`, Tor's OOM recovery path\ncan close circuits through `circuits_handle_oom()`.\n\n## PoC / Evidence\n\nThe attached PoC builds two Tor binaries and runs a private Chutney network. The\nvictim side uses the clean Tor binary. The second binary is used only for\nattacker-controlled exit relays, where the patch sends real `CONFLUX_SWITCH`\nand `RELAY_DATA` cells on the negotiated Conflux leg. The harness then restarts\nclean exits to force normal teardown and reads\n`conflux_get_total_bytes_allocation()` / `MaxMemInQueues` from the clean client\nwith `gdb`.\n\nAttached PoC files:\n\n- `poc-files/run-poc.sh`\n- `poc-files/attacker-relay.diff`\n- `poc-files/chutney-network`\n\nBuild and run the proof:\n\n```sh\nmkdir -p ~/conflux-ooo-oom-check\ncd ~/conflux-ooo-oom-check\n\ngit clone https://gitlab.torproject.org/tpo/core/tor.git tor-clean\ngit clone https://gitlab.torproject.org/tpo/core/tor.git tor-attacker-exact\ngit clone https://gitlab.torproject.org/tpo/core/chutney.git chutney\n\ncp /path/to/poc-files/attacker-relay.diff ~/\ncp /path/to/poc-files/chutney-network ~/\ncp /path/to/poc-files/run-poc.sh ~/\n```\n\nBuild the clean victim/network binary:\n\n```sh\ncd ~/conflux-ooo-oom-check/tor-clean\ngit checkout a66e072d7f3752fe98d4e59129b35b0942d4399b\n./autogen.sh\n./configure --disable-asciidoc\nmake -j\"$(nproc)\"\n```\n\nBuild the attacker-exit binary:\n\n```sh\ncd ~/conflux-ooo-oom-check/tor-attacker-exact\ngit checkout a66e072d7f3752fe98d4e59129b35b0942d4399b\ngit apply ~/attacker-relay.diff\n./autogen.sh\n./configure --disable-asciidoc\nmake -j\"$(nproc)\"\n```\n\nInstall Chutney dependencies if needed:\n\n```sh\ncd ~/conflux-ooo-oom-check/chutney\npython3 -m venv .venv\n. .venv/bin/activate\npython3 -m pip install -U 'typing_extensions' 'typeguard==4.3.0' \\\n  'tomli-w~=1.2.0' 'paramiko~=4.0' 'cryptography~=3.4'\n```\n\nAllow local counter inspection with `gdb`:\n\n```sh\n# Measurement only. This does not change Tor behavior or the attack path.\nsudo sysctl -w kernel.yama.ptrace_scope=0\n```\n\nRun the proof script:\n\n```sh\ncd ~\n. ~/conflux-ooo-oom-check/chutney/.venv/bin/activate\n\nROUNDS=4 \\\nTARGET_COUNTER=1000000 \\\nTRAFFIC_PASSES=1 \\\nTRAFFIC_TIMEOUT=35 \\\nTOR_CONFLUX_OOO_CELLS=900 \\\nTOR_CONFLUX_OOO_PROBES=60 \\\n  bash ~/run-poc.sh\n```\n\nSuccessful proof output:\n\n```text\ntimestamp                  label                         mem_available_mb  client_rss_mb  client_vmsize_mb  conflux_counter  max_mem_in_queues  attacker_sends  oom_lines\n2026-04-28T22:59:29+05:30  baseline                      7872.5            12.6           306.1             0                6625393048         0               0\n2026-04-28T23:00:14+05:30  round-1-after-attack          7886.2            12.8           313.9             327716           6625393048         83              0\n2026-04-28T23:00:24+05:30  round-1-after-clean-restart   8052.1            12.8           313.9             327716           6625393048         83              0\n2026-04-28T23:01:09+05:30  round-2-after-attack          7918.1            12.8           313.9             720904           6625393048         185             0\n2026-04-28T23:01:19+05:30  round-2-after-clean-restart   8079.9            12.8           313.9             720904           6625393048         185             0\n2026-04-28T23:02:04+05:30  round-3-after-attack          7870.9            12.8           313.9             1441452          6625393048         278             0\n2026-04-28T23:02:14+05:30  round-3-after-clean-restart   8205.4            12.8           313.9             1441452          6625393048         278             0\n[result] target counter reached: 1441452 >= 1000000\n```\n\nAttacker-side proof line:\n\n```text\nPoC: Conflux OOO exact-leg probe queued 124 DATA cells; stop this exit now to force client-side teardown\n```\n\nThe important observation is that the Conflux allocation counter remains\nnon-zero after the attacker exits are replaced by clean exits. This confirms\nsuccessful exploitation of the stale accounting bug after real teardown under\ndefault `MaxMemInQueues` settings. No OOM was triggered in this run.\n\n\n\n## Recommended Fix\n\nMake Conflux OOO teardown use the same accounting invariant as normal dequeue.\n\n```c\nstatic void\nconflux_free_queued_msg_accounted(conflux_t *cfx, conflux_msg_t *msg)\n{\n  size_t cost = conflux_msg_alloc_cost(msg);\n\n  if (BUG(total_ooo_q_bytes < cost))\n    total_ooo_q_bytes = 0;\n  else\n    total_ooo_q_bytes -= cost;\n\n  if (BUG(cfx->ooo_q_alloc_cost < cost))\n    cfx->ooo_q_alloc_cost = 0;\n  else\n    cfx->ooo_q_alloc_cost -= cost;\n\n  conflux_relay_msg_free(msg);\n}\n```\n\nThen use it from `conflux_free_()`:\n\n```c\nSMARTLIST_FOREACH(cfx->ooo_q, conflux_msg_t *, cell,\n                  conflux_free_queued_msg_accounted(cfx, cell));\nsmartlist_free(cfx->ooo_q);\n```\n\nRegression tests should verify that teardown with a non-empty Conflux OOO queue\nreturns `conflux_get_total_bytes_allocation()` to zero.\n\n## Impact\n\nA malicious Conflux-capable endpoint can cause Tor's global Conflux OOO\nqueue-memory counter to remain inflated after teardown, and that stale counter\ncan persist until Tor restart.\n\nThis can also affect Tor's OOM recovery path if enough stale accounting\naccumulates, but this report does not include a default-config OOM PoC.\n\nWhy: stale bytes count against `MaxMemInQueues` until restart.",
+  "bounty_amount": "100.0",
+  "formatted_bounty": "$100",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5818384,
+      "file_name": "run-poc.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9xebkjprz9652afr414fuubso55t?response-content-disposition=attachment%3B%20filename%3D%22run-poc.sh%22%3B%20filename%2A%3DUTF-8%27%27run-poc.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR2JVC5MU%2F20260616%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260616T075650Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEKf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFZWIvaw0BHy40hgCfsj8rQpi62FqIzQocvYkJ6oayz%2BAiANEAcBrfiw48hRIUeEGVUMyqheLSJEpIXQQxi%2B0BevwSqxBQhwEAMaDDAxMzYxOTI3NDg0OSIMFsE7f295P%2Fk5bv%2BDKo4FQv3yy935pAubdv%2BZmOyUgci8rxI9IWbO6rrl1%2FUsbWSwag%2Fl6kYjAZRMVsl2K4RF6VVPxH%2B9UfVSbM1cYjkYPclCsmOTbhd1ylmVCbC884TPeSu%2ByGNO8VAPrxuDcob55RqReBZYl0T0wwJlccrNAbEe7rY5%2F325LjT1KG54vrHxb7QoSWXVLLh7m0xjJUSi6cTnSFXB753u9Mrv3hHQdfjP7UHa1qYZBv6hCl%2FjY7jnnAgv2kaDbt7bJzigKCTTWGP1hwvzkcdQjMGrIrvVf%2FCoJ9sgDxnRrmXfHNJ9v20meUMkVKLJWzQwSGv7Jyj19T%2Bq5mitFA8K3K2%2Fx8jmBxL%2FH3vqm%2BvswAulnytD8vS7FRCzyUfcrxaZ385W3S65u286LRD9nIBcwKEDJHHbs8XzrLU0WtvgBVwXTjHhRTFejTx20lvN9pvubz3K1Q6H%2FXzIfz9LBidx1%2BQUFHFsduLVsxZTZdQ1PdQIn8zdtvhhLuKfIYPYbU6oEpoUlDk5JjUWsz9j5te8YnqhFNkXuCdwrX5ofVQDk0r9sBu3iL%2FtX0pftvtb1L391OG8dOqB3ELoRyqYWjuCEjJPj2hQxt1s5JIJrgphMKWs%2Bauh2UvBDXC%2B34gYomWaGP%2B1cf1dXjdOobr2DWRb5pgkoauOuRnr4KjDlbh7HvstGvXX68P2cSa3HcycvWTneGqWBTasit14McTX8kIrWpuSauEPW2Bp2t%2BiKXZScM1W1xFo%2BJoTRhJLopunQTzkwFxaJUmIFa9x6XO4hQrqIhU2XhT9erDN1Ja5vyPMGsqD5culjfh10Db79RdKGllhqO6plYOxQkR27zZnkRWGItrmnO%2FFvbVK7GMYRtJ4swSAbMphMOPhw9EGOrIBf9uQ4n02iG0RqDZJVsEoo%2BwUX%2ByTr1aev2x4%2BPajh1mmnq%2F7h0QiJ6pTW5u%2BCGMyf9NBys%2FdH%2FALIg57i6AccbMWrGH3xiP856GMPCmE10JkHqxNCVz9usgqaEOp05odIQhNAKse3%2BP%2FtSprjgijQneUJeeGFCTx4ATi7s0R5EN%2FBlJZhDBytO2XGMYysDT%2BsEB7h52k2ILJ4NBxIuc0mTu91VxHC2jL%2Bzk1NaUze%2Fja6g%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e55ae0e79c2012dcb99c40b10d875b1dad96f9123bf1ea78dc539f77bb5f0c4c",
+      "file_size": 6433,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5818385,
+      "file_name": "chutney-network",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/njndq44lu0nneccxt71nrgs1xdp7?response-content-disposition=attachment%3B%20filename%3D%22chutney-network%22%3B%20filename%2A%3DUTF-8%27%27chutney-network&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR2JVC5MU%2F20260616%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260616T075650Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEKf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFZWIvaw0BHy40hgCfsj8rQpi62FqIzQocvYkJ6oayz%2BAiANEAcBrfiw48hRIUeEGVUMyqheLSJEpIXQQxi%2B0BevwSqxBQhwEAMaDDAxMzYxOTI3NDg0OSIMFsE7f295P%2Fk5bv%2BDKo4FQv3yy935pAubdv%2BZmOyUgci8rxI9IWbO6rrl1%2FUsbWSwag%2Fl6kYjAZRMVsl2K4RF6VVPxH%2B9UfVSbM1cYjkYPclCsmOTbhd1ylmVCbC884TPeSu%2ByGNO8VAPrxuDcob55RqReBZYl0T0wwJlccrNAbEe7rY5%2F325LjT1KG54vrHxb7QoSWXVLLh7m0xjJUSi6cTnSFXB753u9Mrv3hHQdfjP7UHa1qYZBv6hCl%2FjY7jnnAgv2kaDbt7bJzigKCTTWGP1hwvzkcdQjMGrIrvVf%2FCoJ9sgDxnRrmXfHNJ9v20meUMkVKLJWzQwSGv7Jyj19T%2Bq5mitFA8K3K2%2Fx8jmBxL%2FH3vqm%2BvswAulnytD8vS7FRCzyUfcrxaZ385W3S65u286LRD9nIBcwKEDJHHbs8XzrLU0WtvgBVwXTjHhRTFejTx20lvN9pvubz3K1Q6H%2FXzIfz9LBidx1%2BQUFHFsduLVsxZTZdQ1PdQIn8zdtvhhLuKfIYPYbU6oEpoUlDk5JjUWsz9j5te8YnqhFNkXuCdwrX5ofVQDk0r9sBu3iL%2FtX0pftvtb1L391OG8dOqB3ELoRyqYWjuCEjJPj2hQxt1s5JIJrgphMKWs%2Bauh2UvBDXC%2B34gYomWaGP%2B1cf1dXjdOobr2DWRb5pgkoauOuRnr4KjDlbh7HvstGvXX68P2cSa3HcycvWTneGqWBTasit14McTX8kIrWpuSauEPW2Bp2t%2BiKXZScM1W1xFo%2BJoTRhJLopunQTzkwFxaJUmIFa9x6XO4hQrqIhU2XhT9erDN1Ja5vyPMGsqD5culjfh10Db79RdKGllhqO6plYOxQkR27zZnkRWGItrmnO%2FFvbVK7GMYRtJ4swSAbMphMOPhw9EGOrIBf9uQ4n02iG0RqDZJVsEoo%2BwUX%2ByTr1aev2x4%2BPajh1mmnq%2F7h0QiJ6pTW5u%2BCGMyf9NBys%2FdH%2FALIg57i6AccbMWrGH3xiP856GMPCmE10JkHqxNCVz9usgqaEOp05odIQhNAKse3%2BP%2FtSprjgijQneUJeeGFCTx4ATi7s0R5EN%2FBlJZhDBytO2XGMYysDT%2BsEB7h52k2ILJ4NBxIuc0mTu91VxHC2jL%2Bzk1NaUze%2Fja6g%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b699a56fc94fac826d8c0dcb64d33d7ac3355586120fac9f3d5508f43096616d",
+      "file_size": 462,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 5818386,
+      "file_name": "attacker-relay.diff",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/vub8poukoe9bcng6nalgylifk8d5?response-content-disposition=attachment%3B%20filename%3D%22attacker-relay.diff%22%3B%20filename%2A%3DUTF-8%27%27attacker-relay.diff&response-content-type=text%2Fx-patch&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR2JVC5MU%2F20260616%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260616T075650Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEKf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFZWIvaw0BHy40hgCfsj8rQpi62FqIzQocvYkJ6oayz%2BAiANEAcBrfiw48hRIUeEGVUMyqheLSJEpIXQQxi%2B0BevwSqxBQhwEAMaDDAxMzYxOTI3NDg0OSIMFsE7f295P%2Fk5bv%2BDKo4FQv3yy935pAubdv%2BZmOyUgci8rxI9IWbO6rrl1%2FUsbWSwag%2Fl6kYjAZRMVsl2K4RF6VVPxH%2B9UfVSbM1cYjkYPclCsmOTbhd1ylmVCbC884TPeSu%2ByGNO8VAPrxuDcob55RqReBZYl0T0wwJlccrNAbEe7rY5%2F325LjT1KG54vrHxb7QoSWXVLLh7m0xjJUSi6cTnSFXB753u9Mrv3hHQdfjP7UHa1qYZBv6hCl%2FjY7jnnAgv2kaDbt7bJzigKCTTWGP1hwvzkcdQjMGrIrvVf%2FCoJ9sgDxnRrmXfHNJ9v20meUMkVKLJWzQwSGv7Jyj19T%2Bq5mitFA8K3K2%2Fx8jmBxL%2FH3vqm%2BvswAulnytD8vS7FRCzyUfcrxaZ385W3S65u286LRD9nIBcwKEDJHHbs8XzrLU0WtvgBVwXTjHhRTFejTx20lvN9pvubz3K1Q6H%2FXzIfz9LBidx1%2BQUFHFsduLVsxZTZdQ1PdQIn8zdtvhhLuKfIYPYbU6oEpoUlDk5JjUWsz9j5te8YnqhFNkXuCdwrX5ofVQDk0r9sBu3iL%2FtX0pftvtb1L391OG8dOqB3ELoRyqYWjuCEjJPj2hQxt1s5JIJrgphMKWs%2Bauh2UvBDXC%2B34gYomWaGP%2B1cf1dXjdOobr2DWRb5pgkoauOuRnr4KjDlbh7HvstGvXX68P2cSa3HcycvWTneGqWBTasit14McTX8kIrWpuSauEPW2Bp2t%2BiKXZScM1W1xFo%2BJoTRhJLopunQTzkwFxaJUmIFa9x6XO4hQrqIhU2XhT9erDN1Ja5vyPMGsqD5culjfh10Db79RdKGllhqO6plYOxQkR27zZnkRWGItrmnO%2FFvbVK7GMYRtJ4swSAbMphMOPhw9EGOrIBf9uQ4n02iG0RqDZJVsEoo%2BwUX%2ByTr1aev2x4%2BPajh1mmnq%2F7h0QiJ6pTW5u%2BCGMyf9NBys%2FdH%2FALIg57i6AccbMWrGH3xiP856GMPCmE10JkHqxNCVz9usgqaEOp05odIQhNAKse3%2BP%2FtSprjgijQneUJeeGFCTx4ATi7s0R5EN%2FBlJZhDBytO2XGMYysDT%2BsEB7h52k2ILJ4NBxIuc0mTu91VxHC2jL%2Bzk1NaUze%2Fja6g%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ffec0648eeedcf02b347fff55b80aa4232353d859883a07db4c2e22162f89f17",
+      "file_size": 3140,
+      "type": "text/x-patch",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-06-16T07:16:26.371Z",
+  "allow_singular_disclosure_after": -2424.027577379,
+  "singular_disclosure_allowed": true,
+  "vote_count": 2,
+  "voters": [
+    "aptupdate",
+    "ayham970"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 68695,
+    "asset_type": "OTHER",
+    "asset_identifier": "Tor",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
