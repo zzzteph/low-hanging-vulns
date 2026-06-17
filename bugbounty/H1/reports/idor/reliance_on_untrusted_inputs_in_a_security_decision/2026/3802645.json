@@ -1,0 +1,120 @@
+{
+  "id": 3802645,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODAyNjQ1",
+  "url": "https://hackerone.com/reports/3802645",
+  "title": "verify-release rebuilds from the tarball under verification, enabling pre-check command execution and false OK for a malicious curl release tarball",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-06-15T00:13:32.608Z",
+  "submitted_at": "2026-06-15T00:13:33.017Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "argareksapatii",
+    "url": "/argareksapatii",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fpm7e6yjpfqe99ev12r8d0l8fr16/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-17T06:20:39.488Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-16T06:04:22.625Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n`scripts/verify-release` is documented as a way to independently verify a downloaded curl release tarball, but on `curl-8.20.0` it extracts the tarball under verification and executes `./configure` and `./scripts/dmaketgz` before any trust decision is made.\n\nThis creates a circular trust failure: attacker-chosen commands from the tarball run in the verifier context before authenticity/integrity is established, and the same malicious tarball can still be reported as `curl-8.20.0.tar.gz: OK`.\n\nUsing a trusted verifier copied from the clean official tag `curl-8_20_0`, with the tarball as the only attacker-controlled input, I reproduced verifier-side attacker-chosen command execution from a malicious tarball built with curl’s own release tooling.\n\n`strace -f -e execve` shows `execve(\"./configure\", ...)` before `execve(\"/usr/bin/sha256sum\", [\"sha256sum\", \"-c\", \"checksum\"], ...)`, while the final result is still `curl-8.20.0.tar.gz: OK`.\n\nThis is a source-package / distribution-integrity issue, not a generic infrastructure issue.\n\n## Affected version\nConfirmed affected: `8.20.0` source release (`curl-8_20_0` tag).\n\nLikely affected: `8.10.0+`, because `verify-release` first shipped in `8.10.0`.\n\nPlatform used for reproduction:\n`Linux kali 6.18.12+kali-amd64 #1 SMP PREEMPT_DYNAMIC Kali 6.18.12-1kali1 (2026-02-25) x86_64 GNU/Linux`\n\n## Steps To Reproduce:\n1. Use a clean official curl repository checkout and extract the trusted verifier from the clean release tag:\n   `git show curl-8_20_0:scripts/verify-release > trusted-verify-release && chmod +x trusted-verify-release`\n\n2. Run the attached PoC `poc_verify_release_trust_failure.sh` against the clean repo.\n\n3. The PoC downloads the official `curl-8.20.0.tar.gz`, confirms that the official tarball and the clean official tag do not contain the payload marker, injects a safe source-level payload into `configure.ac`, rebuilds a malicious tarball using the official `./scripts/dmaketgz`, and then runs the trusted verifier under `strace -f -e execve`.\n\n4. Observe the decisive output:\n   - `official_tar_has_payload=no`\n   - `trusted_tag_has_payload=no`\n   - `pre_auth_exec=yes`\n   - `configure_execve=...execve(\"./configure\", [\"./configure\", \"--without-ssl\", \"--without-libpsl\"], ...)`\n   - `sha256sum_execve=...execve(\"/usr/bin/sha256sum\", [\"sha256sum\", \"-c\", \"checksum\"], ...)`\n   - `curl-8.20.0.tar.gz: OK`\n\n5. Observe the proof file produced by the attacker-chosen payload:\n   - `uid=1000 gid=1000 user=nobcoder`\n   - `cwd=/tmp/.../curl-8.20.0`\n   - `argv0=./configure`\n   - `HOME=set`\n   - `USER=set`\n   - `SHELL=set`\n   - `PATH=set`\n   - `GNUPGHOME=unset`\n   - `SSH_AUTH_SOCK=set`\n   - `GITHUB_VAR_COUNT=0`\n\n6. Observe that the malicious tarball accepted by the verifier had SHA-256:\n   - `378a4c4de88b2cd55b6933faf1b61ba838130c754938226b4ed0f6716559678c`\n\nI have attached:\n- the stronger PoC,\n- verifier log,\n- `strace` exec-order log,\n- proof file,\n- and a ZIP bundle with all evidence.\n\n## Impact\n\nImpact:\n\n## Summary:\nAn attacker who can cause a verifier to run curl’s documented `verify-release` workflow on a malicious release tarball can achieve verifier-side attacker-chosen local command execution before authenticity is established, while the trusted verifier still returns a false successful result (`curl-8.20.0.tar.gz: OK`).\n\nThis breaks the exact release-integrity property curl claims for `verify-release`: signatures prove origin, while `verify-release` is presented as the mechanism that should detect a release manager or release host adding extra malicious content to an official release. The current implementation cannot do that because it rebuilds from the tarball being verified.\n\nI did not attempt to access or exfiltrate secrets. My proof only demonstrates execution-context visibility and false verification.",
+  "weakness": {
+    "id": 133,
+    "name": "Reliance on Untrusted Inputs in a Security Decision"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6092092,
+      "file_name": "verify-release-rce-20260615-bundle.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/73cxkle2medojw2dtq9fqwb3gaa0?response-content-disposition=attachment%3B%20filename%3D%22verify-release-rce-20260615-bundle.zip%22%3B%20filename%2A%3DUTF-8%27%27verify-release-rce-20260615-bundle.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ6B4SNOOJ%2F20260617%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260617T074932Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIBAS5Nf7D%2F2cimXIGLnIqKyY9ar2Z9ZeCh4oRAR%2BEQp%2FAiBLRiDo68hoAFIx3acX%2FBE6vY04nIl9u%2FR1XWewkFnOKiq7BQiI%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMorVYoPKR0pe5pKQaKo8FanX2jSf7oSX%2B4WOoTD0qSRJ2oK3xGzI5Tpt7YJnSeBHIPFqiImnp0IhJDdDou5oTARk0fWskDbjjn9%2BFtsZ2Gnp1S1GasP%2FSZaveSdeVKcLmLVkx%2FeAxojyk6I3TVFQfC8YjP%2BjlyRQjk9M6YD%2BlEyHXXZhw9nvpZ16CUHWj9ASDS1EDFfOMqt0HbpKgnZGq%2BkmAqcdbI8be21BACxJvXE4MR0YOwRo3vevDmaGmWk3wGJIDop9D4s3zWOIeCh7xqh9lEM3lDciSmrwHXdkucRZAb5hPKpIXplXS6ygMRTTTGEUlwACR2DktyVhQJP1ZC0BOHmd%2FukbFRVrb%2FhTUL7H5e8dT1B1wGT1LZzcqzDZpxuUxh9VoXlCz%2BeNBi0ZoLIt9PzouVwvT0l%2FPNrEEmA3fe7J3EVxTW3TxNZWzusblWAp5GBOWe%2BUxpVH8Ktx29s1xpiomY2Es1sV5SrNYnoFet5vtxLWvVW%2Bzd6cMOY9NBUDOCzenmFqAVwHl0m5XADe9Rfnw5M0uAAed6Na73%2B%2BZT22d3hIf5aCMeh2dLxodGwBd%2Ffw2TCx6tzHfrux17HvWpILMzrbYzX3DlaIBrBPUihXudcBbHjD5HpLVb40ODi%2B%2F8vjRwH0lvkrWV8thpeIh0KyVlwI07CCWlVCLQXbmSWuW%2FBtk1oRphmrt6F7DnaFKHBFadLA6KS2q1WfpTWB6LdH%2FXFLDAbmvPty8kyf7wRYw5B1VVXyP9XcUBsvJXYU9e5J5EOQa%2BvvnOGFoe69vYp88%2FcUtkqA8VT%2FmyNJHH%2FSnx4idC5b%2FLv57jfx5esQJcE3WEqzYYvGyl4MVrWx1WYYfJw3fkbAsYzPkUFOeiwBomLZ%2BRv88a0GrdzDmg8nRBjqyAfchpHK4GBva6SCXRMewlWNxXDmsak3qVYHULkB862XnKNnMdMSVhOENAynCc4pTQIjP5dACYRPRP7C%2F2SOdhepKJjdYzDCrngmda%2BPJhNmfpxVOZGs8BCUCfH6J3y3bRAu8FgjTGdL%2FxF2lZDcpgMyB%2FWf1HGp476M4vrRWpm%2F8K86bgFtBVUkErPVZ2q9TnWxXywqI%2FtrMD6oR8mC4yWJ1%2BGnleHvaZp3%2BEtdTcIREnx4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=71870b562957d4e9fcbf265b8114e315cafc08846b4bd9d50a0ccff528c72a5f",
+      "file_size": 150372,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
