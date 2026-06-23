@@ -1,0 +1,127 @@
+{
+  "id": 3734676,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM0Njc2",
+  "url": "https://hackerone.com/reports/3734676",
+  "title": "Taskcluster web-server OAuth2 authorization codes are reusable and the exchange handler checks the wrong expiry column",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-14T07:47:37.750Z",
+  "submitted_at": "2026-05-14T07:47:38.180Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "anshuman_bh",
+    "url": "/anshuman_bh",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/002/274/e61ac38cffc356f9d4531f8581e62fd4b6603c67_original.jpg/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 61236,
+    "url": "https://hackerone.com/mozilla",
+    "handle": "mozilla",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0p8e6gg8xoy45dhjxs5wh4iti6k8/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/0p8e6gg8xoy45dhjxs5wh4iti6k8/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Mozilla",
+      "twitter_handle": "",
+      "website": "https://www.mozilla.org",
+      "about": "Mozilla web bug bounty program specific to encouraging security research in Mozilla's products and web services."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-06-23T12:37:52.822Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-06-18T20:15:16.048Z",
+  "team_member_agreed_on_going_public_at": "2026-06-23T12:37:52.140Z",
+  "comments_closed?": true,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "The Taskcluster web-server's OAuth2 token-exchange handler does not consume authorization codes and does not enforce the authorization-code expiry. A leaked authorization code can be replayed to mint additional bridge access tokens for the original user, well past the 10-minute window that RFC 6749 §4.1.2 requires.\n\n# Source-to-sink\n\nTwo bugs in `services/web-server/src/servers/oauth2.js`, both in the same handler at lines 165-199:\n\n1. The exchange handler validates `redirect_uri` and code existence, mints a bridge access token, and returns — it never deletes or otherwise consumes the `authorization_codes` row. RFC 6749 §4.1.2 requires single-use codes: \"The client MUST NOT use the authorization code more than once. If an authorization code is used more than once, the authorization server MUST deny the request...\"\n\n2. The expiry check at line 66 reads `entry.client_details.expires`, which is the requested lifetime of the resulting Taskcluster credentials (capped by the registered OAuth client's `maxExpires`, e.g. `\"1 year\"` in the test config). The authorization-code row's intended 10-minute lifetime (`entry.expires`, set at line 33 to `taskcluster.fromNow('10 minutes')`) is never checked at exchange time. Expired codes remain usable until the daily `cleanup-expire-auth-codes` cron deletes them (`services/web-server/procs.yml:20-24`).\n\nThe same expiry-column mismatch repeats in the bridge-token-to-credentials handler at `oauth2.js:318-375` (`/login/oauth/credentials`), which checks `entry.client_details.expires` rather than the access-token row's `entry.expires`.\n\n# Reproduction (end-to-end PoC)\n\nEnd-to-end PoC reproduces against unmodified Taskcluster source at commit `246cb765672da1fdc1b7e6901002725bf0e50090` (default branch `main`). The test case extends the existing `services/web-server/test/third_party_test.js` and runs via the project's existing Mocha test infrastructure:\n\n```\n$ source ~/.nvm/nvm.sh && nvm use 24.15.0\n$ cd taskcluster && yarn install\n$ docker compose up -d postgres\n$ docker exec taskcluster-postgres-1 psql -U postgres -c \"CREATE DATABASE \\\"taskcluster-test\\\";\"\n$ cd services/web-server\n$ TEST_DB_URL=postgresql://postgres@localhost:5432/taskcluster-test NODE_ENV=test \\\n    yarn mocha --grep \"TC-002\" test/third_party_test.js\n```\n\nResult:\n\n```\nservices/web-server/test/third_party_test.js\n  unit\n    ✔ TC-002 (PoC): authorization code is reusable in violation of RFC 6749 §4.1.2\n\n1 passing\n```\n\nThe test:\n\n1. Authorizes a code through `GET /login/oauth/authorize` using the `test-code-whitelisted` registered client that ships in `services/web-server/config.yml`.\n2. Exchanges the code through `POST /login/oauth/token` (asserts 200, token A).\n3. Replays the same code through `POST /login/oauth/token` (asserts 200, token B, `token A != token B` — the RFC 6749 §4.1.2 violation).\n4. Calls `GET /login/oauth/credentials` with `Authorization: Bearer <token B>` (asserts 200, Taskcluster credentials with `clientId` + `accessToken` in the original user's identity).\n\nThe full test patch and Mocha pass log are attached.\n\n# Remediation\n\nConsume the authorization code atomically during token exchange. Add a DB function such as `consume_authorization_code(code, client_id, redirect_uri)` that performs a single statement equivalent to:\n\n```\nDELETE FROM authorization_codes\n WHERE code = code_in\n   AND client_id = client_id_in\n   AND redirect_uri = redirect_uri_in\n   AND expires > now()\n RETURNING code, client_id, redirect_uri, identity, identity_provider_id, expires, client_details;\n```\n\nUse the returned row as the only gate for creating an access token. Apply the same fix to `/login/oauth/credentials`: check the access-token row's top-level `entry.expires` rather than `entry.client_details.expires`.\n\nOptionally, store a back-reference from access tokens to the originating authorization code and revoke or invalidate already-minted tokens if replay is detected, matching RFC 6749's \"SHOULD revoke\" clause in §4.1.2.\n\n# Duplicate / advisory checks (performed 2026-05-14)\n\n- GitHub Security Advisories on `taskcluster/taskcluster`: `gh api repos/taskcluster/taskcluster/security-advisories` returns `[]`.\n- Mozilla Foundation Security Advisories index: no matching entry for taskcluster or OAuth code reuse.\n- HackerOne disclosed reports mentioning \"taskcluster\" globally: 3 (#2915647 Netlify token in CI logs, #2221404 RCE via task env variable, #2696294 private emails leaked). None cover OAuth2 authorization-code reuse or expiry-mismatch.\n\n## Impact\n\nWith a captured authorization code (referer in narrow conditions, redirect-page logs, TLS-inspecting proxy, browser-history access on the redirect page), the attacker can:\n\n1. Replay `POST /login/oauth/token` to mint a fresh OAuth bridge access token bound to the original user's `identity`, `identity_provider_id`, and consented scope set.\n2. Call `GET /login/oauth/credentials` with that bridge token to receive Taskcluster credentials in the original user's identity. The auth service's `create_client` behavior (`db/versions/0041.yml:343-404`) returns the existing client's access token when called within a 15-minute idempotency window; outside that window the bridge token can still mint credentials if the attacker is the first to convert the bridge token to credentials.\n3. Replay arbitrarily often within the practical window bounded by (a) `client_details.expires` and (b) the daily cleanup cron. With the documented default of `maxExpires` up to 1 year and `authorizationCodeExpirationDelay: '- 10 minutes'`, the window extends to many hours past the intended 10-minute code lifetime.\n\nFor `firefox-ci-tc.services.mozilla.com`, the resulting Taskcluster credentials carry the user's Firefox-CI scopes, which directly impacts the Firefox build CI integrity boundary. A Taskcluster identity that holds Firefox-CI scopes (e.g. `mozilla-employee` roles) is a privileged role; replay of a code authorized by such an identity is a meaningful integrity exposure on a Critical Site asset.\n\nThe local PoC demonstrates the full chain — authorize → first exchange → replay exchange → credentials conversion — succeeds end-to-end with no error.",
+  "bounty_amount": "2000.0",
+  "formatted_bounty": "$2,000",
+  "weakness": {
+    "id": 554,
+    "name": "Authentication Bypass by Capture-replay"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5916219,
+      "file_name": "TC-002-poc-test.patch",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/relr0gl6aypt44y1lw4osnf1gvr1?response-content-disposition=attachment%3B%20filename%3D%22TC-002-poc-test.patch%22%3B%20filename%2A%3DUTF-8%27%27TC-002-poc-test.patch&response-content-type=text%2Fx-diff&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQURLY2XCY%2F20260623%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260623T125656Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFQaCXVzLXdlc3QtMiJHMEUCIQDuX8xAqDv39mzg2DE%2FeBHr2A%2BYDnBlJQhrzxntlpfwpwIgSSwy1oSG1%2BokNYhCqb3ehgEw0X0S7NCWMQCUSqtwNWgqsgUIHRADGgwwMTM2MTkyNzQ4NDkiDKWzFv%2BDpepSb4Ti9yqPBWB13tzsJ%2Bt2X5IbhtPM2Ih8e6f6NBQ2d%2FvWE3XNC%2FybsNtPM4Yrw7868a%2Bsrbb4HGCy8BpJZH4NMXxXDaUhbwsURufx5vgBuIh5XI9z4ycoRaUkvQC6JQwfQqVgE676Rix7V4ZEax9NIs265PCJIRVvMxdopY3pt0a35iEYlhTKXAzwqrnq3VzoTprcHCzqHhSTukj4wavV6l4A299BrTJ%2FQAOXsY1sUzY1rtDXEXoj1VZr%2F1R9DOVtD15YgOomatG7P4GmuBsoG%2BILcOyHe2SlF5pNZZDuOAILGOtYBYF1Z71pdzNBleom9%2FMTTCblav7p9%2FF9ChDjtpsEEtrwig1GDZQRHCBQXOt82Cllrd6NB%2Flt5%2BWRIOL4ASL65UzfuahtKYdM7IUAFtgFa5ax97Td5ax7ZbZnBB2L7Tt9sbPeIGVudySa0KctkXnHKv8RepIVjOZb45jP6x3AW%2FHFXp3g8hx8c1Auouu2KAxjd0UcKTL4pW2KvRFdYQb%2BLqvuAYSqKyb7J%2FPAYpXIO7wvM7cDkHaTM0jR3vJhK%2BAzsIHysHB2K1z76H4DLR8GMPjW7lTNrNwHhame4euAJoeryt3HEVTcHHi8loCw2%2BLfl2RyuooNoBj46fFuFXKZY2KrWZj2OAePM7O0a5T3OnZ03%2BLcVqcOOy5%2B%2B%2Br%2Br70QFhURUwYtB%2BARDYTxMCcfY8hCOGtTXixGCb39hyrVxk6ukkLtYWynOq0qc8HqRhv4fzPD3YzcqsjB1giWkf3VuNB4pywqKHXfnlSDwjp79%2F33W8WJrZxRnoMolWT%2ByBxF6N%2FMK7QgKfm8rkqdPPWvCWLojkbrvOW8nD%2F5rDUj0uPFABPUjJ9idO8nITSamIOix7wwiuzp0QY6sQEfxJla3ETM6agWF2lmocQIc0Bd%2Bl1a%2B7kTWrOLSAppsx2yYUyguCU9A8KpYBSSFSMEtWKFS3Erq8KnqkAyPZ9WHFaMiuE89rtD1WkCi7il0RkjBctsoFStYT6SXYwI3be3FTrn2FsuXh0apiPOhR6S1q7BYICuABTl%2FBscHIkBNy7xV%2BYXnANeWiQYDEroWqK%2FEK51lzSyl7jxRTdCitVJfHUClcu%2BPEzaQQKDCC0HBm4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a1cb10ef31974befeec840c7efd2f0391fd8e80ed2cde812c008839857778800",
+      "file_size": 4951,
+      "type": "text/x-diff",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-07-18T20:15:16.592Z",
+  "allow_singular_disclosure_after": 2186300.509224325,
+  "singular_disclosure_allowed": false,
+  "vote_count": 2,
+  "voters": [
+    "n1m0",
+    "sottam"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 635513,
+    "asset_type": "URL",
+    "asset_identifier": "firefox-ci-tc.services.mozilla.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
