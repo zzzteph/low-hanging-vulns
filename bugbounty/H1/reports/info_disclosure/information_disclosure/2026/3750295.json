@@ -1,0 +1,132 @@
+{
+  "id": 3750295,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzUwMjk1",
+  "url": "https://hackerone.com/reports/3750295",
+  "title": "CVE-2026-9079: stale proxy password leak",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-20T10:49:36.468Z",
+  "submitted_at": "2026-05-20T10:49:37.917Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "keen4n",
+    "url": "/keen4n",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-9079"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:26:56.851Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:16:13.020Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "#### Product\n\nProduct name: curl / libcurl\n\nProduct link: https://github.com/curl/curl\n\nSuggested CWE: CWE-226: Sensitive Information in Resource Not Removed Before Reuse (https://cwe.mitre.org/data/definitions/226.html); alternative CWE-200: Exposure of Sensitive Information to an Unauthorized Actor (https://cwe.mitre.org/data/definitions/200.html)\n\nAffected versions: `8.8.0 <= libcurl <= 8.20.0` are confirmed affected. curl/libcurl `8.21.0-DEV`, commit `b2476a07128fc1e83a0b322fe6eb9dfa761db53d`, is also affected.\n\nUnaffected versions: `libcurl <= 8.7.1` do not contain the `CURLOPT_PROXYUSERPWD` setter change that introduced this issue.\n\nIntroduced in: this issue was introduced by commit `d5e83eb745762f48d8fafadc5df5dd3ae8d8941e` (`url: do not URL decode proxy credentials`) in curl 8.8.0. This commit changed `CURLOPT_PROXYUSERPWD` from writing directly to the internal proxy username/password fields to first parsing the input into temporary `u` / `p` variables and then writing back only the components that exist.\n\nReference: https://github.com/curl/curl/commit/d5e83eb745762f48d8fafadc5df5dd3ae8d8941e\n\n\n#### Summary\n\ncurl is a widely used command-line network transfer tool, and libcurl is the transfer library it provides for integration into other applications. libcurl provides the `CURLOPT_PROXYUSERPWD` option to set the `username:password` used for HTTP proxy authentication. The official documentation states that when this option is set multiple times, the last set string overrides the previous one, and setting this option to `NULL` disables its use.\n\nHowever, the implementation of `CURLOPT_PROXYUSERPWD` has a stale-state issue. When the same easy handle is first configured with proxy credentials such as `victim:secret`, and later `CURLOPT_PROXYUSERPWD` is set to a username-only value such as `attacker`, or set to `NULL` in an attempt to clear the credentials, the old proxy password `secret` remains stored inside the handle. When a later request is sent through a proxy and proxy authentication is triggered, libcurl sends the old password to the proxy server, leaking a previous request's or previous task's proxy password to a later proxy.\n\nThis is a credential disclosure vulnerability. It primarily affects applications that reuse libcurl easy handles and allow tasks with different trust levels to configure proxy parameters, such as proxy pools, download services, crawler platforms, CI/automation systems, and other multi-tenant services built on libcurl.\n\n\n\n#### Details\n\nThe official documentation describes the semantics of `CURLOPT_PROXYUSERPWD` as follows:\n\n- This option sets the `[username]:[password]` to use for the connection to the HTTP proxy.\n- When this option is set multiple times, the last set string overrides the previous ones.\n- Setting this option to `NULL` disables its use.\n\nReference: https://curl.se/libcurl/c/CURLOPT_PROXYUSERPWD.html\n\nThe issue is in the setter logic for `CURLOPT_PROXYUSERPWD`. The option first parses the provided `username:password` string into temporary variables `u` and `p`, then URL-decodes those components and writes them to the internal proxy username and proxy password fields. The implementation replaces the internal username only when `u` is non-null, and replaces the internal password only when `p` is non-null:\n\n```c\ncase CURLOPT_PROXYUSERPWD: {\n  char *u = NULL;\n  char *p = NULL;\n  result = setstropt_userpwd(ptr, &u, &p);\n\n  if(!result && u) {\n    curlx_safefree(s->str[STRING_PROXYUSERNAME]);\n    result = Curl_urldecode(u, 0, &s->str[STRING_PROXYUSERNAME], NULL,\n                            REJECT_ZERO);\n  }\n  if(!result && p) {\n    curlx_safefree(s->str[STRING_PROXYPASSWORD]);\n    result = Curl_urldecode(p, 0, &s->str[STRING_PROXYPASSWORD], NULL,\n                            REJECT_ZERO);\n  }\n```\n\nAs a result:\n\n1. After setting `CURLOPT_PROXYUSERPWD = \"victim:secret\"`, the internal proxy username is `victim` and the internal proxy password is `secret`.\n2. When `CURLOPT_PROXYUSERPWD = \"attacker\"` is set next, parsing produces only the username `attacker` and no password component. The implementation replaces the username but does not clear the old password, so the internal state becomes `attacker:secret`.\n3. When `CURLOPT_PROXYUSERPWD = NULL` is set next, parsing produces neither a username nor a password component. The implementation does not free the old username or old password, so `attacker:secret` remains stored.\n4. Later proxy authentication uses the internal proxy credentials to generate a `Proxy-Authorization` header, causing the old password to leak across logical requests to a later proxy.\n\nThis behavior violates the documented override and clear semantics. It is not a result of an application using an undocumented API. It occurs when using the documented repeated-set and `NULL` clear semantics, because libcurl fails to correctly clear sensitive state.\n\nAffected versions: `8.8.0 <= libcurl <= 8.20.0` are confirmed affected. `libcurl <= 8.7.1` does not contain the setter change that introduced this issue. This range is based on the version history of the `CURLOPT_PROXYUSERPWD` setter in `lib/setopt.c`: 8.7.1 still writes directly through `setstropt_userpwd()` and clears the internal `STRING_PROXYUSERNAME` / `STRING_PROXYPASSWORD` fields; commit `d5e83eb745762f48d8fafadc5df5dd3ae8d8941e` in 8.8.0 (`url: do not URL decode proxy credentials`, https://github.com/curl/curl/commit/d5e83eb745762f48d8fafadc5df5dd3ae8d8941e) changed `CURLOPT_PROXYUSERPWD` to first parse into temporary `u` / `p` variables and then write back only the components that exist, introducing stale username/password state. This issue has been verified on Alpine 3.20's default distribution package `libcurl 8.14.1-r2`, and also on curl/libcurl `8.21.0-DEV`, commit `b2476a07128fc1e83a0b322fe6eb9dfa761db53d`. If maintainers release additional versions before the fix, the affected range should extend up to the first fixed version.\n\n\n\n#### PoC\n\nThe PoC is located in the `poc/` directory beside this report. The default PoC uses Alpine 3.20's distribution-provided `libcurl 8.14.1-r2` and does not compile curl from source. During `docker build`, it only installs the distribution `curl-dev` package and compiles a small C reproducer. During `docker run`, it only starts a local capture proxy and runs the already-built PoC binary to verify the actual `Proxy-Authorization` value received by the proxy.\n\nPoC files:\n\n- `poc/Dockerfile`: builds the reproduction environment, uses Alpine 3.20's default `libcurl 8.14.1-r2`, and compiles the PoC binary during the build stage.\n- `poc/run-built-poc.sh`: runs the PoC binary that was compiled during the build stage and checks the output.\n- `poc/poc-proxyuserpwd-stale.c`: triggers the stale state using libcurl's public API.\n- `poc/proxy-capture-server.py`: local HTTP proxy that captures and decodes `Proxy-Authorization`.\n\nSteps to reproduce:\n\n1. Build the Docker image:\n\n   ```bash\n   cd poc\n   docker build -t curl-proxyuserpwd-stale-poc .\n   ```\n\n2. Run the PoC. This step does not compile curl and does not compile the PoC; it only starts the capture proxy and runs the already-built PoC binary:\n\n   ```bash\n   docker run --rm curl-proxyuserpwd-stale-poc\n   ```\n\n3. Expected vulnerable output:\n\n   ```text\n   [poc] transfer return codes:\n   SUMMARY initial=0 user_only=0 null_clear=0\n   [poc] proxy capture:\n   GET http://example.invalid/ auth=Basic dmljdGltOnNlY3JldA== decoded=victim:secret\n   GET http://example.invalid/ auth=Basic YXR0YWNrZXI6c2VjcmV0 decoded=attacker:secret\n   GET http://example.invalid/ auth=Basic YXR0YWNrZXI6c2VjcmV0 decoded=attacker:secret\n   [poc] VULNERABLE: stale proxy password was sent after replacement/clear\n   ```\n\nThe second and third `decoded=attacker:secret` lines are the evidence of the vulnerability:\n\n- In the second request, the application has set `CURLOPT_PROXYUSERPWD` to `attacker`, so the old password `secret` should not appear.\n- In the third request, the application has set `CURLOPT_PROXYUSERPWD` to `NULL`, so no proxy credentials should be sent.\n\nIn a fixed version, the second request should not include the old password, and the third request should not send `Proxy-Authorization`.\n\n\n#### Reporter Severity Estimate\n\nThe curl project normally uses Low / Medium / High / Critical for vulnerability severity rather than CVSS. We suggest treating this issue as High. As a reporter-provided reference estimate, the CVSS v4.0 score is 8.2 with vector `CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:H/VI:N/VA:N/SC:N/SI:N/SA:N`, for the following reasons:\n\n- AV:N: the leaked credential is exposed through a network proxy request, and an attacker can obtain it by controlling or observing the later proxy.\n- AC:L: once the application reuses an easy handle and allows later proxy configuration changes, triggering the issue is direct and does not rely on complex races or unstable conditions.\n- AT:P: the target application must reuse an easy handle that previously stored proxy credentials, and later proxy configuration or credentials must be influenced by external input.\n- PR:N: in the baseline scenario, the attacker does not need an account on the target system; the attacker only needs to submit input that affects later proxy configuration in the vulnerable application.\n- UI:N: once the application executes these libcurl API calls, no additional user interaction is required.\n- VC:H: the old proxy password is sent to the later proxy. With Basic authentication, the plaintext `username:password` can be recovered directly, making this a high-sensitivity credential disclosure.\n- VI:N: the PoC does not demonstrate data modification against the affected system itself.\n- VA:N: the PoC does not demonstrate denial-of-service impact.\n- SC:N/SI:N/SA:N: later misuse of the credential may cause broader business impact, but the direct impact of this vulnerability is proxy credential disclosure within the affected system using libcurl; secondary impacts on other systems' confidentiality, integrity, or availability are not counted here.\n\n\n\n#### Credit\n\nThis vulnerability was discovered by:\n\n- XlabAI Team of Tencent Xuanwu Lab (xlabai@tencent.com)\n- Atuin Automated Vulnerability Discovery Engine\n- Guannan Wang (wgnbuaa@gmail.com), Zhanpeng Liu (pkugenuine@gmail.com), Jiashuo Liang (761232680@qq.com), Guancheng Li (lgcpku@gmail.com)\n\nCVE and credit are preferred.\n\nIf you have any questions regarding the vulnerability details, please feel free to reach out to us for further discussion. Our email address is xlabai@tencent.com.\n\n## Impact\n\nAn attacker can obtain a proxy password previously stored in the same libcurl easy handle. For Basic proxy authentication, the proxy can directly Base64-decode `Proxy-Authorization: Basic ...` to recover `username:password`. For other challenge-based proxy authentication schemes, the stale password material may still participate in generating authentication responses, causing authentication state to leak across proxies or tasks.\n\nA typical attack scenario is:\n\n1. A service uses libcurl and reuses easy handles for performance.\n2. High-trust task A accesses the network through an enterprise proxy and sets `CURLOPT_PROXYUSERPWD = \"victim:secret\"`.\n3. Low-trust task B reuses the same handle and is allowed to specify a proxy address or proxy credentials.\n4. Task B sets `CURLOPT_PROXYUSERPWD` to a username-only value, or sets it to `NULL` in an attempt to clear proxy credentials.\n5. libcurl incorrectly retains the old password and sends `Proxy-Authorization: Basic attacker:secret` in B's proxy request.\n6. A proxy controlled or observable by the attacker obtains task A's proxy password.\n\nThis vulnerability does not affect every one-shot use of the curl command-line tool. It primarily affects applications that use libcurl as a library, reuse easy handles, and change proxy configuration across different trust contexts. This usage pattern is realistic in download services, crawler platforms, proxy pools, automation task systems, and CI/build systems.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5955438,
+      "file_name": "poc.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/4erjcmkdyyeb29h5t79a7fgfhcvd?response-content-disposition=attachment%3B%20filename%3D%22poc.zip%22%3B%20filename%2A%3DUTF-8%27%27poc.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5VAX3MBL%2F20260624%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260624T090615Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGkaCXVzLXdlc3QtMiJHMEUCIBoJjv7rGZuPh%2BHtB97%2FK28uAx1VXEYbdAAAb6XzGvXWAiEAlsWZ1EkVkVjSj7iU1xqm95ySLNCsEL%2FCFS2P7tCtbGoqsgUIMRADGgwwMTM2MTkyNzQ4NDkiDCL87xzsRgxfcVwivyqPBcdyzRH0YbS7U09CcovwCTsd8x82shT8nNjYCFThwllzPdcIi6Q28LF18S8nnx8%2F7z9OW1gGrZe4NXhoHbzBaxH0i0QPCdys%2FRWtKcWpDdmH1EkJ0j%2Bmjn1M5IztHhVgvRiwFLsjUUADAjsJhpqa5E7TnQqG4xVqOOnmc9MVP3a2CGhDXyUWstX7OcCVwtPMKKhiYvRJ5pGXFOz5XflcGj4Own08kxfOexRsx2k8Pk45j8mn2%2BDYlcQK2y8ZxkiJPfKZ7bpGxvPQWLqX2fefQ3zxNqhj5teHLaBhmtk1rTN20WheCY4BzcfV44SNWt9ZNDh%2BnaaayjWKoLTApFKtLRuVEy4BVlWpQ2kShWoHK%2BBdaZkLQVy0%2B3341B5LrGGaBr%2B%2B9YreD9c1Y0hdE1NM6yZJqMNBXMw9wJjNUjKFd0HjNAKUL7mwwvFcuFX33ySuCNURvQsUDpHvjOa4LbkzaA1IC6FAAkr%2BTmm2hukO9qi%2FvHmycTv%2FphZeE3gRL5SxcavgfEzybxj9AIVcpNCOiKEAFzUK6IhX8tK4hYYjqOx8ywYQWgSTO55G6Nr90t9OPq0HfjUSVKiLdWJJJM1XEM0%2FLWAlF%2FNXfk4xEjxA1Ow899d57V%2FVrhUjELvJ5XLAdL%2BWC6AoYL6X74BMcOvDmfz8B0CDHHQO2TqT%2BqfPNtGeaB6gXt0jbjiDLtzx6bzMnEPddwC7cC4rR4sCTWnfrJCnaKk17T2GqoXp406Y0yFbOwbSQvPSpGdZ7pr5eqqQLOdJk8ZSS%2BvOm0hUzo3gs07thcH1DitNVxzmDCS4udJV3I0SsMl1ox5JPqHWRhnSfCOXIaRC5qaUu99CNrhkvUjkxmRqmGhNIqgCJxfsE2MwzaXu0QY6sQEj%2F%2Fso5Ya86gdgjVWNIPR3NezwOhbKj1Q1u2bQzMuPxbFeUxODtjO%2Fqfa804riaPxY6q45ClwenTIGETDN4lx6RKEJadh88VKJXCbOC7z9nCLk7qNKJt1euPlwSv9m77IS5eiu1jo8%2BN2jD%2BiC5c6wk7YUkjf2F29qn9Ith%2BGs0MLUfAju9GMuW9N8fUzcGtrw2uY1Asfc5obyG1b%2FCUku8Q8q342cZQGE5X%2BVJ%2FmJc0I%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=061d4ed9b653a4fd3ce4a113c6e14ecd5596926118ea47a2079ca3666bb2a5ba",
+      "file_size": 7144,
+      "type": "application/zip",
+      "moderated": null
+    },
+    {
+      "id": 5955439,
+      "file_name": "poc.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/yu2p48wq187w5op9qbwuewk4sb7q?response-content-disposition=attachment%3B%20filename%3D%22poc.png%22%3B%20filename%2A%3DUTF-8%27%27poc.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5VAX3MBL%2F20260624%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260624T090615Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGkaCXVzLXdlc3QtMiJHMEUCIBoJjv7rGZuPh%2BHtB97%2FK28uAx1VXEYbdAAAb6XzGvXWAiEAlsWZ1EkVkVjSj7iU1xqm95ySLNCsEL%2FCFS2P7tCtbGoqsgUIMRADGgwwMTM2MTkyNzQ4NDkiDCL87xzsRgxfcVwivyqPBcdyzRH0YbS7U09CcovwCTsd8x82shT8nNjYCFThwllzPdcIi6Q28LF18S8nnx8%2F7z9OW1gGrZe4NXhoHbzBaxH0i0QPCdys%2FRWtKcWpDdmH1EkJ0j%2Bmjn1M5IztHhVgvRiwFLsjUUADAjsJhpqa5E7TnQqG4xVqOOnmc9MVP3a2CGhDXyUWstX7OcCVwtPMKKhiYvRJ5pGXFOz5XflcGj4Own08kxfOexRsx2k8Pk45j8mn2%2BDYlcQK2y8ZxkiJPfKZ7bpGxvPQWLqX2fefQ3zxNqhj5teHLaBhmtk1rTN20WheCY4BzcfV44SNWt9ZNDh%2BnaaayjWKoLTApFKtLRuVEy4BVlWpQ2kShWoHK%2BBdaZkLQVy0%2B3341B5LrGGaBr%2B%2B9YreD9c1Y0hdE1NM6yZJqMNBXMw9wJjNUjKFd0HjNAKUL7mwwvFcuFX33ySuCNURvQsUDpHvjOa4LbkzaA1IC6FAAkr%2BTmm2hukO9qi%2FvHmycTv%2FphZeE3gRL5SxcavgfEzybxj9AIVcpNCOiKEAFzUK6IhX8tK4hYYjqOx8ywYQWgSTO55G6Nr90t9OPq0HfjUSVKiLdWJJJM1XEM0%2FLWAlF%2FNXfk4xEjxA1Ow899d57V%2FVrhUjELvJ5XLAdL%2BWC6AoYL6X74BMcOvDmfz8B0CDHHQO2TqT%2BqfPNtGeaB6gXt0jbjiDLtzx6bzMnEPddwC7cC4rR4sCTWnfrJCnaKk17T2GqoXp406Y0yFbOwbSQvPSpGdZ7pr5eqqQLOdJk8ZSS%2BvOm0hUzo3gs07thcH1DitNVxzmDCS4udJV3I0SsMl1ox5JPqHWRhnSfCOXIaRC5qaUu99CNrhkvUjkxmRqmGhNIqgCJxfsE2MwzaXu0QY6sQEj%2F%2Fso5Ya86gdgjVWNIPR3NezwOhbKj1Q1u2bQzMuPxbFeUxODtjO%2Fqfa804riaPxY6q45ClwenTIGETDN4lx6RKEJadh88VKJXCbOC7z9nCLk7qNKJt1euPlwSv9m77IS5eiu1jo8%2BN2jD%2BiC5c6wk7YUkjf2F29qn9Ith%2BGs0MLUfAju9GMuW9N8fUzcGtrw2uY1Asfc5obyG1b%2FCUku8Q8q342cZQGE5X%2BVJ%2FmJc0I%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=9d433aaee63e801c1f65688ee2179b2eae5d816979104442fd5ff102200aee74",
+      "file_size": 1379937,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "keen4n"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

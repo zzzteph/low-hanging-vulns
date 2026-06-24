@@ -1,0 +1,113 @@
+{
+  "id": 3735193,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM1MTkz",
+  "url": "https://hackerone.com/reports/3735193",
+  "title": "CVE-2026-8925: SASL double-free",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-14T11:47:26.146Z",
+  "submitted_at": "2026-05-14T11:47:26.534Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-8925"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:23:35.633Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:17:10.346Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nWe found a double-free in the GSASL authentication path — `Curl_auth_gsasl_is_supported()` frees `gsasl->ctx` on a failed `gsasl_client_start()` but never nulls the pointer, and then `Curl_auth_gsasl_cleanup()` frees it again unconditionally at connection teardown.\n\nThe bug lives in two spots. `lib/vauth/gsasl.c:47-50`:\n\n```c\nres = gsasl_client_start(gsasl->ctx, mech, &gsasl->client);\nif(res != GSASL_OK) {\n  gsasl_done(gsasl->ctx);   /* frees gsasl->ctx ... */\n  return FALSE;              /* ... but gsasl->ctx still holds the freed pointer */\n}\n```\n\nAnd the cleanup function at `lib/vauth/gsasl.c:108-115`:\n\n```c\nvoid Curl_auth_gsasl_cleanup(struct gsasldata *gsasl)\n{\n  gsasl_finish(gsasl->client);\n  gsasl->client = NULL;\n\n  gsasl_done(gsasl->ctx);   /* no NULL guard — second free if probe failed */\n  gsasl->ctx = NULL;\n}\n```\n\n`Curl_auth_gsasl_cleanup()` is called unconditionally at connection close via `gsasl_conn_dtor` at `lib/vauth/vauth.c:201-209`. What makes this land reliably is that `sasl_choose_gsasl()` in `lib/curl_sasl.c:354-383` allocates a single `struct gsasldata` for the connection and passes the same pointer to each mechanism probe:\n\n```c\ngsasl = Curl_auth_gsasl_get(sctx->conn);   /* one struct, reused across all probes */\n\nif((sctx->enabledmechs & SASL_MECH_SCRAM_SHA_256) &&\n   Curl_auth_gsasl_is_supported(data, SASL_MECH_STRING_SCRAM_SHA_256, gsasl)) {\n  ...\n}\nelse if((sctx->enabledmechs & SASL_MECH_SCRAM_SHA_1) &&\n        Curl_auth_gsasl_is_supported(data, SASL_MECH_STRING_SCRAM_SHA_1, gsasl)) {\n  ...\n}\n```\n\nSo if `SCRAM-SHA-256` fails, `gsasl->ctx` holds a freed pointer when `SCRAM-SHA-1` is tried. That second call reinitialises `gsasl->ctx` with a fresh allocation — but if it also fails, another free-without-null occurs. Whatever stale pointer `gsasl->ctx` holds at the end of mechanism selection is what `gsasl_conn_dtor` passes to `gsasl_done()` at teardown.\n\nThe trigger is server-controlled: any server that advertises `AUTH SCRAM-SHA-256` (or `SCRAM-SHA-1`) in its capability response causes libcurl to call `Curl_auth_gsasl_is_supported()`. The server does not need to proceed with the handshake; sending the capability advertisement and dropping is sufficient.\n\n`gsasl_client_start()` can fail — and thus trigger this bug without any shim — under several real conditions:\n\n- **libgsasl < 1.4.0** (pre-2011): neither SCRAM-SHA-1 nor SCRAM-SHA-256 exist in the mechanism table — both calls return `GSASL_UNKNOWN_MECHANISM`, double-free fires on every connection.\n- **OOM** (`GSASL_MALLOC_ERROR`): `gsasl_client_start` does a `calloc(1, 0xf0)` internally; both calls fail under genuine memory pressure — possible in memory-capped containers.\n- **Library built with `--disable-client`**: returns `GSASL_NO_CLIENT_CODE` — uncommon but a valid configuration.\n- **Runtime library downgrade/mismatch**: curl compiled against libgsasl 2.x, loads 1.3.x at runtime.\n\nSince the reproduction steps are narrow, the PoC below uses an LD_PRELOAD shim to force `gsasl_client_start()` to return `GSASL_UNKNOWN_MECHANISM` — simulating a stripped or older installation. The shim only intercepts the return code; `gsasl_init`/`gsasl_done` calls go directly to the real libgsasl, so ASan catches the double-free on its actual allocations.\n\nASan output from a live run against the current tree (CMake, `-DCURL_USE_GSASL=ON -DCURL_USE_OPENSSL=ON -DBUILD_SHARED_LIBS=OFF`, `-fsanitize=address -g3 -O0`, libgsasl 2.2.1, mock IMAP server advertising `AUTH=SCRAM-SHA-256 AUTH=SCRAM-SHA-1`):\n\n```\n=================================================================\n==2529510==ERROR: AddressSanitizer: attempting double-free on 0x6f2bd1fe5880 in thread T0:\n    #0 0x716bd3f212ab in free asan_malloc_linux.cpp:51\n    #1 0x716bd34efb04 in gsasl_done (libgsasl.so.18+0x4b04)\n    #2 0x6371f1ea7b8f in Curl_auth_gsasl_cleanup gsasl.c:113    ← second free\n    #3 0x6371f1d905f5 in gsasl_conn_dtor vauth.c:207\n    #4 0x6371f1d6ddaf in Curl_conn_free url.c:520\n    ...\n    #10 0x6371f1d1c1bf in multi_done_locked multi.c:662\n\nfreed by thread T0 here:\n    #0 0x716bd3f212ab in free asan_malloc_linux.cpp:51\n    #1 0x716bd34efb04 in gsasl_done (libgsasl.so.18+0x4b04)\n    #2 0x6371f1ea772f in Curl_auth_gsasl_is_supported gsasl.c:49    ← first free\n    #3 0x6371f1eeae85 in sasl_choose_gsasl curl_sasl.c:367\n    #4 0x6371f1eec6eb in Curl_sasl_start curl_sasl.c:536\n    #5 0x6371f1efd033 in imap_perform_authentication imap.c:713\n    #6 0x6371f1eff078 in imap_state_capability_resp imap.c:1092\n\npreviously allocated by thread T0 here:\n    #0 0x716bd3f2154b in realloc asan_malloc_linux.cpp:81\n    #1 0x716bd34efb04 in gsasl_register (libgsasl.so.18+0x4bb4)\n    #2 0x716bd34efa8c in gsasl_init (libgsasl.so.18+0x4a8c)\n    #3 0x6371f1ea767c in Curl_auth_gsasl_is_supported gsasl.c:41\n\nSUMMARY: AddressSanitizer: double-free (libgsasl.so.18+0x4b04) in gsasl_done\n=================================================================\n(second and third violations follow — one per internal gsasl_init allocation,\n both double-freed at gsasl.c:113 via gsasl_conn_dtor at vauth.c:207)\n```\n\nThe first-free stack runs through `Curl_auth_gsasl_is_supported` at `gsasl.c:49`; the second-free through `Curl_auth_gsasl_cleanup` at `gsasl.c:113` via `gsasl_conn_dtor`. Exactly the two-site pattern described above.\n\nA minimal reproducer — compile against a `--with-gsasl --enable-debug` ASan build and point it at any server whose `EHLO`/`CAPABILITY` response includes `SCRAM-SHA-256` or `SCRAM-SHA-1`:\n\nTo force the failure regardless of libgsasl version / memory conditions, use an `LD_PRELOAD` shim that overrides `gsasl_client_start` to always return `GSASL_UNKNOWN_MECHANISM`:\n\n```c\n/* gsasl_shim.c */\n#include <gsasl.h>\n\nint gsasl_client_start(Gsasl *ctx, const char *mech, Gsasl_session **out)\n{\n    (void)ctx; (void)mech; (void)out;\n    return GSASL_UNKNOWN_MECHANISM;\n}\n```\n\nBuild and use it:\n\n```bash\ngcc -shared -fPIC -o gsasl_shim.so gsasl_shim.c $(pkg-config --cflags gsasl)\nLD_PRELOAD=./gsasl_shim.so ASAN_OPTIONS=detect_leaks=0 \\\n    ./src/curl -v imaps://user:pass@mail.example.com/\n```\n\n```c\n#include <curl/curl.h>\n\nint main(void)\n{\n  CURL *easy;\n  curl_global_init(CURL_GLOBAL_DEFAULT);\n  easy = curl_easy_init();\n  curl_easy_setopt(easy, CURLOPT_URL,      \"smtps://mail.example.com/\");\n  curl_easy_setopt(easy, CURLOPT_USERNAME, \"user@example.com\");\n  curl_easy_setopt(easy, CURLOPT_PASSWORD, \"hunter2\");\n  curl_easy_perform(easy);   /* sasl_choose_gsasl() -> failed probe */\n  curl_easy_cleanup(easy);   /* gsasl_conn_dtor() -> double-free */\n  curl_global_cleanup();\n  return 0;\n}\n```\n\nThe fix is two changes. The root cause fix is one line in `Curl_auth_gsasl_is_supported()`:\n\n```diff\n   res = gsasl_client_start(gsasl->ctx, mech, &gsasl->client);\n   if(res != GSASL_OK) {\n     gsasl_done(gsasl->ctx);\n+    gsasl->ctx = NULL;\n     return FALSE;\n   }\n```\n\nThe defence-in-depth change adds NULL guards to `Curl_auth_gsasl_cleanup()`, matching the pattern used by the NTLM and Kerberos cleanup helpers:\n\n```diff\n void Curl_auth_gsasl_cleanup(struct gsasldata *gsasl)\n {\n-  gsasl_finish(gsasl->client);\n-  gsasl->client = NULL;\n-\n-  gsasl_done(gsasl->ctx);\n-  gsasl->ctx = NULL;\n+  if(gsasl->client) {\n+    gsasl_finish(gsasl->client);\n+    gsasl->client = NULL;\n+  }\n+  if(gsasl->ctx) {\n+    gsasl_done(gsasl->ctx);\n+    gsasl->ctx = NULL;\n+  }\n }\n```\n\nThe first change is the necessary one; the second ensures any future code path that arrives at `Curl_auth_gsasl_cleanup()` with a partially-freed struct cannot reproduce the same outcome. Same anti-pattern as CVE-2018-16840 and CVE-2023-27537 — free without clear, second cleanup path frees again.\n\nThank you,\nAISLE Research Team\n\n## Impact\n\nDouble free",
+  "weakness": {
+    "id": 49,
+    "name": "Double Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

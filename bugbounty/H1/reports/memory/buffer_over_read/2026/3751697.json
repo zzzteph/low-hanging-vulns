@@ -1,0 +1,113 @@
+{
+  "id": 3751697,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzUxNjk3",
+  "url": "https://hackerone.com/reports/3751697",
+  "title": "CVE-2026-10536: HTTP/2 stream-dependency tree UAF",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-20T19:31:25.612Z",
+  "submitted_at": "2026-05-20T19:31:27.679Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-10536"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:28:55.277Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:15:18.003Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Use-after-free in `curl_easy_reset()` with HTTP/2 stream-dependency tree\n\nHi all,\n\nWe've found an issue in `lib/easy.c` where `curl_easy_reset()` bypasses `data_priority_cleanup()` before clearing `data->set`, leaving the HTTP/2 stream-dependency tree with dangling pointers to the reset handle.\n\nThe current `curl_easy_reset()` at `lib/easy.c:1090-1098` does:\n\n```c\nCurl_freeset(data);\nmemset(&data->set, 0, sizeof(struct UserDefined));\nCurl_init_userdefined(data);\n```\n\nThis zeroes `data->set.priority.{parent,children}` without first walking the dependency tree to remove this handle from its peers' children lists. After a subsequent `curl_easy_cleanup()`, peers still reference the freed handle through their `priority.children` list and dereference it from `data_priority_cleanup` → `priority_remove_child` (`lib/url.c:3094, 3022`).\n\nThe defect dates to commit `71b7e01610` (2022-12-30, \"lib: connect/h2/h3 refactor\"), which converted `set.priority` into a linked tree and introduced `Curl_data_priority_cleanup()` in `lib/url.c`, but did not add a call to it from `curl_easy_reset()`. Reachable through documented public APIs only, on any `USE_NGHTTP2` build.\n\n## Reproducer\n\nBuild curl with ASan:\n\n```sh\nautoreconf -fi\nmkdir build && cd build\nCFLAGS='-O1 -g -fsanitize=address' LDFLAGS='-fsanitize=address' CC=clang \\\n  ../configure --with-openssl --enable-debug --enable-maintainer-mode --disable-shared\nmake -j\n```\n\nSave as `poc.c`:\n\n```c\n#include <curl/curl.h>\nint main(void) {\n    curl_global_init(CURL_GLOBAL_DEFAULT);\n    CURL *A = curl_easy_init();\n    CURL *B = curl_easy_init();\n    curl_easy_setopt(B, CURLOPT_STREAM_DEPENDS, A);\n    curl_easy_reset(B);\n    curl_easy_cleanup(B);\n    curl_easy_cleanup(A);\n    curl_global_cleanup();\n    return 0;\n}\n```\n\nCompile and run:\n\n```sh\nclang -fsanitize=address -g -I../include poc.c \\\n  ./lib/.libs/libcurl.a -lssl -lcrypto -lz -lnghttp2 -lidn2 -lzstd \\\n  -lbrotlidec -lldap -llber -o poc\n./poc\n```\n\n## Observed output\n\n```\n=================================================================\n==654355==ERROR: AddressSanitizer: heap-use-after-free on address 0x7ac36ebe2148 at pc 0x614bec3b354f bp 0x7fff212fbea0 sp 0x7fff212fbe98\nREAD of size 8 at 0x7ac36ebe2148 thread T0\n    #0 priority_remove_child   lib/url.c:3022:3\n    #1 data_priority_cleanup   lib/url.c:3094:5\n    #2 Curl_close              lib/url.c:278:3\n    #3 curl_easy_cleanup       lib/easy.c:844:5\n    #4 main                    poc.c\n\n0x7ac36ebe2148 is located 2120 bytes inside of 5096-byte region [0x7ac36ebe1900,0x7ac36ebe2ce8)\nfreed by thread T0 here:\n    #0 free\n    #1 Curl_close              lib/url.c:311:3\n    #2 curl_easy_cleanup       lib/easy.c:844:5\n    #3 main                    poc.c  (curl_easy_cleanup(B))\n\npreviously allocated by thread T0 here:\n    #0 calloc\n    #1 curl_dbg_calloc         lib/memdebug.c:254:9\n    #2 Curl_open               lib/url.c:463:10\n    #3 curl_easy_init          lib/easy.c:350:12\n    #4 main                    poc.c\n\nSUMMARY: AddressSanitizer: heap-use-after-free lib/url.c:3022:3 in priority_remove_child\n```\n\nThe 5096-byte region freed by the cleanup of `B` is the entire `struct Curl_easy`. The subsequent cleanup of `A` then walks `A->set.priority.children`, finds the stale node whose `->data` points into the freed region, and reads through it at `lib/url.c:3022` and writes through it at `lib/url.c:3034-3035`.\n\n## Suggested fix\n\nExpose the existing static `data_priority_cleanup` helper and call it from `curl_easy_reset`, the same way `Curl_close` already does:\n\n```diff\n--- a/lib/url.c\n+++ b/lib/url.c\n@@ -120,9 +120,9 @@\n #ifdef USE_NGHTTP2\n-static void data_priority_cleanup(struct Curl_easy *data);\n+void Curl_data_priority_cleanup(struct Curl_easy *data);\n #else\n-#define data_priority_cleanup(x)\n+#define Curl_data_priority_cleanup(x)\n #endif\n@@ -275,7 +275,7 @@\n   /* destroy data->state.priority for HTTP/2 dep tree */\n-  data_priority_cleanup(data);\n+  Curl_data_priority_cleanup(data);\n@@ -3087,7 +3087,7 @@\n-static void data_priority_cleanup(struct Curl_easy *data)\n+void Curl_data_priority_cleanup(struct Curl_easy *data)\n\n--- a/lib/easy.c\n+++ b/lib/easy.c\n@@ -1093,6 +1093,7 @@ void curl_easy_reset(CURL *curl)\n   /* clear all meta data */\n   Curl_meta_reset(data);\n+  Curl_data_priority_cleanup(data);\n   /* zero out UserDefined data: */\n   Curl_freeset(data);\n   memset(&data->set, 0, sizeof(struct UserDefined));\n```\n\nCheers,\nAISLE Research Team\n",
+  "weakness": {
+    "id": 9,
+    "name": "Buffer Over-read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

