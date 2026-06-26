@@ -1,0 +1,120 @@
+{
+  "id": 3826199,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODI2MTk5",
+  "url": "https://hackerone.com/reports/3826199",
+  "title": "mbedTLS / wolfSSL / rustls backends silently skip hostname verification when CURLOPT_SSL_VERIFYPEER=0",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-06-26T08:37:53.328Z",
+  "submitted_at": "2026-06-26T08:40:39.007Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "b1gtang",
+    "url": "/b1gtang",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-26T14:34:52.058Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-26T09:33:44.010Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWhen an application sets `CURLOPT_SSL_VERIFYPEER=0` while keeping\n`CURLOPT_SSL_VERIFYHOST=2` (the default), the mbedTLS, wolfSSL, and rustls\nTLS backends silently skip the hostname-vs-certificate check. The OpenSSL,\nGnuTLS, and Schannel backends correctly preserve hostname checking under\nthe same configuration.\n\n`docs/libcurl/opts/CURLOPT_SSL_VERIFYPEER.md` lines 57-59 explicitly state:\n\n> *\"The check that the host name in the certificate is valid for the\n> hostname you are connecting to is **done independently of the\n> CURLOPT_SSL_VERIFYPEER(3) option**.\"*\n\nResult: an MITM holding any valid certificate (the CN does not need to\nmatch the requested host) can intercept TLS sessions to any HTTPS target\nwhen an application disables peer chain verification — a common pattern\nwith self-signed / internal-CA deployments. `Authorization`, `Cookie`, and\nPOST bodies all leak to the attacker.\n\n## Affected backends\n\n```\n$ src/curl --version    # all four built from the same source tree\ncurl 8.21.1-DEV (x86_64-pc-linux-gnu) libcurl/8.21.1-DEV OpenSSL/3.5.6   ← rc=60 (correct)\ncurl 8.21.1-DEV (x86_64-pc-linux-gnu) libcurl/8.21.1-DEV mbedTLS/3.6.5    ← rc=0 (BUG)\ncurl 8.21.1-DEV (x86_64-pc-linux-gnu) libcurl/8.21.1-DEV wolfSSL/5.7.2    ← rc=0 (BUG)\ncurl 8.21.1-DEV (x86_64-pc-linux-gnu) libcurl/8.21.1-DEV rustls-ffi/0.15.3 ← rc=0 (BUG)\n```\n\nAffected versions: **all curl releases through HEAD master** for the\nmbedTLS, wolfSSL, and rustls backends. The mbedTLS code path traces to\ncommit `88cae145509` (2024-08-17, \"mbedtls: add more informative logging\"),\nshipped in 8.10.0 and unchanged through current master.\n\nThe relevant code sites:\n\n- **mbedTLS** — `lib/vtls/mbedtls.c::mbed_verify_cb`:\n  ```c\n  if(!conn_config->verifypeer)\n      *flags = 0;                /* clears CN_MISMATCH along with chain flags */\n  else if(!conn_config->verifyhost)\n      *flags &= ~MBEDTLS_X509_BADCERT_CN_MISMATCH;\n  ```\n  `*flags = 0` zeroes the entire mbedTLS verify-flag bitmap, including\n  `MBEDTLS_X509_BADCERT_CN_MISMATCH`. mbedTLS uses\n  `MBEDTLS_SSL_VERIFY_REQUIRED` and trusts whatever flags this callback\n  returns.\n\n- **wolfSSL** — `lib/vtls/wolfssl.c::Curl_wssl_ctx_init`:\n  ```c\n  wolfSSL_CTX_set_verify(wctx->ssl_ctx, conn_config->verifypeer ?\n                         WOLFSSL_VERIFY_PEER : WOLFSSL_VERIFY_NONE, NULL);\n  ```\n  When `verifypeer=0`, `WOLFSSL_VERIFY_NONE` makes wolfSSL skip the entire\n  certificate-validation pipeline including the hostname check registered\n  by `wolfSSL_check_domain_name` further down.\n\n- **rustls** — `lib/vtls/rustls.c::cr_init_backend` (line 1048-1050):\n  ```c\n  if(!conn_config->verifypeer) {\n      rustls_client_config_builder_dangerous_set_certificate_verifier(\n          config_builder, cr_verify_none);\n  }\n  ```\n  `cr_verify_none` (line 389) is a callback that returns `RUSTLS_RESULT_OK`\n  unconditionally. It replaces rustls's default `ServerCertVerifier`, which\n  in rustls performs both chain validation **and** hostname matching against\n  the SNI value passed to `rustls_client_connection_new`. Replacing it\n  disables both at once.\n\n## Steps to reproduce\n\nA self-contained Docker reproduction package is attached\n(`verifyhost-repro.tar.gz`). It pulls the latest curl source from\n`github.com/curl/curl.git`, builds four libcurls from the same source tree\n(OpenSSL, mbedTLS, wolfSSL, rustls backends), runs a TLS server presenting\na wrong-CN certificate, and drives a libcurl client at all four backends.\n\n```sh\ntar xzf verifyhost-repro.tar.gz\ncd docker\n./build_and_run.sh\n```\n\n(Pass a tag/branch/SHA as arg to pin: `./build_and_run.sh curl-8_21_0`.)\n\nExpected output:\n\n```\n================================================================\n  curl source commit:       <SHA from official curl/curl repo>\n  OpenSSL curl --version:   curl 8.21.1-DEV libcurl/8.21.1-DEV OpenSSL/3.5.6 ...\n  mbedTLS curl --version:   curl 8.21.1-DEV libcurl/8.21.1-DEV mbedTLS/3.6.5 ...\n  wolfSSL curl --version:   curl 8.21.1-DEV libcurl/8.21.1-DEV wolfSSL/5.7.2 ...\n  rustls  curl --version:   curl 8.21.1-DEV libcurl/8.21.1-DEV rustls-ffi/0.15.3 ...\n================================================================\n\n============== OpenSSL backend (control) — expect rc=60 ==============\n* SSL: certificate subject name 'wrong.example.com' does not match target hostname 'target.example.com'\n=== RESULT: rc=60 (SSL peer certificate or SSH remote key was not OK) ===\n\n============== mbedTLS backend — expect rc=0 (BUG) ==============\n< HTTP/1.1 200 OK\n< Content-Length: 7\n=== RESULT: rc=0 (No error) ===\n\n============== wolfSSL backend — expect rc=0 (BUG) ==============\n< HTTP/1.1 200 OK\n=== RESULT: rc=0 (No error) ===\n\n============== rustls backend — expect rc=0 (BUG) ==============\n< HTTP/1.1 200 OK\n=== RESULT: rc=0 (No error) ===\n```\n\nThe OpenSSL run is the control: same source tree, same flags, same PoC\ncode — only the TLS backend differs. Its `rc=60` confirms that the PoC\ncorrectly enforces `verifyhost=2` and that the `rc=0` on the other three\nbackends is a backend defect, not a PoC mistake.\n\n## Files in the package\n\n- `Dockerfile` — Debian trixie + mbedTLS 3.6.5 + OpenSSL 3.x + wolfSSL 5.7.2 + rustls-ffi 0.15.3\n- `build_and_run.sh` — wrapper: `docker build` then `docker run`\n- `run.sh` — entrypoint inside container; drives all four scenarios\n- `poc.c` — minimal libcurl PoC\n- `poc_server.py` — Python TLS server presenting CN=wrong.example.com\n\n## Credits\nReported by: b1gtang on hackerone (SecBuddyF @ Tencent KeenLab)\n\n## Impact\n\n## Summary:\n\nAn MITM on the network path can fully impersonate the intended HTTPS\nserver using any certificate (no need to match the requested hostname),\ndecrypting and modifying the entire TLS session. The application has\nopted out of chain verification but explicitly kept hostname verification\non per the documented contract; libcurl silently disables both.",
+  "weakness": {
+    "id": 555,
+    "name": "Improper Validation of Certificate with Host Mismatch"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6156125,
+      "file_name": "verifyhost-repro.tar.gz",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/6omxgbqcsvw3fnn2dwxco9fpybzx?response-content-disposition=attachment%3B%20filename%3D%22verifyhost-repro.tar.gz%22%3B%20filename%2A%3DUTF-8%27%27verifyhost-repro.tar.gz&response-content-type=application%2Fgzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7JSJSOBW%2F20260626%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260626T145423Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDm%2BOLJA4HZSOCKygx%2BkvNHpp2brNpftQvsCO8d3FOfSQIhAOTr99t5TZ09BpBhOviy2sR21zI%2BWMuyqUj26l3jZP0bKrIFCGYQAxoMMDEzNjE5Mjc0ODQ5IgxgwP27sg3TRHbSwgIqjwVYLTwNByBVfC4nAkJ%2BoMEI3304xSSXR4VFkavkc2N8Z%2B%2FOMIEmbyAPIY9LfMpXA5O3g7Jn7OhQ2lIbTKO1VOEgVlp7WKw1yNVBx3QyTN%2B8IRJidz4jGUPAqWS5TlppSa9WyE0UffJfwTHUJvTF209bb%2FpacA83O4cgUnPVq33XJ6ppBctFF4Qy30VbD%2Fo1KQclPfNgQvj5%2FrV1DYy0b%2BNPcIgImBXWgEW%2FQPW17XqLZ6EiuFKDlAeHgyUzPWBHNsBOs92BJEe%2FXzhPcRF5vt%2BsWVB4g0cKLBtOmX7k%2BQRerBiZxlg5d8IHHZrONEdqodJ%2FvV9vb%2Fpgqhz%2B%2BxbXPCM9OZWYPGNAcUAGr0I3qW0q7YsMWGa5MSmTw0zuP2sxaCCfPGhyBLOFVK8J2DNPu7L7%2BoW1fovVgPUxDGIp3iVUIgv1RiX8C2%2FNJigKj6NpCkPFJad2Xnw0guvK7MiqKciHKIZ8Ium1DipUb%2FZXht1qbt%2FI%2BgxB5Zjt98vZKZlf3%2FasqMC%2FeDHdpSSbKrAxYGhx9ypq32J8vpom%2FNV750POfMEyi%2B2oDAgFplTwJKqSxOJZoPrYrOT3dcDXuXTujsd%2BlVxi%2BVlb5uRg2ryYxKRRdVvPT9EI%2FMpsGTxI59uhLkYLFwkqC0LFKlwIWUBuguuO4dnsCPutj6vlwCWtjuLFGqhITovJ58%2BLTyI%2FZumdeTbluG0ieFODb3SkqtpyO3JnrK449Xg9raun10VCIHu03s2dA1I9gtR6LeCM9%2F3ZVigTiLMXSjjGYNdVEJ5%2BbNuWGYYtGjbKi5sloMY65FSDmklPk42%2FCdfEEGWN9sH%2FQj3mWXJmSzvIET3o6DzR6RespZn3tNme2qTX6ptWupETMOr0%2BdEGOrABpZfL5m9mes7t1PudaXB4BOgJyP37DcwKsSfxvNUk7Ov3EjsvFU3wBygmBjqiwVWf8yFiLtiRLCtU%2BUcbjzcdfThUP7KjREFVN7J8dMCdQDDWiylRG%2FLBFDk2Wb57%2BfAh0fiJnbXHavbQZQBpxb%2F0kqSgZOfLD2Jjai44DG3XPuO2m3SRiVB9qQbsh3URb7hDTTxaZedVzwB%2B%2FPKpgMNcv0ha7R8HWZijJtEIefSZkdk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e5eb8d8b2f7e23eda5e1beefad89da78255bddcddeb67c61a058ce392a37ff0d",
+      "file_size": 4932,
+      "type": "application/gzip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
