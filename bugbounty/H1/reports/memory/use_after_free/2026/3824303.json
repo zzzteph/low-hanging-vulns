@@ -1,0 +1,113 @@
+{
+  "id": 3824303,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODI0MzAz",
+  "url": "https://hackerone.com/reports/3824303",
+  "title": "UAF read in mev_pollset_diff() trace path after curl_easy_pause() in socket callback",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-06-25T12:17:29.283Z",
+  "submitted_at": "2026-06-25T12:17:30.317Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "homanp",
+    "url": "/homanp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/w2xtp5id1c4vknpfpfkujwqcpy2o/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-9080"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-28T15:22:06.398Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-26T14:32:18.147Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nThe CVE-2026-9080 fix re-fetches the sh_entry after the socket callback inside `mev_sh_entry_update()`, because `curl_easy_pause()` called from that callback re-enters `mev_assess()` and can free the entry. The same re-fetch was not applied at the caller, `mev_pollset_diff()`, which dereferences its own `entry` pointer again in a `CURL_TRC_M()` trace call immediately after the callback returns (`lib/multi_ev.c:435-436`). On the exact reentrancy and free path that 9080 patched, that trace reads `&entry->xfers` and `entry->conn` from freed memory. It only fires in verbose-strings builds (the default) with multi tracing enabled, because the dereference lives inside the trace macro's arguments, which is why the 9080 PoC did not surface it. This is an incomplete-fix residual of 9080 rather than a new issue, with a one-line fix.\n\n## Affected version\nReproduced on libcurl 8.21.0 / current git master (the release that shipped the 9080 fix).\n\n## Steps To Reproduce:\n1. Build libcurl with verbose strings (default) and AddressSanitizer.\n2. Use the `curl_multi_socket_action()` event interface with a registered `CURLMOPT_SOCKETFUNCTION`.\n3. From inside the socket callback, call `curl_easy_pause(easy, CURLPAUSE_RECV)` on a transfer whose socket action is being removed (the same trigger as CVE-2026-9080), so the reentrant `mev_assess()` frees the sh_entry for that socket.\n4. Enable multi tracing (`--trace-config all`, or a handle where `CURL_TRC_M_is_verbose()` is true).\n5. ASan reports a heap-use-after-free read in `mev_pollset_diff()` at the `CURL_TRC_M()` call right after `mev_sh_entry_update()` (`lib/multi_ev.c:435-436`): `Curl_uint32_spbset_count(&entry->xfers)` and `entry->conn` read the freed entry.\n\n## Suggested fix\nRe-fetch and guard after the callback, matching the idiom already used in `mev_sh_entry_update()`:\n\n```c\nmresult = mev_sh_entry_update(multi, data, entry, s,\n                              prev_ps->actions[i], 0);\nif(mresult)\n  return mresult;\n/* the callback may have freed this entry via curl_easy_pause(); re-fetch */\nentry = mev_sh_entry_get(&multi->ev.sh_entries, s);\nif(entry)\n  CURL_TRC_M(data, \"ev entry fd=%\" FMT_SOCKET_T \", removed transfer, \"\n             \"total=%u/%d (xfer/conn)\", s,\n             Curl_uint32_spbset_count(&entry->xfers),\n             entry->conn ? 1 : 0);\n```\n\nAlternatively capture the two counts into locals before the call and trace those, or drop the entry-derived fields from the trace line.\n\n## Impact\n\n## Summary:\nA use-after-free read of a freed `mev_sh_entry`: in practice a crash (DoS), or stale heap bytes read into the application's multi trace output. It is a read, not a write, so there is no write primitive and no control-flow hijack. The stale bytes only reach the application's own trace/debug sink, so by themselves they are not disclosed to a remote party. Triggering requires the multi socket event interface, a socket callback that pauses so the entry is freed, and multi tracing enabled in a verbose-strings build; as the team noted for 9080, pausing from a socket callback is unusual, so exposure is narrow. I would rate this Low, strictly below 9080 (rated Low) since it adds the tracing condition. Proposed vector CVSS:3.1/AV:L/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:L, deferring to your scoring.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
