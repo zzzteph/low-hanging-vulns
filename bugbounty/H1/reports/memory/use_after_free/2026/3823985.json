@@ -1,0 +1,130 @@
+{
+  "id": 3823985,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODIzOTg1",
+  "url": "https://hackerone.com/reports/3823985",
+  "title": "Use-after-free in `mev_forget_socket` when `curl_easy_pause()` is called from a `CURL_POLL_REMOVE` socket callback (incomplete fix of CVE-2026-9080)",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-06-25T07:56:56.113Z",
+  "submitted_at": "2026-06-25T07:56:57.175Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "stze",
+    "url": "/stze",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-9080"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-28T06:33:17.184Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-06-28T06:33:16.532Z",
+  "team_member_agreed_on_going_public_at": "2026-06-26T14:32:03.351Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`libcurl`'s event interface lets the application's socket callback\n(`CURLMOPT_SOCKETFUNCTION`) call `curl_easy_pause()`. CVE-2026-9080 was issued for a\nuse-after-free that this triggers, and the fix added a post-callback re-fetch of the\nsocket-hash entry in the **UPDATE** leg (`mev_sh_entry_update`, `lib/multi_ev.c`).\n\nThe same re-entrancy hazard exists in the **REMOVE** leg, `mev_forget_socket()`, which\nwas **not** fixed: after invoking the `CURL_POLL_REMOVE` callback it dereferences the\nhash entry (`entry->announced = FALSE`, `lib/multi_ev.c:216`) with no re-fetch. When the\ncallback calls `curl_easy_pause()`, libcurl re-enters `mev_assess()` and frees that same\nentry via `Curl_hash_delete()`, so line 216 is a use-after-free. The companion path\n`Curl_multi_ev_socket_done()` (`lib/multi_ev.c:618` → `mev_forget_socket`) is affected\nidentically.\n\nThis reproduces with a small standalone program (no fuzzer).\n\n## Supported operation (forecloses \"you're holding it wrong\")\n\nCalling `curl_easy_pause()` from within a callback is **explicitly documented and\nintentionally implemented** — this is not an API misuse:\n- `docs/libcurl/curl_easy_pause.md:30-32`: *\"Unlike most other libcurl functions,\n  curl_easy_pause(3) can be used from within callbacks.\"* (no socket-callback carve-out).\n- Unlike the functions that reject re-entrant use with `CURLE_RECURSIVE_API_CALL`,\n  `curl_easy_pause()` (`lib/easy.c:1147-1152`) deliberately has **no `Curl_is_in_callback`\n  rejection** — it only records `recursive` to restore the in-callback flag afterward.\n  `mev_assess()` never checks `multi->in_callback`. So the recursion guard provides no\n  protection on this path.\n- **CVE-2026-9080 itself** established pausing from the socket callback as supported and\n  security-relevant, and shipped a fix for it — in the UPDATE leg only.\n\n## Affected versions\n\n- Reproduced against **curl 8.21.0** (tag `curl-8_21_0`, `LIBCURL_VERSION \"8.21.0-DEV\"`),\n  the tree carrying the CVE-2026-9080 UPDATE-leg re-fetch.\n- Independently confirmed unpatched on **curl master, HEAD `c10a7aa`** (2026-06-25):\n  `mev_forget_socket` line 216 dereferences the entry after the `CURL_POLL_REMOVE`\n  callback with no re-fetch — unchanged from 8.21.0, while the UPDATE leg retains the fix.\n\n## Root cause\n\n`lib/multi_ev.c`, `mev_forget_socket()`:\n\n```c\nstatic CURLMcode mev_forget_socket(struct Curl_multi *multi,\n                                   struct Curl_easy *data,\n                                   curl_socket_t s, const char *cause)\n{\n  struct mev_sh_entry *entry = mev_sh_entry_get(&multi->ev.sh_entries, s);  // 202\n  ...\n  if(entry->announced && multi->socket_cb) {\n    mev_in_callback(multi, TRUE);\n    rc = multi->socket_cb(data, s, CURL_POLL_REMOVE,\n                          multi->socket_userp, entry->user_data);          // 213  callback\n    mev_in_callback(multi, FALSE);\n    entry->announced = FALSE;                                              // 216  <-- UAF\n  }\n  mev_sh_entry_kill(multi, s);                                             // 219\n  ...\n}\n```\n\nThe fix author already documented this exact hazard — in the **UPDATE** leg\n(`mev_sh_entry_update`), `lib/multi_ev.c:293`:\n\n```c\n/* ... the callback ... re-enters mev_assess() which may free this 'entry'. Re-fetch. */\nentry = mev_sh_entry_get(&multi->ev.sh_entries, s);   // 294  (the CVE-2026-9080 fix)\n```\n\n`mev_forget_socket()` has the identical pattern but performs no such re-fetch before\nusing `entry` at line 216.\n\n## Crash (AddressSanitizer)\n\n(`entry->announced` is a `BIT()` bitfield, so `entry->announced = FALSE` at line 216 is a\nread-modify-write of the byte — ASan reports the load half as \"READ of size 1\".)\n\nUse:\n```\nheap-use-after-free  READ of size 1\n  #0 mev_forget_socket        lib/multi_ev.c:216\n  #1 socket_close             lib/cf-socket.c\n  #2 cf_tcp_connect           lib/cf-socket.c:1435\n  #3 cf_ip_attempt_connect    lib/cf-ip-happy.c:252   (Happy-Eyeballs closing a losing socket)\n  #6 cf_ip_happy_connect      lib/cf-ip-happy.c:880\n  #14 multi_socket            lib/multi.c:3302\n  #15 main                    uaf_repro.c               (curl_multi_socket_action)\n```\nFreed by (the re-entrant pause):\n```\n  Curl_hash_delete            lib/hash.c:225\n  mev_sh_entry_kill           lib/multi_ev.c:135\n  mev_forget_socket           lib/multi_ev.c:219     (inner, during the pause)\n  mev_pollset_diff            lib/multi_ev.c:439\n  mev_assess                  lib/multi_ev.c:531     (curl_easy_pause re-entered here)\n```\n\nSo: the outer `mev_forget_socket` (closing a Happy-Eyeballs socket during connect) calls\nthe REMOVE callback; the callback's `curl_easy_pause()` re-enters `mev_assess` →\n`mev_pollset_diff` → an inner `mev_forget_socket` that `Curl_hash_delete`s the same\nentry; control returns to the outer frame, which uses the freed entry at line 216.\n\n## Steps to reproduce (standalone, no fuzzer)\n\n1. Build curl with AddressSanitizer (release config so the program reaches the UAF rather\n   than an unrelated debug assertion):\n   ```\n   ./configure --with-openssl --disable-shared --disable-debug \\\n       CFLAGS=\"-fsanitize=address -g\" LDFLAGS=\"-fsanitize=address\"\n   make\n   ```\n   (Any TLS backend works; OpenSSL used here. A `--enable-debug` build instead trips\n   `DEBUGASSERT(NULL)` at `lib/multi_ev.c:423` — the same re-entrancy corrupting the\n   pollset book-keeping.)\n\n2. Compile and run the attached `uaf_repro.c` against that libcurl:\n   ```\n   cc -fsanitize=address -g uaf_repro.c -o uaf_repro -lcurl -lpthread\n   ./uaf_repro\n   ```\n   Expected: `AddressSanitizer: heap-use-after-free in mev_forget_socket (lib/multi_ev.c:216)`,\n   deterministic (5/5 here).\n\nThe program: starts a loopback HTTP listener (IPv4); drives one transfer through the\nevent interface (`curl_multi_socket_action`); resolves the host to `[::1],127.0.0.1` so\nHappy-Eyeballs abandons the `::1` attempt and closes its socket during connect; the\nsocket callback calls `curl_easy_pause()` on `CURL_POLL_REMOVE`.\n\n(`uaf_repro.c` is attached.)\n\n## Suggested fix\n\nApply the same fix as the UPDATE leg: do not use `entry` after the callback in\n`mev_forget_socket()` — either re-fetch it (`entry = mev_sh_entry_get(...)`) before line\n216, or set `entry->announced = FALSE` *before* invoking the callback. Apply the same to\n`Curl_multi_ev_socket_done()` (`lib/multi_ev.c:618`).\n\n## Impact\n\nHeap use-after-free in `libcurl`, reachable from a normal application using the event\ninterface (the standard libevent / libuv integration) that calls `curl_easy_pause()` from\nits socket callback — for example for read/write backpressure — when connecting to a\ndual-stack host (Happy-Eyeballs is the default). It is the direct, unpatched sibling of\nCVE-2026-9080.\n\n**Severity: Low** (same as the CVE-2026-9080 parent, by the same reasoning). The use is a\nsingle read-modify-write that clears one bitfield bit at a fixed offset in the freed\n80-byte `mev_sh_entry`; the value and offset are not attacker-controlled, no information\nis leaked, and there is no double-free — the subsequent `mev_sh_entry_kill` (line 219)\nsafely no-ops because the re-entrant path already removed the key via `Curl_hash_delete`.\nThe significance is that it is the unpatched twin of a fix you just shipped, reachable via\na documented-supported operation.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6149790,
+      "file_name": "asan-report-standalone.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/r1bej1gl4hr1hnq6aq4jyyu0fud1?response-content-disposition=attachment%3B%20filename%3D%22asan-report-standalone.txt%22%3B%20filename%2A%3DUTF-8%27%27asan-report-standalone.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2YROQRXS%2F20260628%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260628T072109Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMb%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIEOsoYUct8i6HoeTGLNBRq85dFYVdouzkqoysOigPNO3AiEA8ddfnyTVsKRlmI7IVxOqD%2FfNvBQn8FnlUdGuTxOgaWQquwUIj%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDG4gsn3unHOlnsYXLSqPBcrfVT4yIV9%2F%2Fdlj7%2Fy7SZ8F62MqPFc6xr8WfYnTUP5BvOpEVbRaLQvXAe%2BmqpD6Tpkgpy0n4GG43%2BAb6tsHFmuU4voMqXC5Ra7aA5jD6Vjga3g%2B5MxTehT%2Bl8mbbu7K15F4AbKqwnNyBm1mikS%2BKWSfNZry5Lia%2BLIcMBnYu%2B9%2FgKezzaL9YoEThebAmIdLxpNBhmHBBylIc6%2BavULkP2up3woE0tuM34QNk7H3GZSy5QbBj38SzSx6e1taHZKF1mwtBq%2F0bL6c7c9dpaj6xsdEZx3Ewo12lEcOdDhde44izchngnuhPdpdg%2ByUWooBW1H0Y8o4GXfFH%2FI6ctr9EqbRnzNjtIPKOWpBX0ZGahzHAEMvWFq8FUShM%2F8iKpPODEZmxnbp2OKi7IPU0MVpqkHZNas89H7zGBGT5LdNTaFfxqhOgRK%2FEURdPhF9Vc8GO0tHObeJA2tiAfOelgs8C5%2BKeEp1%2B1aonzfPw5%2BT9faddXb2QRtACGYvtBUTYaVjpTR4FzaizFDhN75ncYJOlWzqxzTGe1wgxhCH53KvU8JcJHMOWWYeKdicNMDfoiEiqrDptXfTFYP1cstSExI9D193uFMbT3NXqvyWLvYmAcRyTlu0cr2IN1FVHXRDQ3zFqvJPk1D9N9RFQl1nAH1QmCF5XRPXSBQ3Ku0ovJ4AlZJs1r7aGVXiYzLoJ7i3n2ZsrZe0zw%2B6PWkQp5WdT65kutMhAuidnvWjaHLzRZ3Oq%2FrMFmhKJYxcQ4WKlrLzs%2FzorpB78P7y2CVCI7r5qhiAgK%2F4likkhJ%2BLK9nHvPXoFt2N4V%2FdSNy47ESe0LJKbZzm8OLZIFydx%2FRHqLtYwWGCF9S4MUbWjBQTR%2BOMaBMNmi8wiu2C0gY6sQFnu5MckejFNp68D7%2F%2BWYsDpkPAtVH4PRtnq9UK3IOK8SDPC8G0zrN3lNHlb2%2FJimQv0%2BgEan8h2%2BZ100aF2W48oM%2BF%2BoqeGY%2Ba16yTlEeu%2FFFLILQBs3acMwL7KMBZhxsQGWQjAT9ej6Ov0s%2B64d6cH81WcdN6GFVnDUPRSomq9UJdRqGtaaxnFATUu0kG8a2LMBh6qwXDXl91E0kT1qUojHyTxskdXg2UxhmTIJqLg5E%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b3a750f0d78d038570f556d0fae1bb748dde4913d0174853d457832a0e71cd66",
+      "file_size": 7504,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 6149794,
+      "file_name": "uaf_repro.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ehadpoke8lkq72q5t3eqq5ihvqab?response-content-disposition=attachment%3B%20filename%3D%22uaf_repro.c%22%3B%20filename%2A%3DUTF-8%27%27uaf_repro.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2YROQRXS%2F20260628%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260628T072109Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMb%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIEOsoYUct8i6HoeTGLNBRq85dFYVdouzkqoysOigPNO3AiEA8ddfnyTVsKRlmI7IVxOqD%2FfNvBQn8FnlUdGuTxOgaWQquwUIj%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDG4gsn3unHOlnsYXLSqPBcrfVT4yIV9%2F%2Fdlj7%2Fy7SZ8F62MqPFc6xr8WfYnTUP5BvOpEVbRaLQvXAe%2BmqpD6Tpkgpy0n4GG43%2BAb6tsHFmuU4voMqXC5Ra7aA5jD6Vjga3g%2B5MxTehT%2Bl8mbbu7K15F4AbKqwnNyBm1mikS%2BKWSfNZry5Lia%2BLIcMBnYu%2B9%2FgKezzaL9YoEThebAmIdLxpNBhmHBBylIc6%2BavULkP2up3woE0tuM34QNk7H3GZSy5QbBj38SzSx6e1taHZKF1mwtBq%2F0bL6c7c9dpaj6xsdEZx3Ewo12lEcOdDhde44izchngnuhPdpdg%2ByUWooBW1H0Y8o4GXfFH%2FI6ctr9EqbRnzNjtIPKOWpBX0ZGahzHAEMvWFq8FUShM%2F8iKpPODEZmxnbp2OKi7IPU0MVpqkHZNas89H7zGBGT5LdNTaFfxqhOgRK%2FEURdPhF9Vc8GO0tHObeJA2tiAfOelgs8C5%2BKeEp1%2B1aonzfPw5%2BT9faddXb2QRtACGYvtBUTYaVjpTR4FzaizFDhN75ncYJOlWzqxzTGe1wgxhCH53KvU8JcJHMOWWYeKdicNMDfoiEiqrDptXfTFYP1cstSExI9D193uFMbT3NXqvyWLvYmAcRyTlu0cr2IN1FVHXRDQ3zFqvJPk1D9N9RFQl1nAH1QmCF5XRPXSBQ3Ku0ovJ4AlZJs1r7aGVXiYzLoJ7i3n2ZsrZe0zw%2B6PWkQp5WdT65kutMhAuidnvWjaHLzRZ3Oq%2FrMFmhKJYxcQ4WKlrLzs%2FzorpB78P7y2CVCI7r5qhiAgK%2F4likkhJ%2BLK9nHvPXoFt2N4V%2FdSNy47ESe0LJKbZzm8OLZIFydx%2FRHqLtYwWGCF9S4MUbWjBQTR%2BOMaBMNmi8wiu2C0gY6sQFnu5MckejFNp68D7%2F%2BWYsDpkPAtVH4PRtnq9UK3IOK8SDPC8G0zrN3lNHlb2%2FJimQv0%2BgEan8h2%2BZ100aF2W48oM%2BF%2BoqeGY%2Ba16yTlEeu%2FFFLILQBs3acMwL7KMBZhxsQGWQjAT9ej6Ov0s%2B64d6cH81WcdN6GFVnDUPRSomq9UJdRqGtaaxnFATUu0kG8a2LMBh6qwXDXl91E0kT1qUojHyTxskdXg2UxhmTIJqLg5E%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=cf0f07b7ecf60979a7954dca95d5eda1563f7c33a82d86e924b76ded97a1c3b3",
+      "file_size": 5909,
+      "type": "text/x-c++src",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
