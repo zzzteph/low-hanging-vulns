@@ -1,0 +1,121 @@
+{
+  "id": 876530,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC84NzY1MzA=",
+  "url": "https://hackerone.com/reports/876530",
+  "title": "Remote node DOS",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2020-05-17T13:12:07.954Z",
+  "submitted_at": "2020-05-17T13:12:07.954Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "xnbya",
+    "url": "/xnbya",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-06-29T17:06:45.599Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-05-30T17:06:36.928Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\nIn monerod, there is an outgoing send queue for each p2p connection to other peers. When this send queue is full, the thread sleeps for approximately 6 seconds and then terminates the connection.\n\nIt is possible for an attacker to request enough objects to fill this queue repeatedly, causing all (default = 10) of the p2p threads to sleep.\n\nAdditionally, a peer can request objects before performing a handshake, allowing the attacker to bypass any limit set on the number of incoming connections.\n\nThis also uses up a lot of memory, causing further issues on memory-constrained systems.\n\nThis is related to report #506595\n\n\n## Releases Affected:\n\n All monero versions, including v0.15.0.5\n\n## Steps To Reproduce:\n\n- Attacker opens many connections and sends simultaneously sends many NOTIFY_REQUEST_GET_OBJECTS (500 blocks) to <target node>, with specially chosen blocks which can fill the queue\nFor each request:\n    - <target node> tries to respond, and fills m_send_que in abstract_tcp_server2.inl\n    - The P2P thread in <target node> then sleeps for approximately 6 seconds\nWith enough well-timed requests, this will cause all the P2P threads in <target node> to sleep.\n\n\nThis can be trivially triggered for a single P2P thread by syncing a monerod instance (v0.15.0.5) with the arguments --block-sync-size=500 --limit-rate-down=500 --add-exclusive-node <target node>. Once it reaches a height at which the size of the next 500 blocks is greater than the m_send_que in <target node>, the P2P thread in the target node will sleep for 6 seconds and then drop the connection. This has been tested with a blockchain synced up to height 1675605 (other heights will work).\n\n\n\n## Quick fix\n\n- Check that a handshake has completed before sending blocks\n- Further limit the maximum number of NOTIFY_REQUEST_GET_OBJECTS\n- Remove the sleep from the P2P thread when the send queue is full \n\n```\ndiff --git a/contrib/epee/include/net/abstract_tcp_server2.inl b/contrib/epee/include/net/abstract_tcp_server2.inl\nindex 128ff10aa..e149da480 100644\n--- a/contrib/epee/include/net/abstract_tcp_server2.inl\n+++ b/contrib/epee/include/net/abstract_tcp_server2.inl\n@@ -625,39 +625,12 @@ PRAGMA_WARNING_DISABLE_VS(4355)\n     m_send_que_lock.lock(); // *** critical ***\n     epee::misc_utils::auto_scope_leave_caller scope_exit_handler = epee::misc_utils::create_scope_leave_handler([&](){m_send_que_lock.unlock();});\n \n-    long int retry=0;\n-    const long int retry_limit = 5*4;\n-    while (m_send_que.size() > ABSTRACT_SERVER_SEND_QUE_MAX_COUNT)\n-    {\n-        retry++;\n-\n-        /* if ( ::cryptonote::core::get_is_stopping() ) { // TODO re-add fast stop\n-            _fact(\"ABORT queue wait due to stopping\");\n-            return false; // aborted\n-        }*/\n-\n-        using engine = std::mt19937;\n-\n-        engine rng;\n-        std::random_device dev;\n-        std::seed_seq::result_type rand[engine::state_size]{};  // Use complete bit space\n-\n-        std::generate_n(rand, engine::state_size, std::ref(dev));\n-        std::seed_seq seed(rand, rand + engine::state_size);\n-        rng.seed(seed);\n-\n-        long int ms = 250 + (rng() % 50);\n-        MDEBUG(\"Sleeping because QUEUE is FULL, in \" << __FUNCTION__ << \" for \" << ms << \" ms before packet_size=\"<<chunk.size()); // XXX debug sleep\n-        m_send_que_lock.unlock();\n-        boost::this_thread::sleep(boost::posix_time::milliseconds( ms ) );\n-        m_send_que_lock.lock();\n-        _dbg1(\"sleep for queue: \" << ms);\n \n-        if (retry > retry_limit) {\n-            MWARNING(\"send que size is more than ABSTRACT_SERVER_SEND_QUE_MAX_COUNT(\" << ABSTRACT_SERVER_SEND_QUE_MAX_COUNT << \"), shutting down connection\");\n-            shutdown();\n-            return false;\n-        }\n+    if (m_send_que.size() > ABSTRACT_SERVER_SEND_QUE_MAX_COUNT)\n+    {\n+      MWARNING(\"send que size is more than ABSTRACT_SERVER_SEND_QUE_MAX_COUNT(\" << ABSTRACT_SERVER_SEND_QUE_MAX_COUNT << \"), shutting down connection\");\n+      shutdown();\n+      return false;\n     }\n \n     m_send_que.push_back(std::move(chunk));\ndiff --git a/src/cryptonote_protocol/cryptonote_protocol_handler.h b/src/cryptonote_protocol/cryptonote_protocol_handler.h\nindex 3b456e324..6160c6cca 100644\n--- a/src/cryptonote_protocol/cryptonote_protocol_handler.h\n+++ b/src/cryptonote_protocol/cryptonote_protocol_handler.h\n@@ -52,7 +52,7 @@ PUSH_WARNINGS\n DISABLE_VS_WARNINGS(4355)\n \n #define LOCALHOST_INT 2130706433\n-#define CURRENCY_PROTOCOL_MAX_OBJECT_REQUEST_COUNT 500\n+#define CURRENCY_PROTOCOL_MAX_OBJECT_REQUEST_COUNT 20\n \n namespace cryptonote\n {\ndiff --git a/src/cryptonote_protocol/cryptonote_protocol_handler.inl b/src/cryptonote_protocol/cryptonote_protocol_handler.inl\nindex 74ceeb41d..e4e15efb3 100644\n--- a/src/cryptonote_protocol/cryptonote_protocol_handler.inl\n+++ b/src/cryptonote_protocol/cryptonote_protocol_handler.inl\n@@ -935,6 +935,12 @@ namespace cryptonote\n   int t_cryptonote_protocol_handler<t_core>::handle_request_get_objects(int command, NOTIFY_REQUEST_GET_OBJECTS::request& arg, cryptonote_connection_context& context)\n   {\n     MLOG_P2P_MESSAGE(\"Received NOTIFY_REQUEST_GET_OBJECTS (\" << arg.blocks.size() << \" blocks)\");\n+    if(context.m_state == cryptonote_connection_context::state_before_handshake) {\n+      LOG_ERROR_CCONTEXT(\"Requested objects before handshake, dropping connection\");\n+      drop_connection(context, false, false);\n+      return 1;\n+    }\n+\n     if (arg.blocks.size() > CURRENCY_PROTOCOL_MAX_OBJECT_REQUEST_COUNT)\n       {\n         LOG_ERROR_CCONTEXT(\n```\n\n## Impact\n\nSlowdown of node and possible memory exhaustion on memory constrained systems",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-06-29T17:06:37.127Z",
+  "allow_singular_disclosure_after": -5642.722945977,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "onorbayar"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.3,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "none",
+      "availability": "low"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
