@@ -1,0 +1,123 @@
+{
+  "id": 3826843,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODI2ODQz",
+  "url": "https://hackerone.com/reports/3826843",
+  "title": "ssh_config_matches is dead code: unauthorized SSH key reuse",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-06-26T14:17:29.011Z",
+  "submitted_at": "2026-06-26T14:17:30.463Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "bigsize",
+    "url": "/bigsize",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-27782",
+    "CVE-2023-27538"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-30T10:20:56.390Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-30T07:36:01.782Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nlibcurl's SSH connection-reuse guard `ssh_config_matches()` — added for\n**CVE-2022-27782** and reaffirmed by **CVE-2023-27538** — is dead code in\nevery release since 7.83.1. It compares `sshc->rsa` / `sshc->rsa_pub`\nbetween a new transfer (\"needle\") and a pooled connection, but on **both**\nsides those pointers are `NULL` at the moment the comparison runs, so\n`Curl_safecmp(NULL, NULL)` always returns TRUE and the guard always lets the\nreuse through. On the needle side, `sshc` is `curlx_calloc`'d in\n`ssh_setup_connection()` before `ConnectionExists()` runs, so the keyfile\npointers are still NULL at reuse-check time; on the pooled side,\n`sshc->rsa` / `rsa_pub` are freed unconditionally right after\n`libssh2_userauth_publickey_fromfile_ex()`, before the `rc == 0` check. As a\nresult, a transfer configured with an **unauthorized** SSH key reuses a\npooled session authenticated with a different, authorized key, and the\nserver serves the data without ever seeing the unauthorized key.\n\nThis is the complement to **HackerOne report #3788506**, which reported the\n*removal* of `ssh_config_matches` on master (`3e9817cd1b`, 2026-05-07) and\nwas closed on shipping grounds — the removal was reverted by `0618ffe50d`\nbefore any release. The deeper issue #3788506 did not address is that the\nguard has been **dead code in every release since 7.83.1**: present,\ncompiled, called, but always returning TRUE. CVE-2023-27538's advisory\nalready states the CVE-2022-27782 fix *\"was bad and did not actually correct\nthe problem\"*; CVE-2023-27538 only fixed a bitmask so the dead guard finally\ngot *called* for SFTP/SCP — it left the guard itself dead. The advisories\nclaim `curl >= 7.83.1` / `curl >= 8.0.0` are not affected; they are.\n\nI reproduced this on curl 8.20.0, 8.21.0, and master (libssh2 backend) with\na real `sshd`: an unauthorized key reads a secret by reusing an authorized\nkey's pooled session; Step 3 (fresh pool) confirms keyB is genuinely\nrejected by the server. A self-contained Docker verification environment is\nin `ssh-reuse-deadcode/`. The 3-step PoC:\n\n```\nStep 1: keyA (authorized)   GET sftp://.../secret  -> OK      (leaves conn in pool)\nStep 2: keyB (unauthorized) GET same, same pool    -> OK      <-- BUG: reuses keyA's session\nStep 3: keyB (unauthorized) GET same, FRESH pool   -> DENIED  (control: keyB truly rejected)\n```\n\n`VULNERABILITY CONFIRMED` iff Step 1 OK **and** Step 2 OK **and** Step 3 DENIED.\n\n## Affected version\n\nReproduced on (libssh2 backend, SFTP enabled, debian:trixie-slim container):\n\n- **curl 8.20.0** — commit `a05f34973e` (released 2026-04-29). Does **not**\n  contain `3e9817cd1`.\n- **curl 8.21.0** — commit `68720b4837` (current release, 2026-06-24).\n- **master** — commit `a36384ab94` (8.21.1-DEV, tested 2026-06-26).\n\nAll three versions produce `VULNERABILITY CONFIRMED`. The dead-code pattern\nholds in source from `curl-7_83_1` (the release that shipped the CVE-2022-27782\nfix) through the current release.\n\n## Steps To Reproduce\n\nA self-contained verification environment lives in\n`ssh-reuse-deadcode/` (see its `README.md` for full details).\nIt builds curl from upstream inside a container, starts a real `sshd`, and\nruns the 3-step SFTP test. `keyA` is placed in `authorized_keys`; `keyB` is\ndeliberately **not**. No host source tree is mutated.\n\n```bash\ncd ssh-reuse-deadcode\n./verify.sh                  # all 3 versions (8.20.0, 8.21.0, master)\n./verify.sh 8.20.0           # one version\n```\n\n### Expected vulnerable output\n\nClient verdict (stdout) — Step 2 reads the same secret as Step 1:\n\n```\n>> Step1 result=0 (No error) body='user_a_secret_data'     <- keyA reads secret\n>> Step2 result=0 (No error) body='user_a_secret_data'     <- keyB reads same secret (BUG)\n>> Step3 result=67 (Login denied) body=''                   <- fresh pool, keyB rejected\n\nStep 1 (keyA, authorized)  : OK\nStep 2 (keyB, shared pool) : SUCCEEDED  <-- BUG\nStep 3 (keyB, fresh pool)  : DENIED (control)\n\nVULNERABILITY CONFIRMED: unauthorized keyB read the secret by reusing\nkeyA's pooled SSH session.\n```\n\n`sshd` VERBOSE log (only `keyA` is ever accepted; Step 2 opens **no** new\nconnection):\n\n```\nAccepted publickey for root ... RSA SHA256:<keyA>     <- Step 1\nFailed publickey  for root ... RSA SHA256:<keyB>      <- Step 3 only\n```\n\ncurl verbose (Step 2 shows no `Trying`, no `authenticated via publickey`):\n\n```\n== Step 1: authorized keyA ==\n*   Trying 127.0.0.1:12222...\n* SSH: authenticated via publickey\n== Step 2: UNAUTHORIZED keyB (shared pool) ==\n* Reusing existing sftp: connection with host 127.0.0.1   <- no auth\n== Step 3: UNAUTHORIZED keyB (FRESH pool, control) ==\n*   Trying 127.0.0.1:12222...\n* SSH public key authentication failed\n```\n\n### Reproduction across versions\n\n`./verify.sh` (all three versions) produces:\n\n```\n  VERSION  COMMIT                                        VERDICT\n  -------  --------------------------------------------  --------\n  8.20.0   a05f34973e6c4bb629d018f7cb51487be1c904d8     CONFIRMED (vulnerable)\n  8.21.0   68720b4837284335b2d63cb358f8f6ce65f5bc55     CONFIRMED (vulnerable)\n  master   a36384ab94b868b70b39209ced3e89927a14922d     CONFIRMED (vulnerable)\n```\n\nFull logs (including `sshd` auth log and curl verbose output) are saved to\n`results/<version>.log`.\n\n## Credits\nReported by: Bigtang (SecBuddyF @ Tencent KeenLab)\n\n## Impact\n\n## Summary:\nA transfer configured with an **unauthorized** SSH key reads or writes data\non the SSH server as if it were the authorized key. The unauthorized key is\nnever presented to the server, so server-side authorization provides no\ndefense.\n\nAffected: any application sharing a libcurl connection cache\n(`CURLOPT_SHARE` + `CURL_LOCK_DATA_CONNECT`, or a reused `CURLM`/easy\nhandle) across SFTP/SCP transfers with different per-transfer SSH keys —\nmulti-tenant SFTP gateways, CI/CD runners, backup/sync daemons.\n\nThis is **CWE-305: Authentication Bypass by Primary Weakness** — curl's own\nclassification for CVE-2022-27782 (Medium) and CVE-2023-27538 (downgraded\nto Low on the premise the path was fixed; it was not). Reproduced on 8.20.0,\n8.21.0, and master, all `>= 8.0.0` and claimed \"not affected\".",
+  "weakness": {
+    "id": 184,
+    "name": "Authentication Bypass by Primary Weakness"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6157567,
+      "file_name": "ssh-reuse-deadcode.tar.gz",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/urr67fid5k8fkenggxmp9xf470i2?response-content-disposition=attachment%3B%20filename%3D%22ssh-reuse-deadcode.tar.gz%22%3B%20filename%2A%3DUTF-8%27%27ssh-reuse-deadcode.tar.gz&response-content-type=application%2Fgzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQWYCZIZE%2F20260630%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260630T110209Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIC9EN8E5LkrwzFb3Tg5%2Fuc9Xa6Crr7qSIS11POaS6Im6AiAv6wQhgqLdKNyp123ocKn5VWuMfGWMFIOZaP%2FJ2Vgg5Sq6BQjC%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMc1iiVExd1viYvGjkKo4F2dptt46Jt9jp%2BgFjgXjMiGNEVPGJfPwLRGI0lLznIs5wq9TuUKaPBjniQhf0QAPwRNIEEoRbVaJsizUnA21XsHpfo2DiFsHy4QmeM%2Fd221yngG3lQHKuGV7%2FDP%2BlgQzikAf5jq3yFKrAGYvxoLAnBOcX0YLGT%2FxGWmXOPacYMRIo401eRZ5zobQvU%2BN5G2WyHT5RciM1tCeo3b9N%2B4kcXrQx0BlpzmMzjdKqbRRE3A%2FmBK7BgvhMDhWX3xSpJ0QVkvobNZb%2FmRn7WSAjCtDLbdzomoXKLr1ZW1YmNdZEnERbAXjrAUth3qx0PjIdnU8TglWaFucKSHGV7iUYD7DbE89pZwV56I6%2ByjXbVGD3DCa7mDhlMsyYzJ%2B4jyBUQM9BlBQcwc2awVVp%2FCkWqdUmWm%2Fl28ddGjRj%2FLQTcrDK8wM6ats5P1yp99lz5U1cpvlp56Qjzm%2B6S2bAobBxzlLnh0A0mmrSbdTEZefvVjI03uKKaogxwk7IGy%2BCgafEntZvFy7F%2Bo83Y448QxVaUlFp2YXHLlmtiiodzRhAgaqAt8tN6zVy3fW%2BPwah%2Fd%2Bjw4%2BY76mctzNnsaUf4IJdb5Y4UJAFyBPZCHvI1J%2FDYndiPUyTF2HLUm6dGJ0Csa%2FENEghnGo7e%2FMvtSXToKSBbU9H2PY3C3qQaweR3dL4%2BnPeUxL4CiLknXDaj%2FK7yiLA0iOlHebVU0oQDgcwHLZ3MD7bNTbFyFq6GLPMrImndTjYZVxyb9NHUk080i2m%2F%2FoomPSMfi9jePKYJjlkgUHRu3jhufLlG%2FaVWlxzgo1DPcjvLHbQVjAPjLQq6mgR%2BZD%2B%2FwhQS3ARR6ctG92Lc%2FDZJZrhewxbO57KvX02Lt%2BeZHNtMNaIjtIGOrIB7NF01GX4x5VIKDMAmktVQ%2FO5jNt%2B64%2BgSMR8KecK0GwW%2BWM3kVCeRTkzAzHJjFKsVcxOO9fsacjwfPxDRDzS0Lz6l74812xaCpFFgkccvhe6mlVXJ2A5exg5c6GDW1jeVgmv8Pxv%2F4gVXz2m7rph1lW3jBTSkduwBYEseDx2G%2BgUhi5hsZf7ITe1%2BKaXSyQszIzRsMdRM%2FbU6wvAs8Q6gOh73tkfWtBwlsYjDKBGHHBhRA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=465cd573a8554e06e4bec0e94294057140cd0b0a04a894f5b9d8a601a8da2a4f",
+      "file_size": 7890,
+      "type": "application/gzip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

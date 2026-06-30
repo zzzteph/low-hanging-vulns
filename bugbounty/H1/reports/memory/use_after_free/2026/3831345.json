@@ -1,0 +1,106 @@
+{
+  "id": 3831345,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODMxMzQ1",
+  "url": "https://hackerone.com/reports/3831345",
+  "title": "CURLSHOPT_UNSHARE race can cause UAF in shared SSL session cache during HTTPS transfer",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-06-29T11:47:21.363Z",
+  "submitted_at": "2026-06-29T11:47:21.748Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "smaeljaish771",
+    "url": "/smaeljaish771",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-06-30T10:20:45.351Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-06-30T05:55:39.673Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`CURLSHOPT_UNSHARE` can free a shared SSL session cache while another thread is starting a normal HTTPS transfer with the same share handle. The failing transfer reaches the cache through `curl_easy_perform()`, during the OpenSSL handshake. libcurl appears to try to reject this kind of lifetime change with `share_in_use()`, but that check is not atomic with the later cache destruction, so the guard can be bypassed by a concurrent `CURLOPT_SHARE` link.\n\n## Affected version\n\nReproduced on curl 8.21.0 on Linux x86_64 with the OpenSSL backend and an ASan/UBSan build.\n\nI also checked current master after 8.21.0 and the same code pattern is still present there.\n\n## Steps to reproduce\n\nBuild libcurl with ASan, OpenSSL and no optimization. Start a local HTTPS server on `127.0.0.1:9443`; for example, an `openssl s_server -www -tls1_2` instance with a self-signed certificate is enough.\n\nCompile and run the C program at the end of this report against that libcurl build. In my run it failed in under a minute.\n\nThe reproducer has one thread repeatedly doing:\n\n```text\ncurl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION)\ncurl_share_setopt(share, CURLSHOPT_UNSHARE, CURL_LOCK_DATA_SSL_SESSION)\n```\n\nand one thread repeatedly doing:\n\n```text\ncurl_easy_setopt(easy, CURLOPT_SHARE, share)\ncurl_easy_perform(easy)\n```\n\nThe lock and unlock callbacks are installed. The CPU burner threads do not call libcurl; they only make normal scheduler preemption more likely.\n\n## ASan result\n\n```text\nERROR: AddressSanitizer: heap-use-after-free\nREAD of size 4\n    #0 cf_ssl_scache_get lib/vtls/vtls_scache.c:379\n    #1 Curl_ssl_scache_use lib/vtls/vtls_scache.c:647\n    #2 Curl_ossl_add_session lib/vtls/openssl.c:2659\n    #3 ossl_new_session_cb lib/vtls/openssl.c:2721\n    #4 ssl_update_cache libssl.so.3\n    #5 tls_finish_handshake libssl.so.3\n    #6 ossl_connect_step2 lib/vtls/openssl.c:4138\n    #7 ossl_connect lib/vtls/openssl.c:5000\n    #8 ssl_cf_connect lib/vtls/vtls.c:1007\n    #9 Curl_conn_cf_connect lib/cfilters.c:424\n    #10 curl_easy_perform lib/easy.c:820\n    #11 perform_once poc_https_scache_unshare_race.c\n    #12 perform_loop poc_https_scache_unshare_race.c\n\nfreed by thread T1 here:\n    #0 free\n    #1 Curl_ssl_scache_destroy lib/vtls/vtls_scache.c:641\n    #2 curl_share_setopt lib/curl_share.c:312\n    #3 unshare_loop poc_https_scache_unshare_race.c\n\npreviously allocated by thread T1 here:\n    #0 calloc\n    #1 Curl_ssl_scache_create lib/vtls/vtls_scache.c:611\n    #2 curl_share_setopt lib/curl_share.c:253\n    #3 unshare_loop poc_https_scache_unshare_race.c\n```\n\n## What I think is wrong\n\n`curl_share_setopt()` checks whether the share object is in use before it destroys `share->ssl_scache`. That check is released before the destroy happens.\n\nA second thread can therefore attach a new easy handle to the same share object after the check has passed. The easy handle then enters a normal HTTPS handshake and uses the SSL session cache that the first thread is destroying.\n\nRelevant places:\n\n```text\nlib/curl_share.c:160        share_in_use()\nlib/curl_share.c:204        in-use check\nlib/curl_share.c:312        Curl_ssl_scache_destroy()\nlib/curl_share.c:433        Curl_share_easy_link()\nlib/vtls/vtls_scache.c:379  cf_ssl_scache_get()\nlib/vtls/openssl.c:2659     Curl_ossl_add_session()\n```\n\n## Documentation note\n\nThe share API documents `CURL_LOCK_DATA_SSL_SESSION` as shareable: \"SSL sessions are shared across the easy handles using this shared object.\" The threaded-use requirement is to install lock and unlock callbacks, which the reproducer does.\n\nThere is also an existing test named `concurrent HTTPS GET using shared SSL session cache` in `tests/data/test3207` / `tests/libtest/lib3207.c`.\n\n## Why I consider this a security bug\n\nThe first-principles issue is object lifetime. One public API call frees an object while another public API path can still obtain and use the same object. Once that happens, later behavior depends on allocator reuse and timing, not on libcurl's intended ownership rules. In my run, the stale object was read during the TLS handshake; with a different heap layout the same stale pointer can point at unrelated application data.\n\n## Possible fix\n\nMake the `UNSHARE` lifetime change atomic with respect to easy-handle linking and SSL session cache users. For example, keep the share object protected across the in-use check and cache destruction, or defer the free until current users have dropped the cache.\n\n## Reproducer source\n\n```c\n#include <curl/curl.h>\n#include <pthread.h>\n#include <sched.h>\n#include <stdio.h>\n#include <unistd.h>\n\n#define HOSTS 25\n#define BURNERS 64\n#define RUN_SECONDS 300\n\nstatic CURLSH *share;\nstatic struct curl_slist *resolve_hosts;\nstatic pthread_mutex_t locks[CURL_LOCK_DATA_LAST];\nstatic volatile int stop_threads;\nstatic volatile unsigned long spin_sink;\n\nstatic void lock_cb(CURL *easy, curl_lock_data data,\n                    curl_lock_access access, void *clientp)\n{\n  (void)easy;\n  (void)access;\n  (void)clientp;\n  if(data > CURL_LOCK_DATA_NONE && data < CURL_LOCK_DATA_LAST)\n    pthread_mutex_lock(&locks[data]);\n}\n\nstatic void unlock_cb(CURL *easy, curl_lock_data data, void *clientp)\n{\n  (void)easy;\n  (void)clientp;\n  if(data > CURL_LOCK_DATA_NONE && data < CURL_LOCK_DATA_LAST)\n    pthread_mutex_unlock(&locks[data]);\n}\n\nstatic size_t discard_cb(char *ptr, size_t size, size_t nmemb, void *userdata)\n{\n  (void)ptr;\n  (void)userdata;\n  return size * nmemb;\n}\n\nstatic void perform_once(long n)\n{\n  CURL *easy = curl_easy_init();\n  char url[128];\n\n  if(!easy)\n    return;\n\n  snprintf(url, sizeof(url), \"https://h%ld.test:9443/\", n % HOSTS);\n  curl_easy_setopt(easy, CURLOPT_URL, url);\n  curl_easy_setopt(easy, CURLOPT_SHARE, share);\n  curl_easy_setopt(easy, CURLOPT_RESOLVE, resolve_hosts);\n  curl_easy_setopt(easy, CURLOPT_NOPROXY, \"*\");\n  curl_easy_setopt(easy, CURLOPT_SSL_VERIFYPEER, 0L);\n  curl_easy_setopt(easy, CURLOPT_SSL_VERIFYHOST, 0L);\n  curl_easy_setopt(easy, CURLOPT_NOSIGNAL, 1L);\n  curl_easy_setopt(easy, CURLOPT_TIMEOUT_MS, 2000L);\n  curl_easy_setopt(easy, CURLOPT_CONNECTTIMEOUT_MS, 500L);\n  curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, discard_cb);\n  (void)curl_easy_perform(easy);\n  curl_easy_cleanup(easy);\n}\n\nstatic void *unshare_loop(void *arg)\n{\n  (void)arg;\n  while(!stop_threads) {\n    (void)curl_share_setopt(share, CURLSHOPT_SHARE,\n                            CURL_LOCK_DATA_SSL_SESSION);\n    (void)curl_share_setopt(share, CURLSHOPT_UNSHARE,\n                            CURL_LOCK_DATA_SSL_SESSION);\n  }\n  return NULL;\n}\n\nstatic void *perform_loop(void *arg)\n{\n  long n = (long)(size_t)arg;\n  while(!stop_threads) {\n    perform_once(n++);\n    usleep(100);\n  }\n  return NULL;\n}\n\nstatic void *burn_loop(void *arg)\n{\n  unsigned long x = (unsigned long)(size_t)arg + 1;\n  while(!stop_threads) {\n    x = x * 1103515245UL + 12345UL;\n    if((x & 0xfffffUL) == 0)\n      sched_yield();\n  }\n  spin_sink += x;\n  return NULL;\n}\n\nint main(void)\n{\n  pthread_t unshare_thread;\n  pthread_t perform_thread;\n  pthread_t burners[BURNERS];\n  int i;\n\n  curl_global_init(CURL_GLOBAL_ALL);\n  for(i = 0; i < CURL_LOCK_DATA_LAST; i++)\n    pthread_mutex_init(&locks[i], NULL);\n\n  share = curl_share_init();\n  curl_share_setopt(share, CURLSHOPT_LOCKFUNC, lock_cb);\n  curl_share_setopt(share, CURLSHOPT_UNLOCKFUNC, unlock_cb);\n  curl_share_setopt(share, CURLSHOPT_SHARE, CURL_LOCK_DATA_SSL_SESSION);\n\n  for(i = 0; i < HOSTS; i++) {\n    char resolve[128];\n    snprintf(resolve, sizeof(resolve), \"h%d.test:9443:127.0.0.1\", i);\n    resolve_hosts = curl_slist_append(resolve_hosts, resolve);\n  }\n\n  for(i = 0; i < HOSTS * 2; i++)\n    perform_once(i);\n\n  pthread_create(&unshare_thread, NULL, unshare_loop, NULL);\n  pthread_create(&perform_thread, NULL, perform_loop, NULL);\n  for(i = 0; i < BURNERS; i++)\n    pthread_create(&burners[i], NULL, burn_loop, (void *)(size_t)i);\n\n  sleep(RUN_SECONDS);\n  stop_threads = 1;\n\n  pthread_join(unshare_thread, NULL);\n  pthread_join(perform_thread, NULL);\n  for(i = 0; i < BURNERS; i++)\n    pthread_join(burners[i], NULL);\n\n  curl_slist_free_all(resolve_hosts);\n  curl_share_cleanup(share);\n  curl_global_cleanup();\n  return 0;\n}\n```\n\n## Impact\n\n## Summary:\nA public libcurl API path can free the shared SSL session cache while another thread is entering a normal HTTPS transfer through the same share handle. This causes heap-use-after-free during the TLS handshake. In my reproduction this results in a crash under ASan.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
