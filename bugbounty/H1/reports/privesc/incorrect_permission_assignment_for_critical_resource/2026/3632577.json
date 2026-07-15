@@ -1,0 +1,113 @@
+{
+  "id": 3632577,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjMyNTc3",
+  "url": "https://hackerone.com/reports/3632577",
+  "title": "Bedrock AgentCore Starter Toolkit Creates Gateway IAM Roles Without Confused Deputy Protections",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-27T19:33:14.250Z",
+  "submitted_at": "2026-03-27T19:33:14.844Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "mistercloudsec",
+    "url": "/mistercloudsec",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/917j8f4yrcgxs0qgzm8qdbybo073/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 84809,
+    "url": "https://hackerone.com/aws_vdp",
+    "handle": "aws_vdp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/1d3351b56b27c9bb56ce22821a57514a7210186a77aefb760cd2113272723c1f"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "AWS VDP",
+      "twitter_handle": "amazon",
+      "website": "https://aws.amazon.com/",
+      "about": "Amazon Web Services (AWS) is a secure cloud services platform, offering compute power and other functionality to help businesses scale and grow. "
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-07-15T15:11:59.984Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-07-15T12:54:44.346Z",
+  "team_member_agreed_on_going_public_at": "2026-07-15T15:11:59.474Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "> NOTE! Thanks for submitting a report to Amazon Web Services! Please replace *all* the [square] sections below with the pertinent details. Remember, the more detail you provide, the easier it is for us to triage and respond quickly, so be sure to take your time filling out the report!\n\n**Description:** The Bedrock AgentCore Starter Toolkit (https://github.com/aws/bedrock-agentcore-starter-toolkit) CLI (`agentcore gateway create`) creates IAM roles for the AgentCore Gateway with trust policies that lack `aws:SourceArn` and `aws:SourceAccount` condition keys. This enables a cross-account confused deputy attack where any AgentCore workload in any AWS account can assume the victim's Gateway role. The role grants access to all secrets in the account, full KMS permissions, the ability to invoke any Lambda function, full DynamoDB access, and read access to all S3 buckets.\n\n**Note:** The AWS Console correctly includes these conditions when creating a Gateway via the web UI. The vulnerability is specific to the CLI toolkit's code path, which is the primary interface for developers automating infrastructure deployment.\n\nThe security intent exists but was not applied consistently: the Jinja2 template at `utils/runtime/templates/execution_role_trust_policy.json.j2` correctly includes both conditions, and the AWS Console includes them. The Gateway trust policy constant at `src/bedrock_agentcore_starter_toolkit/operations/gateway/constants.py` (lines 47-56) does not.\n\nThe same missing-condition pattern appears in the CDK template (`agentcore-stack.ts.j2`, lines 37-40 and 312-314) and Terraform template (`bedrock_agentcore.tf.j2`, lines 238-247), meaning all infrastructure-as-code deployment paths are affected.\n\n## Steps To Reproduce:\n**1. Install the Bedrock AgentCore Starter Toolkit and create a Gateway:**\n\n```bash\npip install bedrock-agentcore-starter-toolkit\nagentcore gateway create --name my-gateway\n```\n\n**2. Inspect the created IAM role's trust policy:**\n\n```bash\naws iam get-role --role-name <gateway-role-name> --query 'Role.AssumeRolePolicyDocument'\n```\n\n**3. Observe the trust policy:**\n\n```python\nBEDROCK_AGENTCORE_TRUST_POLICY = {\n    \"Version\": \"2012-10-17\",\n    \"Statement\": [\n        {\n            \"Effect\": \"Allow\",\n            \"Principal\": {\"Service\": \"bedrock-agentcore.amazonaws.com\"},\n            \"Action\": \"sts:AssumeRole\",\n        }\n    ],\n}\n```\n\nNo `Condition` block. Compare with the Jinja2 template which correctly includes:\n\n```json\n\"Condition\": {\n    \"StringEquals\": {\n        \"aws:SourceAccount\": \"{{ account_id }}\"\n    },\n    \"ArnLike\": {\n        \"aws:SourceArn\": \"arn:aws:bedrock-agentcore:{{ region }}:{{ account_id }}:*\"\n    }\n}\n```\n\nThis inconsistency confirms the security intent exists but was not applied to the Gateway trust policy constant.\n\n**4. Confused deputy exploitation:** From a different AWS account with AgentCore access, configure an AgentCore Gateway target using the victim's role ARN. When the attacker's Gateway makes calls, the AgentCore service assumes the victim's role on the attacker's behalf.\n\nThe role created with this trust policy is granted (lines 58-102):\n- `bedrock-agentcore:*` on `arn:aws:bedrock-agentcore:*:*:*`\n- `secretsmanager:GetSecretValue` on `*` (every secret in the account)\n- `lambda:InvokeFunction` on `arn:aws:lambda:*:*:function:*` (every Lambda)\n- `kms:*` on `arn:aws:kms:*:*:*` (full KMS admin including key deletion)\n- `AmazonDynamoDBFullAccess` managed policy\n- `AmazonS3ReadOnlyAccess` managed policy\n\n## Impact\n\n## Summary:\nAn attacker with their own AWS account and AgentCore access can:\n\n1. **Read all secrets** in the victim's account via `secretsmanager:GetSecretValue` on `*`\n2. **Invoke any Lambda function** in the victim's account\n3. **Read all S3 data** via `AmazonS3ReadOnlyAccess`\n4. **Read/write/delete any DynamoDB table** via `AmazonDynamoDBFullAccess`\n5. **Manage KMS keys** including disabling or scheduling deletion via `kms:*`\n\nThe attacker only needs to know the victim's role ARN, which follows a predictable naming pattern generated by the toolkit.\n\nAdditionally, the same trust policy pattern (without conditions) appears in the CDK template (`agentcore-stack.ts.j2`, lines 37-40 and 312-314) and Terraform template (`bedrock_agentcore.tf.j2`, lines 238-247), affecting users who deploy via infrastructure-as-code.\n\n## Recommended Fix\n\nAdd condition keys to `BEDROCK_AGENTCORE_TRUST_POLICY` in `constants.py`, matching the pattern already used in the Jinja2 trust policy template:\n\n```python\nBEDROCK_AGENTCORE_TRUST_POLICY = {\n    \"Version\": \"2012-10-17\",\n    \"Statement\": [\n        {\n            \"Effect\": \"Allow\",\n            \"Principal\": {\"Service\": \"bedrock-agentcore.amazonaws.com\"},\n            \"Action\": \"sts:AssumeRole\",\n            \"Condition\": {\n                \"StringEquals\": {\n                    \"aws:SourceAccount\": \"<ACCOUNT_ID>\"\n                },\n                \"ArnLike\": {\n                    \"aws:SourceArn\": \"arn:aws:bedrock-agentcore:<REGION>:<ACCOUNT_ID>:*\"\n                }\n            },\n        }\n    ],\n}\n```\n\nSince the constant is used at runtime, the account ID and region should be parameterized (as the Jinja2 template already does).\n\nApply the same fix to the CDK and Terraform templates.\n\nAdditionally, consider scoping down the attached permissions:\n- `secretsmanager:GetSecretValue` should be limited to `arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity!*`\n- `kms:*` should be scoped to specific actions needed (e.g., `kms:Decrypt`, `kms:GenerateDataKey`)\n\n## Disclosure\n\nFor awareness, we plan to publish a blog post detailing these findings after remediation. We are happy to share a draft ahead of publication and coordinate on timing.",
+  "weakness": {
+    "id": 150,
+    "name": "Incorrect Permission Assignment for Critical Resource"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "mistercloudsec"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 741710,
+    "asset_type": "OTHER",
+    "asset_identifier": "Amazon Bedrock",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
