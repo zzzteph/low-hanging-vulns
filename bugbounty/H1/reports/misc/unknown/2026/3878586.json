@@ -1,0 +1,125 @@
+{
+  "id": 3878586,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODc4NTg2",
+  "url": "https://hackerone.com/reports/3878586",
+  "title": "Unauthenticated team \"income/payments\" export ignores donor privacy settings (hide_giving, hide_from_lists) and uses frozen visibility, exposing donat",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-21T13:00:12.734Z",
+  "submitted_at": "2026-07-21T13:00:12.941Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "its9me",
+    "url": "/its9me",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/7oycurgla1bywwklw5icv92e7hg9/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 28411,
+    "url": "https://hackerone.com/liberapay",
+    "handle": "liberapay",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/t5bperr6a46huf3g9yn98it5zpfz/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/t5bperr6a46huf3g9yn98it5zpfz/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Liberapay",
+      "twitter_handle": "",
+      "website": "https://liberapay.com",
+      "about": "An open source platform designed to facilitate recurrent donations."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-01T12:27:05.068Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-08-01T12:27:04.345Z",
+  "team_member_agreed_on_going_public_at": "2026-08-01T08:51:53.466Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Liberapay lets teams publish the list of donors who chose to donate **publicly** (donation\n`visibility = 3`). That public list is served by `www/%username/income/payments.spt`. The problem\nis that this endpoint decides whether to reveal a donor using **only** the payment's frozen\nvisibility flag, and ignores the two donor privacy controls that every other public surface honors\n(`hide_giving`, `hide_from_lists`) as well as the recipient's opt‑in gate. As a result an\nunauthenticated attacker can retrieve donor identity + exact amount + date for donations that the\ndonor has explicitly opted out of public listings for, or has **since changed to private/secret**.\n\n## The privacy model it should follow\nThe canonical public patron list on the team's profile page (`www/%username/index.html.spt`) gates\neach donor on **all** of the following:\n- `index.html.spt:32` — recipient opted in: `if patron_visibilities & 4:`\n- `index.html.spt:42` — `AND tip.visibility = 3`\n- `index.html.spt:45` — `AND NOT tipper_p.hide_giving`\n- `index.html.spt:46` — `AND tipper_p.hide_from_lists = 0`\n- it also reads the **current** visibility from `current_tips`.\n\n## Root cause (code)\n`www/%username/income/payments.spt`:\n- `:33` `participant = get_participant(state, restrict=False)` → **unauthenticated**.\n- `:34` only constraint is `if participant.kind != 'group'` (teams only).\n- `:51‑53` selects `payer.id`, `payer.username`, `payer.public_name`.\n- `:62` the **only** donor‑identity gate:\n  ```sql\n  LEFT JOIN participants payer ON payer.id = pi.payer AND pt.visibility = 3\n  ```\nIt omits `hide_giving`, omits `hide_from_lists`, omits the recipient `patron_visibilities & 4`\ngate, and reads `pt.visibility` = **`payin_transfers.visibility`**, which is set once at payment\ntime (`liberapay/payin/common.py:752`, `abs(visibility)`) and is **never updated** afterwards\n(none of the four `UPDATE payin_transfers` statements touch the `visibility` column; changing a\ndonation's visibility via `set_tip_to` / the giving page only INSERTs a new `tips` row). So the\nper‑payment visibility is frozen forever.\n\nTwo concrete consequences, each a privacy violation:\n1. **Opt‑out ignored.** A donor who set `hide_from_lists = 1` (explicit \"exclude me from public\n   lists\") or `hide_giving` is still fully listed here — name + exact per‑payment amount + date —\n   even though the team's own profile page excludes them.\n2. **Downgrade ignored (strongest case).** A donor who made a public donation and **later changed\n   that donation to private or secret** disappears from the profile page and from\n   `/<team>/patrons/public.csv` (both read `current_tips.visibility`), but their historical public\n   payments remain exposed here because this endpoint reads the frozen `payin_transfers.visibility`.\n   The donor took a deliberate privacy action and reasonably believes it is now hidden everywhere.\n\n## Proof — unauthenticated disclosure surface (confirmed live 2026‑07‑21)\n```\nGET https://liberapay.com/GIMP/income/payments.json HTTP/2\nHost: liberapay.com\n(no Cookie, no session)\n```\n→ HTTP 200, JSON array (45 KB). Public‑donation entries return\n`\"payer_id\": <int>, \"payer_username\": \"<username>\", \"payer_public_name\": \"<real name>\"` plus\n`amount`, `unit_amount`, `period`, `n_units`, `date`, `payment_method`. Non‑public entries return\n`payer_id/username/public_name = null`, confirming the sole gate is `pt.visibility = 3`.\n(Real donor identities were returned; they are redacted in `evidence/income-payments-disclosure.md`.)\n`/<team>/income/payments.csv` returns the **entire** history in one request (per_page defaults to\n`None` for CSV, no pagination cap).\n\n## Full end‑to‑end PoC for the privacy bypass (donor account + one small donation)\n1. Register free account **A**.\n2. As A, make a **public** (`visibility=3`) donation to any team and complete the payment\n   (any small amount).\n3. As A, either (a) set the donation's visibility to **secret** on `/<A>/giving/`, or (b) enable\n   **\"Hide me from public lists\"** (`hide_from_lists`) in privacy settings.\n4. Verify A no longer appears on `https://liberapay.com/<team>/` (profile) nor in\n   `https://liberapay.com/<team>/patrons/public.csv`.\n5. Fetch `https://liberapay.com/<team>/income/payments.json` **unauthenticated** → account A is\n   still listed with username, exact amount, and date.\n\n## Impact\n\nUnauthenticated third‑party disclosure of donor identity, exact donation amount, and dates for a\nteam's public donors, bypassing the donor's explicit `hide_giving` / `hide_from_lists` opt‑outs and\ncontinuing to expose donations the donor has since made private or secret. Donation relationships\nand amounts are the platform's core privacy asset.\n\n## Remediation\nMake the query match the profile page's model:\n```sql\nLEFT JOIN participants payer\n       ON payer.id = pi.payer\n      AND pt.visibility = 3\n      AND payer.hide_giving IS NOT TRUE\n      AND payer.hide_from_lists = 0\n```\nand gate the endpoint on the recipient's `patron_visibilities & 4`, and filter on the **current**\ntip visibility (join `current_tips`) rather than the frozen `payin_transfers.visibility`, so that a\ndonor's later privacy change is honored here as it is everywhere else.",
+  "bounty_amount": "100.0",
+  "formatted_bounty": "$100",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-08-31T08:51:54.124Z",
+  "allow_singular_disclosure_after": 2575656.0541468,
+  "singular_disclosure_allowed": false,
+  "vote_count": 2,
+  "voters": [
+    "its9me",
+    "2026"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.3,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 8927,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/liberapay/liberapay.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
