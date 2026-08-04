@@ -1,0 +1,146 @@
+{
+  "id": 3911968,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTExOTY4",
+  "url": "https://hackerone.com/reports/3911968",
+  "title": "Heap use-after-free (write) in mev_forget_socket() via reentrant curl_easy_pause() — incomplete fix for CVE-2026-9080",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-08-03T08:50:07.067Z",
+  "submitted_at": "2026-08-03T08:50:07.882Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "juthawong",
+    "url": "/juthawong",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-9080"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-04T14:55:05.969Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-03T11:20:39.652Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "lib/multi_ev.c keeps a hash table (multi->ev.sh_entries) of per-socket\nbookkeeping structs (struct mev_sh_entry) used to decide when to notify the\napplication's socket callback (CURLMOPT_SOCKETFUNCTION) about interest\nchanges on a socket.\n\nCVE-2026-9080 (\"multi: handle pause in multi socket callback\", commit\n5ab34cba42e4ee4282fe8bab43f311d51b9bf9bd, reported by Joshua Rogers, closes\n#21748) fixed a heap-use-after-free in mev_sh_entry_update(): that function\ncalls multi->socket_cb(...) and then writes to the `entry` it fetched\n*before* the call. curl_easy_pause() is documented as callable from any\ncallback, and calling it reenters Curl_multi_ev_assess_xfer() ->\nmev_pollset_diff(), which can delete (free) that very `entry` if the\nreentrant assessment concludes the socket has no remaining users. The fix\nre-fetches `entry` from the hash table after the callback returns, before\ntouching it again, and adds a debug `magic` field specifically to help catch\nthis class of bug.\n\nThe sibling function mev_forget_socket(), in the same file, has the\nidentical hazard and was not touched by this patch:\n\n    static CURLMcode mev_forget_socket(struct Curl_multi *multi,\n                                       struct Curl_easy *data,\n                                       curl_socket_t s,\n                                       const char *cause)\n    {\n      struct mev_sh_entry *entry = mev_sh_entry_get(&multi->ev.sh_entries, s);\n      int rc = 0;\n\n      if(!entry) return CURLM_OK;\n\n      if(entry->announced && multi->socket_cb) {\n        mev_in_callback(multi, TRUE);\n        rc = multi->socket_cb(data, s, CURL_POLL_REMOVE,\n                              multi->socket_userp, entry->user_data);\n        mev_in_callback(multi, FALSE);\n        entry->announced = FALSE;   /* <-- UAF: entry may already be freed */\n      }\n\n      mev_sh_entry_kill(multi, s);\n      ...\n    }\n\nIf the application's socket callback, invoked at the CURL_POLL_REMOVE\nnotification, calls curl_easy_pause() on any transfer sharing the same\nsocket (realistic with HTTP/2 multiplexing, where multiple transfers share\none connection/socket), that reentrant call can free `entry` via\nmev_sh_entry_kill() before control returns to the outer frame. The\nsubsequent `entry->announced = FALSE;` is a heap-use-after-free WRITE.\n=====================================================================\nSTEPS TO REPRODUCE / PROOF OF CONCEPT\n=====================================================================\n\nTwo independent proofs of concept are provided.\n\nMethod 1: whitebox harness (deterministic, targets the exact write)\n\nThe actual, unmodified lib/multi_ev.c (not a reimplementation) was compiled\nas part of a real ASan-instrumented libcurl build:\n\n  CFLAGS='-fsanitize=address -fno-omit-frame-pointer -g -O0' \\\n  LDFLAGS='-fsanitize=address' \\\n  ./configure --disable-shared --enable-debug --without-ssl\n  make -C lib\n\nA small harness (attached: curl_uaf_harness.c) #includes the real\nmulti_ev.c and calls the real exported Curl_multi_ev_socket_done() (the\nthin public wrapper around mev_forget_socket()), with a socket_cb that\ndeletes the socket's hash entry from inside the callback, reproducing what\na reentrant curl_easy_pause() call does:\n\n  gcc -DHAVE_CONFIG_H -I../include -I../lib -I. -DDEBUGBUILD -DCURLDEBUG \\\n      -DBUILDING_LIBCURL -D_GNU_SOURCE -fsanitize=address \\\n      -fno-omit-frame-pointer -g -O0 -c curl_uaf_harness.c -o curl_uaf_harness.o\n  gcc -fsanitize=address -g -o curl_uaf_poc curl_uaf_harness.o .libs/libcurl.a \\\n      -lnghttp2 -lidn2 -lrtmp -lldap -llber -lpsl -lzstd -lbrotlidec -lz -lpthread\n  ./curl_uaf_poc\n\nAddressSanitizer reports a heap-use-after-free WRITE of size 1 at\nmulti_ev.c:213 (entry->announced = FALSE;), with the free happening at\nmulti_ev.c:133 (mev_sh_entry_kill) inside the callback invoked from\nmev_forget_socket at multi_ev.c:210 — exactly the predicted reentrancy\nwindow. Full ASan output attached (poc_output.txt).\n\nScope note: this harness triggers the reentrant free directly inside the\nsocket callback rather than through a live two-easy-handle HTTP/2 connection\nwith a genuine curl_easy_pause() call racing real socket I/O. It targets the\nexact vulnerable write with real, unmodified function bodies, the real\nexported entry point, and the real heap allocator via an actual ASan-built\nlibcurl.\n\nMethod 2: live, organic reproduction (real network I/O, no internal headers)\n\nlive_h2_client.c (attached) uses only curl's public API to drive two easy\nhandles through a real curl_multi_socket_action() event loop against a real\nlocal nginx HTTP/2 (cleartext, prior-knowledge) server, injecting\ncurl_easy_pause() calls on both handles from inside CURLMOPT_SOCKETFUNCTION\nwhenever the shared socket is removed — the same reentrancy pattern\nCVE-2026-9080 addressed in mev_sh_entry_update().\n\nThis reproduces deterministically (5/5 runs): handle A's IPv6 connect\nattempt is refused (nginx listens IPv4-only), and while curl tears down\nthat failed connection's socket, the injected curl_easy_pause() calls\nreentrantly corrupt multi_ev.c's bookkeeping, tripping DEBUGASSERT(NULL) in\nmev_pollset_diff() at multi_ev.c:420 (\"transfer lost interest but is not\nregistered\"). This is a different specific invariant than the Method 1\nwrite at line 213, but the same root cause (curl_easy_pause() reentrancy\nfrom inside the socket callback). In a non-DEBUGBUILD (production) binary\nthis particular assertion is a no-op, so this exact manifestation's\nreal-world consequence there is silently-inconsistent internal state rather\nthan a guaranteed abort — Method 1's line-213 write remains the clearer\nevidence of a consequence that matters in production (non-debug) builds.\nFull log attached (live_repro_output.txt), along with a screen recording of\na live run for easier triage (live_h2_repro.mp4; the source asciinema\nterminal recording, live_h2_repro.cast, is also included).\n\n## Impact\n\nA heap-use-after-free write in a library embedded in an enormous number of\nnetwork-facing daemons, tools, and language bindings. Concretely\ndemonstrated impact is a deterministic crash (SIGABRT under ASan); without\ninstrumentation, the practical effect depends on what the allocator has\nplaced in the freed slot by the time the write occurs, which was not\nestablished beyond \"reasoned as potentially exploitable, not verified against\na specific target\". Reachable by any application using curl's multi-socket\ninterface (CURLMOPT_SOCKETFUNCTION) that calls curl_easy_pause() from its\nsocket callback while multiple transfers share a socket — most realistically\nvia HTTP/2 multiplexing. A remote server has some influence over the timing\nof connection-teardown/pause-worthy events that lead into this code path.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6384268,
+      "file_name": "curl_uaf_harness.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/av0l90tzmwcfdbgh0t3iixakkdfo?response-content-disposition=attachment%3B%20filename%3D%22curl_uaf_harness.c%22%3B%20filename%2A%3DUTF-8%27%27curl_uaf_harness.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5FPS2JXN%2F20260804%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260804T152105Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEcaCXVzLXdlc3QtMiJIMEYCIQD4dyvrAt3ogK2oo2fXVDot87jb%2FCWeffw4dLNXi%2BzphQIhAJfAiUAQ3rYmzk2txPug%2Fb0Cgy1dy6%2FW%2FdJWpTHzYLyGKrIFCBAQAxoMMDEzNjE5Mjc0ODQ5IgyY3txCkfYrlWhVRasqjwVXVehjfYQjBvP7maZnouknLrvEzqBW12TG63wvupNA%2Bqg9mi%2BHG%2BGqmcR4vmxFzDtgXG2PzcBWzVeeB7ZyfuySEfwFNhrs9Yd2GazfKOG9CgezAP5f%2Bwh6hJd9tDDfO%2Bj15fvwGIXeg5X6Ou8hYDc8FNuRjbtW%2FWojLZbHtYeiJLMPYFEH5PCX8k6RMyVA7ipw7a31iXhWutZvy1%2FGsfe%2BjJlASUobZMCHYQPClytqVrkZEtcL8qkD6CeoBvPPhXM6IBDdkpghlr2f9o16%2FQSi3JM3v7XCy%2Fte%2F7YDWbpJTdZikglPNmacnuDksTIe9PbizGokYaicbWg%2FJwD9MjrqxGkXEgngpBdkaSbZNsWQxIezT5AqsVVG37yns0lOmLr9Cj6S2hZQZEEDGmWGz5RgtYL38osj99RSNnMoJSt4GZT2VQVwyLEeCpHCmfBbJUzG6j6cDfBHfOj7Y%2B9%2F%2F%2F8hFlVoDTlwcQtbklKZusXYpoJsktCENfL3jJXiUziA%2BcwaWq3%2FTLJHUVB8Nx3z6C%2FsTjGqaa6tBgdSqNG4w%2BzYHNPdXw1ChrSBey9mAuJdza7sAZ%2FCXnbNRml2gAeQ5duUyOdrV8qYHOmVAzL92I44ubPVC3qkQS%2FJBtgCJuTZA6rIVNxtTcCNvfHKoeQsmrudU8%2B1lEf2RLB9GGVKzlALWs%2BmF9kqF9RRxDnnefiTzruThEXaiZKqEoJosvyxZPEyg%2ByLgsmHcs191afHI9OccsMYCNZAdkqvX1fO8POr6I9IzBWywiUsJaGKYEzuXi1AbYMhbfCUwnzdAFmvyqn9wEdUrfDA1NKND8cuHs6yBh2Q65XVfXTaER6%2BaT%2BffjBxTVuzLfBu0hSs3J2MKGGIMNOEyNMGOrABr%2FUI14B50ZYNsKmncZcedHmTyS8RwvAe6gER%2BrTgJWzUI97HDbxko7KmwedZ0lQnDp6s7yV5ifgjIW6IvFFijYaA%2B75QHvx0e1XQeYwGZvCpMU8G2cbAhZV7h0FI5sByV6MsXx%2FQj8lXa0xhpmuvteD8hnQlWxeuu4QLVporGiYwLYEa%2BzZJhc3CHEgyh5uZlh6Ag%2FoM%2FS%2BHOKffg0aVwl%2BP5O333fLZb%2Bdbbb%2FJkes%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=98d74308e90c86f2e043af4f68223947497cd3b160921137dbacdbfbceb4e0cc",
+      "file_size": 2795,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6384269,
+      "file_name": "live_h2_repro.cast",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/5qnp1p52ao03b54rsqmtzycwug6h?response-content-disposition=attachment%3B%20filename%3D%22live_h2_repro.cast%22%3B%20filename%2A%3DUTF-8%27%27live_h2_repro.cast&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5FPS2JXN%2F20260804%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260804T152105Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEcaCXVzLXdlc3QtMiJIMEYCIQD4dyvrAt3ogK2oo2fXVDot87jb%2FCWeffw4dLNXi%2BzphQIhAJfAiUAQ3rYmzk2txPug%2Fb0Cgy1dy6%2FW%2FdJWpTHzYLyGKrIFCBAQAxoMMDEzNjE5Mjc0ODQ5IgyY3txCkfYrlWhVRasqjwVXVehjfYQjBvP7maZnouknLrvEzqBW12TG63wvupNA%2Bqg9mi%2BHG%2BGqmcR4vmxFzDtgXG2PzcBWzVeeB7ZyfuySEfwFNhrs9Yd2GazfKOG9CgezAP5f%2Bwh6hJd9tDDfO%2Bj15fvwGIXeg5X6Ou8hYDc8FNuRjbtW%2FWojLZbHtYeiJLMPYFEH5PCX8k6RMyVA7ipw7a31iXhWutZvy1%2FGsfe%2BjJlASUobZMCHYQPClytqVrkZEtcL8qkD6CeoBvPPhXM6IBDdkpghlr2f9o16%2FQSi3JM3v7XCy%2Fte%2F7YDWbpJTdZikglPNmacnuDksTIe9PbizGokYaicbWg%2FJwD9MjrqxGkXEgngpBdkaSbZNsWQxIezT5AqsVVG37yns0lOmLr9Cj6S2hZQZEEDGmWGz5RgtYL38osj99RSNnMoJSt4GZT2VQVwyLEeCpHCmfBbJUzG6j6cDfBHfOj7Y%2B9%2F%2F%2F8hFlVoDTlwcQtbklKZusXYpoJsktCENfL3jJXiUziA%2BcwaWq3%2FTLJHUVB8Nx3z6C%2FsTjGqaa6tBgdSqNG4w%2BzYHNPdXw1ChrSBey9mAuJdza7sAZ%2FCXnbNRml2gAeQ5duUyOdrV8qYHOmVAzL92I44ubPVC3qkQS%2FJBtgCJuTZA6rIVNxtTcCNvfHKoeQsmrudU8%2B1lEf2RLB9GGVKzlALWs%2BmF9kqF9RRxDnnefiTzruThEXaiZKqEoJosvyxZPEyg%2ByLgsmHcs191afHI9OccsMYCNZAdkqvX1fO8POr6I9IzBWywiUsJaGKYEzuXi1AbYMhbfCUwnzdAFmvyqn9wEdUrfDA1NKND8cuHs6yBh2Q65XVfXTaER6%2BaT%2BffjBxTVuzLfBu0hSs3J2MKGGIMNOEyNMGOrABr%2FUI14B50ZYNsKmncZcedHmTyS8RwvAe6gER%2BrTgJWzUI97HDbxko7KmwedZ0lQnDp6s7yV5ifgjIW6IvFFijYaA%2B75QHvx0e1XQeYwGZvCpMU8G2cbAhZV7h0FI5sByV6MsXx%2FQj8lXa0xhpmuvteD8hnQlWxeuu4QLVporGiYwLYEa%2BzZJhc3CHEgyh5uZlh6Ag%2FoM%2FS%2BHOKffg0aVwl%2BP5O333fLZb%2Bdbbb%2FJkes%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=8690f745410979fd8a76bcdb84b81024f7ce923f1e3b4305a1abd94b1e271ef5",
+      "file_size": 2634,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6384270,
+      "file_name": "live_h2_client.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/tcdw9dnbsm6xhxpz5jwo2xrmr0f0?response-content-disposition=attachment%3B%20filename%3D%22live_h2_client.c%22%3B%20filename%2A%3DUTF-8%27%27live_h2_client.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5FPS2JXN%2F20260804%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260804T152105Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEcaCXVzLXdlc3QtMiJIMEYCIQD4dyvrAt3ogK2oo2fXVDot87jb%2FCWeffw4dLNXi%2BzphQIhAJfAiUAQ3rYmzk2txPug%2Fb0Cgy1dy6%2FW%2FdJWpTHzYLyGKrIFCBAQAxoMMDEzNjE5Mjc0ODQ5IgyY3txCkfYrlWhVRasqjwVXVehjfYQjBvP7maZnouknLrvEzqBW12TG63wvupNA%2Bqg9mi%2BHG%2BGqmcR4vmxFzDtgXG2PzcBWzVeeB7ZyfuySEfwFNhrs9Yd2GazfKOG9CgezAP5f%2Bwh6hJd9tDDfO%2Bj15fvwGIXeg5X6Ou8hYDc8FNuRjbtW%2FWojLZbHtYeiJLMPYFEH5PCX8k6RMyVA7ipw7a31iXhWutZvy1%2FGsfe%2BjJlASUobZMCHYQPClytqVrkZEtcL8qkD6CeoBvPPhXM6IBDdkpghlr2f9o16%2FQSi3JM3v7XCy%2Fte%2F7YDWbpJTdZikglPNmacnuDksTIe9PbizGokYaicbWg%2FJwD9MjrqxGkXEgngpBdkaSbZNsWQxIezT5AqsVVG37yns0lOmLr9Cj6S2hZQZEEDGmWGz5RgtYL38osj99RSNnMoJSt4GZT2VQVwyLEeCpHCmfBbJUzG6j6cDfBHfOj7Y%2B9%2F%2F%2F8hFlVoDTlwcQtbklKZusXYpoJsktCENfL3jJXiUziA%2BcwaWq3%2FTLJHUVB8Nx3z6C%2FsTjGqaa6tBgdSqNG4w%2BzYHNPdXw1ChrSBey9mAuJdza7sAZ%2FCXnbNRml2gAeQ5duUyOdrV8qYHOmVAzL92I44ubPVC3qkQS%2FJBtgCJuTZA6rIVNxtTcCNvfHKoeQsmrudU8%2B1lEf2RLB9GGVKzlALWs%2BmF9kqF9RRxDnnefiTzruThEXaiZKqEoJosvyxZPEyg%2ByLgsmHcs191afHI9OccsMYCNZAdkqvX1fO8POr6I9IzBWywiUsJaGKYEzuXi1AbYMhbfCUwnzdAFmvyqn9wEdUrfDA1NKND8cuHs6yBh2Q65XVfXTaER6%2BaT%2BffjBxTVuzLfBu0hSs3J2MKGGIMNOEyNMGOrABr%2FUI14B50ZYNsKmncZcedHmTyS8RwvAe6gER%2BrTgJWzUI97HDbxko7KmwedZ0lQnDp6s7yV5ifgjIW6IvFFijYaA%2B75QHvx0e1XQeYwGZvCpMU8G2cbAhZV7h0FI5sByV6MsXx%2FQj8lXa0xhpmuvteD8hnQlWxeuu4QLVporGiYwLYEa%2BzZJhc3CHEgyh5uZlh6Ag%2FoM%2FS%2BHOKffg0aVwl%2BP5O333fLZb%2Bdbbb%2FJkes%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3efca71c795d8fcb679fa0b0aad68543b27857bc236371d6dfdb05e8a6e12f71",
+      "file_size": 6883,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6384271,
+      "file_name": "live_h2_repro.mp4",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ylxenr9gu8ahmn0qra3xgbl011y7?response-content-disposition=attachment%3B%20filename%3D%22live_h2_repro.mp4%22%3B%20filename%2A%3DUTF-8%27%27live_h2_repro.mp4&response-content-type=video%2Fmp4&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5FPS2JXN%2F20260804%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260804T152105Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEcaCXVzLXdlc3QtMiJIMEYCIQD4dyvrAt3ogK2oo2fXVDot87jb%2FCWeffw4dLNXi%2BzphQIhAJfAiUAQ3rYmzk2txPug%2Fb0Cgy1dy6%2FW%2FdJWpTHzYLyGKrIFCBAQAxoMMDEzNjE5Mjc0ODQ5IgyY3txCkfYrlWhVRasqjwVXVehjfYQjBvP7maZnouknLrvEzqBW12TG63wvupNA%2Bqg9mi%2BHG%2BGqmcR4vmxFzDtgXG2PzcBWzVeeB7ZyfuySEfwFNhrs9Yd2GazfKOG9CgezAP5f%2Bwh6hJd9tDDfO%2Bj15fvwGIXeg5X6Ou8hYDc8FNuRjbtW%2FWojLZbHtYeiJLMPYFEH5PCX8k6RMyVA7ipw7a31iXhWutZvy1%2FGsfe%2BjJlASUobZMCHYQPClytqVrkZEtcL8qkD6CeoBvPPhXM6IBDdkpghlr2f9o16%2FQSi3JM3v7XCy%2Fte%2F7YDWbpJTdZikglPNmacnuDksTIe9PbizGokYaicbWg%2FJwD9MjrqxGkXEgngpBdkaSbZNsWQxIezT5AqsVVG37yns0lOmLr9Cj6S2hZQZEEDGmWGz5RgtYL38osj99RSNnMoJSt4GZT2VQVwyLEeCpHCmfBbJUzG6j6cDfBHfOj7Y%2B9%2F%2F%2F8hFlVoDTlwcQtbklKZusXYpoJsktCENfL3jJXiUziA%2BcwaWq3%2FTLJHUVB8Nx3z6C%2FsTjGqaa6tBgdSqNG4w%2BzYHNPdXw1ChrSBey9mAuJdza7sAZ%2FCXnbNRml2gAeQ5duUyOdrV8qYHOmVAzL92I44ubPVC3qkQS%2FJBtgCJuTZA6rIVNxtTcCNvfHKoeQsmrudU8%2B1lEf2RLB9GGVKzlALWs%2BmF9kqF9RRxDnnefiTzruThEXaiZKqEoJosvyxZPEyg%2ByLgsmHcs191afHI9OccsMYCNZAdkqvX1fO8POr6I9IzBWywiUsJaGKYEzuXi1AbYMhbfCUwnzdAFmvyqn9wEdUrfDA1NKND8cuHs6yBh2Q65XVfXTaER6%2BaT%2BffjBxTVuzLfBu0hSs3J2MKGGIMNOEyNMGOrABr%2FUI14B50ZYNsKmncZcedHmTyS8RwvAe6gER%2BrTgJWzUI97HDbxko7KmwedZ0lQnDp6s7yV5ifgjIW6IvFFijYaA%2B75QHvx0e1XQeYwGZvCpMU8G2cbAhZV7h0FI5sByV6MsXx%2FQj8lXa0xhpmuvteD8hnQlWxeuu4QLVporGiYwLYEa%2BzZJhc3CHEgyh5uZlh6Ag%2FoM%2FS%2BHOKffg0aVwl%2BP5O333fLZb%2Bdbbb%2FJkes%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1f954c8cd4bf91e30acf66f519a91da35bfee87938f822f0c1d2c37a79cfda9d",
+      "file_size": 179202,
+      "type": "video/mp4",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
