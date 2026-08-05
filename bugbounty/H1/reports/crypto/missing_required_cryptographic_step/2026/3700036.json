@@ -1,0 +1,146 @@
+{
+  "id": 3700036,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzAwMDM2",
+  "url": "https://hackerone.com/reports/3700036",
+  "title": "SpendProofV1 txid-substitution: get_spend_proof/check_spend_proof do not verify returned transaction hash",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-28T06:57:26.109Z",
+  "submitted_at": "2026-04-28T06:57:26.380Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "bebensap",
+    "url": "/bebensap",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f03exbfz2vld0bvyw9b3hiabdbua/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-05T10:23:21.523Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-08-05T10:23:20.887Z",
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:50:07.966Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Repository:** [`monero-project/monero`](https://github.com/monero-project/monero) — `src/wallet/wallet2.cpp`. Snapshot: `master @ 3ad4a5ee8` (`v0.18.1.0-3ad4a5ee8`).\n\n## Summary\n\nBoth helpers fetch a pruned transaction with `/gettransactions`, parse it with `get_pruned_tx()`, then build the spend-proof challenge from the **`txid` argument**, not from the hash implied by the blob. Neither compares `tx_hash` (from parsing) to `txid` before signing or verifying. `check_tx_proof()` on the same RPC path does that comparison.\n\n`get_spend_proof` (roughly `wallet2.cpp` 11868–11969): request, parse, then:\n\n```cpp\nstd::string sig_prefix_data((const char*)&txid, sizeof(crypto::hash));\nsig_prefix_data += message;\ncrypto::hash sig_prefix_hash;\ncrypto::cn_fast_hash(sig_prefix_data.data(), sig_prefix_data.size(), sig_prefix_hash);\n// ring sigs use tx / rings from res.txs[0], not a second hash check\n```\n\n`check_spend_proof` (same file, ~11979–12084) repeats the pattern: prefix hash from `txid`, ring checks from the parsed `tx`.\n\nFor comparison, after `get_pruned_tx` in `check_tx_proof`:\n\n```cpp\nTHROW_WALLET_EXCEPTION_IF(tx_hash != txid, error::wallet_internal_error,\n    \"Failed to get the right transaction from daemon\");\n```\n\nSo if the HTTP peer in front of the wallet is malicious (fake `monerod`, corporate proxy, or on-path MITM), it can answer a request for txid **B** with a valid serialized body for a different tx **A**. The wallet still signs `H(B || message)` while using inputs/key images/rings from **A**. Verifiers that use `check_spend_proof` against the same bad endpoint will see `good: true` for **B** even though nothing in the response actually authenticates **B**.\n\nThis is integrity of the spend proof binding, not key exfiltration or remote wallet compromise. You still need a broken or attacker-controlled daemon channel.\n\n## Releases Affected\n\nRe-checked on `master @ 3ad4a5ee8`. The missing `tx_hash == txid` guard is plain in source; any branch with this spend-proof code path behaves the same unless someone already merged an equivalent check.\n\n## Steps to Reproduce\n\nThe practical check is end-to-end: real `monerod --regtest`, real `monero-wallet-rpc`, and a tiny Python reverse proxy that forwards to the honest node but, on `POST /gettransactions`, replaces a chosen **FAKE** `txs_hashes` entry with the **REAL** hash of a spend the wallet actually made. The node returns a consistent pruned tx for **A**; the RPC still asks for a proof on **FAKE**. No Monero source edits.\n\n**One command (paths match this machine; adjust `MONERO_BUILD` if your tree lives elsewhere):**\n\n```bash\nbash /home/beni/Monero/reports/poc_spend_proof_txid_substitution.sh\n```\n\nThe script mirrors what you would do by hand: mine and `transfer` on a **direct** daemon URL (so sync is boring), record the real spend txid, bring up the MITM, `set_daemon` to it with `\"ssl_support\":\"disabled\"` for plain HTTP, then call `get_spend_proof` with the random **FAKE** id, `check_spend_proof` with the returned signature, and finally point back at the honest daemon to show the same **FAKE** id no longer yields a proof.\n{F5813828}\n**What you should see in the log:** `SpendProofV1…` returned for **FAKE**, `check_spend_proof` reports `good`, then after dropping the MITM the wallet errors on `get_spend_proof` for **FAKE** (e.g. missing / wrong `txs` count).\n\nBuild the binaries once from the official tree, Release, no patches — same idea as the other lab scripts in `reports/`.\n\nIf you hate shell wrappers, the two attachments that matter are:\n\n- `reports/poc_spend_proof_txid_substitution.sh`\n- `reports/poc_spend_proof_txid_substitution_proxy.py`\n\n## Possible Solution\n\nAfter `get_pruned_tx(res.txs[0], tx, tx_hash)` succeeds in **both** `get_spend_proof` and `check_spend_proof`, add the same guard as `check_tx_proof`:\n\n```cpp\nTHROW_WALLET_EXCEPTION_IF(tx_hash != txid, error::wallet_internal_error,\n    \"Failed to get the right transaction from daemon\");\n```\n\nAdd a regression test (daemon fixture or mocked HTTP) that returns a blob whose id does not match the requested hash; both entry points should bail before signing or verifying.\n\n## Impact\n\nA malicious, compromised, or MITM daemon can break the integrity binding of SpendProofV1.\n\n`get_spend_proof` and `check_spend_proof` are supposed to operate on the transaction identified by the caller-supplied `txid`. However, because the parsed transaction hash is not compared against that `txid`, the daemon can return transaction body A for a request for txid B. The wallet then builds/verifies the spend-proof challenge over B while using the inputs, key images, and rings from A.\n\nIn the PoC, a random FAKE txid cannot produce a spend proof against the honest daemon. When `/gettransactions` is MITM-substituted with a real wallet-originated transaction body, `get_spend_proof(txid=FAKE)` succeeds and `check_spend_proof(txid=FAKE, signature=...)` returns `good:true` behind the same malicious daemon.\n\nThis can mislead services or automation that rely on `check_spend_proof` as evidence that a user created/spent a specific transaction id, if their wallet-rpc verifier is connected to an attacker-controlled, compromised, or MITM'd daemon.\n\nThis is not a private-key leak, fund theft, consensus issue, or RCE. The precondition is control of the wallet-to-daemon response path. The impact is proof authenticity/integrity failure.\n\n## Note\n\nDrafting and the PoC wiring had editor/AI help; line numbers, script runs, and daemon behaviour were checked against the local tree/build.\n\n## Bounty\n\nIf this qualifies for a bounty, XMR can be sent to:\n\n`47TUANy82gtBFMvsFwyA3hE98PzgKSmxNia3n9fpvSadDWs234M7oWfevXqYxKmy3d9hSp1TH82gX4JWvNEUupse2s92maV`",
+  "weakness": {
+    "id": 39,
+    "name": "Missing Required Cryptographic Step"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5813828,
+      "file_name": "Screenshot_2026-04-28_134958.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/8s89m0mg7tq39bhej8mlxfu6mavu?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-04-28_134958.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-04-28_134958.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXF6RNLRE%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115337Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFoaCXVzLXdlc3QtMiJGMEQCICUGm3AEqBlltphylMY66wEOIWBJQezuxbmZYTyr6VkFAiBpaZEq9Qi6G4hdQOvL9lUGDQN8sxIe%2B3KjbKrWKwrCVCqxBQgjEAMaDDAxMzYxOTI3NDg0OSIMa3Fzy9KmgMR7TLdEKo4FlU1t%2BNgrS%2BrYOy7cQMW0d0bb2%2BCmpc9k8JcXZevqqw2sn5frcmE%2F3Pk4pGP3OUVXmmKZ%2FiiEv1OSbTF08AdqCH0Y4aHyYFSFz9Jlg7nPyBeiBvEd%2FQfSV6hV4sX5iJrB020%2FtgxKQS7S87zlKoHlImQ1VNPVEmVuX9ZXC%2Fsv4eXBtgFgwkn1K6FOkwE6vffQzNB9FyXLvGmzIu7ce6MT%2B4ah%2BcEAJOAD22O2CPxzq%2BSp1G6fwEZVmqcZegBiS1Vq73bCNf5awGrW%2F3NXm3WzH4FI0xsqn%2BNFAKm3sJKSaN92MZRXnsDIZjX%2FO3yhLHQPxxqjk3fMtE6%2F%2F6Ozn4s6PKEvP5GvamBJXfqP7SDfQoa06fARRepJqOPeqfZNSI84H2g4TWmSevuaTJuMHDu0tQcZOdLmOihleyFky0mklun6cjVZjVXeGLyY8ERH5sICWmrIx1KlXJW%2FY1nft86yVVhxf0bvvOqfo2qhau0GWLNFeGMx9dIp4MevAz8A0ORDvQoYVX0rXuT0mGiKzAYrnQ92RdChE9X7pLMcIw7abS%2BYKb7RaDe2RsRolwRr14xb2Ytnb8OEKNKlrxCV2mQFNWKoKgi0u%2BdBeBkClodnKwD9hmZVpwGXHDo%2BbVU8ApMjsEhchvkiv7TpiWSfRAMb%2FFZauo31VOsBOKkROo5mh5pY4GMkmrsj9tUGjg3NlSg%2FRGIxtbAtZ9X93r98QJkV7zsnYyI9iJjgEwcWlvmH07RLZAdBPQwK4cNoJcPOGHZgE0LT6gERLt%2FrplHclV9y3QFYzkw1tAF4%2F6jd%2B65%2FfUrF3MmnX9WXYane0ppHjZJB%2F9yKmvozDffoILeJwtH0rNFzspvdo3cLQ%2Foo6YrvMMGDzNMGOrIBrNveuTG%2FpDXkPK6CZ1r5Fux3MIsUTnpgWMZYJs21BNEGZQFHTp2VBbokdJY1aYSKl6jCemDukRa7mCRahsHBO%2BGCRw1bmNe8S4QjzkNKNlCR6B7fZNjI2hmLqZVYqgfuosmCRTjuzpigMu4voEBERpvcKwcUQFA%2FLG07Vp5SZrLSSl0QsKZaITeKJ6rNVGpeGK8pRHEgZWLDM0ojGW4jnWgNWe9ge2XRV2%2FvLvVdy%2BWBqQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e9bdcfc5fe7563a285bb2fe881054a76d86686bb71bfc7c3003ea69a5c9cfa3a",
+      "file_size": 173114,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5813829,
+      "file_name": "poc_spend_proof_txid_substitution_proxy.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/4awevuu9nqqhiou89l9itypw1gpd?response-content-disposition=attachment%3B%20filename%3D%22poc_spend_proof_txid_substitution_proxy.py%22%3B%20filename%2A%3DUTF-8%27%27poc_spend_proof_txid_substitution_proxy.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXF6RNLRE%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115337Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFoaCXVzLXdlc3QtMiJGMEQCICUGm3AEqBlltphylMY66wEOIWBJQezuxbmZYTyr6VkFAiBpaZEq9Qi6G4hdQOvL9lUGDQN8sxIe%2B3KjbKrWKwrCVCqxBQgjEAMaDDAxMzYxOTI3NDg0OSIMa3Fzy9KmgMR7TLdEKo4FlU1t%2BNgrS%2BrYOy7cQMW0d0bb2%2BCmpc9k8JcXZevqqw2sn5frcmE%2F3Pk4pGP3OUVXmmKZ%2FiiEv1OSbTF08AdqCH0Y4aHyYFSFz9Jlg7nPyBeiBvEd%2FQfSV6hV4sX5iJrB020%2FtgxKQS7S87zlKoHlImQ1VNPVEmVuX9ZXC%2Fsv4eXBtgFgwkn1K6FOkwE6vffQzNB9FyXLvGmzIu7ce6MT%2B4ah%2BcEAJOAD22O2CPxzq%2BSp1G6fwEZVmqcZegBiS1Vq73bCNf5awGrW%2F3NXm3WzH4FI0xsqn%2BNFAKm3sJKSaN92MZRXnsDIZjX%2FO3yhLHQPxxqjk3fMtE6%2F%2F6Ozn4s6PKEvP5GvamBJXfqP7SDfQoa06fARRepJqOPeqfZNSI84H2g4TWmSevuaTJuMHDu0tQcZOdLmOihleyFky0mklun6cjVZjVXeGLyY8ERH5sICWmrIx1KlXJW%2FY1nft86yVVhxf0bvvOqfo2qhau0GWLNFeGMx9dIp4MevAz8A0ORDvQoYVX0rXuT0mGiKzAYrnQ92RdChE9X7pLMcIw7abS%2BYKb7RaDe2RsRolwRr14xb2Ytnb8OEKNKlrxCV2mQFNWKoKgi0u%2BdBeBkClodnKwD9hmZVpwGXHDo%2BbVU8ApMjsEhchvkiv7TpiWSfRAMb%2FFZauo31VOsBOKkROo5mh5pY4GMkmrsj9tUGjg3NlSg%2FRGIxtbAtZ9X93r98QJkV7zsnYyI9iJjgEwcWlvmH07RLZAdBPQwK4cNoJcPOGHZgE0LT6gERLt%2FrplHclV9y3QFYzkw1tAF4%2F6jd%2B65%2FfUrF3MmnX9WXYane0ppHjZJB%2F9yKmvozDffoILeJwtH0rNFzspvdo3cLQ%2Foo6YrvMMGDzNMGOrIBrNveuTG%2FpDXkPK6CZ1r5Fux3MIsUTnpgWMZYJs21BNEGZQFHTp2VBbokdJY1aYSKl6jCemDukRa7mCRahsHBO%2BGCRw1bmNe8S4QjzkNKNlCR6B7fZNjI2hmLqZVYqgfuosmCRTjuzpigMu4voEBERpvcKwcUQFA%2FLG07Vp5SZrLSSl0QsKZaITeKJ6rNVGpeGK8pRHEgZWLDM0ojGW4jnWgNWe9ge2XRV2%2FvLvVdy%2BWBqQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=654229aea9aafd8eb4bf88b2e9695fce2e2ee4d57c256a4b52e0e9276d4554a7",
+      "file_size": 4188,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5813830,
+      "file_name": "poc_spend_proof_txid_substitution.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bkvnujsacdy5fgi663b5zf7v7lz1?response-content-disposition=attachment%3B%20filename%3D%22poc_spend_proof_txid_substitution.sh%22%3B%20filename%2A%3DUTF-8%27%27poc_spend_proof_txid_substitution.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXF6RNLRE%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115337Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFoaCXVzLXdlc3QtMiJGMEQCICUGm3AEqBlltphylMY66wEOIWBJQezuxbmZYTyr6VkFAiBpaZEq9Qi6G4hdQOvL9lUGDQN8sxIe%2B3KjbKrWKwrCVCqxBQgjEAMaDDAxMzYxOTI3NDg0OSIMa3Fzy9KmgMR7TLdEKo4FlU1t%2BNgrS%2BrYOy7cQMW0d0bb2%2BCmpc9k8JcXZevqqw2sn5frcmE%2F3Pk4pGP3OUVXmmKZ%2FiiEv1OSbTF08AdqCH0Y4aHyYFSFz9Jlg7nPyBeiBvEd%2FQfSV6hV4sX5iJrB020%2FtgxKQS7S87zlKoHlImQ1VNPVEmVuX9ZXC%2Fsv4eXBtgFgwkn1K6FOkwE6vffQzNB9FyXLvGmzIu7ce6MT%2B4ah%2BcEAJOAD22O2CPxzq%2BSp1G6fwEZVmqcZegBiS1Vq73bCNf5awGrW%2F3NXm3WzH4FI0xsqn%2BNFAKm3sJKSaN92MZRXnsDIZjX%2FO3yhLHQPxxqjk3fMtE6%2F%2F6Ozn4s6PKEvP5GvamBJXfqP7SDfQoa06fARRepJqOPeqfZNSI84H2g4TWmSevuaTJuMHDu0tQcZOdLmOihleyFky0mklun6cjVZjVXeGLyY8ERH5sICWmrIx1KlXJW%2FY1nft86yVVhxf0bvvOqfo2qhau0GWLNFeGMx9dIp4MevAz8A0ORDvQoYVX0rXuT0mGiKzAYrnQ92RdChE9X7pLMcIw7abS%2BYKb7RaDe2RsRolwRr14xb2Ytnb8OEKNKlrxCV2mQFNWKoKgi0u%2BdBeBkClodnKwD9hmZVpwGXHDo%2BbVU8ApMjsEhchvkiv7TpiWSfRAMb%2FFZauo31VOsBOKkROo5mh5pY4GMkmrsj9tUGjg3NlSg%2FRGIxtbAtZ9X93r98QJkV7zsnYyI9iJjgEwcWlvmH07RLZAdBPQwK4cNoJcPOGHZgE0LT6gERLt%2FrplHclV9y3QFYzkw1tAF4%2F6jd%2B65%2FfUrF3MmnX9WXYane0ppHjZJB%2F9yKmvozDffoILeJwtH0rNFzspvdo3cLQ%2Foo6YrvMMGDzNMGOrIBrNveuTG%2FpDXkPK6CZ1r5Fux3MIsUTnpgWMZYJs21BNEGZQFHTp2VBbokdJY1aYSKl6jCemDukRa7mCRahsHBO%2BGCRw1bmNe8S4QjzkNKNlCR6B7fZNjI2hmLqZVYqgfuosmCRTjuzpigMu4voEBERpvcKwcUQFA%2FLG07Vp5SZrLSSl0QsKZaITeKJ6rNVGpeGK8pRHEgZWLDM0ojGW4jnWgNWe9ge2XRV2%2FvLvVdy%2BWBqQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3bea334c853bbdd4a92f92bf6a479a539577f325a3d3ff100175388da021ab95",
+      "file_size": 15610,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-08-20T23:50:08.543Z",
+  "allow_singular_disclosure_after": 1338991.207168852,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.3,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

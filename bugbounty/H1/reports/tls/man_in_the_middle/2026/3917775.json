@@ -1,0 +1,106 @@
+{
+  "id": 3917775,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTE3Nzc1",
+  "url": "https://hackerone.com/reports/3917775",
+  "title": "curl Missing Sec-WebSocket-Accept Verification Enables MITM WebSocket Session Hijacking",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "readable_substate": "N/A",
+  "created_at": "2026-08-05T09:05:25.691Z",
+  "submitted_at": "2026-08-05T09:05:25.892Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "kiyin",
+    "url": "/kiyin",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-05T11:13:13.332Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-05T09:27:09.838Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\ncurl's `Curl_ws_accept()` function in `lib/ws.c` processes the 101 Switching Protocols response to a client WebSocket upgrade request. RFC 6455 Section 4.1 mandates that the client MUST verify the `Sec-WebSocket-Accept` response header by computing the SHA-1 hash of the concatenation of the `Sec-WebSocket-Key` value with the magic GUID `258EAFA5-E914-47DA-95CA-C5AB0DC85B11`, base64-encoding the result, and comparing it against the server-returned value. The source code contains a comment describing this requirement (line 1418) but implements no actual verification logic — there is no SHA-1 computation, no header comparison, and no rejection path. The function unconditionally calls `infof(data, \"[WS] Received 101, switch to WebSocket\")` and switches to WebSocket mode upon receiving any `HTTP/1.1 101 Switching Protocols` response. A network attacker positioned on the `ws://` connection path can return a forged 101 response that entirely omits the `Sec-WebSocket-Accept` header (or includes an arbitrary incorrect value), and curl will accept it and process attacker-controlled WebSocket frames. This enables full man-in-the-middle hijacking of any `ws://` WebSocket transfer.\n\n```python\n#!/usr/bin/env python3\n\"\"\"PoC: send 101 without Sec-WebSocket-Accept — curl accepts it.\"\"\"\nimport socket, struct, sys, time\n\nPORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8766\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ns.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\ns.bind((\"0.0.0.0\", PORT)); s.listen(1)\nconn, _ = s.accept()\ndata = b\"\"\nwhile b\"\\r\\n\\r\\n\" not in data:\n    data += conn.recv(4096)\n# Send 101 WITHOUT Sec-WebSocket-Accept header\nconn.sendall(b\"HTTP/1.1 101 Switching Protocols\\r\\nUpgrade: websocket\\r\\nConnection: Upgrade\\r\\n\\r\\n\")\ntime.sleep(0.5)\n# Send attacker-controlled WebSocket binary frame\nframe = bytes([0x82, 25]) + b\"ATTACKER_CONTROLLED_DATA\"\nconn.sendall(frame)\ntime.sleep(2)\nconn.close(); s.close()\n```\n\nRun: `python3 poc.py 8766` then in another terminal: `curl -v ws://127.0.0.1:8766/`\n\n## Affected version\n\ncurl 8.22.0-DEV (compiled from master, 2026-08-05)\n\nPlatform: Ubuntu 24.04 (x86_64), Debug build with ASan\n\nSource location: `lib/ws.c`, function `Curl_ws_accept()`, lines 1375–1510\n\nThe vulnerability has been present since the initial introduction of WebSocket support. No code changes were observed in the current master branch.\n\n## Steps To Reproduce\n\n1. Save the PoC script above as `poc.py`.\n2. Start the fake WebSocket server: `python3 poc.py 8766`\n3. Run curl: `curl --max-time 5 -v ws://127.0.0.1:8766/`\n4. Observe curl output:\n   - `< HTTP/1.1 101 Switching Protocols`\n   - `* Received 101, Switching to WebSocket`\n   - `[WS] Received 101, switch to WebSocket`\n5. curl accepts the 101 response without a `Sec-WebSocket-Accept` header, switches to WebSocket mode, and processes the attacker-sent frame. No rejection or error occurs.\n\nExpected compliant behavior: curl MUST compute `base64(SHA1(Sec-WebSocket-Key + \"258EAFA5-E914-47DA-95CA-C5AB0DC85B11\"))` and verify it matches the `Sec-WebSocket-Accept` value returned by the server. If the header is missing or the value does not match, curl MUST fail the WebSocket connection (RFC 6455 Section 4.1, item 6).\n\n\n## Again: there is no bug-bounty for curl. We do not offer any rewards, only proper credits.\n\n## Impact\n\n## Summary\n\nAn attacker positioned on the network path of a `ws://` WebSocket connection can hijack the WebSocket session by returning a forged 101 Switching Protocols response. Because `Curl_ws_accept()` performs zero verification of the `Sec-WebSocket-Accept` header, the attacker-controlled 101 response is accepted unconditionally.\n\nOnce the forged WebSocket session is established, the attacker gains full control:\n\n- **Inject arbitrary WebSocket frames** — The attacker can send arbitrary binary or text frames to the curl client, impersonating the legitimate server. Application logic consuming WebSocket data cannot distinguish genuine server data from attacker-injected data.\n- **Intercept client traffic** — Any WebSocket frames the client sends through the hijacked session are visible to the attacker, compromising the confidentiality and integrity of the connection.\n- **Bypass application-layer authentication** — Application-level authentication or message integrity checks built on top of the `ws://` WebSocket transport may be undermined, since the attacker controls the entire data channel.\n\nThis vulnerability affects all users who use curl's WebSocket support with `ws://` URLs. Connections using `wss://` (WebSocket over TLS) are not affected, as the TLS layer prevents a man-in-the-middle from tampering with the 101 response.",
+  "weakness": {
+    "id": 30,
+    "name": "Man-in-the-Middle"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

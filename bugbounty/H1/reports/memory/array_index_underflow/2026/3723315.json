@@ -1,0 +1,162 @@
+{
+  "id": 3723315,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzIzMzE1",
+  "url": "https://hackerone.com/reports/3723315",
+  "title": "wallet-rpc describe_transfer uses real_output_in_tx_index instead of real_output: cold-wallet pre-sign review shows wrong ring member",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-09T17:08:31.741Z",
+  "submitted_at": "2026-05-09T17:08:32.093Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "bebensap",
+    "url": "/bebensap",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f03exbfz2vld0bvyw9b3hiabdbua/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-05T10:23:08.581Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-08-05T10:23:07.960Z",
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:50:46.582Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# `describe_transfer` wallet-rpc indexes the ring with `real_output_in_tx_index` instead of `real_output` → cold-wallet pre-sign review shows a decoy as the \"real input\"\n\n**Repository:** [`monero-project/monero`](https://github.com/monero-project/monero) — `src/wallet/wallet_rpc_server.cpp`. Reproduced against unmodified upstream source built from `/home/beni/Monero/monero-src` (HEAD `082b600a2`, master). The same two lines exist on `release-v0.18`.\n\n## Summary\n\n`describe_transfer` is the JSON-RPC method a cold-wallet operator (or a GUI / payment integration wrapping `monero-wallet-rpc`) calls before signing an unsigned or multisig txset, to see what the transaction is actually going to do. For each input it returns a `sources[i]` block that includes `global_index` and `pubkey` — advertised as the real ring entry being spent.\n\nThe handler reads those two fields from the wrong slot of the ring. `tx_source_entry` carries two distinct numbers: `real_output` (the position of the real entry inside `outputs`, the ring) and `real_output_in_tx_index` (the position the output had inside its source transaction's `vout`). They are not the same. `outputs` is the ring (size = ring_size, currently 16); `real_output_in_tx_index` is bounded only by the source tx's vout length and is `0` for any coinbase-derived UTXO. `on_describe_transfer` indexes the ring with the second number, so the global_index and pubkey it shows the operator describe whichever ring slot happens to sit at position `real_output_in_tx_index` — usually a decoy.\n\nThe signing path is unaffected. `construct_tx_with_tx_key` reads the real entry from `outputs[real_output]` (`cryptonote_tx_utils.cpp:365,373`); so do `multisig_tx_builder_ringct.cpp:113` and `simplewallet.cpp:6213`. Only this RPC mixes them up. The result is that `describe_transfer` and the broadcast tx disagree about which output the wallet is about to spend.\n\nBuggy block, `src/wallet/wallet_rpc_server.cpp` (master `082b600a2`):\n\n```cpp\n1564  for (size_t s = 0; s < cd.sources.size(); ++s)\n1565  {\n1566    const cryptonote::tx_source_entry &src_in = cd.sources[s];\n1567    wallet_rpc::COMMAND_RPC_DESCRIBE_TRANSFER::source &src_out = desc.sources.emplace_back();\n1568    src_out.amount = src_in.amount;\n1569    src_out.global_index = src_in.outputs.at(src_in.real_output_in_tx_index).first;\n1570    src_out.rct = src_in.rct;\n1571    src_out.pubkey = epee::string_tools::pod_to_hex(\n1572                        src_in.outputs.at(src_in.real_output_in_tx_index).second);\n```\n\nThe struct definition documents the meaning, and the serialiser only bounds `real_output`, not `real_output_in_tx_index`:\n\n```cpp\n// src/cryptonote_core/cryptonote_tx_utils.h\n45  std::vector<output_entry> outputs;     // index + key + ringct commitment (the RING)\n46  uint64_t real_output;                  // index in `outputs` of the real entry\n49  uint64_t real_output_in_tx_index;      // index in the SOURCE TX's vout\n...\n68    if (real_output >= outputs.size())   // serialiser only enforces this one\n69      return false;\n```\n\nOther callers all use `real_output`:\n\n```cpp\n// src/cryptonote_core/cryptonote_tx_utils.cpp:365\nconst auto& out_key = src_entr.outputs[src_entr.real_output].second.dest;\n// src/multisig/multisig_tx_builder_ringct.cpp:113\nrct::rct2pk(src.outputs[src.real_output].second.dest),\n// src/simplewallet/simplewallet.cpp:6213\nif (src.outputs[src.real_output].second.dest == td.get_public_key())\n```\n\nAnd `wallet2::transfer_selected_rct` is what populates the two fields in the first place, so you can see them being assigned to clearly different things:\n\n```cpp\n// src/wallet/wallet2.cpp:9985–9992\n*it_to_replace = real_oe;\nsrc.real_out_tx_key             = get_tx_pub_key_from_extra(td.m_tx, td.m_pk_index);\nsrc.real_out_additional_tx_keys = get_additional_tx_pub_keys_from_extra(td.m_tx);\nsrc.real_output                 = it_to_replace - src.outputs.begin();   // ring slot\nsrc.real_output_in_tx_index     = td.m_internal_output_index;             // source-tx vout index\n```\n\nThere's a second, smaller failure mode falling out of the same line. Because `real_output_in_tx_index` isn't bounded by `outputs.size()`, an unsigned txset whose source UTXO came from a tx with more than `ring_size` outputs (batched payouts, miner consolidations) makes `outputs.at(real_output_in_tx_index)` throw `std::out_of_range`. The catch a few frames up converts that into `WALLET_RPC_ERROR_CODE_BAD_UNSIGNED_TX_DATA \"failed to parse unsigned transfers\"`. The same blob signs and broadcasts cleanly via `sign_transfer` / `submit_transfer` — only the review path is broken. Operators who rely on `describe_transfer` to gate signing on legitimate batched txsets get a hard fail with a misleading error message.\n\n## Releases Affected\n\n`master @ 082b600a2` and the `release-v0.18` branch (the two lines are byte-identical there). The describe path lands in tree well before the current top commits — this isn't a regression from a single PR. The Ubuntu `monero` package ships the same handler.\n\n## Steps to Reproduce\n\nI packaged the entire repro as a self-contained bash script that drives the unmodified upstream binaries built from `/home/beni/Monero/monero-src`. It uses no mocks, no patches, no test harness — just a real `monerod --regtest --offline` and two `monero-wallet-rpc` instances on loopback.\n\n**Prerequisites — build once:**\n\n```bash\ncd /home/beni/Monero/monero-src\nmkdir -p build/release && cd build/release\ncmake -D CMAKE_BUILD_TYPE=Release -D BUILD_TESTS=OFF \\\n      -D MONERO_WALLET_CRYPTO_LIBRARY=cn -D ARCH=native \\\n      -D MANUAL_SUBMODULES=1 ../..\nmake -j$(nproc)\n# Binaries land at build/release/bin/{monerod,monero-wallet-rpc}\n```\n\nThe script checks for those binaries at startup and exits with an error if they're missing. It also `grep`s the buggy lines out of the source tree before doing anything else, so reviewers can confirm the binary they're about to run was compiled from those exact lines.\n\n**Run (~90 s):**\n\n```\nbash reports/poc_describe_transfer_wrong_ring_index.sh\n```\n\nWhat it does:\n\n1. Starts `monerod --regtest --fixed-difficulty 1 --offline` on loopback.\n2. Spins up `wallet_a` (full / cold) on RPC `:18190`. Mines 80 blocks to it, then 60 buffer blocks elsewhere so the outputs unlock.\n3. Captures `wallet_a`'s UTXO ledger via `incoming_transfers`. That's the ground truth — for every output the wallet owns, we now have the `(key_image, global_index, pubkey)` triple.\n4. Spins up `wallet_b` (watch-only of `wallet_a`) on RPC `:18191` via `generate_from_keys` with viewkey + address only. Refreshes. Imports key images so it knows what's unspent.\n5. `wallet_b` calls `transfer` with `do_not_relay=true`. Because it's watch-only, `fill_response` returns the cold-signing blob in `unsigned_txset`. That's the same blob a cold operator would receive in a real flow.\n6. `wallet_a` calls `describe_transfer` on the unsigned txset. We capture each `sources[i].global_index` and `sources[i].pubkey`.\n7. `wallet_a` calls `sign_transfer` on the same blob. `wallet_b` calls `submit_transfer` to relay it. We mine one block.\n8. We pull the on-chain tx from the daemon (`get_transactions`, `decode_as_json=true`), read `vin[i].k_image` for each input, and look each one up in step 3's UTXO ledger. That gives the truth for every input: which `global_index`, which `pubkey`.\n9. Per-input compare against describe.\n\nExcerpted output from a real run (full log: `reports/_poc_describe_transfer_run.log`):\n\n```\n══ 0a) Show the buggy source lines compiled into the binaries above ══\n    wallet_rpc_server.cpp:1569:          src_out.global_index = src_in.outputs.at(src_in.real_output_in_tx_index).first;\n    wallet_rpc_server.cpp:1571:          src_out.pubkey = epee::string_tools::pod_to_hex(src_in.outputs.at(src_in.real_output_in_tx_index).second);\n  [PASS] monerod    : Monero 'Fluorine Fermi' (v0.18.1.0-unknown)\n  [PASS] wallet-rpc : Monero 'Fluorine Fermi' (v0.18.1.0-unknown)\n\n══ 8) wallet_b submits the signed tx (submit_transfer) — broadcasts on-chain ══\n  [PASS] tx broadcast on regtest chain: 7e1ba85c6c44d85f8aca7b82a30f1abb1b3703f4acd25096aa6b1f4b48afaf42\n\n══ 9) Pull the on-chain tx; for EACH input, recover the real output via k_image match ══\n  [PASS] On-chain tx has 2 input(s); each was matched against wallet_a's UTXO ledger:\n        k_image=da3a45a17a5bf33b…  amount=35179037333548  global_index=79  pubkey=387dced4092abedf…\n        k_image=bec0c27ec4c4a996…  amount=35184338534400  global_index= 0  pubkey=2a0e7912bf34820c…\n\n══ 10) Per-input compare: describe_transfer  vs  on-chain ground truth ══\n  source[0] amount=35184338534400  →  MATCHES  (real_output happened to == real_output_in_tx_index)\n    describe : GI=0      dest_pubkey=2a0e7912bf34820cbfd9221f351b82aa…\n    TRUTH    : GI=0           pubkey=2a0e7912bf34820cbfd9221f351b82aa…\n  source[1] amount=35179037333548  →  *** MISMATCH ***   (BUG TRIGGERED)\n    describe : GI=0      dest_pubkey=2a0e7912bf34820cbfd9221f351b82aa…\n    TRUTH    : GI=79          pubkey=387dced4092abedf248f68ea2a2957ec…\n\n  [PASS] *** BUG CONFIRMED *** — 1 of 2 input(s) misreported by describe_transfer\n```\n\nNote what describe says about source[1]: `global_index=0, pubkey=2a0e7912…`. That's identical to source[0]. Both sources came from coinbase txs (one output each, so `real_output_in_tx_index=0` on both), so the buggy line pulls `outputs[0]` from each ring; describe ends up reporting two ring decoys that look almost interchangeable. The actual broadcast tx (`txid=7e1ba85c…`) spent `global_index=79` on that input — pubkey `387dced4…` — which is nowhere in the description an operator would have seen.\n\nIf you want to do it by hand instead of via the script, the four core RPC calls are:\n\n```bash\n# 1) wallet_b (watch-only) — produce the unsigned txset\nTX=$(curl -s http://127.0.0.1:18191/json_rpc -d '{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"transfer\",\n  \"params\":{\"destinations\":[{\"amount\":1000000000000,\"address\":\"<DEST>\"}],\n            \"account_index\":0,\"priority\":1,\"ring_size\":11,\"do_not_relay\":true}}')\nUTX=$(echo \"$TX\" | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"result\"][\"unsigned_txset\"])')\n\n# 2) wallet_a (full) — describe it BEFORE signing\ncurl -s http://127.0.0.1:18190/json_rpc \\\n  -d \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":\\\"0\\\",\\\"method\\\":\\\"describe_transfer\\\",\n       \\\"params\\\":{\\\"unsigned_txset\\\":\\\"$UTX\\\"}}\" \\\n  | jq '.result.desc[0].sources[] | {amount,global_index,pubkey}'         # ← BUGGY OUTPUT\n\n# 3) wallet_a — sign; wallet_b — submit\nSIGNED=$(curl -s http://127.0.0.1:18190/json_rpc \\\n  -d \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":\\\"0\\\",\\\"method\\\":\\\"sign_transfer\\\",\n       \\\"params\\\":{\\\"unsigned_txset\\\":\\\"$UTX\\\"}}\" \\\n  | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"result\"][\"signed_txset\"])')\ncurl -s http://127.0.0.1:18191/json_rpc \\\n  -d \"{\\\"jsonrpc\\\":\\\"2.0\\\",\\\"id\\\":\\\"0\\\",\\\"method\\\":\\\"submit_transfer\\\",\n       \\\"params\\\":{\\\"tx_data_hex\\\":\\\"$SIGNED\\\"}}\"\n\n# 4) Daemon — pull the on-chain tx, read its real vin[i].k_image\ncurl -s http://127.0.0.1:38181/get_transactions \\\n  -d \"{\\\"txs_hashes\\\":[\\\"<TX_HASH>\\\"],\\\"decode_as_json\\\":true}\" \\\n  | jq '.txs[0].as_json | fromjson | .vin[].key.k_image'                  # ← TRUTH\n```\n{F5885192}\n{F5885193}\n{F5885194}\n{F5885195}\nThe `truth.tsv` artefact the script writes makes the per-input mapping easy to read; the raw `describe_transfer.json` and `get_transactions.json` are saved next to it under `/tmp/lab_describe_transfer_bug/`.\n\n## Possible Solution\n\nOne-line fix — use the field whose name actually means what we want:\n\n```diff\n-        src_out.global_index = src_in.outputs.at(src_in.real_output_in_tx_index).first;\n+        src_out.global_index = src_in.outputs.at(src_in.real_output).first;\n         src_out.rct = src_in.rct;\n-        src_out.pubkey = epee::string_tools::pod_to_hex(src_in.outputs.at(src_in.real_output_in_tx_index).second);\n+        src_out.pubkey = epee::string_tools::pod_to_hex(src_in.outputs.at(src_in.real_output).second);\n```\n\nA couple of defence-in-depth notes while you're there:\n\n- Add an explicit guard before the lookup. The serialiser already rejects `real_output >= outputs.size()`, but a future change there shouldn't be the only thing standing between this RPC and an OOB read:\n  ```cpp\n  THROW_WALLET_EXCEPTION_IF(src_in.real_output >= src_in.outputs.size(),\n      error::wallet_internal_error, \"real_output out of bounds\");\n  ```\n- It would be nice to add `real_output` itself to the response. Operators who keep their own UTXO ledger could then sanity-check the chosen ring slot independently, instead of having to trust `global_index` and `pubkey` blindly.\n- The current test fixtures don't catch this because they tend to have `real_output == real_output_in_tx_index == 0`. A unit test where the two diverge — easy to construct from `transfer_selected_rct` output — would have caught it.\n\n## Impact\n\n`describe_transfer` is the cold-wallet pre-sign review primitive. When the unsigned txset comes from a side the operator doesn't fully trust — a compromised view-only wallet, a malicious co-signer, a payment-processor integration — the operator's only defence is to call this RPC and read what it says before hitting `sign_transfer`. Today that defence doesn't work: the description does not describe the real input.\n\nA hostile builder who produces the unsigned txset can put a benign-looking ring decoy in the slot the bug picks (`outputs[real_output_in_tx_index]`). For UTXOs derived from coinbase or any source tx whose real output sits at `vout[0]`, that's `outputs[0]` of the ring — the lowest-global-index decoy after sort, which to a reviewer looks like an ordinary entry. Nothing in the rest of `on_describe_transfer` notices the substitution: the change-handling sanity checks at line 1590 onward only constrain change destinations, not source identity. The reviewer signs. The actual signed transaction (built from `outputs[real_output]`, untouched) burns the real output that was hidden from the description.\n\nThe same defect quietly denies pre-sign review for legitimate batched-payout txsets where the real output's source tx had more than `ring_size` outputs. `outputs.at(real_output_in_tx_index)` throws, the catch returns `WALLET_RPC_ERROR_CODE_BAD_UNSIGNED_TX_DATA \"failed to parse unsigned transfers\"`, the operator can't review it, but `sign_transfer` and `submit_transfer` accept and broadcast the same blob without complaint.\n\n## Note\n\nThe PoC script `reports/poc_describe_transfer_wrong_ring_index.sh` and this write-up were iterated with editor/AI help for the regtest plumbing and shell wiring. The buggy lines, the index semantics in `tx_source_entry`, and the on-chain ground-truth comparison were checked by reading the source and the captured RPC responses against the tree at `082b600a2`. The script `grep`s the buggy lines from the source tree at startup, so anyone re-running it can confirm the binary it's exercising was compiled from those lines.\n\n## Bounty\n\nIf this qualifies for a bounty, XMR can be sent to:\n\n`45BYNkdWvv45fovzeSgnNdMcZ8Pn9bdnegRyDcggz9XBUbrrgDhwfx63rpvesZMwWEKKQFms81v8hPbCX2eSCb3m9nFk9ZX`",
+  "weakness": {
+    "id": 12,
+    "name": "Array Index Underflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5885192,
+      "file_name": "Screenshot_2026-05-10_000140.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/4jxrzuimhf38ry6lo6dgfte79y2s?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-05-10_000140.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-05-10_000140.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4G6QCZDN%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115337Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFkaCXVzLXdlc3QtMiJIMEYCIQDdeplkU8BOOC1xUEl7BDyHpgatg0jbpay8KQBrg%2FB0DQIhALP%2F2%2BZA1l%2BZnmmcGa1rqJU7L%2B7ys9metlBQVZ1LAflxKrIFCCIQAxoMMDEzNjE5Mjc0ODQ5IgwdBLYGm1t4MUwBmtIqjwVM%2F4RKf%2BtXe8iUOpXvXdm00b4obqc%2FTBaiGWPR3m23bSSPmWIEa%2FrDYnIdY3onVEQuDzHxtIVqly109cbo2Fs8bgkaOgS7Coduh0OltAENkZBNea1P6Kt9EXwrJCPHF0MSaqogCBiuN6fwbOE8IkeS1TT5A7B0XRR4C0PMA53bbpPK4inSEx%2FxQdW6JOu7BxWxBBXXTIsdgmFxFhS3hUJrbqpvCgDV4mpxh0QSS7PZ8vKWM3cnjGGMk8YX6uwAiFZFy5zLvbL13llQUEsC%2FCQiRrA8qsgUqNp6lBTeyAV1eSfcO3aqHbLauzlXnueuxobfZNE1hALFgiPecOxQRfcwzIQ20FCG9kcSfoJHf2TYlWvq%2BWxn%2F7ahEgU4v1EPheJibcoSKvreMBjH2G67W8iXZsq6VlNVd2PUP%2FVQaNd2h3nuvDsbNPg%2F8arTOKNhP6%2BKB%2BR4sroalNaizLfIus8TO2w1hvJbQqgdSJnsMmYGT0aScjYpyRsGggl1J4iRvkEGWYxmWG2E%2FzcASj6r2hPJAgV4fHzgeUuByVpLnFwBI%2Bf00AxuayF3KVEGWqul6PKBqIGz9MylXdQzbto9OfF4vOXbKTeYurpKwYtCncvW9qZhaFCs1mWcqrayXciiB6E1GC89eLWPdrBEvptUmcmjMN3OxyWzEobi1Swf37DkWpkGCLuQZHUShEfboo%2BErxhi2%2FtQKn%2F2Wc%2FYMLT9taC1QtS648gv4SO1GjPxNFPjg1R6UFNc1PZGMFAWqP7Gr0n3S0DsiodnaNUk4Ai8vpU5kQnLBFOtoZkgjQ6u4Q%2BAw6TQjvvqZY5ilo6AAJv%2FFnM3b9EiQTYSxrzmQRSJop327D93M619UYCkwmQbTAfTMOvxy9MGOrABviSVLOtpQDcU9h%2FgOovjNPeeXm2OMLlE5blMr6737wBxGa8PKdf2afiDN5%2FsRx2GJsQ8nk0AqN00tVlxFqSNrLKKrBSOGqB81ekj9h9yJ5p%2FsODdxT2uOrEt3S7pjSa3e0zihElDB18fjlWs3kracDBLTYzj%2FhyZNRItJ4Hv6gNGppPJlZrPBiXJwgnoGX1Tp229aD0avXd0PTDOHEiTB2rz%2BV%2BrQg4MtiGGuABfmo4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=50c5e11047d747094bbbefeb47072292b082c29a66d08afdd40524d74a8ace1c",
+      "file_size": 107405,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5885193,
+      "file_name": "Screenshot_2026-05-10_000151.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ubl2qhfbcof18fcs5vihfsc54ydf?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-05-10_000151.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-05-10_000151.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4G6QCZDN%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115337Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFkaCXVzLXdlc3QtMiJIMEYCIQDdeplkU8BOOC1xUEl7BDyHpgatg0jbpay8KQBrg%2FB0DQIhALP%2F2%2BZA1l%2BZnmmcGa1rqJU7L%2B7ys9metlBQVZ1LAflxKrIFCCIQAxoMMDEzNjE5Mjc0ODQ5IgwdBLYGm1t4MUwBmtIqjwVM%2F4RKf%2BtXe8iUOpXvXdm00b4obqc%2FTBaiGWPR3m23bSSPmWIEa%2FrDYnIdY3onVEQuDzHxtIVqly109cbo2Fs8bgkaOgS7Coduh0OltAENkZBNea1P6Kt9EXwrJCPHF0MSaqogCBiuN6fwbOE8IkeS1TT5A7B0XRR4C0PMA53bbpPK4inSEx%2FxQdW6JOu7BxWxBBXXTIsdgmFxFhS3hUJrbqpvCgDV4mpxh0QSS7PZ8vKWM3cnjGGMk8YX6uwAiFZFy5zLvbL13llQUEsC%2FCQiRrA8qsgUqNp6lBTeyAV1eSfcO3aqHbLauzlXnueuxobfZNE1hALFgiPecOxQRfcwzIQ20FCG9kcSfoJHf2TYlWvq%2BWxn%2F7ahEgU4v1EPheJibcoSKvreMBjH2G67W8iXZsq6VlNVd2PUP%2FVQaNd2h3nuvDsbNPg%2F8arTOKNhP6%2BKB%2BR4sroalNaizLfIus8TO2w1hvJbQqgdSJnsMmYGT0aScjYpyRsGggl1J4iRvkEGWYxmWG2E%2FzcASj6r2hPJAgV4fHzgeUuByVpLnFwBI%2Bf00AxuayF3KVEGWqul6PKBqIGz9MylXdQzbto9OfF4vOXbKTeYurpKwYtCncvW9qZhaFCs1mWcqrayXciiB6E1GC89eLWPdrBEvptUmcmjMN3OxyWzEobi1Swf37DkWpkGCLuQZHUShEfboo%2BErxhi2%2FtQKn%2F2Wc%2FYMLT9taC1QtS648gv4SO1GjPxNFPjg1R6UFNc1PZGMFAWqP7Gr0n3S0DsiodnaNUk4Ai8vpU5kQnLBFOtoZkgjQ6u4Q%2BAw6TQjvvqZY5ilo6AAJv%2FFnM3b9EiQTYSxrzmQRSJop327D93M619UYCkwmQbTAfTMOvxy9MGOrABviSVLOtpQDcU9h%2FgOovjNPeeXm2OMLlE5blMr6737wBxGa8PKdf2afiDN5%2FsRx2GJsQ8nk0AqN00tVlxFqSNrLKKrBSOGqB81ekj9h9yJ5p%2FsODdxT2uOrEt3S7pjSa3e0zihElDB18fjlWs3kracDBLTYzj%2FhyZNRItJ4Hv6gNGppPJlZrPBiXJwgnoGX1Tp229aD0avXd0PTDOHEiTB2rz%2BV%2BrQg4MtiGGuABfmo4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=82f4dabf245f2dfd1bb9da29814b84da64ce18ebbcf6189d12964d58c2586cb0",
+      "file_size": 84424,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5885194,
+      "file_name": "Screenshot_2026-05-10_000129.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/5y5tfz6erq0ey06gpf2942pl4z6p?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-05-10_000129.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-05-10_000129.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4G6QCZDN%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115337Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFkaCXVzLXdlc3QtMiJIMEYCIQDdeplkU8BOOC1xUEl7BDyHpgatg0jbpay8KQBrg%2FB0DQIhALP%2F2%2BZA1l%2BZnmmcGa1rqJU7L%2B7ys9metlBQVZ1LAflxKrIFCCIQAxoMMDEzNjE5Mjc0ODQ5IgwdBLYGm1t4MUwBmtIqjwVM%2F4RKf%2BtXe8iUOpXvXdm00b4obqc%2FTBaiGWPR3m23bSSPmWIEa%2FrDYnIdY3onVEQuDzHxtIVqly109cbo2Fs8bgkaOgS7Coduh0OltAENkZBNea1P6Kt9EXwrJCPHF0MSaqogCBiuN6fwbOE8IkeS1TT5A7B0XRR4C0PMA53bbpPK4inSEx%2FxQdW6JOu7BxWxBBXXTIsdgmFxFhS3hUJrbqpvCgDV4mpxh0QSS7PZ8vKWM3cnjGGMk8YX6uwAiFZFy5zLvbL13llQUEsC%2FCQiRrA8qsgUqNp6lBTeyAV1eSfcO3aqHbLauzlXnueuxobfZNE1hALFgiPecOxQRfcwzIQ20FCG9kcSfoJHf2TYlWvq%2BWxn%2F7ahEgU4v1EPheJibcoSKvreMBjH2G67W8iXZsq6VlNVd2PUP%2FVQaNd2h3nuvDsbNPg%2F8arTOKNhP6%2BKB%2BR4sroalNaizLfIus8TO2w1hvJbQqgdSJnsMmYGT0aScjYpyRsGggl1J4iRvkEGWYxmWG2E%2FzcASj6r2hPJAgV4fHzgeUuByVpLnFwBI%2Bf00AxuayF3KVEGWqul6PKBqIGz9MylXdQzbto9OfF4vOXbKTeYurpKwYtCncvW9qZhaFCs1mWcqrayXciiB6E1GC89eLWPdrBEvptUmcmjMN3OxyWzEobi1Swf37DkWpkGCLuQZHUShEfboo%2BErxhi2%2FtQKn%2F2Wc%2FYMLT9taC1QtS648gv4SO1GjPxNFPjg1R6UFNc1PZGMFAWqP7Gr0n3S0DsiodnaNUk4Ai8vpU5kQnLBFOtoZkgjQ6u4Q%2BAw6TQjvvqZY5ilo6AAJv%2FFnM3b9EiQTYSxrzmQRSJop327D93M619UYCkwmQbTAfTMOvxy9MGOrABviSVLOtpQDcU9h%2FgOovjNPeeXm2OMLlE5blMr6737wBxGa8PKdf2afiDN5%2FsRx2GJsQ8nk0AqN00tVlxFqSNrLKKrBSOGqB81ekj9h9yJ5p%2FsODdxT2uOrEt3S7pjSa3e0zihElDB18fjlWs3kracDBLTYzj%2FhyZNRItJ4Hv6gNGppPJlZrPBiXJwgnoGX1Tp229aD0avXd0PTDOHEiTB2rz%2BV%2BrQg4MtiGGuABfmo4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a1e45036643543f67f3c417db7f1a5dd664e07560315aca9a2d993205779f779",
+      "file_size": 105067,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5885195,
+      "file_name": "Screenshot_2026-05-10_000120.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/r8r75moo0zgevknnldr47bo13r3k?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-05-10_000120.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-05-10_000120.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4G6QCZDN%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115337Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFkaCXVzLXdlc3QtMiJIMEYCIQDdeplkU8BOOC1xUEl7BDyHpgatg0jbpay8KQBrg%2FB0DQIhALP%2F2%2BZA1l%2BZnmmcGa1rqJU7L%2B7ys9metlBQVZ1LAflxKrIFCCIQAxoMMDEzNjE5Mjc0ODQ5IgwdBLYGm1t4MUwBmtIqjwVM%2F4RKf%2BtXe8iUOpXvXdm00b4obqc%2FTBaiGWPR3m23bSSPmWIEa%2FrDYnIdY3onVEQuDzHxtIVqly109cbo2Fs8bgkaOgS7Coduh0OltAENkZBNea1P6Kt9EXwrJCPHF0MSaqogCBiuN6fwbOE8IkeS1TT5A7B0XRR4C0PMA53bbpPK4inSEx%2FxQdW6JOu7BxWxBBXXTIsdgmFxFhS3hUJrbqpvCgDV4mpxh0QSS7PZ8vKWM3cnjGGMk8YX6uwAiFZFy5zLvbL13llQUEsC%2FCQiRrA8qsgUqNp6lBTeyAV1eSfcO3aqHbLauzlXnueuxobfZNE1hALFgiPecOxQRfcwzIQ20FCG9kcSfoJHf2TYlWvq%2BWxn%2F7ahEgU4v1EPheJibcoSKvreMBjH2G67W8iXZsq6VlNVd2PUP%2FVQaNd2h3nuvDsbNPg%2F8arTOKNhP6%2BKB%2BR4sroalNaizLfIus8TO2w1hvJbQqgdSJnsMmYGT0aScjYpyRsGggl1J4iRvkEGWYxmWG2E%2FzcASj6r2hPJAgV4fHzgeUuByVpLnFwBI%2Bf00AxuayF3KVEGWqul6PKBqIGz9MylXdQzbto9OfF4vOXbKTeYurpKwYtCncvW9qZhaFCs1mWcqrayXciiB6E1GC89eLWPdrBEvptUmcmjMN3OxyWzEobi1Swf37DkWpkGCLuQZHUShEfboo%2BErxhi2%2FtQKn%2F2Wc%2FYMLT9taC1QtS648gv4SO1GjPxNFPjg1R6UFNc1PZGMFAWqP7Gr0n3S0DsiodnaNUk4Ai8vpU5kQnLBFOtoZkgjQ6u4Q%2BAw6TQjvvqZY5ilo6AAJv%2FFnM3b9EiQTYSxrzmQRSJop327D93M619UYCkwmQbTAfTMOvxy9MGOrABviSVLOtpQDcU9h%2FgOovjNPeeXm2OMLlE5blMr6737wBxGa8PKdf2afiDN5%2FsRx2GJsQ8nk0AqN00tVlxFqSNrLKKrBSOGqB81ekj9h9yJ5p%2FsODdxT2uOrEt3S7pjSa3e0zihElDB18fjlWs3kracDBLTYzj%2FhyZNRItJ4Hv6gNGppPJlZrPBiXJwgnoGX1Tp229aD0avXd0PTDOHEiTB2rz%2BV%2BrQg4MtiGGuABfmo4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=019c50f3c090db33094e582be02734a3892292a93c48def5efdf5c79d8021391",
+      "file_size": 127097,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5885198,
+      "file_name": "poc_describe_transfer_wrong_ring_index.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/xs2qbywmmvolgs3mcjud49sewyhu?response-content-disposition=attachment%3B%20filename%3D%22poc_describe_transfer_wrong_ring_index.sh%22%3B%20filename%2A%3DUTF-8%27%27poc_describe_transfer_wrong_ring_index.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4G6QCZDN%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115337Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFkaCXVzLXdlc3QtMiJIMEYCIQDdeplkU8BOOC1xUEl7BDyHpgatg0jbpay8KQBrg%2FB0DQIhALP%2F2%2BZA1l%2BZnmmcGa1rqJU7L%2B7ys9metlBQVZ1LAflxKrIFCCIQAxoMMDEzNjE5Mjc0ODQ5IgwdBLYGm1t4MUwBmtIqjwVM%2F4RKf%2BtXe8iUOpXvXdm00b4obqc%2FTBaiGWPR3m23bSSPmWIEa%2FrDYnIdY3onVEQuDzHxtIVqly109cbo2Fs8bgkaOgS7Coduh0OltAENkZBNea1P6Kt9EXwrJCPHF0MSaqogCBiuN6fwbOE8IkeS1TT5A7B0XRR4C0PMA53bbpPK4inSEx%2FxQdW6JOu7BxWxBBXXTIsdgmFxFhS3hUJrbqpvCgDV4mpxh0QSS7PZ8vKWM3cnjGGMk8YX6uwAiFZFy5zLvbL13llQUEsC%2FCQiRrA8qsgUqNp6lBTeyAV1eSfcO3aqHbLauzlXnueuxobfZNE1hALFgiPecOxQRfcwzIQ20FCG9kcSfoJHf2TYlWvq%2BWxn%2F7ahEgU4v1EPheJibcoSKvreMBjH2G67W8iXZsq6VlNVd2PUP%2FVQaNd2h3nuvDsbNPg%2F8arTOKNhP6%2BKB%2BR4sroalNaizLfIus8TO2w1hvJbQqgdSJnsMmYGT0aScjYpyRsGggl1J4iRvkEGWYxmWG2E%2FzcASj6r2hPJAgV4fHzgeUuByVpLnFwBI%2Bf00AxuayF3KVEGWqul6PKBqIGz9MylXdQzbto9OfF4vOXbKTeYurpKwYtCncvW9qZhaFCs1mWcqrayXciiB6E1GC89eLWPdrBEvptUmcmjMN3OxyWzEobi1Swf37DkWpkGCLuQZHUShEfboo%2BErxhi2%2FtQKn%2F2Wc%2FYMLT9taC1QtS648gv4SO1GjPxNFPjg1R6UFNc1PZGMFAWqP7Gr0n3S0DsiodnaNUk4Ai8vpU5kQnLBFOtoZkgjQ6u4Q%2BAw6TQjvvqZY5ilo6AAJv%2FFnM3b9EiQTYSxrzmQRSJop327D93M619UYCkwmQbTAfTMOvxy9MGOrABviSVLOtpQDcU9h%2FgOovjNPeeXm2OMLlE5blMr6737wBxGa8PKdf2afiDN5%2FsRx2GJsQ8nk0AqN00tVlxFqSNrLKKrBSOGqB81ekj9h9yJ5p%2FsODdxT2uOrEt3S7pjSa3e0zihElDB18fjlWs3kracDBLTYzj%2FhyZNRItJ4Hv6gNGppPJlZrPBiXJwgnoGX1Tp229aD0avXd0PTDOHEiTB2rz%2BV%2BrQg4MtiGGuABfmo4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f755c9264bb998018e91590964bd1d3f84aa825d85cb09bf658f0480fcc5c756",
+      "file_size": 30099,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-08-20T23:50:47.133Z",
+  "allow_singular_disclosure_after": 1339029.196793284,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.4,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "high",
+      "availability": "low"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

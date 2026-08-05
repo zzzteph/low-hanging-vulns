@@ -1,0 +1,154 @@
+{
+  "id": 3693636,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjkzNjM2",
+  "url": "https://hackerone.com/reports/3693636",
+  "title": "wallet-rpc crash via malformed /gettransactions response (empty txs → vector::front() in check_tx_key / check_tx_proof)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-24T16:08:56.732Z",
+  "submitted_at": "2026-04-24T16:08:57.050Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "bebensap",
+    "url": "/bebensap",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f03exbfz2vld0bvyw9b3hiabdbua/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-05T10:23:32.245Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-08-05T10:23:31.742Z",
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:49:50.225Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Repository:** [`monero-project/monero`](https://github.com/monero-project/monero) — `src/wallet/wallet2.cpp` (same response type `COMMAND_RPC_GET_TRANSACTIONS` in `src/rpc/core_rpc_server_commands_defs.h`). Affected branch: `master` (commit `474657ad4`, 2026-04-24).\n\n## Summary\n\n`wallet2` calls the daemon HTTP endpoint `/gettransactions` and treats the answer as trustworthy enough to drive payment verification. The guard only insists that **either** the structured array `txs` **or** the legacy array `txs_as_hex` has length 1:\n\n```cpp\nTHROW_WALLET_EXCEPTION_IF(!ok || (res.txs.size() != 1 && res.txs_as_hex.size() != 1),\n  error::wallet_internal_error, \"Failed to get transaction from daemon\");\n```\n\nIf the daemon (or anything on the HTTP path) returns `status: OK`, `txs: []`, and a single blob in `txs_as_hex` whose hash matches the requested txid, the code takes the `else` branch, parses the transaction from hex, runs the crypto checks, then still pulls **pool height and confirmation metadata** from `res.txs.front()` — even though `txs` was empty the whole time. That is undefined behaviour in C++ (`std::vector::front()` on an empty vector). On a normal Release build you usually get an immediate segfault; with ASan you get a clean `vector::front` report.\n\nThe same pattern exists in `check_tx_proof` after the identical guard and `if (res.txs.size() == 1) / else` split.\n\nThere is a second, narrower footgun on the **cold hardware** `get_tx_key` path: after the same `(txs XOR txs_as_hex)` guard, the code **always** loads the blob from `res.txs_as_hex.front()` (see snippet below) and never branches on `res.txs.size() == 1` first. A response with `txs` populated and `txs_as_hex` empty passes the guard when `txs.size()==1`, but then `txs_as_hex.front()` is the one that blows up. That is a different corner case from the main `check_tx_key` crash, same root cause class: the wallet assumes the two representations stay in sync.\n\n`check_tx_key_helper` (txid overload), current `master`:\n\n```cpp\nvoid wallet2::check_tx_key_helper(const crypto::hash &txid, const crypto::key_derivation &derivation, ...)\n{\n  ...\n  ok = epee::net_utils::invoke_http_json(\"/gettransactions\", req, res, *m_http_client);\n  THROW_WALLET_EXCEPTION_IF(!ok || (res.txs.size() != 1 && res.txs_as_hex.size() != 1),\n    error::wallet_internal_error, \"Failed to get transaction from daemon\");\n\n  if (res.txs.size() == 1)\n    ok = get_pruned_tx(res.txs.front(), tx, tx_hash);\n  else {\n    ok = string_tools::parse_hexstr_to_binbuff(res.txs_as_hex.front(), tx_data);\n    ...\n    tx_hash = cryptonote::get_transaction_hash(tx);\n  }\n  ...\n  check_tx_key_helper(tx, derivation, additional_derivations, address, received);\n\n  in_pool = res.txs.front().in_pool;   // ← txs may still be empty\n  ...\n}\n```\n\n`check_tx_proof` (txid overload), same file — same bug after `check_tx_proof(tx, ...)`:\n\n```cpp\n  if (!check_tx_proof(tx, address, is_subaddress, message, sig_str, received))\n    return false;\n\n  in_pool = res.txs.front().in_pool;\n  ...\n  if (err.empty())\n    confirmations = bc_height - res.txs.front().block_height;\n```\n\nCold `get_tx_key` when `tx_prefix_hash` has to be filled from the daemon:\n\n```cpp\n    THROW_WALLET_EXCEPTION_IF(!ok || (res.txs.size() != 1 && res.txs_as_hex.size() != 1),\n                                error::wallet_internal_error, \"Failed to get transaction from daemon\");\n    ...\n    bool ok = string_tools::parse_hexstr_to_binbuff(res.txs_as_hex.front(), tx_data);\n```\n\nThis is **not** the same issue as `./reports/critical-wallet-check-tx-proof-is-out-to-acc-oob-and-uninit-derivation.md` (proof math / `is_out_to_acc` / derivation). That report is about bogus proof *content*; here the wallet dies on bogus *envelope* shape before you get a clean error string.\n\n## Releases Affected\n\n`master @ 474657ad4` (2026-04-24) still contains the snippets above. The guard and the `front()` uses have been this way for a long time; any release that ships the current `wallet2` `/gettransactions` integration is exposed. Severity for bounty triage is usually capped where the attacker already sits on the wallet→daemon HTTP leg (malicious remote node, MITM on cleartext HTTP, broken reverse proxy). There is no RCE claim here — process death / UB only.\n\n## Steps to Reproduce\n\n**Prerequisites — build once (same dependency set as the rest of the Monero tree; roughly an hour on a typical Linux box):**\n\n```bash\nsudo apt-get install -y build-essential cmake pkg-config libssl-dev \\\n  libzmq3-dev libunbound-dev libminiupnpc-dev libboost-all-dev \\\n  libhidapi-dev libusb-1.0-0-dev\n\nexport MONERO_SRC=\"$HOME/src/monero\"    # or wherever you cloned github.com/monero-project/monero\ncd \"$MONERO_SRC\"\ngit checkout master && git pull --ff-only origin master\n\nmkdir -p build/release && cd build/release\ncmake -D CMAKE_BUILD_TYPE=Release -D BUILD_TESTS=OFF ../..\nmake -j\"$(nproc)\" monerod monero-wallet-rpc\n# Binaries: $MONERO_SRC/build/release/bin/monerod\n#           $MONERO_SRC/build/release/bin/monero-wallet-rpc\n```\n\nCopy (or symlink) the two PoC files from your checkout root into the same tree if they are not already there:\n\n- `./reports/poc_proxy_malicious_gettransactions.py`\n- `./reports/poc_gettransactions_empty_txs_crash.sh`\n\nThe shell script looks for `monerod` / `monero-wallet-rpc` in `build/release/bin` under the repo that contains the `reports/` directory, or you can point it anywhere with:\n\n```bash\nexport MONERO_BIN=\"$MONERO_SRC/build/release/bin\"\n```\n\n**Run (~1–2 min, regtest only, no public network):**\n\n```bash\ncd \"$MONERO_SRC\"    # repo root that contains ./reports/\nbash ./reports/poc_gettransactions_empty_txs_crash.sh\n```\n\nWhat it does, in order:\n\n1. Starts `monerod --regtest --fixed-difficulty 1` on a loopback RPC port (default `38081` in the script).\n2. Starts `monero-wallet-rpc`, `create_wallet`, mines a short chain, does a self-`transfer` with `get_tx_key` so we have a real `txid` / `tx_key` / address triplet.\n3. Calls the **real** daemon `/gettransactions` with `prune:false`, `split:false` and pulls the full tx hex blob (what a honest node would return in `txs_as_hex`).\n4. Starts the Python MITM on `127.0.0.1:47147` (override with `PROXY_PORT` if that port is busy). The proxy forwards everything to the real `monerod` except: for `POST /gettransactions` bodies that list the target txid in `txs_hashes`, it returns HTTP 200 JSON with `status:\"OK\"`, `txs:[]`, `txs_as_hex:[<captured hex>]`, `missed_tx:[]`.\n5. Restarts `monero-wallet-rpc` with `--daemon-address http://127.0.0.1:$PROXY_PORT` and `--daemon-ssl disabled`, reloads the same wallet, then issues `set_daemon` (same URL, ssl disabled) so the HTTP client does a clean reconnect after the heavy refresh — otherwise the epee client occasionally thinks it is still connected when the TCP session is already half-dead and the PoC fails before the hijacked body is applied.\n6. Calls `check_tx_key` over wallet JSON-RPC. The wallet parses the blob, matches `tx_hash == txid`, then hits `res.txs.front()`.\n\n**Expected output (abridged):**\n\n- `monero-wallet-rpc` dies with **signal 11** (`Segmentation fault`) on the `check_tx_key` call.\n- The curl client shows **`curl: (52) Empty reply from server`** because the RPC worker process is gone mid-request.\n- Proxy log shows one `POST /gettransactions` `200` and a stderr line similar to:\n  - `[poc-proxy] HIJACK /gettransactions → txs=[], txs_as_hex=len=<N>`\n\n{F5794759}\n\n{F5794760}\n**Lab-only transport detail (not part of the security bug):** the PoC proxy adds `Connection: close` on every response. Without that, Python's default HTTP server behaviour combined with epee's post-response handling can leave the wallet thinking the socket is still up after the server closed it, so the next `/gettransactions` fails before you reach the malicious branch. Production MITMs usually speak proper HTTP/1.1; this is scaffolding hygiene.\n\nIf you prefer not to use the script, the shape you need is:\n\n1. Honest `/gettransactions` once to capture the canonical hex for txid `T`.\n2. MITM wallet→daemon HTTP; on `POST /gettransactions` when the JSON body contains `\"txs_hashes\":[\"<T>...\"]`, respond with `{\"status\":\"OK\",\"untrusted\":false,\"credits\":0,\"top_hash\":\"\",\"txs\":[],\"txs_as_hex\":[\"<hex>\"],\"missed_tx\":[]}` (plus `Connection: close` if your server drops the socket aggressively).\n3. `monero-wallet-rpc` → `check_tx_key` with that `T` and the real `tx_key` / address from the wallet that created the tx.\n\n## Possible Solution\n\n1. After `/gettransactions`, if you need `in_pool`, `block_height`, or `confirmations` from `COMMAND_RPC_GET_TRANSACTIONS::entry`, require **`res.txs.size() == 1`** and treat any other combination as `wallet_internal_error` with a clear message — or re-query the daemon using a response contract that always includes structured metadata.\n\n2. Split metadata extraction to mirror the branch that actually supplied the blob (`txs.front()` vs synthesizing defaults when only legacy hex is present).\n\n3. Cold `get_tx_key`: mirror the `if (res.txs.size()==1) get_pruned_tx else parse txs_as_hex` structure; do not assume `txs_as_hex` is non-empty whenever `txs` has an entry.\n\n4. Add deserialization / integration tests for `(txs empty, txs_as_hex len 1)` and `(txs len 1, txs_as_hex empty)` so this cannot regress silently. Issue [#8311](https://github.com/monero-project/monero/issues/8311) is a good reminder that real daemons have returned odd shapes before; the wallet should fail closed, not UB.\n\n## Impact\n\nAnyone who points a wallet at a node they do not fully trust over **cleartext HTTP**, or who sits behind a misconfigured TLS-terminating proxy, can have `check_tx_key` or `check_tx_proof` turned into a hard crash of `monero-wallet-rpc` (or the CLI wallet process) with a single crafted `/gettransactions` response. That is a straight availability hit on payment verification and any automation that wraps these RPCs.\n\nNo remote code execution is demonstrated; the failure mode observed in testing is SIGSEGV on `vector::front`.\n\n## Note\n\nThe end-to-end shell + Python MITM (`poc_gettransactions_empty_txs_crash.sh`, `poc_proxy_malicious_gettransactions.py`) was put together with editor/AI help for the regtest plumbing and the HTTP keep-alive workaround. The vulnerable control flow and line references were checked against `master` by reading `wallet2.cpp` directly.\n\n## Bounty\n\nIf this qualifies for a payout, XMR can be sent to:\n\n`47TUANy82gtBFMvsFwyA3hE98PzgKSmxNia3n9fpvSadDWs234M7oWfevXqYxKmy3d9hSp1TH82gX4JWvNEUupse2s92maV`",
+  "weakness": {
+    "id": 51,
+    "name": "NULL Pointer Dereference"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5794749,
+      "file_name": "poc_gettransactions_empty_txs_crash.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/wvwufcpj1w3qjbphx6n7orma2bgx?response-content-disposition=attachment%3B%20filename%3D%22poc_gettransactions_empty_txs_crash.sh%22%3B%20filename%2A%3DUTF-8%27%27poc_gettransactions_empty_txs_crash.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3TEOZIZI%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115336Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFkaCXVzLXdlc3QtMiJHMEUCIQCU7HcBlvpnQlw5FALmm7ZvBHSaxL8%2FNMfnscuyQjhM3QIgAI%2BZ3GIKuZXduy1L5gYqV1PrqZP5GLfvmTsL3YsJstgqsgUIIhADGgwwMTM2MTkyNzQ4NDkiDDhGlVU6CJZ%2BLELl%2FCqPBSFPNaHl0l5%2Fj%2F%2FsLaHCTD7PQzGImImNs8PncTb9E2102segwZR%2BK0n4IwhC%2BUVw0INhLRm0V2UmWk4LXjEzri0q3M3ZXPdgKC3S%2BAXgIPdBKTn%2BwwkopP%2BeeJQDtABGjMvskYuxyOSYuEHgQTFkScnAsF1vkoaIvH%2BV%2FnZzJ1H3lzEnq8EjTE0BaVcP2dE6MI2ltvujQEADkAajGJlDw8Td9%2BTEdU%2BMR3KOHElGE3Z%2FK3Fd1JWumgiK9dRoqq2V0CWMtCB1dl%2BjSYCTuBlwMVXemrkhYgdz%2FyvQarO2oJWgh33D90aYASjc5RApMGYE%2FbqZf25fDwYo3vVZIsSrN11V1ab6y2bMdMiH2flsl565CMmZaP9BljSIY9Fm1T4T51tMOFCt9DJ3CO%2F78YHtXZqQO5G4Ftwdwzwlp42JprLk47N3MY760c5uw3VTx9U%2FsTj5SpDMU4OPRIt89Ucu%2B%2BkCX4yhU2ztTrYX1%2BzZX9LyqKRUnh7vO1yhs5ST091j5iEmdQfEyjVYiMGJnerIoOVyLszF3VZlg87cKEptlPl7u8yMvH9YZaGSW%2BHZ%2FdZsQzFV4Q6rk5nL0x61xjvAp9WEgBAftB8HVW8Lz6F9adPQ7XW6oB%2BR3Zq%2B5I4dRiC5MAOK762sn2le8S6iKW3K0wLF1MdjFCFjnYlnq%2FSCnmENCuWzDdl5hRnsMj5gN%2BIHtNtMZRxbjKVYMCo499EMQ2oAquegyZJQ5b7NhfEnKZgw8%2Bvubix1mP28QSg4MF%2BATkYpLTU74vsDWwbohXjLBTYLx%2Bh31rP%2BRt%2FyqTVCULU%2FCDWdweh6OmIhnY8ecT%2F7ZRclTSvW2jK8JpjQsCADXEiCqV1o6GVLmMlejaQXpjEw3%2FTL0wY6sQGyYUTVDUKEG6DGfK%2BubXEJBNYQ45VewGslWavBYJox%2F716edQheYRWI1GygVcrF86Tp4B4aCXTcChtQ6CLVIhINvUWoOoyBHnSIqwRWXcB6T4e1hYLRkb%2B6N7hQTzxLoRjw05uBg5OWsLbn6lTiE1v%2BJ78ZiowU0pU2gMegBeyoL0VNkWTir4SgfYG%2FnasTlE9IBxhTk0TIsJ1HiqM%2FO9ZdvinPe5TnWZLYJqPASe9Y7o%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=981169bd9b01a0798a7271ecc9bb73ba9da3bf552ea7a4883e9bfbe6016a8edb",
+      "file_size": 9636,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5794750,
+      "file_name": "poc_proxy_malicious_gettransactions.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/8izxnn054km49lndfwj87em3zma1?response-content-disposition=attachment%3B%20filename%3D%22poc_proxy_malicious_gettransactions.py%22%3B%20filename%2A%3DUTF-8%27%27poc_proxy_malicious_gettransactions.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3TEOZIZI%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115336Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFkaCXVzLXdlc3QtMiJHMEUCIQCU7HcBlvpnQlw5FALmm7ZvBHSaxL8%2FNMfnscuyQjhM3QIgAI%2BZ3GIKuZXduy1L5gYqV1PrqZP5GLfvmTsL3YsJstgqsgUIIhADGgwwMTM2MTkyNzQ4NDkiDDhGlVU6CJZ%2BLELl%2FCqPBSFPNaHl0l5%2Fj%2F%2FsLaHCTD7PQzGImImNs8PncTb9E2102segwZR%2BK0n4IwhC%2BUVw0INhLRm0V2UmWk4LXjEzri0q3M3ZXPdgKC3S%2BAXgIPdBKTn%2BwwkopP%2BeeJQDtABGjMvskYuxyOSYuEHgQTFkScnAsF1vkoaIvH%2BV%2FnZzJ1H3lzEnq8EjTE0BaVcP2dE6MI2ltvujQEADkAajGJlDw8Td9%2BTEdU%2BMR3KOHElGE3Z%2FK3Fd1JWumgiK9dRoqq2V0CWMtCB1dl%2BjSYCTuBlwMVXemrkhYgdz%2FyvQarO2oJWgh33D90aYASjc5RApMGYE%2FbqZf25fDwYo3vVZIsSrN11V1ab6y2bMdMiH2flsl565CMmZaP9BljSIY9Fm1T4T51tMOFCt9DJ3CO%2F78YHtXZqQO5G4Ftwdwzwlp42JprLk47N3MY760c5uw3VTx9U%2FsTj5SpDMU4OPRIt89Ucu%2B%2BkCX4yhU2ztTrYX1%2BzZX9LyqKRUnh7vO1yhs5ST091j5iEmdQfEyjVYiMGJnerIoOVyLszF3VZlg87cKEptlPl7u8yMvH9YZaGSW%2BHZ%2FdZsQzFV4Q6rk5nL0x61xjvAp9WEgBAftB8HVW8Lz6F9adPQ7XW6oB%2BR3Zq%2B5I4dRiC5MAOK762sn2le8S6iKW3K0wLF1MdjFCFjnYlnq%2FSCnmENCuWzDdl5hRnsMj5gN%2BIHtNtMZRxbjKVYMCo499EMQ2oAquegyZJQ5b7NhfEnKZgw8%2Bvubix1mP28QSg4MF%2BATkYpLTU74vsDWwbohXjLBTYLx%2Bh31rP%2BRt%2FyqTVCULU%2FCDWdweh6OmIhnY8ecT%2F7ZRclTSvW2jK8JpjQsCADXEiCqV1o6GVLmMlejaQXpjEw3%2FTL0wY6sQGyYUTVDUKEG6DGfK%2BubXEJBNYQ45VewGslWavBYJox%2F716edQheYRWI1GygVcrF86Tp4B4aCXTcChtQ6CLVIhINvUWoOoyBHnSIqwRWXcB6T4e1hYLRkb%2B6N7hQTzxLoRjw05uBg5OWsLbn6lTiE1v%2BJ78ZiowU0pU2gMegBeyoL0VNkWTir4SgfYG%2FnasTlE9IBxhTk0TIsJ1HiqM%2FO9ZdvinPe5TnWZLYJqPASe9Y7o%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=464112046adcc3ebe643e3823ea43882813bbe7f7650aefa019885116326d9d2",
+      "file_size": 4926,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5794759,
+      "file_name": "Screenshot_2026-04-24_230509.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fi2cnjb65m57kg4btq29gto2elw7?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-04-24_230509.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-04-24_230509.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3TEOZIZI%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115336Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFkaCXVzLXdlc3QtMiJHMEUCIQCU7HcBlvpnQlw5FALmm7ZvBHSaxL8%2FNMfnscuyQjhM3QIgAI%2BZ3GIKuZXduy1L5gYqV1PrqZP5GLfvmTsL3YsJstgqsgUIIhADGgwwMTM2MTkyNzQ4NDkiDDhGlVU6CJZ%2BLELl%2FCqPBSFPNaHl0l5%2Fj%2F%2FsLaHCTD7PQzGImImNs8PncTb9E2102segwZR%2BK0n4IwhC%2BUVw0INhLRm0V2UmWk4LXjEzri0q3M3ZXPdgKC3S%2BAXgIPdBKTn%2BwwkopP%2BeeJQDtABGjMvskYuxyOSYuEHgQTFkScnAsF1vkoaIvH%2BV%2FnZzJ1H3lzEnq8EjTE0BaVcP2dE6MI2ltvujQEADkAajGJlDw8Td9%2BTEdU%2BMR3KOHElGE3Z%2FK3Fd1JWumgiK9dRoqq2V0CWMtCB1dl%2BjSYCTuBlwMVXemrkhYgdz%2FyvQarO2oJWgh33D90aYASjc5RApMGYE%2FbqZf25fDwYo3vVZIsSrN11V1ab6y2bMdMiH2flsl565CMmZaP9BljSIY9Fm1T4T51tMOFCt9DJ3CO%2F78YHtXZqQO5G4Ftwdwzwlp42JprLk47N3MY760c5uw3VTx9U%2FsTj5SpDMU4OPRIt89Ucu%2B%2BkCX4yhU2ztTrYX1%2BzZX9LyqKRUnh7vO1yhs5ST091j5iEmdQfEyjVYiMGJnerIoOVyLszF3VZlg87cKEptlPl7u8yMvH9YZaGSW%2BHZ%2FdZsQzFV4Q6rk5nL0x61xjvAp9WEgBAftB8HVW8Lz6F9adPQ7XW6oB%2BR3Zq%2B5I4dRiC5MAOK762sn2le8S6iKW3K0wLF1MdjFCFjnYlnq%2FSCnmENCuWzDdl5hRnsMj5gN%2BIHtNtMZRxbjKVYMCo499EMQ2oAquegyZJQ5b7NhfEnKZgw8%2Bvubix1mP28QSg4MF%2BATkYpLTU74vsDWwbohXjLBTYLx%2Bh31rP%2BRt%2FyqTVCULU%2FCDWdweh6OmIhnY8ecT%2F7ZRclTSvW2jK8JpjQsCADXEiCqV1o6GVLmMlejaQXpjEw3%2FTL0wY6sQGyYUTVDUKEG6DGfK%2BubXEJBNYQ45VewGslWavBYJox%2F716edQheYRWI1GygVcrF86Tp4B4aCXTcChtQ6CLVIhINvUWoOoyBHnSIqwRWXcB6T4e1hYLRkb%2B6N7hQTzxLoRjw05uBg5OWsLbn6lTiE1v%2BJ78ZiowU0pU2gMegBeyoL0VNkWTir4SgfYG%2FnasTlE9IBxhTk0TIsJ1HiqM%2FO9ZdvinPe5TnWZLYJqPASe9Y7o%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3592ff4f4b28d31c9eea043050d16d0bf21dd0ee2a6f29f50c99a6c4ce3b6770",
+      "file_size": 149333,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5794760,
+      "file_name": "Screenshot_2026-04-24_230521.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/3u0wzo1eyn1vwwlqvlyyeqazw9pv?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-04-24_230521.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-04-24_230521.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3TEOZIZI%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115336Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFkaCXVzLXdlc3QtMiJHMEUCIQCU7HcBlvpnQlw5FALmm7ZvBHSaxL8%2FNMfnscuyQjhM3QIgAI%2BZ3GIKuZXduy1L5gYqV1PrqZP5GLfvmTsL3YsJstgqsgUIIhADGgwwMTM2MTkyNzQ4NDkiDDhGlVU6CJZ%2BLELl%2FCqPBSFPNaHl0l5%2Fj%2F%2FsLaHCTD7PQzGImImNs8PncTb9E2102segwZR%2BK0n4IwhC%2BUVw0INhLRm0V2UmWk4LXjEzri0q3M3ZXPdgKC3S%2BAXgIPdBKTn%2BwwkopP%2BeeJQDtABGjMvskYuxyOSYuEHgQTFkScnAsF1vkoaIvH%2BV%2FnZzJ1H3lzEnq8EjTE0BaVcP2dE6MI2ltvujQEADkAajGJlDw8Td9%2BTEdU%2BMR3KOHElGE3Z%2FK3Fd1JWumgiK9dRoqq2V0CWMtCB1dl%2BjSYCTuBlwMVXemrkhYgdz%2FyvQarO2oJWgh33D90aYASjc5RApMGYE%2FbqZf25fDwYo3vVZIsSrN11V1ab6y2bMdMiH2flsl565CMmZaP9BljSIY9Fm1T4T51tMOFCt9DJ3CO%2F78YHtXZqQO5G4Ftwdwzwlp42JprLk47N3MY760c5uw3VTx9U%2FsTj5SpDMU4OPRIt89Ucu%2B%2BkCX4yhU2ztTrYX1%2BzZX9LyqKRUnh7vO1yhs5ST091j5iEmdQfEyjVYiMGJnerIoOVyLszF3VZlg87cKEptlPl7u8yMvH9YZaGSW%2BHZ%2FdZsQzFV4Q6rk5nL0x61xjvAp9WEgBAftB8HVW8Lz6F9adPQ7XW6oB%2BR3Zq%2B5I4dRiC5MAOK762sn2le8S6iKW3K0wLF1MdjFCFjnYlnq%2FSCnmENCuWzDdl5hRnsMj5gN%2BIHtNtMZRxbjKVYMCo499EMQ2oAquegyZJQ5b7NhfEnKZgw8%2Bvubix1mP28QSg4MF%2BATkYpLTU74vsDWwbohXjLBTYLx%2Bh31rP%2BRt%2FyqTVCULU%2FCDWdweh6OmIhnY8ecT%2F7ZRclTSvW2jK8JpjQsCADXEiCqV1o6GVLmMlejaQXpjEw3%2FTL0wY6sQGyYUTVDUKEG6DGfK%2BubXEJBNYQ45VewGslWavBYJox%2F716edQheYRWI1GygVcrF86Tp4B4aCXTcChtQ6CLVIhINvUWoOoyBHnSIqwRWXcB6T4e1hYLRkb%2B6N7hQTzxLoRjw05uBg5OWsLbn6lTiE1v%2BJ78ZiowU0pU2gMegBeyoL0VNkWTir4SgfYG%2FnasTlE9IBxhTk0TIsJ1HiqM%2FO9ZdvinPe5TnWZLYJqPASe9Y7o%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=554cde56b73f95a2e09f67ce66e3ce19466cb7a61413e68954522ae96ff24347",
+      "file_size": 140578,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-08-20T23:49:50.730Z",
+  "allow_singular_disclosure_after": 1338973.959650646,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 7.5,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "none",
+      "availability": "high"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

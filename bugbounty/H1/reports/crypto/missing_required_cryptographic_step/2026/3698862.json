@@ -1,0 +1,138 @@
+{
+  "id": 3698862,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjk4ODYy",
+  "url": "https://hackerone.com/reports/3698862",
+  "title": " `check_reserve_proof` sums RingCT ECDH amounts without checking the output commitment",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-27T16:23:40.253Z",
+  "submitted_at": "2026-04-27T16:23:40.484Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "bebensap",
+    "url": "/bebensap",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f03exbfz2vld0bvyw9b3hiabdbua/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-05T10:23:44.117Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-08-05T10:23:43.572Z",
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:49:12.674Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Repository:** [`monero-project/monero`](https://github.com/monero-project/monero) — `src/wallet/wallet2.cpp`, `src/ringct/rctSigs.cpp`. Snapshot: `master @ 3ad4a5ee8` (`v0.18.1.0-3ad4a5ee8`).\n\n## Summary\n\n`wallet2::check_reserve_proof` proves that a reserve-proof entry belongs to the claimed wallet, then decodes the RingCT amount from `tx.rct_signatures.ecdhInfo[proof.index_in_tx]` and adds it to `total`. The missing step is the one normal wallet decoding already does: recompute the Pedersen commitment from the decoded `(mask, amount)` and compare it to `tx.rct_signatures.outPk[n].mask`.\n\nThe vulnerable block is in `wallet2.cpp` around 12751–12764:\n\n```cpp\nuint64_t amount = tx.vout[proof.index_in_tx].amount;\nif (amount == 0)\n{\n  crypto::secret_key shared_secret;\n  crypto::derivation_to_scalar(derivation, proof.index_in_tx, shared_secret);\n  rct::ecdhTuple ecdh_info = tx.rct_signatures.ecdhInfo[proof.index_in_tx];\n  rct::ecdhDecode(ecdh_info, rct::sk2rct(shared_secret),\n      tx.rct_signatures.type == rct::RCTTypeBulletproof2 ||\n      tx.rct_signatures.type == rct::RCTTypeCLSAG ||\n      tx.rct_signatures.type == rct::RCTTypeBulletproofPlus);\n  amount = rct::h2d(ecdh_info.amount);   // no C == mask*G + amount*H check\n}\ntotal += amount;\n```\n\nFor comparison, the wallet receive path does not trust that decoded value by itself:\n\n```cpp\nconst rct::key C = tx.rct_signatures.outPk[n].mask;\nrct::key Ctmp;\nrct::addKeys2(Ctmp, ecdh_info.mask, ecdh_info.amount, rct::H);\nif (rct::equalKeys(C, Ctmp))\n  amount = rct::h2d(ecdh_info.amount);\nelse\n  amount = 0;\n```\n\nThe lower-level RingCT helper is stricter too. `decodeRctSimple()` throws `warning, amount decoded incorrectly, will be unable to spend` when the decoded ECDH tuple does not match the output commitment.\n\nThat leaves reserve proof verification on the weaker path: it authenticates ownership of the output, but it does not authenticate the amount it just decoded. A malicious prover wants exactly that gap: a proof verifier that reads attacker-controlled amount metadata and never binds it back to the commitment that consensus actually checked.\n\n## Releases Affected\n\nConfirmed on `master @ 3ad4a5ee8` (`Monero 'Fluorine Fermi' v0.18.1.0-3ad4a5ee8`) by source review and a targeted unit test.\n\nThe bug is not tied to a recent refactor. Any branch with this `check_reserve_proof` amount path is worth checking, especially branches after RingCT reserve proofs were added.\n\n## Steps to Reproduce\n\nAdd the following unit test under `tests/unit_tests/ringct.cpp` (this is the checked proof I used; it does not touch `wallet2.cpp` or the reserve-proof verifier):\n\n```cpp\nTEST(ringct, reserveProofStyleDecodeNeedsCommitmentCheck)\n{\n  static constexpr uint64_t real_amount = 1;\n  static constexpr uint64_t fake_amount = 1000000000000;\n\n  const rct::key amount_key = rct::skGen();\n  const rct::key commitment_mask = rct::genCommitmentMask(amount_key);\n  rct::key output_commitment;\n  rct::addKeys2(output_commitment, commitment_mask, rct::d2h(real_amount), rct::H);\n\n  rct::ecdhTuple encoded = {};\n  encoded.amount = rct::d2h(fake_amount);\n  rct::ecdhEncode(encoded, amount_key, true);\n\n  rct::ecdhTuple reserve_proof_style_decode = encoded;\n  rct::ecdhDecode(reserve_proof_style_decode, amount_key, true);\n  ASSERT_EQ(fake_amount, rct::h2d(reserve_proof_style_decode.amount));\n\n  rct::key recomputed_commitment;\n  rct::addKeys2(recomputed_commitment, reserve_proof_style_decode.mask,\n      reserve_proof_style_decode.amount, rct::H);\n  ASSERT_NE(output_commitment, recomputed_commitment);\n\n  rct::rctSig rv;\n  rv.type = rct::RCTTypeCLSAG;\n  rv.ecdhInfo.push_back(encoded);\n  rv.outPk.push_back({});\n  rv.outPk[0].mask = output_commitment;\n\n  rct::key decoded_mask;\n  EXPECT_THROW(\n    (void)rct::decodeRctSimple(rv, amount_key, 0, decoded_mask, hw::get_device(\"default\")),\n    std::runtime_error\n  );\n}\n```\n\nBuild and run only that test:\n\n```bash\ncmake -S /home/beni/Monero/monero -B /tmp/monero-official-build \\\n  -D CMAKE_BUILD_TYPE=Release -D BUILD_TESTS=ON -D MANUAL_SUBMODULES=1\ncmake --build /tmp/monero-official-build -j\"$(nproc)\" --target unit_tests\n\n/tmp/monero-official-build/tests/unit_tests/unit_tests \\\n  --gtest_filter=ringct.reserveProofStyleDecodeNeedsCommitmentCheck\n```\n\nObserved output:\n\n```text\nNote: Google Test filter = ringct.reserveProofStyleDecodeNeedsCommitmentCheck\n[==========] Running 1 test from 1 test suite.\n[----------] Global test environment set-up.\n[----------] 1 test from ringct\n[ RUN      ] ringct.reserveProofStyleDecodeNeedsCommitmentCheck\n2026-04-27 16:12:56.768 E warning, amount decoded incorrectly, will be unable to spend\n[       OK ] ringct.reserveProofStyleDecodeNeedsCommitmentCheck (3 ms)\n[----------] 1 test from ringct (3 ms total)\n\n[----------] Global test environment tear-down\n[==========] 1 test from 1 test suite ran. (3 ms total)\n[  PASSED  ] 1 test.\n```\n{F5810252}\nWhat the test proves:\n\n1. The ECDH metadata can decode to `fake_amount = 1000000000000`.\n2. That decoded amount does not match the real output commitment for `real_amount = 1`.\n3. The normal RingCT decode helper catches the mismatch.\n4. A verifier that only does `ecdhDecode()` + `h2d()` and then sums the result is missing the decisive check.\n\nThat last line is exactly what `check_reserve_proof` does today.\n\n## Possible Solution\n\nUse the same commitment check in `check_reserve_proof` that the wallet receive path and `decodeRctSimple()` already use.\n\nMinimal patch shape inside the RingCT amount branch:\n\n```cpp\ncrypto::secret_key shared_secret;\ncrypto::derivation_to_scalar(derivation, proof.index_in_tx, shared_secret);\n\nrct::ecdhTuple ecdh_info = tx.rct_signatures.ecdhInfo[proof.index_in_tx];\nconst bool v2 =\n    tx.rct_signatures.type == rct::RCTTypeBulletproof2 ||\n    tx.rct_signatures.type == rct::RCTTypeCLSAG ||\n    tx.rct_signatures.type == rct::RCTTypeBulletproofPlus;\nrct::ecdhDecode(ecdh_info, rct::sk2rct(shared_secret), v2);\n\nTHROW_WALLET_EXCEPTION_IF(sc_check(ecdh_info.mask.bytes) != 0,\n    error::wallet_internal_error, \"Bad ECDH input mask\");\nTHROW_WALLET_EXCEPTION_IF(sc_check(ecdh_info.amount.bytes) != 0,\n    error::wallet_internal_error, \"Bad ECDH input amount\");\n\nrct::key Ctmp;\nrct::addKeys2(Ctmp, ecdh_info.mask, ecdh_info.amount, rct::H);\nif (!rct::equalKeys(tx.rct_signatures.outPk[proof.index_in_tx].mask, Ctmp))\n  return false;\n\namount = rct::h2d(ecdh_info.amount);\n```\n\nAdd a regression test close to the unit test above, and ideally a wallet-level test once there is a small helper for building a reserve proof around a deliberately malformed output.\n\nThis should be fixed alongside the duplicate-entry issue in `check_reserve_proof`: reject duplicate key images and duplicate `(txid, index_in_tx)` entries before fetching transactions or summing amounts.\n\n## Impact\n\nIf an attacker can get a confirmed output plus reserve proof into this shape, the official verifier can report reserves that are larger than the commitment-backed amount on-chain. The business impact is not wallet theft; it is false solvency. An exchange, bridge custodian, lender, OTC desk, or auditor relying on `check_reserve_proof` could accept collateral or reserves that do not exist.\n\nThe current evidence is the unit test above, not an end-to-end network exploit. I would not present it as \"one-command theft\" or as a finished exploit. The right framing is narrower: the reserve-proof verifier uses a weaker amount-decoding path than the wallet itself, and the test shows why the commitment check exists elsewhere in the codebase.\n\n## Note\n\nThis write-up and the gtest were prepared with AI/editor assistance for code navigation, wording, and test scaffolding. The line references, build commands, and test output above were checked against the local tree at `3ad4a5ee8`.\n\n## Bounty\n\nIf this qualifies for a bounty, XMR can be sent to:\n`47TUANy82gtBFMvsFwyA3hE98PzgKSmxNia3n9fpvSadDWs234M7oWfevXqYxKmy3d9hSp1TH82gX4JWvNEUupse2s92maV`",
+  "weakness": {
+    "id": 39,
+    "name": "Missing Required Cryptographic Step"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5810250,
+      "file_name": "ringct.cpp",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/h0szfv6o9ln2aingtozaa5vndxuk?response-content-disposition=attachment%3B%20filename%3D%22ringct.cpp%22%3B%20filename%2A%3DUTF-8%27%27ringct.cpp&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWRA3TWM2%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115336Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFoaCXVzLXdlc3QtMiJHMEUCICgxElVXuXtM161KhaOyc%2Fafw0WeA3CFW6qNNlC2Hph4AiEA6e7U68CBsnuCT7TaSLia4z9ismON%2FDLAZnPFRjuoYRIqsgUIIxADGgwwMTM2MTkyNzQ4NDkiDP2BjOqwyxIaJxMhziqPBXQcE4F%2FQVWXmAbGIZDKZoW%2F41amwJ0aLBzu%2Fq2O%2BxC83gyYDnEqtBnqzLBqmq%2F7tSIlIrDQgxdhUxHezmMyajJBy1rhvvhkGvGpgb1o8in9uCmP5mvGSzx0hBUUpYGWoSaBRlKmuWZSpFgTjiS1Sx3OEdOgyZotRCYg6YosnVl5VwjNbay%2BPKwE9GhoQ1tNEM13%2F97ZCLICWinLHDAbj89Kghvh9Hj9NLoLN5WnbfyiPTO4qJrnCY9KWVOiXafp52l6YMJdAEvzlpvuUcDlx%2Fpkp9KFIpF4dUFnI4h3WL3VsfEa7n7xRW8Mm%2Fcl5s26784qd4a2F%2FTz5VqK1vZ98I5bJt24LIPMegWX9ka5gQ6Y4rSpXjeUO3gibY1uC5dDq3D6w4Q%2FVHmONwc1PUigDrz9RTtSi%2Bab94CreISPAQIkU5hAkLPeh3IwIXhBLCejVGn0Lx0KDWkyzFRQ%2Br4GOm1j8DXnZ5y37n%2B5gphY4Bl3wIsgAhr1pOd267rDNXEqn10z7qlQwA5zb5OqBu2ZEI4dtreQNr5RWtfLrSRB8MQTzD2vVmnjInRFOznQ12zxcnboS1MemBrJkmWlPfmuoWYYKPSOEovSk4v4DpD%2FWV3LoXAWz6uZmu%2Fn6fTloCdn2AB8tFkdmp4a1KXtudcUtE4P8LuYzz9rWWwXnuA55HjbAul3pFfq09DKAGdR6nu7i%2BowfLK7LwZKdD30hAU%2BE8LwAKB8j%2FyEGDzdl3Q%2B8LNMnnYbjkZUrBUOcP8A%2Bn8WkG%2BowhMyZEApOe6wWbiTveaSPtAPjphejlLL1uK6j%2BMXP4wLxT7bbQAUNcP1mtIZPvnz0XoXAdTCCfniiJafDZePubt8Sy%2BU1oRLd%2BLY%2FRgwnYnM0wY6sQH4lHyT1HRIbs4AaaVjty3clZW7SSqpi5BFemaLX0N33Zkss9SXoGGcVzeG%2Bg5ymdPAK8EfQ8TNgKNa%2BoazcYdChR3q79N9gvjeAf5%2BOuPEQOuh%2FQR7emQInjiO7aaGzLD6jdIV2A7Zw4pwVIePSbWiOr4B%2B0J2PoKmCpUTVaQvbm4Q0aGcuvBaHb4gzfjGAUXHn4drpECrQ27fVyrMIjBo8R64omAQaE43LxdJJCqmSb4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=35f412f076318419c4adc38550312d53225b8610d53ec6f5bab4d101c5af08f3",
+      "file_size": 44054,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 5810252,
+      "file_name": "Screenshot_2026-04-27_231336.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ur7yqwuremp5asgjop1tx9hulk7u?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-04-27_231336.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-04-27_231336.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWRA3TWM2%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115336Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFoaCXVzLXdlc3QtMiJHMEUCICgxElVXuXtM161KhaOyc%2Fafw0WeA3CFW6qNNlC2Hph4AiEA6e7U68CBsnuCT7TaSLia4z9ismON%2FDLAZnPFRjuoYRIqsgUIIxADGgwwMTM2MTkyNzQ4NDkiDP2BjOqwyxIaJxMhziqPBXQcE4F%2FQVWXmAbGIZDKZoW%2F41amwJ0aLBzu%2Fq2O%2BxC83gyYDnEqtBnqzLBqmq%2F7tSIlIrDQgxdhUxHezmMyajJBy1rhvvhkGvGpgb1o8in9uCmP5mvGSzx0hBUUpYGWoSaBRlKmuWZSpFgTjiS1Sx3OEdOgyZotRCYg6YosnVl5VwjNbay%2BPKwE9GhoQ1tNEM13%2F97ZCLICWinLHDAbj89Kghvh9Hj9NLoLN5WnbfyiPTO4qJrnCY9KWVOiXafp52l6YMJdAEvzlpvuUcDlx%2Fpkp9KFIpF4dUFnI4h3WL3VsfEa7n7xRW8Mm%2Fcl5s26784qd4a2F%2FTz5VqK1vZ98I5bJt24LIPMegWX9ka5gQ6Y4rSpXjeUO3gibY1uC5dDq3D6w4Q%2FVHmONwc1PUigDrz9RTtSi%2Bab94CreISPAQIkU5hAkLPeh3IwIXhBLCejVGn0Lx0KDWkyzFRQ%2Br4GOm1j8DXnZ5y37n%2B5gphY4Bl3wIsgAhr1pOd267rDNXEqn10z7qlQwA5zb5OqBu2ZEI4dtreQNr5RWtfLrSRB8MQTzD2vVmnjInRFOznQ12zxcnboS1MemBrJkmWlPfmuoWYYKPSOEovSk4v4DpD%2FWV3LoXAWz6uZmu%2Fn6fTloCdn2AB8tFkdmp4a1KXtudcUtE4P8LuYzz9rWWwXnuA55HjbAul3pFfq09DKAGdR6nu7i%2BowfLK7LwZKdD30hAU%2BE8LwAKB8j%2FyEGDzdl3Q%2B8LNMnnYbjkZUrBUOcP8A%2Bn8WkG%2BowhMyZEApOe6wWbiTveaSPtAPjphejlLL1uK6j%2BMXP4wLxT7bbQAUNcP1mtIZPvnz0XoXAdTCCfniiJafDZePubt8Sy%2BU1oRLd%2BLY%2FRgwnYnM0wY6sQH4lHyT1HRIbs4AaaVjty3clZW7SSqpi5BFemaLX0N33Zkss9SXoGGcVzeG%2Bg5ymdPAK8EfQ8TNgKNa%2BoazcYdChR3q79N9gvjeAf5%2BOuPEQOuh%2FQR7emQInjiO7aaGzLD6jdIV2A7Zw4pwVIePSbWiOr4B%2B0J2PoKmCpUTVaQvbm4Q0aGcuvBaHb4gzfjGAUXHn4drpECrQ27fVyrMIjBo8R64omAQaE43LxdJJCqmSb4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=bc6066d625a5dd7fc859e5dbfb41ee8ace0190a0e2bf7ef42d9f832a736f876a",
+      "file_size": 60546,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-08-20T23:49:13.162Z",
+  "allow_singular_disclosure_after": 1338936.95549997,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

