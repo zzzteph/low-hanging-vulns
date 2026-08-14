@@ -1,0 +1,130 @@
+{
+  "id": 3799010,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzk5MDEw",
+  "url": "https://hackerone.com/reports/3799010",
+  "title": "TaskProcessing callback authorization bypass allows ex-members to post as Assistant Talk Bot",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-06-12T20:36:24.136Z",
+  "submitted_at": "2026-06-12T20:36:25.563Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "kuninogu",
+    "url": "/kuninogu",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-14T14:50:38.628Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-07-15T14:50:37.208Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nAn authenticated low-privilege user who knows a Talk conversation token can cause the trusted Assistant Talk Bot to post attacker-guided AI-generated content into that conversation, even after the user has left the conversation and can no longer access it.\n\nThe attacker schedules a `core:text2text` task through the Nextcloud TaskProcessing API and supplies:\n\n* `webhookMethod=AppAPI:talk_bot_ai:POST`\n* `webhookUri=/message?reply_to=0&token=<TARGET_ROOM_TOKEN>`\n\nWhen the task completes, Nextcloud sends an authenticated AppAPI callback to the bot's `/message` endpoint. The endpoint trusts the caller-supplied `token` and forwards the task output to `AI_BOT.send_message()` without verifying that the callback belongs to a task originally scheduled by the bot.\n\nAs a result, an ex-member who receives HTTP 404 when accessing the room can still cause a message attributed to \"Assistant Talk Bot (Bot)\" to be stored in that room.\n\n## Tested versions\n\nDynamically reproduced on:\n\n* Assistant Talk Bot (`talk_bot_ai`): [REPLACE WITH TESTED CURRENT VERSION, EXPECTED 3.2.0]\n* Nextcloud Server: [REPLACE WITH EXACT SUPPORTED VERSION]\n* AppAPI: [REPLACE WITH VERSION]\n* Talk (`spreed`): [REPLACE WITH VERSION]\n* Assistant: [REPLACE WITH VERSION]\n\nThe issue was also reproduced three out of three times on `talk_bot_ai 3.1.3` with Nextcloud `31.0.14.1`.\n\n## Preconditions\n\n* The attacker has a normal authenticated Nextcloud account.\n* The attacker can use `core:text2text` TaskProcessing.\n* Assistant Talk Bot is enabled in the target conversation.\n* The attacker knows the target conversation token.\n\nThe PoC uses a realistic ex-member scenario: the attacker legitimately learns the token while they are a member and then leaves the conversation before exploiting the issue.\n\n## Steps to reproduce\n\n1. Configure a test Nextcloud instance with `app_api`, `spreed`, `assistant`, a working `core:text2text` provider, and `talk_bot_ai`.\n\n2. Create two non-administrative users:\n\n   * Attacker\n   * Victim\n\n3. As the victim, create a private Talk conversation and enable Assistant Talk Bot in it.\n\n4. Add the attacker to the conversation.\n\n5. As the attacker, list the conversations and record the target conversation token.\n\n6. Have the attacker leave the conversation.\n\n7. Confirm that the attacker can no longer access the conversation:\n\n```http\nGET /ocs/v2.php/apps/spreed/api/v1/chat/<TARGET_ROOM_TOKEN>\nAuthorization: Basic <ATTACKER_CREDENTIALS>\nOCS-APIRequest: true\n```\n\nExpected and observed result:\n\n```text\nHTTP 404 Not Found\n```\n\n8. As the attacker, schedule a text-processing task with a callback targeting the conversation that the attacker has left:\n\n```bash\ncurl -s \\\n  -u '<ATTACKER>:<REDACTED>' \\\n  -H 'OCS-APIRequest: true' \\\n  -H 'Accept: application/json' \\\n  -H 'Content-Type: application/json' \\\n  --data '{\n    \"input\": {\n      \"input\": \"Output exactly: BENIGN-SPOOF-POC-<UNIQUE_NONCE>\"\n    },\n    \"type\": \"core:text2text\",\n    \"appId\": \"talk_bot_ai\",\n    \"webhookUri\": \"/message?reply_to=0&token=<TARGET_ROOM_TOKEN>\",\n    \"webhookMethod\": \"AppAPI:talk_bot_ai:POST\"\n  }' \\\n  'https://<TEST_INSTANCE>/ocs/v2.php/taskprocessing/schedule'\n```\n\nObserved result:\n\n```text\nHTTP 200\nTask status: STATUS_SUCCESSFUL\n```\n\n9. As the victim, open or retrieve the target conversation.\n\n10. Observe a message containing the unique benign marker with the following author information:\n\n```text\nactorType: bots\nactorDisplayName: Assistant Talk Bot (Bot)\nmessage: BENIGN-SPOOF-POC-<UNIQUE_NONCE>\n```\n\nThe attacker still receives HTTP 404 for the same conversation.\n\n## Root cause\n\nThe `POST /message` handler accepts `token` and `reply_to` from query parameters and uses them as the destination for `AI_BOT.send_message()`.\n\nThe endpoint verifies that the callback came through Nextcloud's AppAPI authentication, but it does not verify that:\n\n* the task was originally scheduled by Assistant Talk Bot;\n* the task is owned by the expected application or user;\n* the destination token belongs to that original task;\n* the callback contains a valid task-specific nonce or signature.\n\nA normal user can therefore register a TaskProcessing callback that causes Nextcloud itself to invoke the bot endpoint with attacker-controlled routing parameters.\n\n## Expected behavior\n\nA TaskProcessing callback handled by Assistant Talk Bot should only be accepted when it is cryptographically or server-side bound to a task originally created by that bot and to the original destination conversation.\n\n## Actual behavior\n\nAny authenticated user who can schedule a compatible TaskProcessing task can provide a callback URI containing a known conversation token. The bot then posts the resulting content into that conversation under its trusted bot identity.\n\n## Supporting material\n\nAttached:\n\n* `01_attacker_room_404.png`\n* `02_victim_room_bot_message.png`\n* `03_task_success_terminal.png`\n* `02_poc.zip`\n* `04_submission_evidence.zip`\n* `MANIFEST.sha256`\n\nThe PoC uses unique run-scoped test accounts, a harmless text marker, explicit exit codes, automatic cleanup, and no third-party data.\n\n\n## Disclosure and credit\n\nI have not publicly disclosed this issue.\n\nIf this issue is publicly acknowledged or included in a security advisory, I consent to public credit under my HackerOne username:\n\n`Kuniyoshi Noguchi (@KuniNogu) [Vulnerability Research, Agentic AI Security and Detection Engineering]`\n\n## Impact\n\n## Summary\n\nAn authenticated ex-member of a Talk conversation can perform a blind integrity violation against a conversation they can no longer access.\n\nThe attacker can cause attacker-guided AI-generated content to be stored in the conversation under the trusted identity \"Assistant Talk Bot (Bot)\". This can be used to deliver misleading instructions, false security notices, or phishing content that appears to originate from the organization's configured AI assistant.\n\nThe demonstrated impact is limited to message injection:\n\n* Confidentiality: None. The attacker cannot read the target conversation.\n* Integrity: Low. The attacker can inject a new bot-authored message but cannot modify existing messages, permissions, roles, shares, or approvals.\n* Availability: None.\n\nCVSS:\n\n```text\nCVSS:3.0/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:L/A:N\n4.3 Medium\n```",
+  "weakness": {
+    "id": 55,
+    "name": "Insecure Direct Object Reference (IDOR)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6082983,
+      "file_name": "04_submission_evidence.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/qsv1gwpt7kt4mqq8thrthk6memp1?response-content-disposition=attachment%3B%20filename%3D%2204_submission_evidence.zip%22%3B%20filename%2A%3DUTF-8%27%2704_submission_evidence.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVPLR3J6X%2F20260814%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260814T154424Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEDcaCXVzLXdlc3QtMiJGMEQCICcu8EJLNSqCnty3p53xYiLeRgtB2Nax6i8xPA2xQbcDAiArShgBvoY1XdCfSd8BAgf0ZqaG3lYZHvG0hIpzcP61HiqyBQgAEAMaDDAxMzYxOTI3NDg0OSIMWofYgykPJX0z%2B1LjKo8F78fJP7xLaSNdqKNHWBaK%2FG8OzHjeqL5wwmsx3HtpYkGCrlrvUUO2sSchaKgDlJtUhXr%2FuyLj%2BiBjgiNOt1HdxGG15WwhyhWuKb86orcNrzgXnJRds2EOy%2BqkROji4MWYvfVwYqcZY7jpjft%2FUt6XPRGxP%2Bww40upiRIIZgJeSAbAilt%2FRZuoK7XRdt1pV2diP%2FBDyMDb%2FkbedvOn2%2F1wpBAXVyDvV%2Fb2YuZNVmbIOlpdfJq8VGsv6Kd%2BcbpXDc1IPrmmOI%2FG3%2B85CTQwuHyqpc4%2F%2BDLJTzuKi0jkGQbQZQ%2F%2FutwGjyuJ%2FB3KihyNIiYu4ZUnD9ijctXtIKj5PZwW%2FnbNh9IW9MH7Q%2BnfuJ1jupEA7ycilgU7CP%2BduyApiv%2BQv%2BSUzteUsT97KupE5t34SQImOetyZWK0ewL8RIDCZKsmkxfy7YwJkN0xkTAmSho9ReHKKsBm5bKSqc22VSJvV8YzM9vDBYnvwHqpXsK4%2By2zu0VPut0DBdvWcUgEA%2F32dLvh5A4u7BcEZeyXXWMKcpjtK%2B6chEBABfRkaUMDbX2VnN6Jtc1L5091xRMk4qfukuwbhCMkgPtNaSfLVpSvPtG8huAc%2Bv%2BEr0BRFmNj8%2B%2BmVVi%2FdtIZA1ME%2FkwSxr%2BJg1QMiQbMoKixgdvCquqkAGQ4fikQe4U1DTtf3ICkIrrdVDiP7vPbn7wRcl22UBy3rdIQVu6Ae9puu0%2Fdwm3%2Ba4DI2aZnwdv3U%2BmgbW9iFuCkQchZlg7X2fEc%2BA44DEIAz1bJQMpUPDrJlPaiaTWHq%2BZKNpfN%2BC0LtSnTj3rXK8tI2NhqVPzoDsE%2B5A0Y9leg7EwllH0dTyF2ObEEHIoyRAdoNjNGbKkzDGjlQeLk4DCjy%2FzTBjqyAQYbhVuVnj4%2FFEGX5F8hje%2B6K1ZNHmZ037MPSYE7d0mweV7lq9QhVXpJPeaPmXMHGl5K6M5dxrOJGaO2vzs0gwSRfVLOSrirzCGUW5LJ2a40ETe9HjoZLVpUWbUEDeRnHIS4GPLrUz8O9rs%2BIw3wa4jr3Jcp2S2E6fJugOhNeIa7YmTc1WiHAHSor81YmeiJUDA%2Fr7KEuh9oBYPMCTlx6qpGQkYHiYkEq%2BV5vOybVZk9n6E%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ae3e8c3b8c4e9c63e86a5602a533a3f14c8de642136570be627f93d3ec643370",
+      "file_size": 12026,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-08-14T14:50:37.867Z",
+  "allow_singular_disclosure_after": -3226.613689318,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.3,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
