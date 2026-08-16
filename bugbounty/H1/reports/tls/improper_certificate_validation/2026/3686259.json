@@ -1,0 +1,136 @@
+{
+  "id": 3686259,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjg2MjU5",
+  "url": "https://hackerone.com/reports/3686259",
+  "title": "`set_daemon` wallet-rpc silently ignores `ssl_allowed_fingerprints` → pinning bypassed, wallet↔daemon MITM",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-21T03:05:35.313Z",
+  "submitted_at": "2026-04-21T03:05:35.579Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "benisprlh",
+    "url": "/benisprlh",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/m5ekpzvlfthhuy09lwf04wgk6qy9/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-05T05:05:59.944Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-08-05T05:05:59.434Z",
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:49:31.470Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Repository:** [`monero-project/monero`](https://github.com/monero-project/monero) — `src/wallet/wallet_rpc_server.cpp` (shared vulnerable code also reached via `contrib/epee/src/net_ssl.cpp`). Affected branches: `master` (commit `230de3794`), `release-v0.18`, `release-v0.17` (and every release since the RPC was introduced in commit `67aa4adcf`, March 2019).\n\n## Summary\n\nThe `set_daemon` JSON-RPC in `monero-wallet-rpc` accepts an `ssl_allowed_fingerprints` array and is supposed to pin the daemon's TLS cert to the listed SHA-256 digests. The handler never hex-decodes those strings — it just copies each character into the fingerprint buffer as a byte. A normal 64-char hex fingerprint ends up stored as 64 bytes of ASCII instead of 32 bytes of raw digest. `has_fingerprint()` later compares the real 32-byte SHA-256 of the peer cert against those 64-byte blobs with `std::binary_search`, so the check can never succeed. Because the command's default `ssl_support` is `\"autodetect\"`, the verify callback turns \"nothing matched\" into a `MWARNING` and accepts the connection anyway. Pinning is silently discarded.\n\nThe sibling CLI flag `--daemon-ssl-allowed-fingerprints` on the exact same binary goes through `epee::from_hex_locale::to_vector` and enforces `SSL_FINGERPRINT_SIZE == 32`. So the two paths accept the same documented input format and produce opposite security outcomes.\n\nBuggy block, `src/wallet/wallet_rpc_server.cpp` (current master `230de3794`):\n\n```cpp\nstd::vector<std::vector<uint8_t>> ssl_allowed_fingerprints;\nssl_allowed_fingerprints.reserve(req.ssl_allowed_fingerprints.size());\nfor (const std::string &fp: req.ssl_allowed_fingerprints)\n{\n  ssl_allowed_fingerprints.push_back({});\n  std::vector<uint8_t> &v = ssl_allowed_fingerprints.back();\n  for (auto c: fp)\n    v.push_back(c);\n}\n```\n\nCorrect block, `src/wallet/wallet2.cpp` (CLI startup):\n\n```cpp\nstd::vector<std::vector<uint8_t>> ssl_allowed_fingerprints{ daemon_ssl_allowed_fingerprints.size() };\nstd::transform(daemon_ssl_allowed_fingerprints.begin(), daemon_ssl_allowed_fingerprints.end(),\n               ssl_allowed_fingerprints.begin(), epee::from_hex_locale::to_vector);\nfor (const auto &fpr: ssl_allowed_fingerprints)\n{\n  THROW_WALLET_EXCEPTION_IF(fpr.size() != SSL_FINGERPRINT_SIZE, tools::error::wallet_internal_error,\n      \"SHA-256 fingerprint should be \" BOOST_PP_STRINGIZE(SSL_FINGERPRINT_SIZE) \" bytes long.\");\n}\n```\n\nThe decisive check in `contrib/epee/src/net_ssl.cpp`:\n\n```cpp\nif (!verified && !has_fingerprint(ctx))\n{\n  if (support != ssl_support_t::e_ssl_support_autodetect)\n  {\n    MERROR(\"SSL certificate is not in the allowed list, connection dropped\");\n    return false;\n  }\n  MWARNING(\"SSL peer has not been verified\");\n}\nreturn true;\n```\n\nWith `autodetect` (the command's default in `wallet_rpc_server_commands_defs.h`: `KV_SERIALIZE_OPT(ssl_support, (std::string)\"autodetect\")`) the branch falls through to `return true` and the daemon's cert is accepted.\n\n## Releases Affected\n\nEvery release since the `set_daemon` RPC was added in commit `67aa4adcf` (March 2019) — i.e. `v0.14.x` through `v0.18.x` and current `master @ 230de3794`. I checked `release-v0.17` and `release-v0.18` branches directly; the ASCII-copy block is byte-identical to master. The Ubuntu 22.04 `monero` package (`0.17.2.0`) also reproduces.\n\n## Steps to Reproduce\n\nI packaged the whole thing as a self-contained script (no `sudo` needed on Ubuntu 22.04, it uses `apt-get download` + `dpkg-deb -x` into `/tmp`):\n\n```\n./poc_set_daemon_pinning_bypass.sh\n```\n\nRun it with `bash ./poc_set_daemon_pinning_bypass.sh`.\n\nWhat it does, briefly:\n\n1. Pulls `monerod` and `monero-wallet-rpc` from the Ubuntu `monero` .deb into `/tmp/monero_extract`.\n2. Generates two distinct self-signed certs, `real.crt` (fingerprint `$FP_REAL`) and `evil.crt` (fingerprint `$FP_EVIL`).\n3. Starts two regtest daemons: real on `127.0.0.1:48080` with `real.crt`, evil on `127.0.0.1:49080` with `evil.crt`. Both in `--offline` mode so they cannot talk to each other.\n4. Starts `monero-wallet-rpc`, creates a fresh wallet, and mines 5 blocks on the **evil** daemon only. Direct `get_block_count` now returns `1` on real and `6` on evil.\n5. Pins the wallet to `$FP_REAL` and points it at the real daemon (baseline). `refresh` + `get_height` returns height 1. Good.\n6. Calls `set_daemon` again to point the wallet at the **evil** daemon, keeping `ssl_allowed_fingerprints=[$FP_REAL]` and `ssl_support=\"autodetect\"`. `refresh` returns:\n\n   ```json\n   {\"result\":{\"blocks_fetched\":5,\"received_money\":true}}\n   ```\n\n   and `get_height` returns `6`. The wallet, still \"pinned\" to the real fingerprint, just absorbed the evil daemon's chain. The only log trace is:\n\n   ```\n   WARNING  net.ssl  contrib/epee/src/net_ssl.cpp  SSL peer has not been verified\n   ```\n\n   No log line says the fingerprint list was malformed or ignored.\n\n7. For contrast, the script restarts the same binary with the CLI flag instead:\n\n   ```\n   monero-wallet-rpc --daemon-address 127.0.0.1:49080 --daemon-ssl enabled \\\n                     --daemon-ssl-allowed-fingerprints \"$FP_REAL\"\n   ```\n\n   `refresh` now fails closed:\n\n   ```json\n   {\"error\":{\"code\":-38,\"message\":\"no connection to daemon\"}}\n   ```\n\n   with `SSL certificate is not in the allowed list, connection dropped` in the log. Same binary, same fingerprint, same daemon — the only difference is which decoder the operator's configuration went through.\n\nIf you prefer to do it by hand instead of via the script, the core five calls are:\n\n```bash\nFP_REAL=$(openssl x509 -noout -fingerprint -sha256 -in real.crt \\\n          | sed 's/.*=//' | tr -d ':' | tr '[:upper:]' '[:lower:]')\n\n# baseline\ncurl -s http://127.0.0.1:48090/json_rpc -H 'Content-Type: application/json' -d \"$(cat <<EOF\n{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"set_daemon\",\"params\":{\n  \"address\":\"127.0.0.1:48080\",\"trusted\":true,\"ssl_support\":\"autodetect\",\n  \"ssl_allowed_fingerprints\":[\"$FP_REAL\"]}}\nEOF\n)\"\n\n# bypass\ncurl -s http://127.0.0.1:48090/json_rpc -H 'Content-Type: application/json' -d \"$(cat <<EOF\n{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"set_daemon\",\"params\":{\n  \"address\":\"127.0.0.1:49080\",\"trusted\":true,\"ssl_support\":\"autodetect\",\n  \"ssl_allowed_fingerprints\":[\"$FP_REAL\"]}}\nEOF\n)\"\n\ncurl -s http://127.0.0.1:48090/json_rpc -d '{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"refresh\"}' -H 'Content-Type: application/json'\ncurl -s http://127.0.0.1:48090/json_rpc -d '{\"jsonrpc\":\"2.0\",\"id\":\"0\",\"method\":\"get_height\"}' -H 'Content-Type: application/json'\n```\n{F5770401}\n## Possible Solution\n\nMake the RPC handler do what the CLI path already does:\n\n```cpp\nstd::vector<std::vector<uint8_t>> ssl_allowed_fingerprints;\nssl_allowed_fingerprints.reserve(req.ssl_allowed_fingerprints.size());\nfor (const std::string &fp : req.ssl_allowed_fingerprints)\n{\n  std::vector<uint8_t> decoded;\n  try { decoded = epee::from_hex_locale::to_vector(fp); }\n  catch (const std::exception &) {\n    er.code = WALLET_RPC_ERROR_CODE_NO_DAEMON_CONNECTION;\n    er.message = \"ssl_allowed_fingerprints[] entries must be hex-encoded SHA-256\";\n    return false;\n  }\n  if (decoded.size() != SSL_FINGERPRINT_SIZE) {\n    er.code = WALLET_RPC_ERROR_CODE_NO_DAEMON_CONNECTION;\n    er.message = \"Each fingerprint must decode to exactly 32 bytes\";\n    return false;\n  }\n  ssl_allowed_fingerprints.emplace_back(std::move(decoded));\n}\n```\n\nA couple of defense-in-depth suggestions while you're there:\n\n- The `ssl_options_t(std::vector<std::vector<uint8_t>>, std::string)` constructor in `contrib/epee/src/net_ssl.cpp` should also reject any entry whose size is not `SSL_FINGERPRINT_SIZE`. That would catch any future caller that forgets to hex-decode.\n- `has_strong_verification()` currently only looks at the `verification` enum and happily says \"strong\" for a list of 1000 garbage entries. It should additionally require that every entry have `SSL_FINGERPRINT_SIZE` bytes.\n- When `!fingerprints_.empty()` and `has_fingerprint()` returns false, log an `MERROR` that reports the sizes of the stored entries vs the computed digest. Right now an operator has no way to tell \"server cert rotated\" from \"my pinning list was discarded\".\n\n## Impact\n\nAnyone who uses `set_daemon` over RPC to pin their daemon's TLS cert (a standard automation pattern for exchanges, payment processors, and pool operators running wallet-rpc against a remote daemon) gets zero pinning. A network attacker between wallet and daemon can swap in any self-signed cert, complete the handshake and MITM the channel: daemon HTTP digest credentials, `/get_outs` and key-image-spent queries, decoy-ring responses used during tx construction, signed transactions submitted for relay, `/start_mining` control payloads. The operator's log shows nothing beyond the same `SSL peer has not been verified` line that you'd get from any `autodetect` connection — so you can't even tell from the log that pinning silently died.\n\n## Note\n\nThe proof-of-concept script in `./reports/poc_set_daemon_pinning_bypass.sh` was written with AI assistance to speed up the reproduction scaffolding (cert generation, daemon lifecycle, JSON-RPC plumbing). The vulnerable code path, line references, and manual verification against `release-v0.17`, `release-v0.18`, and `master @ 230de3794` are mine.\n\n## Bounty\n\nIf this qualifies for a payout, XMR can be sent to:\n\n`45BYNkdWvv45fovzeSgnNdMcZ8Pn9bdnegRyDcggz9XBUbrrgDhwfx63rpvesZMwWEKKQFms81v8hPbCX2eSCb3m9nFk9ZX`",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5770401,
+      "file_name": "Screenshot_2026-04-21_100246.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/mpiz36hvbgszib3gzaz1zasf5wil?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-04-21_100246.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-04-21_100246.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRY3YP7GM%2F20260816%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260816T151452Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGYaCXVzLXdlc3QtMiJGMEQCIESVvrA2jxW7Zutudxd5wsDbsLD1F9w8pSqeNvWxVC9bAiBduiA6CXvpA%2FMGwRz6Lj7LXMCUsggYOMGRbwWviEvtxiqyBQgvEAMaDDAxMzYxOTI3NDg0OSIMfxkUkm84JXVgXzRcKo8FSQ7WAPG1yz5a4bAf3Ckyxk67QSOLjRPqWsT%2FiDgccJbJePelqDzCi8f%2FPF4SelZqv2%2BzZN6nOdTQoVv5TIG0sSt6csXAyt8Wl3xpSj60yVEOZgySX4l5RsTcZJ%2F5Dv%2FXrQjDiv2lMpcrHeJqmEql54EwMXqgdN90REopZaYoeFP%2Bct0uQn6fEsnzkavVjxhM9KOkNSMxGS4iGKJoE%2BonjNzVz3SlUSJVtvEmByFIfXrypgf2kI%2FbEcbzZx8WHs5H72gnmDCqn8ZDH%2FKhLSAgvnnLrmcr7UGMAgkhixSbnpcD%2Bp0gJpXUCRRx7%2FfkX59f%2FU9hP5n0%2BsGo7jOCKYAozPLy5LNmQAUaBPXRu6Mc%2BbJflNeuRsPm1UrsQGsK2kLWOYSQ3KtE%2B1I7BsuTxoU%2F24N93syRCXhnmApISGb%2BOBl%2Bw9XuCm5vx%2BUGiplN9FJofTbHRCC6smEhFAi%2BLrLVkMeQo6yMup0d2oz3qL0InASk1VFIVuJkj2HlAXLOR9BCU0lAzlBnpEa67RBB31MgNPQUiq8KSSAu%2BvwdqhvosSo9R9siZFMTQ7UCd9FkOPyW27BQwdDGHEERghD2rSlZzuWemXrKrzkTuJdDXY%2Br0GzRz4T3MN59sQYL6RlhlNtmRuBMgQcUAFTgk6qiIg8kuSA1mYDinIxpTu8ZU%2FE7NTDPTEgg0LiTqLv28ff7okUfLR%2B%2BvBYJ%2FP0fmk0XbflIF2b%2B%2FujU30yqeejJrF4sm3mku1htdWoUu6Cd0W3J30b3ZarCz5PqZ3LGlKmojV4d0SeJRYfoQsqtcyxChmhZ0WN%2FLZ%2B71giivks4dbYa%2BJET290EvcGo%2B7Ypppt1%2BoOCPb8Dd7EDTEEnuWdsAk39dTC3iIfUBjqyAcTNQE7hOc0sWi%2F1yfpRhxxX97k4AJ9t80mejuJbpaUI0xcU9BN3WXs0NrUwlgu8%2BLjTarNIpGqdpD%2FXqdsme%2BE6PdnDKFVjPvN5MUUIbh6O9P5pXufaVCpYJi1%2FCDOXiP6iTqsVPxNqsYfuBKArjOHRKQKu3bE5JFKCTKMqQBo%2F5gBouGTIW6DHTAGkHcI8tFP2RD5wBdeFfhKE5ENKa7CqqsDOILp3hfq7em8jKbcCc4Q%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=5e6d138efc7ce02a69834333ea30c3e6d0faa3b7f9e9bb6147de7bfb44c7600e",
+      "file_size": 86615,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 5770404,
+      "file_name": "poc_set_daemon_pinning_bypass.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/dgthqzqxp3n150xlq45agqyk48bf?response-content-disposition=attachment%3B%20filename%3D%22poc_set_daemon_pinning_bypass.sh%22%3B%20filename%2A%3DUTF-8%27%27poc_set_daemon_pinning_bypass.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRY3YP7GM%2F20260816%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260816T151452Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGYaCXVzLXdlc3QtMiJGMEQCIESVvrA2jxW7Zutudxd5wsDbsLD1F9w8pSqeNvWxVC9bAiBduiA6CXvpA%2FMGwRz6Lj7LXMCUsggYOMGRbwWviEvtxiqyBQgvEAMaDDAxMzYxOTI3NDg0OSIMfxkUkm84JXVgXzRcKo8FSQ7WAPG1yz5a4bAf3Ckyxk67QSOLjRPqWsT%2FiDgccJbJePelqDzCi8f%2FPF4SelZqv2%2BzZN6nOdTQoVv5TIG0sSt6csXAyt8Wl3xpSj60yVEOZgySX4l5RsTcZJ%2F5Dv%2FXrQjDiv2lMpcrHeJqmEql54EwMXqgdN90REopZaYoeFP%2Bct0uQn6fEsnzkavVjxhM9KOkNSMxGS4iGKJoE%2BonjNzVz3SlUSJVtvEmByFIfXrypgf2kI%2FbEcbzZx8WHs5H72gnmDCqn8ZDH%2FKhLSAgvnnLrmcr7UGMAgkhixSbnpcD%2Bp0gJpXUCRRx7%2FfkX59f%2FU9hP5n0%2BsGo7jOCKYAozPLy5LNmQAUaBPXRu6Mc%2BbJflNeuRsPm1UrsQGsK2kLWOYSQ3KtE%2B1I7BsuTxoU%2F24N93syRCXhnmApISGb%2BOBl%2Bw9XuCm5vx%2BUGiplN9FJofTbHRCC6smEhFAi%2BLrLVkMeQo6yMup0d2oz3qL0InASk1VFIVuJkj2HlAXLOR9BCU0lAzlBnpEa67RBB31MgNPQUiq8KSSAu%2BvwdqhvosSo9R9siZFMTQ7UCd9FkOPyW27BQwdDGHEERghD2rSlZzuWemXrKrzkTuJdDXY%2Br0GzRz4T3MN59sQYL6RlhlNtmRuBMgQcUAFTgk6qiIg8kuSA1mYDinIxpTu8ZU%2FE7NTDPTEgg0LiTqLv28ff7okUfLR%2B%2BvBYJ%2FP0fmk0XbflIF2b%2B%2FujU30yqeejJrF4sm3mku1htdWoUu6Cd0W3J30b3ZarCz5PqZ3LGlKmojV4d0SeJRYfoQsqtcyxChmhZ0WN%2FLZ%2B71giivks4dbYa%2BJET290EvcGo%2B7Ypppt1%2BoOCPb8Dd7EDTEEnuWdsAk39dTC3iIfUBjqyAcTNQE7hOc0sWi%2F1yfpRhxxX97k4AJ9t80mejuJbpaUI0xcU9BN3WXs0NrUwlgu8%2BLjTarNIpGqdpD%2FXqdsme%2BE6PdnDKFVjPvN5MUUIbh6O9P5pXufaVCpYJi1%2FCDOXiP6iTqsVPxNqsYfuBKArjOHRKQKu3bE5JFKCTKMqQBo%2F5gBouGTIW6DHTAGkHcI8tFP2RD5wBdeFfhKE5ENKa7CqqsDOILp3hfq7em8jKbcCc4Q%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=4f482437bf13b50a108565e1f800cdcf7870e548fb4a939c1177823338d0d4be",
+      "file_size": 13321,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-08-20T23:49:32.005Z",
+  "allow_singular_disclosure_after": 376479.248356389,
+  "singular_disclosure_allowed": false,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "score": 7.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "low"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
