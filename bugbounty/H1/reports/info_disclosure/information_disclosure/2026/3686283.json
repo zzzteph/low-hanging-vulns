@@ -1,0 +1,121 @@
+{
+  "id": 3686283,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjg2Mjgz",
+  "url": "https://hackerone.com/reports/3686283",
+  "title": "View-only offline transaction creation bypasses the long-payment-ID privacy block",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-21T03:37:18.807Z",
+  "submitted_at": "2026-04-21T03:37:19.006Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "qttps",
+    "url": "/qttps",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0c4rlnulbnr1p89xgwsgyldjhkg9/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-20T23:49:45.868Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:49:40.772Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\nThe monero-gui Transfer page correctly blocks the normal online \"Send\" action when a standalone payment ID is present. The warning shown to the user states that long payment IDs are obsolete, were not encrypted on-chain, and harm privacy.\n\nHowever, the view-only offline transaction signing flow does not enforce the same protection. In a view-only wallet, the \"Offline transaction signing\" -> \"Create\" button remains enabled even when the long-payment-ID warning is visible. That offline Create action forwards the same `paymentIdLine.text` value into the shared transaction creation handler and then into the C++ wallet backend transaction creation API.\n\nThis means a QR code, `monero:` URI, or manually entered payment request can include a standalone payment ID that blocks normal Send, but still allows creation of an unsigned offline transaction. If the unsigned transaction is later signed and submitted, the unencrypted payment ID can link or identify the user's payment on-chain.\n\n## Weakness\n\nProtection Mechanism Failure, CWE-693.\n\nA secondary classification may be CWE-200 because the impact is privacy exposure through transaction metadata.\n\n## Severity\n\nSuggested CVSS 3.0:\n\n`CVSS:3.0/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N`\n\nSuggested severity: Medium.\n\n## Affected Component\n\nmonero-gui transaction creation flow:\n\n- `pages/Transfer.qml`\n- `main.qml`\n- `components/QRCodeScanner.qml`\n- `components/TxConfirmationDialog.qml`\n- `src/libwalletqt/Wallet.cpp`\n- `src/libwalletqt/WalletManager.cpp`\n\nThe exact release version is not inferable from my local checkout because it does not include Git metadata. The issue is present in the reviewed monero-gui source tree.\n\n## Technical Details\n\nUntrusted payment data can enter the GUI through a `monero:` URI or QR code.\n\n`main.qml` parses Monero URI/deeplink input and forwards the parsed payment ID into the transfer view:\n\n```qml\n// main.qml:447-460\nfunction onUriHandler(uri){\n    if (uri && (uri.startsWith(\"monero://\") || uri.startsWith(\"monero:\"))) {\n        const normalizedUri = uri.replace(\"monero://\", \"monero:\");\n        const parsed = walletManager.parse_uri_to_object(normalizedUri);\n\n        if (parsed.error) {\n            console.log(\"Invalid Monero URI: \" + parsed.error);\n        } else {\n            middlePanel.transferView.sendTo(\n                parsed.address || \"\",\n                parsed.payment_id || \"\",\n                parsed.tx_description || \"\",\n                parsed.amount || \"\"\n            );\n```\n\nQR payloads follow the same trust boundary:\n\n```qml\n// components/QRCodeScanner.qml:88-94\nonDecoded : {\n    const parsed = walletManager.parse_uri_to_object(data);\n    if (!parsed.error) {\n        root.qrcode_decoded(parsed.address, parsed.payment_id, parsed.amount, parsed.tx_description, parsed.recipient_name, parsed.extra_parameters);\n        root.state = \"Stopped\";\n    } else if (walletManager.addressValid(data, appWindow.persistentSettings.nettype)) {\n        root.qrcode_decoded(data, \"\", \"\", \"\", \"\", null);\n```\n\nThe Transfer page stores the supplied payment ID in UI state:\n\n```qml\n// pages/Transfer.qml:95-105\nfunction fillPaymentDetails(address, payment_id, amount, tx_description, recipient_name) {\n    ...\n    recipientModel.newRecipient(address, Utils.removeTrailingZeros(amount || \"\"));\n    setPaymentId(payment_id || \"\");\n    setDescription((recipient_name ? recipient_name + (tx_description ? \" (\" + tx_description + \")\" : \"\") : (tx_description || \"\")));\n}\n\n// pages/Transfer.qml:119-122\nfunction setPaymentId(value) {\n    paymentIdLine.text = value;\n    paymentIdCheckbox.checked = paymentIdLine.text != \"\";\n}\n```\n\nThe GUI correctly recognizes this state as dangerous and warns that long payment IDs harm privacy:\n\n```qml\n// pages/Transfer.qml:817-823\nMoneroComponents.WarningBox {\n    id: paymentIdWarningBox\n    text: qsTr(\"Long payment IDs are obsolete. \\\n    Long payment IDs were not encrypted on the blockchain and would harm your privacy. \\\n    If the party you're sending to still requires a long payment ID, please notify them.\") + translationManager.emptyString;\n    visible: paymentIdCheckbox.checked || warningLongPidDescription\n}\n```\n\nThe normal online Send button is disabled when that warning is visible:\n\n```qml\n// pages/Transfer.qml:831-843\nStandardButton {\n    id: sendButton\n    ...\n    text: qsTr(\"Send\") + translationManager.emptyString\n    enabled: !sendButtonWarningBox.visible && !warningContent && !recipientModel.hasEmptyAddress() && !paymentIdWarningBox.visible\n    onClicked: {\n        ...\n        setPaymentId(paymentIdLine.text.trim());\n        root.paymentClicked(recipientModel.getRecipients(), paymentIdLine.text, root.mixin, priority, descriptionLine.text)\n    }\n}\n```\n\nBut the view-only offline transaction \"Create\" button omits `!paymentIdWarningBox.visible`:\n\n```qml\n// pages/Transfer.qml:933-944\nAdvancedOptionsItem {\n    visible: persistentSettings.transferShowAdvanced && appWindow.walletMode >= 2\n    title: qsTr(\"Offline transaction signing\") + translationManager.emptyString\n    button1.text: qsTr(\"Create\") + translationManager.emptyString\n    button1.enabled: appWindow.viewOnly && pageRoot.checkInformation() && appWindow.daemonSynced\n    button1.onClicked: {\n        console.log(\"Transfer: saveTx Clicked\")\n        var priority = priorityModelV5.get(priorityDropdown.currentIndex).priority\n        console.log(\"priority: \" + priority)\n        setPaymentId(paymentIdLine.text.trim());\n        root.paymentClicked(recipientModel.getRecipients(), paymentIdLine.text, root.mixin, priority, descriptionLine.text)\n    }\n```\n\nThe shared transaction handler then forwards the payment ID into wallet transaction creation:\n\n```qml\n// main.qml:938-970\nfunction handlePayment(recipients, paymentId, mixinCount, priority, description, createFile) {\n    ...\n    if (recipientAll) {\n        currentWallet.createTransactionAllAsync(recipientAll.address, paymentId, mixinCount, priority);\n    } else {\n        const addresses = recipients.map(function (recipient) {\n            return recipient.address;\n        });\n        const amountsxmr = recipients.map(function (recipient) {\n            return recipient.amount;\n        });\n        currentWallet.createTransactionAsync(addresses, paymentId, amountsxmr, mixinCount, priority);\n    }\n}\n```\n\nThe C++ wrapper preserves and forwards the payment ID to the wallet backend:\n\n```cpp\n// src/libwalletqt/Wallet.cpp:631-655\nPendingTransaction *Wallet::createTransaction(\n    const QVector<QString> &destinationAddresses,\n    const QString &payment_id,\n    const QVector<QString> &destinationAmounts,\n    quint32 mixin_count,\n    PendingTransaction::Priority priority)\n{\n    ...\n    Monero::PendingTransaction *ptImpl = m_walletImpl->createTransactionMultDest(\n        destinations,\n        payment_id.toStdString(),\n        amounts,\n        mixin_count,\n        static_cast<Monero::PendingTransaction::Priority>(priority),\n        currentSubaddressAccount(),\n        subaddr_indices);\n```\n\nThe async wrapper also preserves the value:\n\n```cpp\n// src/libwalletqt/Wallet.cpp:659-668\nvoid Wallet::createTransactionAsync(\n    const QVector<QString> &destinationAddresses,\n    const QString &payment_id,\n    const QVector<QString> &destinationAmounts,\n    quint32 mixin_count,\n    PendingTransaction::Priority priority)\n{\n    m_scheduler.run([this, destinationAddresses, payment_id, destinationAmounts, mixin_count, priority] {\n        PendingTransaction *tx = createTransaction(destinationAddresses, payment_id, destinationAmounts, mixin_count, priority);\n        emit transactionCreated(tx, destinationAddresses, payment_id, mixin_count);\n    });\n}\n```\n\nThe transaction confirmation dialog shows recipient information, but does not show the standalone payment ID:\n\n```qml\n// components/TxConfirmationDialog.qml:302-322\ntext: {\n    return recipients.map(function (recipient, index) {\n        ...\n        const spacedaddress = recipient.address.match(/.{1,4}/g).join(' ');\n        return title + \"<br>\" + spacedaddress;\n    }).join(\"<br><br>\");\n}\n```\n\n## Steps to Reproduce (theory)\n\nThese steps can be performed with a dummy wallet in a local-only test environment. No real funds, real wallet seed, production wallet, or public node access is required.\n\n1. Open monero-gui with a dummy view-only wallet.\n2. Enable advanced transfer options.\n3. Ensure the wallet reaches the state where offline transaction creation is available.\n4. Provide a Monero URI or QR payload containing:\n   - a valid dummy recipient address,\n   - a dummy amount,\n   - a standalone 64-hex payment ID.\n5. Observe that the Transfer page stores the payment ID in `paymentIdLine.text`.\n6. Observe that the long-payment-ID warning is visible.\n7. Observe that the normal Send button is disabled because its enabled condition includes `!paymentIdWarningBox.visible`.\n8. Observe that the view-only \"Offline transaction signing\" -> \"Create\" button remains enabled because its enabled condition is only:\n\n```qml\nappWindow.viewOnly && pageRoot.checkInformation() && appWindow.daemonSynced\n```\n\n9. Click \"Create\" in the dummy environment.\n10. The payment ID is forwarded through:\n    - `pages/Transfer.qml:942-943`\n    - `main.qml:938-970`\n    - `src/libwalletqt/Wallet.cpp:659-668`\n    - `src/libwalletqt/Wallet.cpp:631-655`\n\n## Observed Result\n\nThe normal Send path blocks transaction creation when the long-payment-ID warning is visible, but the view-only offline Create path remains enabled and forwards the same payment ID to the wallet backend transaction creation sink.\n\n## Expected Result\n\nOffline transaction creation should enforce the same payment ID privacy protection as normal Send. If the GUI blocks normal Send because a standalone long payment ID harms privacy, it should also block view-only offline transaction creation with the same payment ID.\n\n## Why this is security-relevant\n\nThis is not only a UI inconsistency. The application explicitly says that long payment IDs were not encrypted on-chain and harm privacy. The normal Send flow enforces that policy, but the offline transaction creation flow bypasses it and passes the payment ID into backend transaction creation.\n\nFor users relying on cold-signing or view-only wallet workflows, the view-only machine prepares the unsigned transaction. The signing device/user may reasonably trust that monero-gui enforced the same privacy constraints during offline transaction creation as it does during normal sending.\n\n## AI Usage Acknowledgement\n\nChatGPT 5.4 helped create this report and helped with the source code scan. The analysis was based on authorized local source-code review of the monero-gui repository, and the report claims are grounded in the code references listed above.\n```\n\n## Impact\n\nAn attacker, merchant, or compromised payment request generator can supply a `monero:` URI or QR code containing a standalone payment ID. In the normal Send flow, monero-gui blocks transaction creation because the app recognizes that long payment IDs are unencrypted on-chain and harm privacy.\n\nIn the view-only offline signing workflow, the same payment ID can still be used to create an unsigned transaction. If the user later signs and submits that transaction, the standalone payment ID can link or identify the user's payment on-chain.\n\nThe practical impact is a privacy-protection bypass in a financial privacy wallet:\n\n- transaction metadata that the normal GUI blocks can still enter the offline transaction creation path;\n- users can unknowingly prepare unsigned transactions containing unencrypted linkable metadata;\n- the confirmation dialog does not clearly display the standalone payment ID before creation;\n- cold-signing/view-only workflows are affected, which are used by security-conscious users who expect stricter transaction handling.\n\nThis does not bypass wallet signing and does not automatically steal funds, so I am rating it as Medium rather than High. The issue is still security-relevant because it bypasses an explicit Monero privacy protection and can result in on-chain linkability if the prepared transaction is signed and broadcast.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-08-20T23:49:41.289Z",
+  "allow_singular_disclosure_after": -4007.744486753,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.4,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,132 @@
+{
+  "id": 3819475,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODE5NDc1",
+  "url": "https://hackerone.com/reports/3819475",
+  "title": "Monero GUI OpenAlias DNSSEC-invalid resolution still writes spoofable address into recipient field",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-06-23T09:55:03.392Z",
+  "submitted_at": "2026-06-23T09:55:03.812Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "lilpeko",
+    "url": "/lilpeko",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/8b149ecfg7dmv7c8kb2ohjnwiaj7/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-20T23:51:18.358Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:51:08.370Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nMonero GUI resolves OpenAlias names through DNS and exposes the DNSSEC result to QML as `true|address` or `false|address`. When DNSSEC validation fails but the TXT record contains a syntactically valid Monero address, `TxUtils.handleOpenAliasResolution()` returns both a warning message and the resolved address. The Transfer and Address Book pages then apply `response.address` to the recipient field even though `response.message` says the address may be spoofed.\n\nImpact summary: an attacker who can influence a victim's DNS/OpenAlias lookup can make the GUI's OpenAlias helper produce an attacker-controlled address despite failed DNSSEC validation. The QML transfer flow then writes that unauthenticated address into the recipient field. If the victim proceeds with the send flow, funds are sent to the attacker-controlled address.\n\n## Affected Code & Version\n\nRepository/version reviewed:\n\n- `monero-gui` commit `003e667576f38812e27cbb79125a0ba96036225d` on `master`\n- CLI/library source reviewed from `/home/peko/monero/monero` commit `2c48374ecd2449c02bb400e5bcf20b7c6f11649b`\n\nAffected code:\n\n- `monero-gui/src/libwalletqt/WalletManager.cpp:391-396`\n  - `WalletManager::resolveOpenAlias()` serializes the resolver result as `dnssec_valid ? \"true\" : \"false\"` plus the resolved address.\n- `monero/src/wallet/api/wallet_manager.cpp:338-344`\n  - `WalletManagerImpl::resolveOpenAlias()` returns the first address from `tools::dns_utils::addresses_from_url()` even when `dnssec_valid` is false.\n- `monero/src/common/dns_utils.cpp:418-442`\n  - `addresses_from_url()` sets `dnssec_valid = false` unless DNSSEC is both available and valid, but still returns parsed OpenAlias addresses from TXT records.\n- `monero-gui/js/TxUtils.js:82-105`\n  - For `isDnssecValid === \"false\"` and `isAddressValid`, `handleOpenAliasResolution()` returns `{ address: resolvedAddress, message: \"...\" }` instead of withholding the address.\n- `monero-gui/pages/Transfer.qml:430-438`\n  - The Transfer page shows the warning, then unconditionally writes `response.address` into the recipient field.\n- `monero-gui/pages/AddressBook.qml:389-397`\n  - The Address Book page has the same pattern and persists the spoofable address if the user saves the entry.\n\nRelevant CLI comparison:\n\n- `monero/src/simplewallet/simplewallet.cpp:501-534`\n  - The CLI path prompts for explicit confirmation and displays DNSSEC status before returning the address. The GUI path does not require a confirm/deny decision before writing the address into the payment form.\n\n\n## Steps to Reproduce\n\nThe lab PoC below does not query live DNS, does not open a wallet, does not relay transactions, and does not touch the Monero network. It executes the actual `monero-gui/js/TxUtils.js` source with mocked QML globals and then applies the same recipient-field assignment performed by `Transfer.qml`.\n\n1. On the lab VM, run the PoC Script:\n\nCode\n```js\n#!/usr/bin/env node\n/*\n * Lab-safe reproduction that executes the actual monero-gui/js/TxUtils.js\n * handleOpenAliasResolution() function with mocked QML globals.\n *\n * No DNS queries, wallet actions, or Monero network activity are performed.\n */\n\nconst fs = require(\"fs\");\nconst path = require(\"path\");\nconst vm = require(\"vm\");\n\nconst guiDir = process.env.MONERO_GUI_DIR || \"/home/peko/monero/monero-gui\";\nconst txUtilsPath = path.join(guiDir, \"js\", \"TxUtils.js\");\nconst source = fs.readFileSync(txUtilsPath, \"utf8\");\n\nconst attackerAddress =\n  \"45BYNkdWvv45fovzeSgnNdMcZ8Pn9bdnegRyDcggz9XBUbrrgDhwfx63rpvesZMwWEKKQFms81v8hPbCX2eSCb3m9nFk9ZX\";\n\nconst context = {\n  console,\n  qsTr: (text) => text,\n  appWindow: {\n    persistentSettings: {\n      nettype: \"mainnet\",\n    },\n  },\n  walletManager: {\n    resolveOpenAlias: () => `false|${attackerAddress}`,\n    addressValid: (address) => address === attackerAddress,\n  },\n};\n\nvm.createContext(context);\nvm.runInContext(source, context, { filename: txUtilsPath });\n\nconst openAlias = \"donate.getmonero.org\";\nlet recipientField = openAlias;\nconst response = context.handleOpenAliasResolution(recipientField, \"\");\n\nconsole.log(`source_file=${txUtilsPath}`);\nconsole.log(\"resolver_response=\", response);\n\nif (response.message) {\n  console.log(\"warning_shown=\", response.message);\n}\n\n// Transfer.qml lines 430-438 assign response.address even when response.message exists.\nif (response.address) {\n  recipientField = response.address;\n}\n\nconsole.log(\"recipient_after_resolve=\", recipientField);\n\nif (recipientField !== attackerAddress || !response.message || !response.address) {\n  throw new Error(\"PoC did not reproduce the vulnerable autofill state\");\n}\n\nconsole.log(\n  \"RESULT: vulnerable autofill reproduced with actual TxUtils.js: invalid-DNSSEC OpenAlias still overwrote the recipient address\"\n);\n\n```\n\n```bash\nnode /home/peko/reports/monero/poc_gui_openalias_dnssec_autofill_actual_js.js\n```\n\n2. If the saved report directory is not present on the lab VM, run the same actual-source harness inline:\n\n```bash\ncd /home/peko/monero/monero-gui\nnode - <<'JS'\nconst fs = require(\"fs\");\nconst vm = require(\"vm\");\nconst source = fs.readFileSync(\"js/TxUtils.js\", \"utf8\");\nconst attackerAddress = \"45BYNkdWvv45fovzeSgnNdMcZ8Pn9bdnegRyDcggz9XBUbrrgDhwfx63rpvesZMwWEKKQFms81v8hPbCX2eSCb3m9nFk9ZX\";\nconst context = {\n  console,\n  qsTr: (text) => text,\n  appWindow: { persistentSettings: { nettype: \"mainnet\" } },\n  walletManager: {\n    resolveOpenAlias: () => `false|${attackerAddress}`,\n    addressValid: (address) => address === attackerAddress,\n  },\n};\nvm.createContext(context);\nvm.runInContext(source, context, { filename: \"js/TxUtils.js\" });\nlet recipientField = \"donate.getmonero.org\";\nconst response = context.handleOpenAliasResolution(recipientField, \"\");\nconsole.log(\"resolver_response=\", response);\nif (response.message) console.log(\"warning_shown=\", response.message);\nif (response.address) recipientField = response.address;\nconsole.log(\"recipient_after_resolve=\", recipientField);\nif (recipientField !== attackerAddress || !response.message || !response.address) process.exit(1);\nconsole.log(\"RESULT: vulnerable autofill reproduced with actual TxUtils.js\");\nJS\n```\n\n3. Expected output:\n\n```text\nsource_file=/home/peko/monero/monero-gui/js/TxUtils.js\nresolver_response= {\n  address: '45BYNkdWvv45fovzeSgnNdMcZ8Pn9bdnegRyDcggz9XBUbrrgDhwfx63rpvesZMwWEKKQFms81v8hPbCX2eSCb3m9nFk9ZX',\n  message: 'Address found, but the DNSSEC signatures could not be verified, so this address may be spoofed'\n}\nwarning_shown= Address found, but the DNSSEC signatures could not be verified, so this address may be spoofed\nrecipient_after_resolve= 45BYNkdWvv45fovzeSgnNdMcZ8Pn9bdnegRyDcggz9XBUbrrgDhwfx63rpvesZMwWEKKQFms81v8hPbCX2eSCb3m9nFk9ZX\nRESULT: vulnerable autofill reproduced with actual TxUtils.js: invalid-DNSSEC OpenAlias still overwrote the recipient address\n```\n{F6137878}\n\n4. Code-flow verification:\n\n```bash\nnl -ba js/TxUtils.js | sed -n '82,105p'\nnl -ba pages/Transfer.qml | sed -n '430,438p'\nnl -ba pages/AddressBook.qml | sed -n '389,397p'\n```\n{F6137884}\n\nThis PoC intentionally stops at deterministic source-code execution and QML flow verification. No live desktop GUI, DNS server, wallet, or transaction was used.\n\n## Exploit Scenario\n\n1. The victim intends to pay `merchant.example` or `merchant@example` through OpenAlias.\n2. The attacker controls the victim's DNS resolver, poisons DNS on the local network, or otherwise causes the OpenAlias TXT lookup to return `oa1:xmr recipient_address=<attacker address>;` without valid DNSSEC.\n3. Monero GUI receives `false|<attacker address>` from `WalletManager::resolveOpenAlias()`.\n4. `TxUtils.handleOpenAliasResolution()` returns both a spoofing warning and `address: <attacker address>`.\n5. `Transfer.qml` shows the warning but still overwrites the recipient field with the attacker address.\n6. If the victim continues through the normal send confirmation flow, the transaction pays the attacker address.\n\n## Fix Recommendation\n\nMake invalid or unavailable DNSSEC a hard stop for automatic GUI autofill.\n\nPreferred code-level fix in `monero-gui/js/TxUtils.js`:\n\n```javascript\n} else if (isDnssecValid === \"false\") {\n    if (isAddressValid) {\n        return {\n            message: qsTr(\"Address found, but the DNSSEC signatures could not be verified, so this address may be spoofed\"),\n        };\n    } else {\n        return { message: qsTr(\"No valid address found at this OpenAlias address, but the DNSSEC signatures could not be verified, so this may be spoofed\") };\n    }\n}\n```\n\nAdditional hardening:\n\n- In `Transfer.qml` and `AddressBook.qml`, only assign `response.address` when the response indicates authenticated DNSSEC success. Do not infer safety from the address being syntactically valid.\n- If product requirements need unsigned OpenAlias support, show a blocking confirmation dialog with the full OpenAlias name, full resolved address, DNSSEC failure state, and a default-cancel action. Only after explicit confirmation should the GUI fill the address.\n- Consider changing `WalletManager::resolveOpenAlias()` to return structured fields instead of a pipe-delimited string, for example `{dnssec_valid, address, error}`. This reduces the chance that UI code accidentally treats `false|address` as an acceptable address result.\n- Add regression tests for `handleOpenAliasResolution()`:\n  - `true|validAddress` returns an address.\n  - `false|validAddress` returns only a warning and does not mutate the recipient field.\n  - `false|invalidAddress` returns only a warning/error.\n\n## CWE Classification\n\n- CWE-345: Insufficient Verification of Data Authenticity\n  - The GUI consumes address data from DNS/OpenAlias even when DNSSEC authenticity validation failed. A warning is shown, but the unauthenticated address is still accepted into the transaction recipient field.\n- CWE-20: Improper Input Validation\n  - The code validates only that the resolved string is a syntactically valid Monero address. It does not enforce the security property required for OpenAlias payment safety: authenticated binding between the human-readable alias and the resolved address.\n\n\n## Note\n\nThe PoC script `poc_gui_openalias_dnssec_autofill_actual_js.js` was written with AI assistance for the mocked QML globals and lab-safe source execution harness. The harness executes the actual `monero-gui/js/TxUtils.js` file from the checked-out source tree. The vulnerable code path, line references, and the decision that this is separate from the already-submitted GUI price-fetch TLS and transaction-details rich-text issues were verified by reading the source directly. The PoC was executed only on the provided lab VM and did not perform active exploitation against Monero networks or live Monero Project services.\n\n## Bounty\n\nIf this qualifies for a payout, XMR can be sent to:\n\n```text\n45BYNkdWvv45fovzeSgnNdMcZ8Pn9bdnegRyDcggz9XBUbrrgDhwfx63rpvesZMwWEKKQFms81v8hPbCX2eSCb3m9nFk9ZX\n```\n\n## Impact\n\nAn attacker who can influence a victim’s OpenAlias DNS lookup can cause Monero GUI to place an attacker-controlled Monero address into the Transfer recipient field even when DNSSEC validation fails.\n\nThe GUI does show a warning, but it still accepts and applies the unauthenticated address. This creates a direct fund-loss risk: if the victim continues with the normal send  flow, the transaction is constructed for the attacker-controlled address, and the XMR transfer is irreversible.\n\nPractical attack scenarios include:\n\n- Malicious or compromised DNS resolver returns an attacker OpenAlias TXT record.\n- Local network attacker poisons or intercepts DNS responses.\n- Attacker-controlled OpenAlias/domain configuration has no valid DNSSEC but still returns a valid Monero address.\n- Victim relies on the GUI’s Resolve behavior and does not manually compare the final long address.\n\nSecurity impact:\n\n- Unauthenticated DNS data can alter the payment recipient.\n- Human-readable recipient intent is broken: merchant.example can resolve into attacker address.\n- Funds can be permanently lost if the user submits the transaction.\n- Address Book entries can also persist the spoofed address, making future payments to the same contact unsafe.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6137878,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/8ismbcfyj5inlsbji55o8re8uadl?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZBBSMURR%2F20260821%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260821T005628Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjENH%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIBAT5qIve8KuCu8K%2Be4MnggYU1w9vqjRu1sf5QAywHSAAiBVXYHxlMnh2uLASqKf8GI39K4y1fAHVzSHXruQkQ5q0Sq6BQia%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMSRoHf4jz5FjYKi49Ko4FgxNkP5hVqK7BRBtszS%2FdUquOLpV6aDZOuXVJZn18kAIPZK07wRUOySuSL6SnFpbULSRF5vniYikPEbZDr%2Bd55r%2BkMoTIihuv8rn6p%2By7gxC4iY1KtWUdHZ7CV8eOEEQUkPsN%2Fj9tZk5IQ6BQkHlLnOkbcVHUbp5iGmM96aCK11IHCWT9XEDZPmp81f4%2B%2F3N3TW6QKUbrgrLwp3jOVRjS5LAnNMIeTTO5oX5GTq%2BCtA8Am6V60u%2FJIHF5PkXFBzo8VdcUXYMmYUuKAo7W70M93P4auQHdXZQpNMjTUFtZRpLRBwPNBLrlA0OkpoBItmPPXCX2Zsn1nkuUdH08NiTm8WNHfUMnvD3Amm9g5C889jxg2nPJ9L0GmkuL6lZ%2BinnJcsDDNWjkR8QvSEeyaN9YRi9v19F7WBc4WZ12ucTr%2BivbT7karSdTMFKNMs2OFeIBNZ9WIaJFZdsI%2B0YQdOI47QgonZ%2Ba5Dw1d5PpIdNOC28Y9UFO1RKROF3MI1EqN089Kifjxk%2Ff03uVDmlJUGZx6UvwfMs7qyneVbMVh5DoeZoju%2FKEYpM0XV38PSiAS1ZHUPyCNsMoYIiq9nwuMJBmywcOcaVuZiFp1CsU32iE1bmpISn%2Bp1CES9yQT%2BMeQ3CcAMkRrXajzO2LYZB%2FmFTAtmFp2L1g2fc0BN2Upjs3RLRqUNLJ%2BM0KcQa1C2Jxv09TvTj7BptfiARHNRpTW5qga2eQi8mZ8xaoLhvzrN6P60Lsc7juoaFWSA1c2Dj5ffAAot679U1F6qA5e2W88GLra1Ki%2BBZdhpDAcv%2F1in7QqEt1dRhvhEPgiST2nL%2B1VixMYnOubhJUb6p5mDL2Z5nuhPCggakYR4KFNzBSV0ShMI%2B1ntQGOrIBJ50NjmlKbIdeK4apYzVRbUQAm0nbjmQtsAzzIpHb5xGkocX6gocSeYPA9%2FQZCKhklT90UJfizF929YNbn5IkbMIg6D89y7wWMzv506ufhBzzUwymy17x81sF18ml3bE1VkH6r%2FiPoQwo59FaDxIjDyWjYmvtdRjxNoCnetswlh8oHuY%2B3gxkzyKGNoUonYrhoGBe9ig%2FRaOM0rMvEKS%2Bf8y%2FJAyD0KRjKP6%2FD02ekeMUMw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=99b82d51a0166526bac2220a0252a75b368a3dcc51717bd96c27610cb5cc810b",
+      "file_size": 115709,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6137884,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/l0gg89tbgs3w2aflu8qltfmxj9bk?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZBBSMURR%2F20260821%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260821T005628Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjENH%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIBAT5qIve8KuCu8K%2Be4MnggYU1w9vqjRu1sf5QAywHSAAiBVXYHxlMnh2uLASqKf8GI39K4y1fAHVzSHXruQkQ5q0Sq6BQia%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMSRoHf4jz5FjYKi49Ko4FgxNkP5hVqK7BRBtszS%2FdUquOLpV6aDZOuXVJZn18kAIPZK07wRUOySuSL6SnFpbULSRF5vniYikPEbZDr%2Bd55r%2BkMoTIihuv8rn6p%2By7gxC4iY1KtWUdHZ7CV8eOEEQUkPsN%2Fj9tZk5IQ6BQkHlLnOkbcVHUbp5iGmM96aCK11IHCWT9XEDZPmp81f4%2B%2F3N3TW6QKUbrgrLwp3jOVRjS5LAnNMIeTTO5oX5GTq%2BCtA8Am6V60u%2FJIHF5PkXFBzo8VdcUXYMmYUuKAo7W70M93P4auQHdXZQpNMjTUFtZRpLRBwPNBLrlA0OkpoBItmPPXCX2Zsn1nkuUdH08NiTm8WNHfUMnvD3Amm9g5C889jxg2nPJ9L0GmkuL6lZ%2BinnJcsDDNWjkR8QvSEeyaN9YRi9v19F7WBc4WZ12ucTr%2BivbT7karSdTMFKNMs2OFeIBNZ9WIaJFZdsI%2B0YQdOI47QgonZ%2Ba5Dw1d5PpIdNOC28Y9UFO1RKROF3MI1EqN089Kifjxk%2Ff03uVDmlJUGZx6UvwfMs7qyneVbMVh5DoeZoju%2FKEYpM0XV38PSiAS1ZHUPyCNsMoYIiq9nwuMJBmywcOcaVuZiFp1CsU32iE1bmpISn%2Bp1CES9yQT%2BMeQ3CcAMkRrXajzO2LYZB%2FmFTAtmFp2L1g2fc0BN2Upjs3RLRqUNLJ%2BM0KcQa1C2Jxv09TvTj7BptfiARHNRpTW5qga2eQi8mZ8xaoLhvzrN6P60Lsc7juoaFWSA1c2Dj5ffAAot679U1F6qA5e2W88GLra1Ki%2BBZdhpDAcv%2F1in7QqEt1dRhvhEPgiST2nL%2B1VixMYnOubhJUb6p5mDL2Z5nuhPCggakYR4KFNzBSV0ShMI%2B1ntQGOrIBJ50NjmlKbIdeK4apYzVRbUQAm0nbjmQtsAzzIpHb5xGkocX6gocSeYPA9%2FQZCKhklT90UJfizF929YNbn5IkbMIg6D89y7wWMzv506ufhBzzUwymy17x81sF18ml3bE1VkH6r%2FiPoQwo59FaDxIjDyWjYmvtdRjxNoCnetswlh8oHuY%2B3gxkzyKGNoUonYrhoGBe9ig%2FRaOM0rMvEKS%2Bf8y%2FJAyD0KRjKP6%2FD02ekeMUMw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d2480bd82e93f1d1931530274c8c824c2cb289aa4c48caa6c60bc93137cd685a",
+      "file_size": 364280,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6137948,
+      "file_name": "poc_gui_openalias_dnssec_autofill_actual_js.js",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fl0sic1d445vv0umkqq57ofslnxa?response-content-disposition=attachment%3B%20filename%3D%22poc_gui_openalias_dnssec_autofill_actual_js.js%22%3B%20filename%2A%3DUTF-8%27%27poc_gui_openalias_dnssec_autofill_actual_js.js&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZBBSMURR%2F20260821%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260821T005628Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjENH%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIBAT5qIve8KuCu8K%2Be4MnggYU1w9vqjRu1sf5QAywHSAAiBVXYHxlMnh2uLASqKf8GI39K4y1fAHVzSHXruQkQ5q0Sq6BQia%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMSRoHf4jz5FjYKi49Ko4FgxNkP5hVqK7BRBtszS%2FdUquOLpV6aDZOuXVJZn18kAIPZK07wRUOySuSL6SnFpbULSRF5vniYikPEbZDr%2Bd55r%2BkMoTIihuv8rn6p%2By7gxC4iY1KtWUdHZ7CV8eOEEQUkPsN%2Fj9tZk5IQ6BQkHlLnOkbcVHUbp5iGmM96aCK11IHCWT9XEDZPmp81f4%2B%2F3N3TW6QKUbrgrLwp3jOVRjS5LAnNMIeTTO5oX5GTq%2BCtA8Am6V60u%2FJIHF5PkXFBzo8VdcUXYMmYUuKAo7W70M93P4auQHdXZQpNMjTUFtZRpLRBwPNBLrlA0OkpoBItmPPXCX2Zsn1nkuUdH08NiTm8WNHfUMnvD3Amm9g5C889jxg2nPJ9L0GmkuL6lZ%2BinnJcsDDNWjkR8QvSEeyaN9YRi9v19F7WBc4WZ12ucTr%2BivbT7karSdTMFKNMs2OFeIBNZ9WIaJFZdsI%2B0YQdOI47QgonZ%2Ba5Dw1d5PpIdNOC28Y9UFO1RKROF3MI1EqN089Kifjxk%2Ff03uVDmlJUGZx6UvwfMs7qyneVbMVh5DoeZoju%2FKEYpM0XV38PSiAS1ZHUPyCNsMoYIiq9nwuMJBmywcOcaVuZiFp1CsU32iE1bmpISn%2Bp1CES9yQT%2BMeQ3CcAMkRrXajzO2LYZB%2FmFTAtmFp2L1g2fc0BN2Upjs3RLRqUNLJ%2BM0KcQa1C2Jxv09TvTj7BptfiARHNRpTW5qga2eQi8mZ8xaoLhvzrN6P60Lsc7juoaFWSA1c2Dj5ffAAot679U1F6qA5e2W88GLra1Ki%2BBZdhpDAcv%2F1in7QqEt1dRhvhEPgiST2nL%2B1VixMYnOubhJUb6p5mDL2Z5nuhPCggakYR4KFNzBSV0ShMI%2B1ntQGOrIBJ50NjmlKbIdeK4apYzVRbUQAm0nbjmQtsAzzIpHb5xGkocX6gocSeYPA9%2FQZCKhklT90UJfizF929YNbn5IkbMIg6D89y7wWMzv506ufhBzzUwymy17x81sF18ml3bE1VkH6r%2FiPoQwo59FaDxIjDyWjYmvtdRjxNoCnetswlh8oHuY%2B3gxkzyKGNoUonYrhoGBe9ig%2FRaOM0rMvEKS%2Bf8y%2FJAyD0KRjKP6%2FD02ekeMUMw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=127d498ab87547d92cb592808db1bf85ec4f24eec6cf9ff05302d5955754b07b",
+      "file_size": 1844,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-08-20T23:51:08.950Z",
+  "allow_singular_disclosure_after": -3919.518560594,
+  "singular_disclosure_allowed": true,
+  "vote_count": 2,
+  "voters": [
+    "2026",
+    "sumit-sabhaya"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

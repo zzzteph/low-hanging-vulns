@@ -1,0 +1,121 @@
+{
+  "id": 3619409,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjE5NDA5",
+  "url": "https://hackerone.com/reports/3619409",
+  "title": "Windows installer grants low-privileged users write access to executable P2Pool directory, enabling local code execution",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-21T06:24:46.774Z",
+  "submitted_at": "2026-03-21T06:24:46.890Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "qttps",
+    "url": "/qttps",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0c4rlnulbnr1p89xgwsgyldjhkg9/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-20T23:47:52.964Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:47:51.833Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe Windows installer creates the P2Pool subdirectory inside the machine-wide install path with overly broad write permissions:\n\n- `installers/windows/Monero.iss:59`\n- `Name: \"{app}\\p2pool\"; Permissions: users-full`\n\nThe GUI later trusts and executes `p2pool.exe` from that directory when the user starts P2Pool mining:\n\n- `src/p2pool/P2PoolManager.cpp:124-129` (`isInstalled()` only checks file existence)\n- `src/p2pool/P2PoolManager.cpp:154-210` (`start()` executes `p2pool.exe`)\n- `src/p2pool/P2PoolManager.cpp:243-248` (Windows path is `{applicationDirPath()}/p2pool/p2pool.exe`)\n- `pages/Mining.qml:295-318` and `pages/Mining.qml:654-656` (GUI path to starting P2Pool)\n\nThis creates a local binary planting issue: a low-privileged local user can replace or plant `p2pool.exe` in the writable P2Pool directory, and Monero GUI will later execute that attacker-controlled binary when a victim starts P2Pool from the GUI.\n\n## Releases Affected\n\n- Windows installer builds that include commit `432650008c4af92db138041d15b06e43fba0b7ab` dated **2022-05-28** (`Use \"p2pool\" folder for p2pool on Windows`)\n- I have not yet confirmed the earliest tagged release containing this change\n- I reviewed the local source tree on **2026-03-20**\n\n## Why This Is Security-Relevant\n\nThe affected directory is part of a machine-wide installed application under `Program Files`, but the installer intentionally grants broad write access to ordinary users. That turns a trusted executable location into a user-writable code execution surface.\n\nBecause the GUI later launches `p2pool.exe` from that location, any low-privileged local attacker can cause attacker-controlled code to run in the context of whichever user later starts P2Pool from Monero GUI.\n\nThis is not a remote issue. It is a local privilege/trust-boundary issue.\n\n## Steps To Reproduce\n\n1. Install Monero GUI on Windows using the normal installer.\n2. Confirm that the installer created a writable P2Pool directory:\n   - Example target path: `%ProgramFiles%\\Monero GUI Wallet\\p2pool`\n   - Collect ACLs with `icacls \"%ProgramFiles%\\Monero GUI Wallet\\p2pool\"`\n3. From a low-privileged local user account, place a benign proof-of-concept executable at:\n   - `%ProgramFiles%\\Monero GUI Wallet\\p2pool\\p2pool.exe`\n4. Use a harmless PoC executable that only creates a marker file such as:\n   - `%TEMP%\\monero_p2pool_poc.txt`\n   - and writes a short message plus current username and timestamp\n5. Launch Monero GUI as the victim user.\n6. Go to the Mining screen and start P2Pool mining.\n7. Observe that the planted `p2pool.exe` is executed instead of a trusted bundled binary.\n8. Verify execution through:\n   - the marker file\n   - process creation logs\n   - GUI behavior\n\n## Expected Result\n\nLow-privileged users should not be able to modify executables or executable search locations inside the machine-wide installed application directory.\n\n## Actual Result\n\nThe installer grants broad write access to the executable P2Pool directory, and the GUI later executes `p2pool.exe` from that directory without any additional integrity check.\n\n## Supporting Material / References\n\nCode references:\n- `installers/windows/Monero.iss:57-59`\n- `src/p2pool/P2PoolManager.cpp:124-129`\n- `src/p2pool/P2PoolManager.cpp:154-210`\n- `src/p2pool/P2PoolManager.cpp:243-248`\n- `pages/Mining.qml:295-318`\n- `pages/Mining.qml:654-656`\n\nGit history:\n- Commit `432650008c4af92db138041d15b06e43fba0b7ab` dated **2022-05-28**\n- Commit message: `Use \"p2pool\" folder for p2pool on Windows`\n\nPlanned attachments:\n- `TODO: screenshot or text output of icacls on the p2pool directory`\n- `TODO: SHA-256 of the benign planted p2pool.exe`\n- `TODO: screenshot or recording of starting P2Pool from Monero GUI`\n- `TODO: screenshot or contents of the marker file`\n- `TODO: Sysmon / Procmon / Windows Event log process creation evidence showing execution of planted p2pool.exe`\n\n## Novelty Check\n\nI searched the public Monero GUI repository history, issue tracker, and public advisory surfaces for this behavior. I found the feature-introduction commit above, but I did not find a public security fix, advisory, or public duplicate specifically describing the installer-created writable executable P2Pool directory leading to local binary planting and execution.\n\n## AI Assistance Disclosure\n\nI used OpenAI Codex 5.4 with extra high reasoning to help review the local source code and draft this report. All findings, verification status, and final submission contents were reviewed by me before submission.\n\n## Impact\n\nA low-privileged local attacker can plant or replace `p2pool.exe` inside the writable P2Pool directory created by the Windows installer. When another user later starts P2Pool through Monero GUI, the attacker-controlled binary executes in that victim user's context.\n\nThis enables:\n\n- cross-user local code execution\n- persistence in a trusted application path\n- compromise of the victim user's confidentiality, integrity, and availability\n- possible privilege escalation if a higher-privileged user later runs Monero GUI and starts P2Pool\n\nIn practice, this means local malware or another unprivileged user on the same Windows system can turn Monero GUI's P2Pool feature into an execution trigger for arbitrary code.",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-08-20T23:47:52.305Z",
+  "allow_singular_disclosure_after": -4117.788783455,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 7.3,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "high"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

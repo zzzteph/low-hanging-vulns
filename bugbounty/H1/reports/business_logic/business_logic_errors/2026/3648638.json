@@ -1,0 +1,121 @@
+{
+  "id": 3648638,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjQ4NjM4",
+  "url": "https://hackerone.com/reports/3648638",
+  "title": "monero:// deeplink parsing accepts tx_amount=(all) and can trigger send-all transaction mode",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-04T02:33:16.634Z",
+  "submitted_at": "2026-04-04T02:33:16.769Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "qttps",
+    "url": "/qttps",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0c4rlnulbnr1p89xgwsgyldjhkg9/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-20T23:47:45.348Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:47:42.766Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nMonero GUI has two different URI ingestion paths.\n\nQR/manual URI handling uses the canonical backend parser, but external `monero://` deeplinks are parsed by a separate QML routine in `main.qml`. That deeplink path forwards the raw `tx_amount` string into the transfer model without canonical numeric validation.\n\nThe transfer model reserves the literal string `\"(all)\"` as a privileged internal control value meaning \"send all unlocked balance\". Because the external deeplink path does not reject that sentinel, an attacker can supply a crafted URI such as:\n\n`monero://<attacker_address>?tx_amount=(all)&tx_description=test`\n\nand the wallet will enter the send-all transaction path for the attacker-controlled address.\n\n## Releases Affected\n\nObserved in the current Monero GUI source checkout corresponding to `0.18.4.6`.\n\nAffected code paths:\n- `main.qml:447-478`\n- `pages/Transfer.qml:95-105`\n- `pages/Transfer.qml:203-212`\n- `main.qml:964-980`\n\nComparison path showing the stricter canonical parser:\n- `src/libwalletqt/WalletManager.cpp:406-423`\n\n## Steps To Reproduce\n\n1. Inspect `main.qml:447-478`.\n   `onUriHandler(uri)` manually parses `monero://` query parameters and forwards raw `params[\"tx_amount\"]` into `middlePanel.transferView.sendTo(...)`.\n\n2. Inspect `pages/Transfer.qml:95-105`.\n   `fillPaymentDetails(...)` inserts the attacker-controlled amount into `recipientModel` via:\n   `recipientModel.newRecipient(address, Utils.removeTrailingZeros(amount || \"\"))`\n   There is no numeric validation here.\n\n3. Inspect `pages/Transfer.qml:203-212`.\n   `recipientModel.getAmountTotal()` treats the exact literal `\"(all)\"` as a special internal value and returns the wallet's unlocked balance.\n\n4. Inspect `main.qml:964-980`.\n   `handlePayment()` checks whether any recipient amount equals `\"(all)\"`. If so, it routes the request into:\n   `currentWallet.createTransactionAllAsync(...)`\n   instead of the normal numeric transaction creation path.\n\n5. Compare this with `src/libwalletqt/WalletManager.cpp:406-423`.\n   The canonical URI parser uses a typed `uint64_t amount` and converts it back to display text, which is materially stricter and does not expose the UI-only `\"(all)\"` sentinel as an external amount value.\n\n6. Using those code paths, a deeplink like the following is sufficient to reach the send-all branch condition:\n   `monero://<attacker_address>?tx_amount=(all)&tx_description=test`\n\n## Observed Result\n\nAttacker-controlled external deeplink input can reach the transaction flow as the reserved internal sentinel `\"(all)\"`, causing Monero GUI to prepare a send-all transfer to the attacker-controlled address.\n\n## Expected Secure Behavior\n\nExternal payment-request URIs should only accept canonical numeric amounts parsed by the backend URI parser. Reserved UI control values such as `\"(all)\"` should never be reachable from untrusted external input.\n\n## Supporting Material / References\n\nRelevant code references:\n- `main.qml:447-478`\n- `pages/Transfer.qml:95-105`\n- `pages/Transfer.qml:203-212`\n- `main.qml:964-980`\n- `src/libwalletqt/WalletManager.cpp:406-423`\n\nValidation scope:\n- authorized local source review\n- safe local reachability validation only\n- no real wallets\n- no real funds\n- no public infrastructure\n\n# AI Assistance Disclosure\nAI was used to help organize and polish the report wording. The technical content is based on authorized local source review and safe local validation in my environment.\n\n## Impact\n\nA malicious payment link can be transformed from a normal payment request into a send-all request to an attacker-controlled address.\n\nThis is a transaction-integrity issue in a financial wallet. The victim still has to interact with the UI and confirm the transaction, so this is not zero-click theft, but the bug lets an attacker control whether the request is interpreted as a normal amount or as \"send all unlocked balance.\" That materially increases the effectiveness of phishing and payment-request social engineering.",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-08-20T23:47:43.459Z",
+  "allow_singular_disclosure_after": -4127.141145475,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.5,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
