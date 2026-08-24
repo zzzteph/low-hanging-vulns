@@ -1,0 +1,124 @@
+{
+  "id": 3727743,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzI3NzQz",
+  "url": "https://hackerone.com/reports/3727743",
+  "title": "URI scheme validation bypass in ActionText `to_markdown` via user-supplied `<action-text-markdown>` marker tag",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-11T18:10:01.260Z",
+  "submitted_at": "2026-05-11T18:10:02.915Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "offsetmd",
+    "url": "/offsetmd",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/zlfvcv20d4aijd6wsfzfhluqr0n7/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-24T16:21:36.503Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-24T16:21:13.253Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "The markdown converter treats every `<action-text-markdown>` element as trusted internally-generated markup and emits its text verbatim. `Content#to_markdown` only creates that tag when serializing attachments, but the visitor does not distinguish internal nodes from user-supplied ones. A rich-text body containing a literal `<action-text-markdown>` tag therefore bypasses the URI-scheme validation that was added for normal links.\n\n## the bad lines\n\n`actiontext/lib/action_text/markdown_conversion.rb:80`\n\n```ruby\nSKIP_ESCAPING_PARENTS = %w[ action-text-markdown code pre ].freeze\n```\n\n`actiontext/lib/action_text/markdown_conversion.rb:96-97`\n\n```ruby\nelsif skip_markdown_escaping?(node)\n  node.content\n```\n\n`actiontext/lib/action_text/markdown_conversion.rb:226-228`\n\n```ruby\ndef visit_action_text_markdown(_node, child_values)\n  join_children(child_values)\nend\n```\n\n`pre` and `code` are in the same skip list but their visitors wrap output in fenced code, so a link payload inside them becomes inert code. `visit_action_text_markdown` emits raw, which is why this specific marker is the bypass.\n\n## proof of concept\n\nSave as `actiontext/test/unit/markdown_passthrough_bypass_test.rb`:\n\n```ruby\nrequire \"test_helper\"\n\nclass ActionTextMarkdownPassthroughBypassTest < ActiveSupport::TestCase\n  test \"user-supplied <action-text-markdown> emits markdown link bypassing URI scheme validation\" do\n    payload = \"<action-text-markdown>[click](javascript:alert(1))</action-text-markdown>\"\n    markdown = ActionText::Content.new(payload).to_markdown\n\n    refute_match(/\\(javascript:/, markdown,\n      \"expected URI scheme validation to reject javascript: URI, got: #{markdown.inspect}\")\n  end\nend\n```\n\nRun from the repo root:\n\n```\ncd actiontext && bin/test test/unit/markdown_passthrough_bypass_test.rb\n```\n\nObserved:\n\n```\nFailure:\nexpected URI scheme validation to reject javascript: URI, got: \"[click](javascript:alert(1))\"\n```\n\nControl: the existing remote-image hardening tests still pass:\n\n```\ncd actiontext && bin/test test/unit/markdown_conversion_test.rb -n '/RemoteImage attachment with disallowed URI scheme|RichText#to_markdown/'\n# 5 runs, 5 assertions, 0 failures, 0 errors\n```\n\n\n## suggested fix\n\nStrip user-supplied `<action-text-markdown>` nodes before `to_markdown` creates its own internal markers. Drop-in diff:\n\n```diff\n--- a/actiontext/lib/action_text/content.rb\n+++ b/actiontext/lib/action_text/content.rb\n@@ -146,6 +146,11 @@ module ActionText\n       end\n\n       def to_markdown(attachment_links: false)\n+        # Prevent user-supplied <action-text-markdown> nodes from being treated\n+        # as trusted internal markdown passthrough by the markdown converter.\n+        fragment.find_all(\"action-text-markdown\").each do |node|\n+          node.replace(node.children)\n+        end\n         render_attachments(with_full_attributes: false) { |attachment|\n           ActionText::HtmlConversion.create_element(\"action-text-markdown\").tap do |node|\n             node.content = attachment.to_markdown(attachment_links: attachment_links)\n```\n\n`fragment.find_all` is the same Nokogiri idiom already used at `content.rb:56` and `:210`. After this change the PoC test passes and the existing attachment-markdown tests are unaffected.\n\n## Impact\n\nAny consumer of ActionText::RichText#to_markdown / Content#to_markdown output (preview pane, email digest, federated mirror, secondary markdown renderer) can receive an attacker-controlled\n  javascript:, data:, or other unsafe-scheme markdown link from a user who can author rich text. The URI safety boundary added by PRs #56871 and #56909 to normal <a> and remote-image attachment paths is\n   undone for markdown export when the user wraps the payload in <action-text-markdown>.\n  \n  The HTML rendering path (Content#to_s) is not directly affected; the marker tag is stripped and the payload renders as inert text. The bypass is specific to markdown export.",
+  "weakness": {
+    "id": 61,
+    "name": "Cross-site Scripting (XSS) - Reflected"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-09-23T16:21:13.448Z",
+  "allow_singular_disclosure_after": 2591520.970504268,
+  "singular_disclosure_allowed": false,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "score": 4.3,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
