@@ -1,0 +1,138 @@
+{
+  "id": 3963494,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTYzNDk0",
+  "url": "https://hackerone.com/reports/3963494",
+  "title": "RTSP CRLF injection in libcurl allows CURLOPT_RTSP_* values to inject commands into independent sessions",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-08-23T17:25:36.691Z",
+  "submitted_at": "2026-08-23T17:25:36.995Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "subadevan",
+    "url": "/subadevan",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/wp49pkrpakchq1hd8ozqv14p37d1/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-24T21:51:15.669Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-23T21:03:46.579Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nlibcurl's RTSP code interpolates the values of `CURLOPT_RTSP_STREAM_URI`, `CURLOPT_RTSP_TRANSPORT`, and `CURLOPT_RTSP_SESSION_ID` directly into the RTSP request text with no check for embedded CR/LF, so a value containing `\\r\\n` splits one intended RTSP operation into multiple independent RTSP requests on the wire. I reproduced this on libcurl 8.21.0 and current HEAD (`5c61e16869` / `8.22.0-DEV`). Using a stateful test server modeling independent named RTSP resources (the way small/embedded RTSP servers, e.g. IP cameras and NVRs, commonly track a fixed set of channels), I demonstrated that an application performing a single, legitimate `SETUP` on its own resource can have a smuggled `TEARDOWN` command injected via `CURLOPT_RTSP_STREAM_URI` that terminates a completely independent, already-active session established over a separate connection by an unrelated party. The victim's later request against its own session then fails with `454 Session Not Found`, even though the injecting application never referenced that session or resource. None of the three affected options are documented as raw/unsanitized protocol syntax -- unlike `CURLOPT_HTTPHEADER`, which explicitly warns it applies no filtering -- each is documented as a single well-formed value (a stream URI, a transport spec, a session ID). AI assistance (Claude) was used during source analysis, experiment design, and drafting this report; all technical claims and the reproduction below were independently run and verified by the researcher.\n\n## Affected Version\n\n- curl/libcurl 8.21.0 (release tag `curl-8_21_0`)\n- Also reproduced on current HEAD, commit `5c61e16869` (`8.22.0-DEV`)\n- Build used for reproduction: local build from source, OpenSSL backend\n- RTSP is compiled in by default (`CURL_DISABLE_RTSP` defaults to `OFF`; RTSP is not listed as experimental in `docs/EXPERIMENTAL.md`)\n- `curl -V` output from the two builds used:\n  - `curl 8.21.0-DEV (Linux) libcurl/8.21.0-DEV OpenSSL/3.5.5 zlib/1.3.1`\n  - `curl 8.22.0-DEV (Linux) libcurl/8.22.0-DEV OpenSSL/3.5.5 zlib/1.3.1`\n\n## Steps to Reproduce\n\n1. Build curl from the `curl-8_21_0` tag (or use HEAD) with RTSP support (default-on).\n2. Stand up a stateful RTSP test server that tracks session state per named resource path (e.g. `/camera-A`, `/camera-B`) globally, independent of which TCP connection issues a request -- modeling how small/embedded RTSP servers commonly implement a fixed set of channels.\n3. Victim, connection #1: send `SETUP /camera-A RTSP/1.0` then `PLAY /camera-A RTSP/1.0`. Server marks `/camera-A` active and returns `200 OK` for both.\n4. Unrelated application, connection #2: using an unmodified libcurl client, call `curl_easy_setopt(CURLOPT_URL, \"rtsp://HOST/camera-B\")` and set `CURLOPT_RTSP_STREAM_URI` to a value containing an embedded CR/LF sequence, then issue a `SETUP` request. The application's intent is exactly one operation, on its own resource, `/camera-B`.\n5. Capture the raw bytes leaving the client on connection #2 and confirm they contain two independent, well-formed RTSP requests: the intended `SETUP /camera-B RTSP/1.0` followed by an attacker-influenced `TEARDOWN /camera-A RTSP/1.0`.\n6. Confirm server-side that `/camera-A`'s session state transitions from active to torn down as a direct result of processing connection #2's bytes -- a resource that connection, that application call, and that `curl_easy_setopt` invocation never referenced.\n7. Victim, connection #3 (a fresh connection resuming its own session, matching the documented use of `CURLOPT_RTSP_SESSION_ID`: \"Useful for resuming an in-progress session\"): send `PLAY /camera-A RTSP/1.0`. Confirm the response is `454 Session Not Found` instead of the `200 OK` it would have received before step 4-6.\n8. Repeat with a clean, well-formed `CURLOPT_RTSP_STREAM_URI`/`CURLOPT_RTSP_TRANSPORT` value (control case) and confirm exactly one request is sent and no cross-session effect occurs.\n\nThis was implemented as: a standalone libcurl C reproducer (`rtsp_repro.c`, parameterized by mode) driving the malicious `SETUP`; a stateful Python RTSP test server (`rtsp_stateful_server.py`) tracking per-resource session state and logging every parsed request plus the resulting state table; and a driver (`rtsp_crosssession_test.py`) that runs the full three-connection sequence and prints the server-side causal log end to end. All three are attached to this report as the PoC.\n\n## Vulnerable Source\n\n`lib/rtsp.c`:\n- `rtsp_setup_request()`: `b->session_id`, `b->stream_uri`, and the value passed to `rtsp_header_alloc()` for the `Transport:` header are read directly from `CURL_EASY_STR(data, STRING_RTSP_SESSION_ID / STREAM_URI / TRANSPORT)` with no validation.\n- `rtsp_header_alloc()`: `*target = curl_maprintf(\"%s: %s\\r\\n\", header_name, value)` -- raw, unescaped interpolation.\n- Request-line construction inside `rtsp_do()`:\n```\ncurlx_dyn_addf(&req_buffer,\n               \"%s %s RTSP/1.0\\r\\n\"     /* Request Stream-URI RTSP/1.0 */\n               \"CSeq: %u\\r\\n\",\n               block.request, block.stream_uri, rtsp->CSeq_sent);\n...\ncurlx_dyn_addf(&req_buffer, \"Session: %s\\r\\n\", block.session_id);\n```\n`block.stream_uri` sits directly in the request line; `block.session_id` and the Transport value sit directly in header lines. None of the three is checked for CR/LF anywhere in this file.\n\nThe same function does explicitly guard against the application setting `CSeq` or `Session` as a custom header via `CURLOPT_HTTPHEADER` (\"Session ID cannot be set as a custom header\") -- the maintainers were alert to header confusion through that specific path, just not to CR/LF embedded inside the values of these three dedicated RTSP options. This pattern -- an app-supplied `CURLOPT_*` string interpolated unchecked into a line-oriented protocol command -- is the same shape as several fixes curl has shipped in the last two months for other protocols (SMTP envelope address, FTP ACCT, MIME part name/filename, gopher selector, MQTT topic, LDAP filter values), none of which touched RTSP.\n\nWe checked the documentation for all three options before reporting: CURLOPT_RTSP_STREAM_URI.md, CURLOPT_RTSP_TRANSPORT.md, and CURLOPT_RTSP_SESSION_ID.md each describe a single, well-formed data value (a URI, a transport specification, a session identifier) and give example values that are never raw multi-line protocol text. None carries any disclaimer comparable to CURLOPT_HTTPHEADER's explicit \"libcurl passes on the verbatim strings you give it, without any filter or other safe guards. That includes white space and control characters.\" CURLOPT_RTSP_SESSION_ID.md even contains a security-motivated WARNING about a different risk (session-ID reuse across hosts on a reused handle) without ever mentioning CR/LF -- indicating this is a gap in what the maintainers considered, not a deliberately accepted and documented risk.\n\n## Impact\n\n### Confirmed impact\n\nUsing a stateful test server modeling independent named RTSP resources (not a real IP camera or NVR product -- a synthetic model of that class of server's session-tracking behavior), we demonstrated that a single `CURLOPT_RTSP_STREAM_URI` value, supplied by an application performing a `SETUP` against its own resource, can smuggle a second, fully independent, well-formed RTSP request (`TEARDOWN`) that terminates a different, already-active session established over an entirely separate connection by an unrelated party. The causal chain was traced end to end: the victim's session shows as active before the injection, the server's session-state log shows the transition to torn down attributed to the unrelated connection's request, and the victim's own subsequent request against the same resource independently confirms the loss (`454 Session Not Found`). This is unauthorized cross-session/cross-resource command injection with a demonstrated availability impact on a party the injecting application had no relationship to, reproduced identically on 8.21.0 and HEAD.\n\n### Limitations\n\n- The test server is a minimal synthetic model built to isolate and prove the session-tracking-by-resource behavior pattern; we have not tested against, and are not claiming to have compromised, any specific real IP camera, NVR, or other RTSP server product. Real servers' session-identification strategies vary (some may key strictly on server-issued session tokens rather than resource path), which would change exploitability details without changing the underlying request-splitting primitive.\n- Exploitation requires a necessary precondition: the application must pass attacker-controlled or attacker-influenced data into one of `CURLOPT_RTSP_STREAM_URI`, `CURLOPT_RTSP_TRANSPORT`, or `CURLOPT_RTSP_SESSION_ID` without checking it for CR/LF first. This is not exploitable against curl by default or without that specific application behavior.\n- We did not attempt to demonstrate RTP/media-stream redirection via an injected `SETUP` with altered Transport parameters. That remains a plausible further consequence we have not built or verified, and we are not claiming it.\n- Not demonstrated: confidentiality impact, authentication bypass, or code execution.\n- We have not identified a specific named open-source application using this exact option-forwarding pattern.\n\n## Weakness\n\nImproper Neutralization of CRLF Sequences ('CRLF Injection') -- CWE-93. This is the correct protocol-agnostic classification for the mechanism (curl's own recent fixes for the same shape of bug in SMTP/FTP/MIME/gopher/MQTT/LDAP fall under the same weakness). The demonstrated consequence here is unauthorized command injection affecting an independent session/resource; if the program's taxonomy has a more specific category it considers a better fit for that consequence, we'd defer to their judgment, but CWE-93 is our primary recommendation as it accurately names the root cause.\n\n## Severity\n\nMedium, offered as our assessment -- we recognize curl's security team makes the final determination and the illustrative CVSS vector below is not a substitute for that.\n\nJustification: this is a demonstrated, reproducible instance of one application's single, legitimate operation on its own resource causing unauthorized termination of an independent, unrelated party's active session on a different resource -- a genuine violation of the isolation that's supposed to exist between independent RTSP sessions, not merely malformed output. We are not rating it higher than Medium because of the necessary precondition identified above (the application must first forward attacker-controlled or attacker-influenced data into one of these three options; this is not triggerable against arbitrary curl usage or by default), because the demonstration is against a synthetic test server modeling this class of server's session-tracking behavior rather than a verified real product, and because no confidentiality impact or authentication bypass has been shown.\n\nIllustrative CVSS 3.1 vector for the demonstrated scenario: AV:N/AC:L/PR:N/UI:N/S:C/C:N/I:H/A:L. We offer this only as a concrete reference point for how we reasoned about the demonstrated test, not as a claim of the final score.\n\n## Remediation\n\nAdd the same CR/LF rejection already used for SMTP/FTP/MIME/gopher/MQTT/LDAP at the three read points in `rtsp_setup_request()`:\n```\nb->session_id = CURL_EASY_STR(data, STRING_RTSP_SESSION_ID);\nif(b->session_id && strpbrk(b->session_id, \"\\r\\n\")) {\n  failf(data, \"Refusing to send a Session ID with a CR or LF\");\n  return CURLE_BAD_FUNCTION_ARGUMENT;\n}\n```\n...mirrored for STRING_RTSP_STREAM_URI and the value passed into rtsp_header_alloc() for STRING_RTSP_TRANSPORT. Given how many call sites across the codebase now carry this same hand-written check, a shared helper (e.g. Curl_str_has_crlf()) used by all of them, including this one, would reduce the risk of the next protocol handler missing it.\n\n## Regression Test\n\nAdd a libcurl test case: set CURLOPT_RTSP_STREAM_URI (and separately CURLOPT_RTSP_TRANSPORT, CURLOPT_RTSP_SESSION_ID) to a value containing \"\\r\\nX-Injected: yes\", issue a SETUP/PLAY, and assert curl_easy_perform() returns CURLE_BAD_FUNCTION_ARGUMENT before anything reaches the wire -- mirroring the structure of the existing SMTP CR/LF regression test (test 2110).\n\n## AI Disclosure\n\nAI assistance (Claude) was used during source analysis, experiment design, and preparation of this report. All technical claims, the reproduction steps, and the source citations above were independently run and verified by the researcher before submission; nothing in this report is asserted on the basis of AI output alone.\n\n## Impact\n\n## Confirmed impact\n\nUsing a stateful test server modeling independent named RTSP resources (not a real IP camera or NVR product -- a synthetic model of that class of server's session-tracking behavior), we demonstrated that a single CURLOPT_RTSP_STREAM_URI value, supplied by an application performing a SETUP against its own resource, can smuggle a second, fully independent, well-formed RTSP request (TEARDOWN) that terminates a different, already-active session established over an entirely separate connection by an unrelated party. The causal chain was traced end to end: the victim's session shows as active before the injection, the server's session-state log shows the transition to torn down attributed to the unrelated connection's request, and the victim's own subsequent request against the same resource independently confirms the loss (454 Session Not Found). This is unauthorized cross-session/cross-resource command injection with a demonstrated availability impact on a party the injecting application had no relationship to, reproduced identically on 8.21.0 and HEAD.\n\n## Limitations\n\n- The test server is a minimal synthetic model built to isolate and prove the session-tracking-by-resource behavior pattern; we have not tested against, and are not claiming to have compromised, any specific real IP camera, NVR, or other RTSP server product.\n- Exploitation requires a necessary precondition: the application must pass attacker-controlled or attacker-influenced data into one of CURLOPT_RTSP_STREAM_URI, CURLOPT_RTSP_TRANSPORT, or CURLOPT_RTSP_SESSION_ID without checking it for CR/LF first. This is not exploitable against curl by default or without that specific application behavior.\n- We did not attempt to demonstrate RTP/media-stream redirection via an injected SETUP with altered Transport parameters, and are not claiming it.\n- Not demonstrated: confidentiality impact, authentication bypass, or code execution.",
+  "weakness": {
+    "id": 69,
+    "name": "CRLF Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6534925,
+      "file_name": "rtsp_repro.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/iy8bojk06rglsg2knycvuvh1uxom?response-content-disposition=attachment%3B%20filename%3D%22rtsp_repro.c%22%3B%20filename%2A%3DUTF-8%27%27rtsp_repro.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7VXRX4YG%2F20260824%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260824T221856Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECwaCXVzLXdlc3QtMiJHMEUCIFbea%2BrotIxFpbqeYTxUBX2KuXBmrIzE47ixJg7DAXrsAiEA1uRkCXndrHp1dqHyl1GPDbraqdO7MlDEqV2oBU8%2BRm4quwUI9f%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDJNTYtcttNq0vLSYhiqPBecjNc7amv9d535C%2FVzVBfOjBfaP%2BeDH9RbReP4M9LWkfxclfiiIURSohKmr5PAlp6FvZLagve07RCPRqK9EBYpVXgOcae1%2BcCOP5KLiiN8AaOk3Xzvhcrb0c%2BKtjWw8TekJLHCRKgvDk3I5sjmLme%2FMHGo6%2B5hkefL%2FDhA2C284xa4%2BOIg73Qk1wXfebclBsBVRUVHIyZPdbarp%2F%2B0XQbk%2FnmWjio%2B%2BpCfuviqkmoWbldQCSEOBqyMEGOe%2B%2FZQFigy9RB7qxKcN9Hpt3XQgB0tIShiz3Hj2TYwyLaOqSGbXrQmFSlWEfTW2caAmU51CBcrAruI3KhBJvShARSVhdQPorXAtkvb13QYHVDPs6h%2FvDMi6xcsZ5i9BzrjkVgi1n1O11RAlNWJKpR26kfZu%2B7C7Kf2p20HerMM8dy%2BzByAVWyt9N3OkapScMknyedLsDfw1ep4hKUos9QsmVDX%2FZPIvqhj9LDWVA2dEMzym0g9JeDIo570k1yUo%2Fbr4ezGI2bKBLPS3sAOPahUFz0g3JZTo19%2B11%2FxdpzvUr1DvR5GXuLadL%2BCK4Miazm9uIcyxNOeI4grpWehvwVABKbxi5Esb6vBhlRuHTUaq%2FfCh%2FZUoplvSYkCZHczI%2BOcnu9eSM0vbTZ1QGfpRBveP4jsHmMkl3HkM%2BSba9RC0Fgmnqii9%2Bd9i5JGupYqa7St6Z6Tr8AnrYOSiCk75%2FWtuCMjd%2Fi57Wn7ozF1JPzhHsaO0FZkZkhOhEpLuF6EuoJAjv%2Fx6q3CH9l0Afkvbe62hAPkMlgXUCr9eVidRDI8rnwMD69i7TpYUw%2B%2Fa%2F97x1L6cUjRL07FYMGAmkPAp4R%2FgxJ8JII3Yio%2BZQrbb970JaNJr0Wgwzrey1AY6sQHkLaUi92tDsfGBDe2NuWUApiDVN6WMosVDY%2FVtvQVVXFF7LfntSK2HZgsgEm1fD9VKSVGFZ1BSnTXQ1TWjr4fwVs041xO1Kxc2NRVh5oCRDjRXQSlWc9GOjyjw9RlTClfC6ssx6LMww96ZjA398dGy5sIqDj4iIbyqK%2FF%2B1on0kKdAG3mO0RzmWWWbhGq1nQgrL1lBjVun6UmyK2hFwc5jYbKuD4d4JSjiAs3rukDuFEo%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ed9c2b4414deb4d9906c04fe1b5200a316b191861f0c732f5600eda2a2f1b113",
+      "file_size": 3501,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6534926,
+      "file_name": "rtsp_stateful_server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/uh36viii5dzor52jt2i9p12h25he?response-content-disposition=attachment%3B%20filename%3D%22rtsp_stateful_server.py%22%3B%20filename%2A%3DUTF-8%27%27rtsp_stateful_server.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7VXRX4YG%2F20260824%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260824T221856Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECwaCXVzLXdlc3QtMiJHMEUCIFbea%2BrotIxFpbqeYTxUBX2KuXBmrIzE47ixJg7DAXrsAiEA1uRkCXndrHp1dqHyl1GPDbraqdO7MlDEqV2oBU8%2BRm4quwUI9f%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDJNTYtcttNq0vLSYhiqPBecjNc7amv9d535C%2FVzVBfOjBfaP%2BeDH9RbReP4M9LWkfxclfiiIURSohKmr5PAlp6FvZLagve07RCPRqK9EBYpVXgOcae1%2BcCOP5KLiiN8AaOk3Xzvhcrb0c%2BKtjWw8TekJLHCRKgvDk3I5sjmLme%2FMHGo6%2B5hkefL%2FDhA2C284xa4%2BOIg73Qk1wXfebclBsBVRUVHIyZPdbarp%2F%2B0XQbk%2FnmWjio%2B%2BpCfuviqkmoWbldQCSEOBqyMEGOe%2B%2FZQFigy9RB7qxKcN9Hpt3XQgB0tIShiz3Hj2TYwyLaOqSGbXrQmFSlWEfTW2caAmU51CBcrAruI3KhBJvShARSVhdQPorXAtkvb13QYHVDPs6h%2FvDMi6xcsZ5i9BzrjkVgi1n1O11RAlNWJKpR26kfZu%2B7C7Kf2p20HerMM8dy%2BzByAVWyt9N3OkapScMknyedLsDfw1ep4hKUos9QsmVDX%2FZPIvqhj9LDWVA2dEMzym0g9JeDIo570k1yUo%2Fbr4ezGI2bKBLPS3sAOPahUFz0g3JZTo19%2B11%2FxdpzvUr1DvR5GXuLadL%2BCK4Miazm9uIcyxNOeI4grpWehvwVABKbxi5Esb6vBhlRuHTUaq%2FfCh%2FZUoplvSYkCZHczI%2BOcnu9eSM0vbTZ1QGfpRBveP4jsHmMkl3HkM%2BSba9RC0Fgmnqii9%2Bd9i5JGupYqa7St6Z6Tr8AnrYOSiCk75%2FWtuCMjd%2Fi57Wn7ozF1JPzhHsaO0FZkZkhOhEpLuF6EuoJAjv%2Fx6q3CH9l0Afkvbe62hAPkMlgXUCr9eVidRDI8rnwMD69i7TpYUw%2B%2Fa%2F97x1L6cUjRL07FYMGAmkPAp4R%2FgxJ8JII3Yio%2BZQrbb970JaNJr0Wgwzrey1AY6sQHkLaUi92tDsfGBDe2NuWUApiDVN6WMosVDY%2FVtvQVVXFF7LfntSK2HZgsgEm1fD9VKSVGFZ1BSnTXQ1TWjr4fwVs041xO1Kxc2NRVh5oCRDjRXQSlWc9GOjyjw9RlTClfC6ssx6LMww96ZjA398dGy5sIqDj4iIbyqK%2FF%2B1on0kKdAG3mO0RzmWWWbhGq1nQgrL1lBjVun6UmyK2hFwc5jYbKuD4d4JSjiAs3rukDuFEo%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=fd8f818279b3ef74cc4d2616e314778c107b201c5c24b5b49add94401de6974a",
+      "file_size": 5446,
+      "type": "text/x-python",
+      "moderated": null
+    },
+    {
+      "id": 6534927,
+      "file_name": "rtsp_crosssession_test.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/m2yjosm2paip4kbqi2o55u9kk3ej?response-content-disposition=attachment%3B%20filename%3D%22rtsp_crosssession_test.py%22%3B%20filename%2A%3DUTF-8%27%27rtsp_crosssession_test.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7VXRX4YG%2F20260824%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260824T221856Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECwaCXVzLXdlc3QtMiJHMEUCIFbea%2BrotIxFpbqeYTxUBX2KuXBmrIzE47ixJg7DAXrsAiEA1uRkCXndrHp1dqHyl1GPDbraqdO7MlDEqV2oBU8%2BRm4quwUI9f%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDJNTYtcttNq0vLSYhiqPBecjNc7amv9d535C%2FVzVBfOjBfaP%2BeDH9RbReP4M9LWkfxclfiiIURSohKmr5PAlp6FvZLagve07RCPRqK9EBYpVXgOcae1%2BcCOP5KLiiN8AaOk3Xzvhcrb0c%2BKtjWw8TekJLHCRKgvDk3I5sjmLme%2FMHGo6%2B5hkefL%2FDhA2C284xa4%2BOIg73Qk1wXfebclBsBVRUVHIyZPdbarp%2F%2B0XQbk%2FnmWjio%2B%2BpCfuviqkmoWbldQCSEOBqyMEGOe%2B%2FZQFigy9RB7qxKcN9Hpt3XQgB0tIShiz3Hj2TYwyLaOqSGbXrQmFSlWEfTW2caAmU51CBcrAruI3KhBJvShARSVhdQPorXAtkvb13QYHVDPs6h%2FvDMi6xcsZ5i9BzrjkVgi1n1O11RAlNWJKpR26kfZu%2B7C7Kf2p20HerMM8dy%2BzByAVWyt9N3OkapScMknyedLsDfw1ep4hKUos9QsmVDX%2FZPIvqhj9LDWVA2dEMzym0g9JeDIo570k1yUo%2Fbr4ezGI2bKBLPS3sAOPahUFz0g3JZTo19%2B11%2FxdpzvUr1DvR5GXuLadL%2BCK4Miazm9uIcyxNOeI4grpWehvwVABKbxi5Esb6vBhlRuHTUaq%2FfCh%2FZUoplvSYkCZHczI%2BOcnu9eSM0vbTZ1QGfpRBveP4jsHmMkl3HkM%2BSba9RC0Fgmnqii9%2Bd9i5JGupYqa7St6Z6Tr8AnrYOSiCk75%2FWtuCMjd%2Fi57Wn7ozF1JPzhHsaO0FZkZkhOhEpLuF6EuoJAjv%2Fx6q3CH9l0Afkvbe62hAPkMlgXUCr9eVidRDI8rnwMD69i7TpYUw%2B%2Fa%2F97x1L6cUjRL07FYMGAmkPAp4R%2FgxJ8JII3Yio%2BZQrbb970JaNJr0Wgwzrey1AY6sQHkLaUi92tDsfGBDe2NuWUApiDVN6WMosVDY%2FVtvQVVXFF7LfntSK2HZgsgEm1fD9VKSVGFZ1BSnTXQ1TWjr4fwVs041xO1Kxc2NRVh5oCRDjRXQSlWc9GOjyjw9RlTClfC6ssx6LMww96ZjA398dGy5sIqDj4iIbyqK%2FF%2B1on0kKdAG3mO0RzmWWWbhGq1nQgrL1lBjVun6UmyK2hFwc5jYbKuD4d4JSjiAs3rukDuFEo%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=22ab5df9c314bfb19edb9b893948d25a0e1c908ae9f325eafb299b5cca7e1339",
+      "file_size": 2633,
+      "type": "text/x-python",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "sh4d0byss"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

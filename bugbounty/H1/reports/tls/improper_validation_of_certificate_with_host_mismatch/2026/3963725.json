@@ -1,0 +1,128 @@
+{
+  "id": 3963725,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTYzNzI1",
+  "url": "https://hackerone.com/reports/3963725",
+  "title": "wolfSSL backend disables hostname verification when CURLOPT_SSL_VERIFYPEER is 0",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-08-23T19:44:02.706Z",
+  "submitted_at": "2026-08-23T19:44:03.049Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "subadevan",
+    "url": "/subadevan",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/wp49pkrpakchq1hd8ozqv14p37d1/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-24T21:51:05.268Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-23T21:03:29.444Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWhen curl is built against wolfSSL, setting CURLOPT_SSL_VERIFYPEER=0 causes a hostname-mismatched certificate to be accepted even though CURLOPT_SSL_VERIFYHOST remains at its default enabled setting. I built wolfSSL from source, built curl against it, and connected to a TLS server presenting a certificate for an unrelated hostname (CN=totally-wrong-hostname.invalid) while requesting https://localhost/; the handshake completed and the HTTP request/response exchanged normally. This reproduced identically on released curl 8.21.0 and current HEAD (5c61e16869 / 8.22.0-DEV). A control run of the identical reproducer against curl's OpenSSL backend correctly rejected the same certificate (\"certificate subject name ... does not match target hostname\"), confirming this is specific to the wolfSSL backend rather than a general curl behavior. A second control -- the wolfSSL backend with fully default options (CURLOPT_SSL_VERIFYPEER left at its default of 1) -- correctly rejected the same server, isolating the bug precisely to the VERIFYPEER=0 condition.\n\n## Affected Version\n\n- curl/libcurl 8.21.0 (release tag curl-8_21_0), built with -DCURL_USE_WOLFSSL=ON against wolfSSL built from upstream source\n- Also reproduced on current HEAD, commit 5c61e16869 (8.22.0-DEV), identical build configuration\n- wolfSSL version used: built from wolfSSL upstream master (~5.9.2) via ./configure --enable-opensslextra --enable-curl --enable-static --enable-shared && make && make install\n- curl -V output from the HEAD build used: curl 8.22.0-DEV (Linux) libcurl/8.22.0-DEV wolfSSL/5.9.2 zlib/1.3.1\n- Affected: curl/libcurl when built with the wolfSSL TLS backend. Not claiming this affects any other TLS backend; OpenSSL was tested directly as a control and does not exhibit this behavior (see below).\n\n## Steps to Reproduce\n\n1. Build wolfSSL from source with --enable-opensslextra --enable-curl.\n2. Build curl (release tag curl-8_21_0, or HEAD) with -DCURL_USE_WOLFSSL=ON against that wolfSSL build.\n3. Generate a self-signed certificate for a hostname that does not match the target, e.g. CN=totally-wrong-hostname.invalid.\n4. Start a minimal TLS server (Python ssl module is sufficient) on localhost using that certificate.\n5. Using a minimal libcurl client, set CURLOPT_URL to https://localhost:<port>/, set CURLOPT_SSL_VERIFYPEER to 0, and leave CURLOPT_SSL_VERIFYHOST unset (default enabled).\n6. Call curl_easy_perform().\n7. Observe the TLS handshake completes and the HTTP request/response exchange succeeds despite the hostname mismatch.\n8. Control 1: repeat the identical reproducer linked against curl's OpenSSL backend instead. Observe it correctly rejects the connection.\n9. Control 2: repeat the identical reproducer against the wolfSSL backend with fully default options (do not set CURLOPT_SSL_VERIFYPEER at all). Observe it correctly rejects the connection, isolating the bug to the VERIFYPEER=0 condition specifically.\n\nThis was implemented as a minimal libcurl C reproducer (tls_repro.c) driving a minimal Python TLS test server (https_server.py) that serves the mismatched-hostname certificate and logs whether the handshake completed. Both are attached to this report as the PoC.\n\n## Vulnerable Source\n\nlib/vtls/wolfssl.c:\n- wssl_ctx_init() / connection setup: sets wolfSSL_CTX_set_verify(wctx->ssl_ctx, conn_config->verifypeer ? WOLFSSL_VERIFY_PEER : WOLFSSL_VERIFY_NONE, NULL) -- so the whole wolfSSL-internal verification pipeline runs in non-failing (WOLFSSL_VERIFY_NONE) mode whenever verifypeer is off.\n- wssl_connect_step1(): registers an SNI-based hostname check via wolfSSL_check_domain_name(wssl->ssl, connssl->peer.sni), gated only on conn_config->verifyhost (correctly independent of verifypeer at the point of registration).\n- wssl_connect_step2(): after wolfSSL_connect(), there is an explicit, independent post-handshake re-check for the case where the target is a raw IP address (no SNI) -- but no equivalent independent re-check exists for the SNI/named-host case. The code goes straight to if(ret == WOLFSSL_SUCCESS) return CURLE_OK;. Under WOLFSSL_VERIFY_NONE, wolfSSL_connect() returns success regardless of whether the registered domain check matched, and for the SNI path there is nothing left afterward to catch that.\n\nNet effect: the hostname check is registered independently of verifypeer, but its enforcement is not -- it is silently absorbed by the same \"do not fail on verification problems\" mode that verifypeer=0 turns on.\n\n## Weakness\n\nImproper Validation of Certificate with Host Mismatch -- CWE-297. curl's own documentation states that CURLOPT_SSL_VERIFYHOST operates independently of CURLOPT_SSL_VERIFYPEER; on the wolfSSL backend that independence is not actually enforced at the point where it matters (post-handshake), even though it is correctly reflected at the point of registering the check.\n\n## Severity\n\nMedium.\n\nJustification: this is a demonstrated, reproducible hostname-verification bypass with real MITM impact, backed by curl's own historical precedent of assigning CVEs to this exact bug class (verifypeer/verifyhost independence failures) in a different backend context previously. We are not rating this higher than Medium initially because it requires a specific, non-default application configuration (CURLOPT_SSL_VERIFYPEER=0) combined with a specific TLS backend choice (wolfSSL) rather than being exploitable against curl's default configuration or an arbitrary curl build, and because we have not surveyed how common this backend/option combination is in real-world deployments.\n\nIllustrative CVSS 3.1 vector for the demonstrated scenario: AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N. Offered only as a concrete reference point for how we reasoned about the demonstrated test, not as a claim of the final score -- we recognize curl's security team makes the final severity determination.\n\n## Remediation\n\nAdd an explicit, independent post-handshake hostname check for the SNI (named-host) case in wssl_connect_step2(), structured like the existing IP-address-specific check that already exists a few lines below it: after a successful wolfSSL_connect(), when conn_config->verifyhost is set and an SNI hostname was used, verify the presented certificate's subject/SAN against that hostname independently of whatever WOLFSSL_VERIFY_NONE already decided, and fail the connection if it does not match -- mirroring how the IP-address path already re-checks via wolfSSL_X509_check_ip_asc() regardless of the configured verify mode.\n\n## Regression Test\n\nAdd a libcurl test case that, when built against wolfSSL, connects with CURLOPT_SSL_VERIFYPEER=0 and default CURLOPT_SSL_VERIFYHOST to a server presenting a certificate for an unrelated hostname, and asserts the connection is rejected with a peer/host verification error rather than succeeding.\n\n## Impact\n\n## Confirmed impact\n\nAn attacker positioned on the network path (or a compromised/malicious server) can present a certificate for any hostname and have it silently accepted by a curl/wolfSSL client that has set CURLOPT_SSL_VERIFYPEER=0 while relying on CURLOPT_SSL_VERIFYHOST's default to still protect against impersonation -- a common, documented, and reasonable pattern (e.g. connecting to internal hosts with self-signed or CA-less certificates while still expecting the requested hostname to be enforced). This defeats hostname-based MITM protection entirely for such connections. Demonstrated end to end with a real TLS handshake and HTTP exchange, not inferred from source reading alone.\n\n## Limitations\n\n- Requires the application to explicitly set CURLOPT_SSL_VERIFYPEER=0; this is not curl's default behavior and is not triggerable without that specific application configuration.\n- Requires curl to be built with the wolfSSL TLS backend specifically. We tested OpenSSL directly as a control and it is not affected. We have not tested every other curl TLS backend and are not claiming this is universal across backends.\n- We have not identified a specific named open-source application that uses this exact option combination with the wolfSSL backend.",
+  "weakness": {
+    "id": 555,
+    "name": "Improper Validation of Certificate with Host Mismatch"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6535831,
+      "file_name": "tls_repro.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/kvc99vn22jkwhrmvme9nutjbl4kb?response-content-disposition=attachment%3B%20filename%3D%22tls_repro.c%22%3B%20filename%2A%3DUTF-8%27%27tls_repro.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSOSCYFJR%2F20260824%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260824T221857Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECwaCXVzLXdlc3QtMiJGMEQCIFZwQKLIrHlQ6PCePBKeXPvTAr6zZwEyvdUAjS2f%2BL7YAiAKJLX9lMEhdbxscgobsiCKr1HPgq0WyI8nm6HfqWR3RSq7BQj1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIM%2BVPIx%2FKcgcLAbXFyKo8FkLvPTxL5sNUhPr%2BL3OQqVUbQ%2BO53nADz7FWPWKoMXfS2EnxmsVFWVf1%2F2yJRBok%2F6fmCCRIsC7APkXnHRrWNhAR30iGpL8pCJPaJnN6TmJdhSQphtttH8u6s5LRI66N5y1O7GM0mAHGTF6ThKoMX4qZFH1X2ZInqYiGEEOseKbqIY2N5hTSFn6xSEAj0XUmoiYBTsQ2Z6c1jdhR9GQixONCimA0ykPV2efljqOGx4DlvwsEYW%2FQr7XQ8M46hS6MhkLZunjhJEzBAM0DvEWqFmGJsWgzeQ1aPY3VibEzCbiSlFhXHay23wDWwDZ0gyD9zShKgK8pP%2Bvryt7rBPqHnhbsocoXwCil8ufcMrLb7CsVw5B7RXYtSDc4YiEP%2FMaMpdwL2Apsy0w%2ByEnvg74julfTyk6MQb4VSWm4nAKzvljs5JSFw8peUJ3%2Bmf0CyQzgJFE%2BgKBE7JOhJd11KlFGdHA4CI1T%2FKVLXVTgEDK9gj4i61fPCjvP0NrfU6pQKb16iZlY%2FmQOwM%2FG%2B6xzQLxTd%2FBf%2BwwfxlmoyxBYcs6P4Islb%2BQYv3xDXd0EB5DokQGTYbwXKu%2F2hAyensjV%2Fw1NzgdLhNQ6O%2Frv9b0mccc52vY3ju0CMsbfSHBs4iplADq8nZDmkWvG070wLAeeOMVIdKFEBu228CwoH6Y%2B6lE%2Bd%2B7m9AsUyrvLum4jHk3PWwkqxsEGpbYql6U6y8fug7UTjgbC4mf59EvueacgEdVTP2FnTrjz5JA4kccDO3B8dmxy5ZHySBWynEy5zzM9UXIRoYyfks26lup0l6A6rJJ%2FqPfxb2lQOns8C%2Bjd5xejABtepcjkWPU0vzxcL0CzFGRlIjPc2DX5WRJ8V91BbegCEPzCEwLLUBjqyAQpClBJpVbcprshD0VVuxRiW14boivSJwwIhY8x2H1dKRelt9%2B%2BtomTuBqnHtYIPAsOt21bqbacJ7AK8rFPUGi9VCC4NOzv0noZGZjSRHvmbpzkGY3v2oajAhPvexOaNSoihPlYFa2xIpf6%2BQM5NIfD32tP%2Fq6bxfrR%2F6%2FEMWkQlbDSzyXbFTGLwa5fYtP%2BpBwR25FLVeNWw99q0hsYPbhuYLqJ6UZOkTXlKWRP%2B6uDx8Ps%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2074d30a263195860edaab5681670e21c8b08f8309abd0fcff3afe1da3a88790",
+      "file_size": 1417,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6535832,
+      "file_name": "https_server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/3cvq16e2fqfkoe475awubaodohrp?response-content-disposition=attachment%3B%20filename%3D%22https_server.py%22%3B%20filename%2A%3DUTF-8%27%27https_server.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSOSCYFJR%2F20260824%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260824T221857Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECwaCXVzLXdlc3QtMiJGMEQCIFZwQKLIrHlQ6PCePBKeXPvTAr6zZwEyvdUAjS2f%2BL7YAiAKJLX9lMEhdbxscgobsiCKr1HPgq0WyI8nm6HfqWR3RSq7BQj1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIM%2BVPIx%2FKcgcLAbXFyKo8FkLvPTxL5sNUhPr%2BL3OQqVUbQ%2BO53nADz7FWPWKoMXfS2EnxmsVFWVf1%2F2yJRBok%2F6fmCCRIsC7APkXnHRrWNhAR30iGpL8pCJPaJnN6TmJdhSQphtttH8u6s5LRI66N5y1O7GM0mAHGTF6ThKoMX4qZFH1X2ZInqYiGEEOseKbqIY2N5hTSFn6xSEAj0XUmoiYBTsQ2Z6c1jdhR9GQixONCimA0ykPV2efljqOGx4DlvwsEYW%2FQr7XQ8M46hS6MhkLZunjhJEzBAM0DvEWqFmGJsWgzeQ1aPY3VibEzCbiSlFhXHay23wDWwDZ0gyD9zShKgK8pP%2Bvryt7rBPqHnhbsocoXwCil8ufcMrLb7CsVw5B7RXYtSDc4YiEP%2FMaMpdwL2Apsy0w%2ByEnvg74julfTyk6MQb4VSWm4nAKzvljs5JSFw8peUJ3%2Bmf0CyQzgJFE%2BgKBE7JOhJd11KlFGdHA4CI1T%2FKVLXVTgEDK9gj4i61fPCjvP0NrfU6pQKb16iZlY%2FmQOwM%2FG%2B6xzQLxTd%2FBf%2BwwfxlmoyxBYcs6P4Islb%2BQYv3xDXd0EB5DokQGTYbwXKu%2F2hAyensjV%2Fw1NzgdLhNQ6O%2Frv9b0mccc52vY3ju0CMsbfSHBs4iplADq8nZDmkWvG070wLAeeOMVIdKFEBu228CwoH6Y%2B6lE%2Bd%2B7m9AsUyrvLum4jHk3PWwkqxsEGpbYql6U6y8fug7UTjgbC4mf59EvueacgEdVTP2FnTrjz5JA4kccDO3B8dmxy5ZHySBWynEy5zzM9UXIRoYyfks26lup0l6A6rJJ%2FqPfxb2lQOns8C%2Bjd5xejABtepcjkWPU0vzxcL0CzFGRlIjPc2DX5WRJ8V91BbegCEPzCEwLLUBjqyAQpClBJpVbcprshD0VVuxRiW14boivSJwwIhY8x2H1dKRelt9%2B%2BtomTuBqnHtYIPAsOt21bqbacJ7AK8rFPUGi9VCC4NOzv0noZGZjSRHvmbpzkGY3v2oajAhPvexOaNSoihPlYFa2xIpf6%2BQM5NIfD32tP%2Fq6bxfrR%2F6%2FEMWkQlbDSzyXbFTGLwa5fYtP%2BpBwR25FLVeNWw99q0hsYPbhuYLqJ6UZOkTXlKWRP%2B6uDx8Ps%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b5148e9298dab3ad8a3dc86bb3087bf6944c2a8269bd1b4736a70cc0c3ea4066",
+      "file_size": 1462,
+      "type": "text/x-python",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
