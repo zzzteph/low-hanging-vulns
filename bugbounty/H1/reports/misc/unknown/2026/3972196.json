@@ -1,0 +1,111 @@
+{
+  "id": 3972196,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcyMTk2",
+  "url": "https://hackerone.com/reports/3972196",
+  "title": "34: `curl_mprintf` reads `double` for documented `long double` conversions — uninitialized value disclosure",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-26T21:22:27.332Z",
+  "submitted_at": "2026-08-26T21:22:29.637Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-28T09:33:13.517Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-27T11:06:11.557Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`docs/libcurl/curl_mprintf.md` documents that the `L` length modifier makes floating-point conversions (`%f`, `%e`, `%E`, `%g`, `%G`) accept a `long double` argument. The implementation in `lib/mprintf.c` recognizes `L` and sets `FLAGS_LONGDOUBLE`, but the conversion switch (`%f`/`%e`/`%E`/`%g`/`%G`) unconditionally selects `MTYPE_DOUBLE`. The argument is then extracted with `va_arg(arglist, double)`.\n\nOn x86-64 (System V ABI), variadic `double` and `long double` use different register-save slots. When a caller passes a `long double` as documented, `va_arg(..., double)` reads an uninitialized floating-point register slot. Valgrind confirms an uninitialized-value read inside `out_double()`.\n\nAffected commit: `c2676bf9e639e31e44b12a2cc82cf2046231b056` (current HEAD at time of report).\n\n## Root cause\n\n1. `lib/mprintf.c:261-263` — `parse_flags()` sets `FLAGS_LONGDOUBLE` for `L`.\n2. `lib/mprintf.c:397-415` — `parse_conversion()` maps `f`/`e`/`E`/`g`/`G` to `MTYPE_DOUBLE` without checking `FLAGS_LONGDOUBLE`.\n3. `lib/mprintf.c:617-619` — `parsefmt()` extracts the argument as `va_arg(arglist, double)`.\n4. `lib/mprintf.c:100-108` — `struct va_input` has no `long double` member. The enum value `MTYPE_LONGDOUBLE` exists but is never assigned.\n\nThe bug affects all `curl_mprintf` family functions: `curl_mprintf`, `curl_mfprintf`, `curl_msprintf`, `curl_msnprintf`, `curl_maprintf`, and their `va_list` variants.\n\n## Reproduction\n\n### Observed output (x86-64 Linux)\n\n```\nsizeof(double)=8 sizeof(long double)=16 DBL_MANT_DIG=53 LDBL_MANT_DIG=64\n%.17Lf curl=0.00000000000000000 libc=1.23456789012345679 match=no\n%.17Le curl=6.95335579603750720e-310 libc=1.23456789012345679e+00 match=no\n%.17LE curl=6.95335579603750720E-310 libc=1.23456789012345679E+00 match=no\n%.17Lg curl=6.9533557960375072e-310 libc=1.2345678901234568 match=no\n%.17LG curl=6.9533557960375072E-310 libc=1.2345678901234568 match=no\nmismatches=5/5\nRESULT: VULNERABLE\nConditional jump or move depends on uninitialised value(s)\n   at 0x...: out_double (mprintf.c:681)\n Uninitialised value was created by a stack allocation\n```\n\n## Suggested fix\n\nIn `parse_conversion()`, when `FLAGS_LONGDOUBLE` is set alongside a floating-point conversion specifier, assign `MTYPE_LONGDOUBLE` instead of `MTYPE_DOUBLE`. Add a `long double` member to `struct va_input`, extract with `va_arg(arglist, long double)`, and pass it through the output formatting path.\n\n## Impact\n\nA caller following the documented API on x86-64 gets a stale/uninitialized floating-point value formatted instead of the supplied `long double`. Valgrind confirms the value is uninitialized.\n\nNo in-tree production usage of `%L` floating-point conversions was found in curl or libcurl. The format string and argument originate with the calling application, not from remote input. The practical security impact depends on whether a downstream application formats a `long double` via `curl_mprintf` and exposes the result across a trust boundary. I did not identify such a scenario and leave the security classification to the curl team.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6560123,
+      "file_name": "poc.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/gzqgyegp5oy2jhkpdtfxzae5m24j?response-content-disposition=attachment%3B%20filename%3D%22poc.c%22%3B%20filename%2A%3DUTF-8%27%27poc.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7UBJGEY6%2F20260828%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260828T203557Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEIz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCEXyE%2FOEUV2WUZh6KHiqv4VSBxrke6KR55y8KTL79ulwIgPcU5gyvDigXn03b7xtewe6oLZ2F%2FqOchnj31L6yqXlMqsgUIVRADGgwwMTM2MTkyNzQ4NDkiDGQJP6p0hcQULVcLdyqPBTVChCcdMLAjwtImRG5RQuByecrAbULrDsdSm2l8Or9dE6RARWS44ukn%2BMsDWfBpaKXHusOp6SDAKuxq1Tug3v8cQeWpzSVftCotwj3IA6TqsKtZlJHgyMRV%2BpiExWuLPhxEu8PbAewU7eBguRd68UallTPaPpaF76Y7IDWPCn45jGTGj%2FGMkUKnxOR%2BKzD3oxSR%2Fzi2pdJKtiphsHVO9%2BP8CXj7OV%2FkJ8VXgpdtOxYEtqh8ZIV17NsMgOtGWQ5jutQVn8ZQeU9PZsPnOXTKf6Emu9oBI7sT4jXb6Z%2Fs2AgLKTV%2BB%2FElvdzO5cEdpftyBiduKw1%2BfWnUvA4pFogkEjx9%2B7kq9hhuht%2FBt53s9LaiZjod4yQT2E46VYODIs4BfqNQBimPls%2B7We427KEujTGF8r5Pt24swYwBRu2RVmdcBEzuIUB9z3C1zQZ2sheW60cWQQRsySfX%2FLkF4iqJDAMElXgLYhfzLRrkoxnWn5VwHH0RR1A8JZDBh%2FZ7FdNZRcKrRk%2B%2BX%2BNxSsGWvEVNg662Ngz3z4eEbEPNUzg8be8xUAGyps%2Fr8UUfaZHVNBQuYou1LQnRDSZAzT8gpzA%2BhrfJYCeDRG2o0jdB145WiOQOBFVc8PWJ7U92%2BzuIjeP0MGb86ZSTYYdRqTpbtlh27xr79MUHIUNlsd%2F3DVyHioocAVLSOBQYYzWJM2mND%2BVOq%2B48BTMrlvu3YF2Fgge6OGPRb55aUDYvd%2FeTXMau4Ulepo5IvjkC7Qp9wPDUtOYU%2B2cibR%2FaYy%2BQSqXa7QoceZ1M7GskfPr7BIRiZfdsIOuiGL4j6nGfo93bx73Rf2H61M1mtwFwDlKmuL969gIWWWJHNDP1sKH7krnnz67ETG8wu9bH1AY6sQHza%2FG7p01aXLO9p2A8YswUPT55zJNk7kG43PwLOFvo1jxbXk2cbe%2FfefOv2qQPK8fJPpAGVrZNpup52XI%2FfgmiznuIDbtYsShTgF3v05xu8%2BmrPGeaKcmOo4zd%2F8nF3rYxJaRhvJj2gLPcokrhyOPT6JQMYJUaf3LDt6WJbYx2iQoSjNuHDYcTDxW2by6I%2FRbc7klEuYwO1YR5NAGUxqVymvSRTlLVHe8%2FMjiCNdbK7xk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=60fa923e9beae6a7f5c5a043c69268f5ef7bf0620c160ebc12a775098faba2e8",
+      "file_size": 1517,
+      "type": "text/x-csrc",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
