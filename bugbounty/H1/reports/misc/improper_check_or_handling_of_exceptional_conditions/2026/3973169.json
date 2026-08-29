@@ -1,0 +1,149 @@
+{
+  "id": 3973169,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMTY5",
+  "url": "https://hackerone.com/reports/3973169",
+  "title": "42: `VMS_STS` macro typo (`< 3` vs `<< 3`) turns curl failures into successful OpenVMS conditions",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-27T09:17:36.999Z",
+  "submitted_at": "2026-08-27T09:17:37.516Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-29T12:48:44.477Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-27T17:48:11.081Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`VMS_STS` in `src/tool_vms.h` line 46 uses a comparison (`< 3`) where a left-shift (`<< 3`) is intended. This causes `VMSSTS_HIDE` to evaluate to `0x10000001` instead of `0x10000000`, setting bit 0 (the OpenVMS success bit). When curl runs under DCL with `--silent` and without `--show-error`, the mask is ORed into the mapped CURLcode condition before `decc$exit()`. Every mapped curl failure with a clear success bit becomes a successful DCL condition.\n\n## Affected versions\n\nOpenVMS curl CLI 7.8.1 through 8.21.0, plus tested 8.22.0 prerelease/development versions.\n\n## Root cause\n\n```c\n#define VMS_STS(c, f, e, s) \\\n  ((((c) & 0xF)   << 28) |  \\\n   (((e) & 0x1FFF) < 3) |   \\\n    ((s) & 7))\n#define VMSSTS_HIDE VMS_STS(1, 0, 0, 0)\n```\n\nFor `VMSSTS_HIDE` the event field `e` is zero. `(0 & 0x1FFF) < 3` evaluates to `1` (true), setting bit 0. The intended expression `(0 & 0x1FFF) << 3` evaluates to `0`.\n\nOn OpenVMS, bit 0 of a condition value determines success: odd values are successful, even values are failures. Bit 28 (`STS$V_INHIB_MSG`) suppresses the exit message without changing severity. The current mask does both — suppresses the message *and* flips failures to successes.\n\nThe control flow is:\n\n1. `post_check_result()` in `src/tool_operate.c:608-613` assigns `VMSSTS_HIDE` to `vms_show` when `--silent` is set without `--show-error`.\n2. `main()` in `src/tool_main.c:200-201` passes `vms_show` to `vms_special_exit()`.\n3. `vms_special_exit()` in `src/tool_vms.c:103` ORs the mask into `vms_cond[code]` and calls `decc$exit()`.\n\nConcrete example with `CURLE_PARTIAL_FILE` (exit code 18):\n\n| Step | Value | Bit 0 | VMS meaning |\n|---|---|---|---|\n| `vms_cond[18]` = `CURL_PARTIAL_FILE` | `0x0F01809A` | 0 | Error (severity 2) |\n| OR with buggy `VMSSTS_HIDE` `0x10000001` | `0x1F01809B` | 1 | **Success** (severity 3) |\n| OR with fixed mask `0x10000000` | `0x1F01809A` | 0 | Error preserved |\n\n## Security impact\n\nA remote server can trigger a transfer failure while leaving output behind (e.g. declaring `Content-Length: 10`, sending three bytes, closing the connection). DCL automation that branches on curl's exit condition would enter the success path and process the incomplete output.\n\nThis requires all of the following:\n\n1. curl built for and run under OpenVMS DCL\n2. `--silent` without `--show-error`\n3. A server or network condition causes curl to fail\n4. Downstream automation trusts curl's condition code for a security-sensitive decision\n\nThe platform and option constraints make this low severity. I have verified the source-level arithmetic and control flow but have not executed on native OpenVMS.\n\n## Suggested fix\n\nReplace `< 3` with `<< 3` in `src/tool_vms.h`:\n\n```diff\n--- a/src/tool_vms.h\n+++ b/src/tool_vms.h\n@@ -43,7 +43,7 @@\n #define VMS_STS(c, f, e, s) \\\n   ((((c) & 0xF)   << 28) |  \\\n-   (((e) & 0x1FFF) < 3) |   \\\n+   (((e) & 0x1FFF) << 3) |  \\\n     ((s) & 7))\n```\n\n## Reproduction steps\n\n1. Build an affected curl command-line tool for OpenVMS, starting with curl 7.8.1.\n2. Start an HTTP test server that advertises a response body larger than the data it actually sends, then closes the connection. For example, advertise ten bytes and send only three.\n3. Write a DCL procedure that invokes curl with `--silent`, without `--show-error`, and saves the response to a file.\n4. Immediately after curl exits, record the DCL `$STATUS` and `$SEVERITY` values and branch on the normal OpenVMS success test.\n5. Confirm that curl created an incomplete output file containing only the bytes sent before the server closed.\n6. Confirm through curl diagnostics or a control run that the underlying transfer result is `CURLE_PARTIAL_FILE`, not a successful transfer.\n7. Observe the vulnerable result under DCL: the condition returned by curl is odd, has informational severity, and is treated as success even though curl detected the partial-file error.\n8. Confirm that automation following the ordinary DCL success path would process the incomplete output.\n9. Repeat the failing request without `--silent`, or add `--show-error`, and verify that the transfer is represented as a failure. This isolates the incorrect conversion to the message-hiding path.\n10. Inspect the mapped OpenVMS condition for `CURLE_PARTIAL_FILE` and confirm that it is an even failure value before the hide mask is applied.\n11. Apply the `VMSSTS_HIDE` mask generated by the affected `VMS_STS` macro and confirm that the `< 3` comparison contributes bit zero, converting the condition into an odd success value.\n12. Replace the comparison with the intended left shift, changing `((e) & 0x1FFF) < 3` to `((e) & 0x1FFF) << 3`.\n13. Rebuild curl and repeat the same silent truncated transfer.\n14. Observe the corrected result: the message remains suppressed, but `$STATUS` stays even, `$SEVERITY` reports failure, and the DCL procedure enters its failure branch.\n15. If native OpenVMS testing is unavailable, build a portable validation harness against the affected `tool_vms.h` and generated condition table, feed it a real failing curl exit code, and compare the affected and corrected numeric transformations. Treat this as arithmetic and control-flow evidence rather than a substitute for the final native DCL test.\n\n### Expected result\n\n`--silent` may suppress diagnostic messages, but it must not change a failed transfer into a successful OpenVMS condition.\n\n### Vulnerable result\n\nThe malformed hide-mask expression sets the OpenVMS success bit. A genuine curl failure is returned to DCL as a successful informational condition, allowing automation to process partial or otherwise invalid output.\n\n## Impact\n\n## Summary:\nA remote server can deliberately fail or truncate a transfer while leaving partial output, yet OpenVMS automation may treat curl’s resulting condition as success. Security-sensitive scripts could consequently accept corrupted downloads, incomplete configuration, or attacker-controlled partial data and continue with deployment, installation, or processing that should have been aborted.",
+  "weakness": {
+    "id": 115,
+    "name": "Improper Check or Handling of Exceptional Conditions"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6563088,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/a2xa457q6atvtwzue9e7hessvwo8?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTYQRAIES%2F20260829%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260829T145401Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIHXM2pjkqdiRqLtbL3YkF6%2BJQlohQ7QD%2BD7hHejtC79RAiANCPhY2xpltkd1RAZTdBcIBMv%2F8vpeJatvtHkgYCQNryqxBQhnEAMaDDAxMzYxOTI3NDg0OSIMRL2NfSYVWOH0xjSAKo4FMeTdoyS88t3mE3dhPfJdNBf4ln2Dzprr%2FHZhvJyWxfvAZfH95Sqy97bZ9A5EnX%2Fqg79f9lSsHrwHvCXNQfBKZ5yJVJ%2B1AujBdsZDfhHnvVdl1g17TUDZ9X%2FzPaf372Q5I%2BJjwJOJdRaCzwp96KKPjS7ZZy4IZWSPkv2dcM2tDnV4eS97Ell%2BGP%2FcTbKcDDFYq3St9Om9PpqfXyfa5HZ%2F%2FxF0ogc3MWcV54A5TjOX6R0PyQ%2FJtPEWmXgSzWzIMDeY3%2F0OVvZVBV0xp%2F1C2%2FJ6DPwa%2BhOIVwV8ElybnG01bG6zzb%2FQqXw7eeIKq4afwl5gmqK4sEN5DNYFZQxLVmP2bE%2BW44p3PZFOQMiBsD11BzF%2F%2FvVUe%2BSMKKyFhnA%2BTw%2FzKL2hG2TNjDh26%2FkZdPTTDjNuZ5ajxWzfXv0aFLdP21ES54KD2AqaC02b%2FFDeEdhznBUEzN2k%2FgJdrj7PESDlNUwqwDTTJBeFfBWLoEktDO0CY%2FzPiEzASib%2FxyLKqfM1oQNnKDI%2BsW8Vrl0j1JOhaH75tpkk%2F7%2BjvGG%2FTGECA7LiTM4bhIxn9hrcIVnmuEu7bM7VCwnQ1NVTJtoTMXSAj9AhYJCVpxXPPDPsidMRyEEjv88Je0FrticzAJEvkfTTOiB8o4JuYXAjRvQdqt7qvtbe9UgZI9E83nKYszTaNef1ijGarNndrPKVsXt98Gu%2BnoEtLshF2Z9pzj3F8IboDXWP0ImtRn2wAUcPP1I31cM2tj2%2BRU%2BoIqELzqZ43IjKC1R4KY8dNscjTfr9Bf%2BFfZz07verGEpIv9pXwPqgx4AtR%2BxKDC4Lrxs%2Bxiy9GJw%2BtrbNPPwAyrG5z9jQvzyHJJAnvbhtM2nkga9CukbcMLzQy9QGOrIBQ32LtCf93m%2FPcne9J7MzFfh0TK%2Fj0fDYPzBA6X5MUbc1Rva49WSuwF%2FJHmMiaiRLFYZsGIlRKdyPZDJhj2hW%2Fk6bJtr%2Bd6UQUZZBcmgb7YIrV%2FrXGRDSyiCKXa3YMBBXprflUhAP1kW5Q0BBmZzjbAp%2F5PrPFKgAA0MSf%2FByz9PbJ7rNs9UW%2FriJk0HZqG%2B%2ByryVWeYSdr9IpHjmvG7c8kFL63XhLa2gI%2Bh5%2FjZced6hwQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e7f09d3dd6e377a70caee1b498e06ebe93dff024d29a2ced1afb858bd3022526",
+      "file_size": 1055,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6563089,
+      "file_name": "poc.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/s1axv2t1fuimwznrklzpah4mp7vj?response-content-disposition=attachment%3B%20filename%3D%22poc.c%22%3B%20filename%2A%3DUTF-8%27%27poc.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTYQRAIES%2F20260829%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260829T145401Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIHXM2pjkqdiRqLtbL3YkF6%2BJQlohQ7QD%2BD7hHejtC79RAiANCPhY2xpltkd1RAZTdBcIBMv%2F8vpeJatvtHkgYCQNryqxBQhnEAMaDDAxMzYxOTI3NDg0OSIMRL2NfSYVWOH0xjSAKo4FMeTdoyS88t3mE3dhPfJdNBf4ln2Dzprr%2FHZhvJyWxfvAZfH95Sqy97bZ9A5EnX%2Fqg79f9lSsHrwHvCXNQfBKZ5yJVJ%2B1AujBdsZDfhHnvVdl1g17TUDZ9X%2FzPaf372Q5I%2BJjwJOJdRaCzwp96KKPjS7ZZy4IZWSPkv2dcM2tDnV4eS97Ell%2BGP%2FcTbKcDDFYq3St9Om9PpqfXyfa5HZ%2F%2FxF0ogc3MWcV54A5TjOX6R0PyQ%2FJtPEWmXgSzWzIMDeY3%2F0OVvZVBV0xp%2F1C2%2FJ6DPwa%2BhOIVwV8ElybnG01bG6zzb%2FQqXw7eeIKq4afwl5gmqK4sEN5DNYFZQxLVmP2bE%2BW44p3PZFOQMiBsD11BzF%2F%2FvVUe%2BSMKKyFhnA%2BTw%2FzKL2hG2TNjDh26%2FkZdPTTDjNuZ5ajxWzfXv0aFLdP21ES54KD2AqaC02b%2FFDeEdhznBUEzN2k%2FgJdrj7PESDlNUwqwDTTJBeFfBWLoEktDO0CY%2FzPiEzASib%2FxyLKqfM1oQNnKDI%2BsW8Vrl0j1JOhaH75tpkk%2F7%2BjvGG%2FTGECA7LiTM4bhIxn9hrcIVnmuEu7bM7VCwnQ1NVTJtoTMXSAj9AhYJCVpxXPPDPsidMRyEEjv88Je0FrticzAJEvkfTTOiB8o4JuYXAjRvQdqt7qvtbe9UgZI9E83nKYszTaNef1ijGarNndrPKVsXt98Gu%2BnoEtLshF2Z9pzj3F8IboDXWP0ImtRn2wAUcPP1I31cM2tj2%2BRU%2BoIqELzqZ43IjKC1R4KY8dNscjTfr9Bf%2BFfZz07verGEpIv9pXwPqgx4AtR%2BxKDC4Lrxs%2Bxiy9GJw%2BtrbNPPwAyrG5z9jQvzyHJJAnvbhtM2nkga9CukbcMLzQy9QGOrIBQ32LtCf93m%2FPcne9J7MzFfh0TK%2Fj0fDYPzBA6X5MUbc1Rva49WSuwF%2FJHmMiaiRLFYZsGIlRKdyPZDJhj2hW%2Fk6bJtr%2Bd6UQUZZBcmgb7YIrV%2FrXGRDSyiCKXa3YMBBXprflUhAP1kW5Q0BBmZzjbAp%2F5PrPFKgAA0MSf%2FByz9PbJ7rNs9UW%2FriJk0HZqG%2B%2ByryVWeYSdr9IpHjmvG7c8kFL63XhLa2gI%2Bh5%2FjZced6hwQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=44318f510b544750f3ec6b2b1a33cdab9defe9d83c7a9137c05314e723bb7809",
+      "file_size": 1962,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6563090,
+      "file_name": "run-container.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/19xuqi8soptj68dw2c566ufsfioc?response-content-disposition=attachment%3B%20filename%3D%22run-container.sh%22%3B%20filename%2A%3DUTF-8%27%27run-container.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTYQRAIES%2F20260829%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260829T145401Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIHXM2pjkqdiRqLtbL3YkF6%2BJQlohQ7QD%2BD7hHejtC79RAiANCPhY2xpltkd1RAZTdBcIBMv%2F8vpeJatvtHkgYCQNryqxBQhnEAMaDDAxMzYxOTI3NDg0OSIMRL2NfSYVWOH0xjSAKo4FMeTdoyS88t3mE3dhPfJdNBf4ln2Dzprr%2FHZhvJyWxfvAZfH95Sqy97bZ9A5EnX%2Fqg79f9lSsHrwHvCXNQfBKZ5yJVJ%2B1AujBdsZDfhHnvVdl1g17TUDZ9X%2FzPaf372Q5I%2BJjwJOJdRaCzwp96KKPjS7ZZy4IZWSPkv2dcM2tDnV4eS97Ell%2BGP%2FcTbKcDDFYq3St9Om9PpqfXyfa5HZ%2F%2FxF0ogc3MWcV54A5TjOX6R0PyQ%2FJtPEWmXgSzWzIMDeY3%2F0OVvZVBV0xp%2F1C2%2FJ6DPwa%2BhOIVwV8ElybnG01bG6zzb%2FQqXw7eeIKq4afwl5gmqK4sEN5DNYFZQxLVmP2bE%2BW44p3PZFOQMiBsD11BzF%2F%2FvVUe%2BSMKKyFhnA%2BTw%2FzKL2hG2TNjDh26%2FkZdPTTDjNuZ5ajxWzfXv0aFLdP21ES54KD2AqaC02b%2FFDeEdhznBUEzN2k%2FgJdrj7PESDlNUwqwDTTJBeFfBWLoEktDO0CY%2FzPiEzASib%2FxyLKqfM1oQNnKDI%2BsW8Vrl0j1JOhaH75tpkk%2F7%2BjvGG%2FTGECA7LiTM4bhIxn9hrcIVnmuEu7bM7VCwnQ1NVTJtoTMXSAj9AhYJCVpxXPPDPsidMRyEEjv88Je0FrticzAJEvkfTTOiB8o4JuYXAjRvQdqt7qvtbe9UgZI9E83nKYszTaNef1ijGarNndrPKVsXt98Gu%2BnoEtLshF2Z9pzj3F8IboDXWP0ImtRn2wAUcPP1I31cM2tj2%2BRU%2BoIqELzqZ43IjKC1R4KY8dNscjTfr9Bf%2BFfZz07verGEpIv9pXwPqgx4AtR%2BxKDC4Lrxs%2Bxiy9GJw%2BtrbNPPwAyrG5z9jQvzyHJJAnvbhtM2nkga9CukbcMLzQy9QGOrIBQ32LtCf93m%2FPcne9J7MzFfh0TK%2Fj0fDYPzBA6X5MUbc1Rva49WSuwF%2FJHmMiaiRLFYZsGIlRKdyPZDJhj2hW%2Fk6bJtr%2Bd6UQUZZBcmgb7YIrV%2FrXGRDSyiCKXa3YMBBXprflUhAP1kW5Q0BBmZzjbAp%2F5PrPFKgAA0MSf%2FByz9PbJ7rNs9UW%2FriJk0HZqG%2B%2ByryVWeYSdr9IpHjmvG7c8kFL63XhLa2gI%2Bh5%2FjZced6hwQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=04eff3c8aa9a34dbd9c276116de2217cb2c520fb5c7b6b4811dfaf64ff89b5e6",
+      "file_size": 593,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563091,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/5th62tvqz7nbvxhykdvzkuwnxlft?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTYQRAIES%2F20260829%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260829T145401Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIHXM2pjkqdiRqLtbL3YkF6%2BJQlohQ7QD%2BD7hHejtC79RAiANCPhY2xpltkd1RAZTdBcIBMv%2F8vpeJatvtHkgYCQNryqxBQhnEAMaDDAxMzYxOTI3NDg0OSIMRL2NfSYVWOH0xjSAKo4FMeTdoyS88t3mE3dhPfJdNBf4ln2Dzprr%2FHZhvJyWxfvAZfH95Sqy97bZ9A5EnX%2Fqg79f9lSsHrwHvCXNQfBKZ5yJVJ%2B1AujBdsZDfhHnvVdl1g17TUDZ9X%2FzPaf372Q5I%2BJjwJOJdRaCzwp96KKPjS7ZZy4IZWSPkv2dcM2tDnV4eS97Ell%2BGP%2FcTbKcDDFYq3St9Om9PpqfXyfa5HZ%2F%2FxF0ogc3MWcV54A5TjOX6R0PyQ%2FJtPEWmXgSzWzIMDeY3%2F0OVvZVBV0xp%2F1C2%2FJ6DPwa%2BhOIVwV8ElybnG01bG6zzb%2FQqXw7eeIKq4afwl5gmqK4sEN5DNYFZQxLVmP2bE%2BW44p3PZFOQMiBsD11BzF%2F%2FvVUe%2BSMKKyFhnA%2BTw%2FzKL2hG2TNjDh26%2FkZdPTTDjNuZ5ajxWzfXv0aFLdP21ES54KD2AqaC02b%2FFDeEdhznBUEzN2k%2FgJdrj7PESDlNUwqwDTTJBeFfBWLoEktDO0CY%2FzPiEzASib%2FxyLKqfM1oQNnKDI%2BsW8Vrl0j1JOhaH75tpkk%2F7%2BjvGG%2FTGECA7LiTM4bhIxn9hrcIVnmuEu7bM7VCwnQ1NVTJtoTMXSAj9AhYJCVpxXPPDPsidMRyEEjv88Je0FrticzAJEvkfTTOiB8o4JuYXAjRvQdqt7qvtbe9UgZI9E83nKYszTaNef1ijGarNndrPKVsXt98Gu%2BnoEtLshF2Z9pzj3F8IboDXWP0ImtRn2wAUcPP1I31cM2tj2%2BRU%2BoIqELzqZ43IjKC1R4KY8dNscjTfr9Bf%2BFfZz07verGEpIv9pXwPqgx4AtR%2BxKDC4Lrxs%2Bxiy9GJw%2BtrbNPPwAyrG5z9jQvzyHJJAnvbhtM2nkga9CukbcMLzQy9QGOrIBQ32LtCf93m%2FPcne9J7MzFfh0TK%2Fj0fDYPzBA6X5MUbc1Rva49WSuwF%2FJHmMiaiRLFYZsGIlRKdyPZDJhj2hW%2Fk6bJtr%2Bd6UQUZZBcmgb7YIrV%2FrXGRDSyiCKXa3YMBBXprflUhAP1kW5Q0BBmZzjbAp%2F5PrPFKgAA0MSf%2FByz9PbJ7rNs9UW%2FriJk0HZqG%2B%2ByryVWeYSdr9IpHjmvG7c8kFL63XhLa2gI%2Bh5%2FjZced6hwQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=7a424f445fbef8be1c437f5a5ae19c50002338ec63c282653def9184b0e6297f",
+      "file_size": 206,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563092,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/zf9784vij6y0fx99ag6m64h8ppj7?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=text%2Fx-python-script&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTYQRAIES%2F20260829%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260829T145401Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIHXM2pjkqdiRqLtbL3YkF6%2BJQlohQ7QD%2BD7hHejtC79RAiANCPhY2xpltkd1RAZTdBcIBMv%2F8vpeJatvtHkgYCQNryqxBQhnEAMaDDAxMzYxOTI3NDg0OSIMRL2NfSYVWOH0xjSAKo4FMeTdoyS88t3mE3dhPfJdNBf4ln2Dzprr%2FHZhvJyWxfvAZfH95Sqy97bZ9A5EnX%2Fqg79f9lSsHrwHvCXNQfBKZ5yJVJ%2B1AujBdsZDfhHnvVdl1g17TUDZ9X%2FzPaf372Q5I%2BJjwJOJdRaCzwp96KKPjS7ZZy4IZWSPkv2dcM2tDnV4eS97Ell%2BGP%2FcTbKcDDFYq3St9Om9PpqfXyfa5HZ%2F%2FxF0ogc3MWcV54A5TjOX6R0PyQ%2FJtPEWmXgSzWzIMDeY3%2F0OVvZVBV0xp%2F1C2%2FJ6DPwa%2BhOIVwV8ElybnG01bG6zzb%2FQqXw7eeIKq4afwl5gmqK4sEN5DNYFZQxLVmP2bE%2BW44p3PZFOQMiBsD11BzF%2F%2FvVUe%2BSMKKyFhnA%2BTw%2FzKL2hG2TNjDh26%2FkZdPTTDjNuZ5ajxWzfXv0aFLdP21ES54KD2AqaC02b%2FFDeEdhznBUEzN2k%2FgJdrj7PESDlNUwqwDTTJBeFfBWLoEktDO0CY%2FzPiEzASib%2FxyLKqfM1oQNnKDI%2BsW8Vrl0j1JOhaH75tpkk%2F7%2BjvGG%2FTGECA7LiTM4bhIxn9hrcIVnmuEu7bM7VCwnQ1NVTJtoTMXSAj9AhYJCVpxXPPDPsidMRyEEjv88Je0FrticzAJEvkfTTOiB8o4JuYXAjRvQdqt7qvtbe9UgZI9E83nKYszTaNef1ijGarNndrPKVsXt98Gu%2BnoEtLshF2Z9pzj3F8IboDXWP0ImtRn2wAUcPP1I31cM2tj2%2BRU%2BoIqELzqZ43IjKC1R4KY8dNscjTfr9Bf%2BFfZz07verGEpIv9pXwPqgx4AtR%2BxKDC4Lrxs%2Bxiy9GJw%2BtrbNPPwAyrG5z9jQvzyHJJAnvbhtM2nkga9CukbcMLzQy9QGOrIBQ32LtCf93m%2FPcne9J7MzFfh0TK%2Fj0fDYPzBA6X5MUbc1Rva49WSuwF%2FJHmMiaiRLFYZsGIlRKdyPZDJhj2hW%2Fk6bJtr%2Bd6UQUZZBcmgb7YIrV%2FrXGRDSyiCKXa3YMBBXprflUhAP1kW5Q0BBmZzjbAp%2F5PrPFKgAA0MSf%2FByz9PbJ7rNs9UW%2FriJk0HZqG%2B%2ByryVWeYSdr9IpHjmvG7c8kFL63XhLa2gI%2Bh5%2FjZced6hwQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=67708031f47b433632d8c834579b2462bbc2e9830c7e7a168f6a09fa01640890",
+      "file_size": 525,
+      "type": "text/x-python-script",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,133 @@
+{
+  "id": 3973228,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMjI4",
+  "url": "https://hackerone.com/reports/3973228",
+  "title": "50: CMake `HTTP_ONLY` does not disable SSH backends — SCP and SFTP remain usable",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-27T09:45:29.033Z",
+  "submitted_at": "2026-08-27T09:45:29.320Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-29T12:51:05.754Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-27T17:50:38.401Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe CMake `HTTP_ONLY=ON` option is documented as \"Disable all protocols except HTTP\" (`CMakeLists.txt:538`), but the implementation (`CMakeLists.txt:541-557`) only sets `CURL_DISABLE_*` flags for non-SSH protocols. It does not disable `CURL_USE_LIBSSH2` or `CURL_USE_LIBSSH`. Since `CURL_USE_LIBSSH2` defaults to `ON`, a build on any system with libssh2 installed produces a binary that advertises and accepts SCP and SFTP.\n\n## Affected versions\n\nCMake builds from curl 7.38.0 through 8.21.0, plus affected 8.22.0 prerelease/development versions, when an SSH backend is available.\n\n## Root cause\n\nThe `HTTP_ONLY` block disables DICT, FILE, FTP, GOPHER, IMAP, IPFS, LDAP, LDAPS, MQTT, POP3, RTSP, SMTP, TELNET, TFTP, and WebSockets — but not the SSH backends. When CMake finds libssh2, it sets `USE_LIBSSH2`, which causes `lib/curl_setup.h:773-775` to define `USE_SSH`. This makes the SCP/SFTP handlers in `lib/protocol.c:283-309` live, includes them in version output, and allows initial URLs using those schemes.\n\n## Impact\n\nAn application that trusts the documented `HTTP_ONLY` build restriction as its protocol boundary — without also setting `CURLOPT_PROTOCOLS_STR` at runtime — unknowingly exposes SCP and SFTP. In SSRF-adjacent scenarios where an attacker controls the initial URL and the host has reachable SSH credentials, this widens the attack surface beyond what the builder intended.\n\nThe runtime restriction (`--proto '=http,https'` / `CURLOPT_PROTOCOLS_STR`) remains effective. I consider this primarily a build-policy violation with Low security impact given the preconditions required for exploitation.\n\n## Reproduction steps\n\n1. Use an affected curl source release, starting with 7.38.0, on a system where CMake can discover libssh2 or libssh.\n2. Configure curl with CMake using `HTTP_ONLY=ON` and leave the available SSH backend enabled.\n3. Build the curl command-line tool and libcurl.\n4. Inspect the configuration summary, `curl --version`, and `curl_version_info()` protocol list.\n5. Observe the vulnerable build result: SCP and SFTP are listed alongside HTTP and HTTPS despite the documented HTTP-only configuration.\n6. Invoke the resulting command-line tool with an initial `sftp://` URL pointing to a closed local port or another harmless unreachable endpoint.\n7. Record the curl result and verbose connection trace.\n8. Confirm that curl selects the SFTP handler and attempts a network connection, producing a connection error rather than `CURLE_UNSUPPORTED_PROTOCOL`.\n9. Repeat the test with an initial `scp://` URL and confirm that SCP is also active.\n10. Optionally start a disposable SSH/SFTP server with isolated credentials and verify that the supposedly HTTP-only build can complete an authenticated SFTP download or upload.\n11. As a runtime-policy control, invoke the same vulnerable binary with `--proto '=http,https'`, or set `CURLOPT_PROTOCOLS_STR` to `http,https`.\n12. Confirm that the SFTP URL is rejected before any network connection is attempted.\n13. As a build control, configure a second build with `HTTP_ONLY=ON` and explicitly disable both `CURL_USE_LIBSSH2` and `CURL_USE_LIBSSH`.\n14. Build the control and confirm that its protocol list contains only HTTP and HTTPS and that SCP/SFTP URLs return `CURLE_UNSUPPORTED_PROTOCOL`.\n15. Confirm a fix by making `HTTP_ONLY` enforce the final protocol-set invariant, including disabling SSH backends or excluding their protocol handlers regardless of dependency discovery.\n16. Repeat the original configuration with libssh2 or libssh installed and verify that SCP and SFTP are absent from build reporting and rejected at runtime.\n\n### Expected result\n\n`HTTP_ONLY=ON` must produce a build whose available protocol set is limited to HTTP and HTTPS, regardless of which optional protocol libraries are installed.\n\n### Vulnerable result\n\nThe CMake option disables many individual protocols but leaves SSH backends enabled. If an SSH library is found, the resulting build retains fully functional SCP and SFTP handlers.\n\n\n## Suggested fix\n\nAdd `CURL_USE_LIBSSH2=OFF` and `CURL_USE_LIBSSH=OFF` to the `HTTP_ONLY` block in `CMakeLists.txt`, or — more robustly — have `HTTP_ONLY` enforce the final protocol-set invariant so the computed and runtime protocol lists contain only HTTP and HTTPS regardless of which backends are detected.\n\n## Impact\n\n## Summary:\nf an application accepts attacker-influenced URLs and relies on the documented HTTP_ONLY build restriction, an attacker may make it initiate SCP or SFTP connections to otherwise reachable SSH services. Depending on credentials available to the process, this could enable internal network access or unauthorized file downloads and uploads outside the intended HTTP-only boundary. An explicit runtime protocol allowlist prevents exploitation.",
+  "weakness": {
+    "id": 68,
+    "name": "Server-Side Request Forgery (SSRF)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6563329,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/g1l5qii1okdyhoc9n1vzjs4a5sg9?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSZZ7DSTK%2F20260829%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260829T145401Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQC%2BM3C35WzDS3XZ8n7T7%2FbN2O%2BQGgclri%2B46cJR3hghoQIgPbpIe79kqrfPSMWaHz%2B66dST%2FCyQFPJeqPSx3BhJYz0qsgUIZxADGgwwMTM2MTkyNzQ4NDkiDHexrxaOBan5vC3EPyqPBYl14QcCGs5lN%2B%2BWhic7SjQHeS2Ctz6FuWgv5aMZs7WZ8u0%2Bv3WX9OSchohajUekkKn%2Bb17dGMYaUyLV9nTyZJsjoaKoq9oqIfkmMzswERnXX4P7G2mUjQPlKWCCFnkecxDLuBqmK1AdnN9cbNGVzcQLvIXBrLF1ZLyuIY8T0%2F0MFKwr9j06DxqKa8OTs2fCDorVFbKpv6EymdXOMr%2BidkJiE%2FH2ZMdsr50OfV20mVq8TtPchqUWFruepcI7ODxoAOC4dWM7U5%2Bp6RkQqRtySr0EvWJvo3PewPabw%2F%2FB%2FFtwGTxJUwoibYlaIhuh9fJLjxII5vvPumWSbaLDE0jEDX0y4btb4uMCvevM8HcFw6uNl%2FLvjj97eMfG4GJNAKVPRVV6KM17c68aUcoa8eJy6hpictV21IDcwGlpNisFu95qz4Fc7kVPmj9SvmIBzZyH8AVKnZKo0lpJpfKHMtEr4HBQG6OnKfzgF9%2BM4HCN618%2FwKEcQqE3ZXNX6PaYAUgBrNrvcPhIqwgbmt8ECTP1DO8NyJ0OF8B9oGMYJFmZzF5StgfRgX8BSGtiClJNQ%2F1D1h06CfxxFb8F2g1fkU3oRRMDpJiTwYjkvQwg2yAWGaOIF4MyXtTfANKXrpgMMxBRx9aQdOZVymR35A0RHXw3RnQWRQUmNaxMAdStYLE%2FLcQyyatvUw7wS7a49FcbxD%2F9j0koBROdIz9cO49lVzGhxLn%2BF5Ut9cx4yjWYQVAQlQnb3MUkIuLqvE4V%2FiBKVefMLYcMWeAoHBinLuQDh3Ex4TfBdK7PamyxLyW1DSnfrYRDK5Zh4oi1IlnmHFeS9TMGsiRMz5AjNzPRUkfI8mQ5D7TxPvs6jR%2Fke5Fw2qJ3fyMwysnL1AY6sQEvFMp7kl%2BNeV%2FUMEc6zYekGRlQrgjqxqdVnE0ZpByflQT382oAWwsQyggKLsq2r%2FxSZTlyfrunrkp5d00dtybVkYPG1KFW30Bt0e1yN0XGbid8OKX99BVNJAy8SE2%2Ft0OzxDh9BoF0zEZp%2FXhlAGRgU3J8j1eu1HpIs5zJ6m29b7dAX19wFe9Jvh06Jm3I%2BfN5QKYR7ywtPGs6aNTCmgY%2BQ6npHgkdO%2BpP%2FN7tnwQEVTY%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=becec580829aaf43cf0be0959d86fcd97bda9d751e9e00cafd887075fd2f154d",
+      "file_size": 328,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6563330,
+      "file_name": "poc.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/91mdmjlvshci9wqisdcn88piz58k?response-content-disposition=attachment%3B%20filename%3D%22poc.sh%22%3B%20filename%2A%3DUTF-8%27%27poc.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSZZ7DSTK%2F20260829%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260829T145401Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQC%2BM3C35WzDS3XZ8n7T7%2FbN2O%2BQGgclri%2B46cJR3hghoQIgPbpIe79kqrfPSMWaHz%2B66dST%2FCyQFPJeqPSx3BhJYz0qsgUIZxADGgwwMTM2MTkyNzQ4NDkiDHexrxaOBan5vC3EPyqPBYl14QcCGs5lN%2B%2BWhic7SjQHeS2Ctz6FuWgv5aMZs7WZ8u0%2Bv3WX9OSchohajUekkKn%2Bb17dGMYaUyLV9nTyZJsjoaKoq9oqIfkmMzswERnXX4P7G2mUjQPlKWCCFnkecxDLuBqmK1AdnN9cbNGVzcQLvIXBrLF1ZLyuIY8T0%2F0MFKwr9j06DxqKa8OTs2fCDorVFbKpv6EymdXOMr%2BidkJiE%2FH2ZMdsr50OfV20mVq8TtPchqUWFruepcI7ODxoAOC4dWM7U5%2Bp6RkQqRtySr0EvWJvo3PewPabw%2F%2FB%2FFtwGTxJUwoibYlaIhuh9fJLjxII5vvPumWSbaLDE0jEDX0y4btb4uMCvevM8HcFw6uNl%2FLvjj97eMfG4GJNAKVPRVV6KM17c68aUcoa8eJy6hpictV21IDcwGlpNisFu95qz4Fc7kVPmj9SvmIBzZyH8AVKnZKo0lpJpfKHMtEr4HBQG6OnKfzgF9%2BM4HCN618%2FwKEcQqE3ZXNX6PaYAUgBrNrvcPhIqwgbmt8ECTP1DO8NyJ0OF8B9oGMYJFmZzF5StgfRgX8BSGtiClJNQ%2F1D1h06CfxxFb8F2g1fkU3oRRMDpJiTwYjkvQwg2yAWGaOIF4MyXtTfANKXrpgMMxBRx9aQdOZVymR35A0RHXw3RnQWRQUmNaxMAdStYLE%2FLcQyyatvUw7wS7a49FcbxD%2F9j0koBROdIz9cO49lVzGhxLn%2BF5Ut9cx4yjWYQVAQlQnb3MUkIuLqvE4V%2FiBKVefMLYcMWeAoHBinLuQDh3Ex4TfBdK7PamyxLyW1DSnfrYRDK5Zh4oi1IlnmHFeS9TMGsiRMz5AjNzPRUkfI8mQ5D7TxPvs6jR%2Fke5Fw2qJ3fyMwysnL1AY6sQEvFMp7kl%2BNeV%2FUMEc6zYekGRlQrgjqxqdVnE0ZpByflQT382oAWwsQyggKLsq2r%2FxSZTlyfrunrkp5d00dtybVkYPG1KFW30Bt0e1yN0XGbid8OKX99BVNJAy8SE2%2Ft0OzxDh9BoF0zEZp%2FXhlAGRgU3J8j1eu1HpIs5zJ6m29b7dAX19wFe9Jvh06Jm3I%2BfN5QKYR7ywtPGs6aNTCmgY%2BQ6npHgkdO%2BpP%2FN7tnwQEVTY%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=96d1030bd5d631c7978b6706179ad4b9c2325e3f8d04773988d90a0f8556b7ab",
+      "file_size": 1764,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563332,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/h97oyxo8lzsh7z7gsaucho4fl81p?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSZZ7DSTK%2F20260829%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260829T145401Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQC%2BM3C35WzDS3XZ8n7T7%2FbN2O%2BQGgclri%2B46cJR3hghoQIgPbpIe79kqrfPSMWaHz%2B66dST%2FCyQFPJeqPSx3BhJYz0qsgUIZxADGgwwMTM2MTkyNzQ4NDkiDHexrxaOBan5vC3EPyqPBYl14QcCGs5lN%2B%2BWhic7SjQHeS2Ctz6FuWgv5aMZs7WZ8u0%2Bv3WX9OSchohajUekkKn%2Bb17dGMYaUyLV9nTyZJsjoaKoq9oqIfkmMzswERnXX4P7G2mUjQPlKWCCFnkecxDLuBqmK1AdnN9cbNGVzcQLvIXBrLF1ZLyuIY8T0%2F0MFKwr9j06DxqKa8OTs2fCDorVFbKpv6EymdXOMr%2BidkJiE%2FH2ZMdsr50OfV20mVq8TtPchqUWFruepcI7ODxoAOC4dWM7U5%2Bp6RkQqRtySr0EvWJvo3PewPabw%2F%2FB%2FFtwGTxJUwoibYlaIhuh9fJLjxII5vvPumWSbaLDE0jEDX0y4btb4uMCvevM8HcFw6uNl%2FLvjj97eMfG4GJNAKVPRVV6KM17c68aUcoa8eJy6hpictV21IDcwGlpNisFu95qz4Fc7kVPmj9SvmIBzZyH8AVKnZKo0lpJpfKHMtEr4HBQG6OnKfzgF9%2BM4HCN618%2FwKEcQqE3ZXNX6PaYAUgBrNrvcPhIqwgbmt8ECTP1DO8NyJ0OF8B9oGMYJFmZzF5StgfRgX8BSGtiClJNQ%2F1D1h06CfxxFb8F2g1fkU3oRRMDpJiTwYjkvQwg2yAWGaOIF4MyXtTfANKXrpgMMxBRx9aQdOZVymR35A0RHXw3RnQWRQUmNaxMAdStYLE%2FLcQyyatvUw7wS7a49FcbxD%2F9j0koBROdIz9cO49lVzGhxLn%2BF5Ut9cx4yjWYQVAQlQnb3MUkIuLqvE4V%2FiBKVefMLYcMWeAoHBinLuQDh3Ex4TfBdK7PamyxLyW1DSnfrYRDK5Zh4oi1IlnmHFeS9TMGsiRMz5AjNzPRUkfI8mQ5D7TxPvs6jR%2Fke5Fw2qJ3fyMwysnL1AY6sQEvFMp7kl%2BNeV%2FUMEc6zYekGRlQrgjqxqdVnE0ZpByflQT382oAWwsQyggKLsq2r%2FxSZTlyfrunrkp5d00dtybVkYPG1KFW30Bt0e1yN0XGbid8OKX99BVNJAy8SE2%2Ft0OzxDh9BoF0zEZp%2FXhlAGRgU3J8j1eu1HpIs5zJ6m29b7dAX19wFe9Jvh06Jm3I%2BfN5QKYR7ywtPGs6aNTCmgY%2BQ6npHgkdO%2BpP%2FN7tnwQEVTY%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=9a9f279189a90270995d4edc863bbaaa3fb61c88db0ed639bb60c2be7b0db587",
+      "file_size": 286,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
