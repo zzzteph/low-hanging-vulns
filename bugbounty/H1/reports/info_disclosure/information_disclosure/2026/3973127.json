@@ -1,0 +1,143 @@
+{
+  "id": 3973127,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMTI3",
+  "url": "https://hackerone.com/reports/3973127",
+  "title": "18:  Explicit IPv6 proxy zone ID silently ignored — proxy credentials sent to wrong interface",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-27T08:57:01.644Z",
+  "submitted_at": "2026-08-27T08:57:02.053Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-31T07:02:42.279Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-28T13:42:50.259Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Explicit IPv6 proxy zone ID silently ignored — proxy credentials sent to wrong interface\n\n## Summary\n\nWhen a proxy is configured with a literal link-local IPv6 address and an explicit zone ID (e.g. `http://[fe80::1%25eth0]:8080`), curl parses and stores the zone correctly but never applies it to the socket. On a multi-homed host, `get_scope_id()` falls back to the first link-local interface it finds, which may be a different one. This causes proxy credentials (`Proxy-Authorization`) to be sent to an unintended network endpoint.\n\nThis is a regression introduced by commit `bc40e09f63` (\"lib: introduce Curl_peer\", 2026-05-05). Before that refactor, `zonefrom_url()` in `parse_proxy()` placed the proxy's zone ID into `conn->scope_id`. The refactor deleted `zonefrom_url()` and moved zone storage to `peer->scopeid`, but `conn->scope_id` is now only set from `CURLOPT_ADDRESS_SCOPE` or the *origin* peer — never from the proxy peer. This regresses the fix from PR #3918 / issue #3482 (\"parse_proxy: use the IPv6 zone id if given\").\n\n## Affected version\n\ncurl 8.21.0, plus affected 8.22.0 prerelease/development versions. Introduced by bc40e09f63.\n\n## Root cause\n\n1. `peer_create()` correctly converts the proxy URL zone ID to `proxy_peer->scopeid` (`lib/peer.c:146-170`).\n\n2. `Curl_str2addr()` / `ip2addr()` creates a zero-initialized `sockaddr_in6` without copying any scope ID (`lib/curl_addrinfo.c:406-412`).\n\n3. Before `connect()`, `get_scope_id()` (`lib/cf-socket.c:379-417`) checks:\n   - `conn->scope_id` — set from `CURLOPT_ADDRESS_SCOPE` or origin peer, not the proxy peer (`lib/url.c:1566-1567`)\n   - `sa6->sin6_scope_id` — always zero (see step 2)\n   - First link-local interface via `getifaddrs()` — picks whichever comes first\n\n   It never checks `Curl_conn_get_first_peer(conn, ...)->scopeid`. The proxy's explicit zone is parsed, stored, and then silently discarded.\n\n## Security impact\n\nOn a host with multiple link-local interfaces where a different interface shares the same link-local address, curl connects to the wrong endpoint and sends proxy credentials there. The reproduction below proves disclosure of HTTP Basic `Proxy-Authorization` to an unintended listener. The same routing error would affect HTTPS CONNECT tunneling and SOCKS proxy authentication.\n\nThe configuration is narrow (literal link-local proxy, multiple eligible interfaces, same link-local address on the wrong interface), but the user explicitly specified the correct interface via the standard zone ID syntax and curl silently ignored it.\n\n## Reproduction\n\n1. Build curl 8.21.0 or another affected revision with IPv6 and proxy support enabled.\n2. Prepare a host or isolated network namespace with two active IPv6 link-local interfaces.\n3. Place a separate endpoint behind each interface and assign both endpoints the same link-local address and TCP port, such as `[fe80::1]:18080`.\n4. Ensure the unintended interface is enumerated before the intended interface so that curl's automatic link-local scope fallback selects the unintended one.\n5. Start a simple HTTP proxy listener on each endpoint. Have each listener record incoming connections, request lines, and any `Proxy-Authorization` header.\n6. Configure curl to use the proxy's literal link-local IPv6 address with an explicit zone identifying the intended interface, percent-encoding the zone delimiter in the URL, for example `http://[fe80::1%25intended0]:18080`.\n7. Configure HTTP Basic proxy credentials, clear any proxy-bypass configuration, and request an HTTP URL through the proxy.\n8. Record the scope ID used by curl and identify which listener receives the connection.\n9. Observe the vulnerable result: curl ignores the zone from the proxy URL, falls back to the unintended interface, and sends the proxy request and credentials to that endpoint. The listener on the explicitly selected interface receives nothing.\n10. Repeat the test with the numeric interface index in the proxy URL instead of its name. Confirm that the explicit numeric zone is ignored in the same way.\n11. As a control, perform the same transfer through libcurl while setting `CURLOPT_ADDRESS_SCOPE` to the intended interface index.\n12. Confirm that the control connects only through the intended interface and that the unintended listener receives no credentials.\n13. Optionally repeat the vulnerable case with an HTTPS proxy tunnel or a SOCKS proxy and verify that the same routing error exposes the corresponding proxy-authentication exchange to the unintended endpoint.\n14. Confirm a fix by making socket setup prefer the selected first peer's explicit scope ID before automatic interface fallback, while preserving an explicit `CURLOPT_ADDRESS_SCOPE` as the highest-priority override.\n15. Repeat the original test and verify that only the listener behind the zone specified in the proxy URL receives the connection and credentials.\n\n### Expected result\n\nAn explicit IPv6 zone in a proxy URL must determine the interface used to reach that link-local proxy. Curl must not send proxy traffic or credentials through another interface.\n\n### Vulnerable result\n\nCurl parses and stores the proxy zone but does not apply it when opening the socket. Automatic scope selection can therefore route the connection and proxy credentials to an endpoint on a different interface.\n\n\n## Suggested fix\n\nIn `get_scope_id()` (`lib/cf-socket.c`), after checking `conn->scope_id` and before the `getifaddrs` fallback, check the first peer's explicit scope:\n\n```c\nif(data->conn->scope_id)\n    return data->conn->scope_id;\n\n/* Check the first peer's explicit zone (proxy or connect-to) */\n{\n    struct Curl_peer *peer = Curl_conn_get_first_peer(data->conn, 0);\n    if(peer && peer->scopeid)\n        return peer->scopeid;\n}\n\nscope_id = sa6->sin6_scope_id;\n/* ... existing fallback ... */\n```\n\n## Impact\n\n## Summary:\nAn attacker controlling the same link-local IPv6 address on another interface may receive traffic intended for the explicitly selected proxy, including HTTP Basic credentials, HTTPS CONNECT authentication, or SOCKS credentials. This can disclose proxy secrets and potentially allow the attacker to intercept or manipulate proxied traffic.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6562913,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/vx8dyz9p4eb7s1c07wl859n9d1l1?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3FTXDTR4%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144441Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCICNDr4nltYvxSU%2FVspylwMdyRvu0OvxFmas%2Fs99YpinUAiEAkL316Z0wQEKSblM49pSVptuX25OxMMD5Y7ZMmH4odT0qugUIk%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDF8e1OllhLqTRJgWCSqOBY7Fh3s49xH8gsNtP1QxhZ6xKMx2eipxpEX%2FxIg9OGs7W5qTIhrisHhrzACEqutGlwAEvNHhnLPyzPhpFpbSesFPjOz5FoUnGiLbHsyRXpMOrtDDTCC9%2By513hfCPg7ec5hGZgir7PObI8%2F3UKlNniya%2FmRotdO7wGUsFkAxU26IgNRITVsCkTOSR%2BH%2FBCGCXgljSRyik2IGUJ7ERDK%2F%2Bqy%2F%2BANmb4Ej6l1rO966891oFsr3TAdqjyegN1eN4T09pzHscAZec06ON5W5CmhKmxZld8lXvO%2FyVpn4yK4OXrulg0D5M3Smj%2FR8ccyziQ%2BECgRU49wqa%2BiYWXYiSpRJTl12fBycvwPPVI5kn7dlfZnvEKOzNQtHxDabQ0M8sAJWBooLXUmRb5Ar%2B7A8t0Mnwz%2Fu76PMDWM3iB2EEwc8Ujq3hivoUK2HID6atfNCQYu35P7YbALJ8kAx5iQ5dBayLAPegMoLAyTwrFq23H3XuSjhm4nmyRcbXH00y93lNGWKwmchQSaUpqKfuOekHjdoW0xdRBS1al26GW%2FboFRe8Q%2FWzG3%2FQhejrbFLnZ9J7Wz7E70k2i2WMQUhuA4s6UXETuNG0wskQhPWWyZMWp4msrIp%2BeHIqMR2SNslVH0dyU7uXdfkKan%2BYWbQqTgcBsJLOwCfFB4%2F5l%2Bl5L0977qyUVuZoDD8gUMMXsl%2BS8rS46SYTp4d6%2F8D8ltfDt3FgslXN0CrfbvQW93yMl1Z2xC5BZq6tmzBy27HKUwRaBy6yHLkNhDJgXzKdBMwC9vTaxGsTspm3asJBIkSe3L56qI26loUD2UhIhP799e53ek3YuX8uYQI6Sjt35I0Y1nRCZeoz%2FXQMpyP3UzT3V6mxIejnzCcqtXUBjqxAUxbwLHuoa6x6YKdjKf8m5TzjZBOqYsMMLo98FFJbRlsDzwzFV3NPu8a%2FDegrj39WBgiggOxYDtccO3G21ja%2F98HEjSYyqej6c3KajswFwRpbSNSoGQHHFD2QUEcXIIJgGglCuTe%2BMji62D3reldoDffxSsMN32SQprT%2BUi%2FfzxwC%2Bszsd%2FVd5pHteRIlAAAMbh%2BYoFf9S1BeHPNbQ9%2BLNHmZVoiHrJeQPfR2obC7C58kA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=02602754269b97941fd873d04b5c118b666060ac9f44061f304a5035e3875493",
+      "file_size": 313,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6562914,
+      "file_name": "client.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/mcnkmse4jytsr9z2f3im8ame5hwz?response-content-disposition=attachment%3B%20filename%3D%22client.c%22%3B%20filename%2A%3DUTF-8%27%27client.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3FTXDTR4%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144441Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCICNDr4nltYvxSU%2FVspylwMdyRvu0OvxFmas%2Fs99YpinUAiEAkL316Z0wQEKSblM49pSVptuX25OxMMD5Y7ZMmH4odT0qugUIk%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDF8e1OllhLqTRJgWCSqOBY7Fh3s49xH8gsNtP1QxhZ6xKMx2eipxpEX%2FxIg9OGs7W5qTIhrisHhrzACEqutGlwAEvNHhnLPyzPhpFpbSesFPjOz5FoUnGiLbHsyRXpMOrtDDTCC9%2By513hfCPg7ec5hGZgir7PObI8%2F3UKlNniya%2FmRotdO7wGUsFkAxU26IgNRITVsCkTOSR%2BH%2FBCGCXgljSRyik2IGUJ7ERDK%2F%2Bqy%2F%2BANmb4Ej6l1rO966891oFsr3TAdqjyegN1eN4T09pzHscAZec06ON5W5CmhKmxZld8lXvO%2FyVpn4yK4OXrulg0D5M3Smj%2FR8ccyziQ%2BECgRU49wqa%2BiYWXYiSpRJTl12fBycvwPPVI5kn7dlfZnvEKOzNQtHxDabQ0M8sAJWBooLXUmRb5Ar%2B7A8t0Mnwz%2Fu76PMDWM3iB2EEwc8Ujq3hivoUK2HID6atfNCQYu35P7YbALJ8kAx5iQ5dBayLAPegMoLAyTwrFq23H3XuSjhm4nmyRcbXH00y93lNGWKwmchQSaUpqKfuOekHjdoW0xdRBS1al26GW%2FboFRe8Q%2FWzG3%2FQhejrbFLnZ9J7Wz7E70k2i2WMQUhuA4s6UXETuNG0wskQhPWWyZMWp4msrIp%2BeHIqMR2SNslVH0dyU7uXdfkKan%2BYWbQqTgcBsJLOwCfFB4%2F5l%2Bl5L0977qyUVuZoDD8gUMMXsl%2BS8rS46SYTp4d6%2F8D8ltfDt3FgslXN0CrfbvQW93yMl1Z2xC5BZq6tmzBy27HKUwRaBy6yHLkNhDJgXzKdBMwC9vTaxGsTspm3asJBIkSe3L56qI26loUD2UhIhP799e53ek3YuX8uYQI6Sjt35I0Y1nRCZeoz%2FXQMpyP3UzT3V6mxIejnzCcqtXUBjqxAUxbwLHuoa6x6YKdjKf8m5TzjZBOqYsMMLo98FFJbRlsDzwzFV3NPu8a%2FDegrj39WBgiggOxYDtccO3G21ja%2F98HEjSYyqej6c3KajswFwRpbSNSoGQHHFD2QUEcXIIJgGglCuTe%2BMji62D3reldoDffxSsMN32SQprT%2BUi%2FfzxwC%2Bszsd%2FVd5pHteRIlAAAMbh%2BYoFf9S1BeHPNbQ9%2BLNHmZVoiHrJeQPfR2obC7C58kA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f07a9409ba4634c7ec7380ac4dc6dfc9fe16d72a58cb261323a312782d3efb80",
+      "file_size": 1205,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6562915,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/p3p3n3lc2xjwmnqh1ijp2hkxkh2f?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3FTXDTR4%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144441Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCICNDr4nltYvxSU%2FVspylwMdyRvu0OvxFmas%2Fs99YpinUAiEAkL316Z0wQEKSblM49pSVptuX25OxMMD5Y7ZMmH4odT0qugUIk%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDF8e1OllhLqTRJgWCSqOBY7Fh3s49xH8gsNtP1QxhZ6xKMx2eipxpEX%2FxIg9OGs7W5qTIhrisHhrzACEqutGlwAEvNHhnLPyzPhpFpbSesFPjOz5FoUnGiLbHsyRXpMOrtDDTCC9%2By513hfCPg7ec5hGZgir7PObI8%2F3UKlNniya%2FmRotdO7wGUsFkAxU26IgNRITVsCkTOSR%2BH%2FBCGCXgljSRyik2IGUJ7ERDK%2F%2Bqy%2F%2BANmb4Ej6l1rO966891oFsr3TAdqjyegN1eN4T09pzHscAZec06ON5W5CmhKmxZld8lXvO%2FyVpn4yK4OXrulg0D5M3Smj%2FR8ccyziQ%2BECgRU49wqa%2BiYWXYiSpRJTl12fBycvwPPVI5kn7dlfZnvEKOzNQtHxDabQ0M8sAJWBooLXUmRb5Ar%2B7A8t0Mnwz%2Fu76PMDWM3iB2EEwc8Ujq3hivoUK2HID6atfNCQYu35P7YbALJ8kAx5iQ5dBayLAPegMoLAyTwrFq23H3XuSjhm4nmyRcbXH00y93lNGWKwmchQSaUpqKfuOekHjdoW0xdRBS1al26GW%2FboFRe8Q%2FWzG3%2FQhejrbFLnZ9J7Wz7E70k2i2WMQUhuA4s6UXETuNG0wskQhPWWyZMWp4msrIp%2BeHIqMR2SNslVH0dyU7uXdfkKan%2BYWbQqTgcBsJLOwCfFB4%2F5l%2Bl5L0977qyUVuZoDD8gUMMXsl%2BS8rS46SYTp4d6%2F8D8ltfDt3FgslXN0CrfbvQW93yMl1Z2xC5BZq6tmzBy27HKUwRaBy6yHLkNhDJgXzKdBMwC9vTaxGsTspm3asJBIkSe3L56qI26loUD2UhIhP799e53ek3YuX8uYQI6Sjt35I0Y1nRCZeoz%2FXQMpyP3UzT3V6mxIejnzCcqtXUBjqxAUxbwLHuoa6x6YKdjKf8m5TzjZBOqYsMMLo98FFJbRlsDzwzFV3NPu8a%2FDegrj39WBgiggOxYDtccO3G21ja%2F98HEjSYyqej6c3KajswFwRpbSNSoGQHHFD2QUEcXIIJgGglCuTe%2BMji62D3reldoDffxSsMN32SQprT%2BUi%2FfzxwC%2Bszsd%2FVd5pHteRIlAAAMbh%2BYoFf9S1BeHPNbQ9%2BLNHmZVoiHrJeQPfR2obC7C58kA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=4f44ec5ee38e7598b1bb411ec08f57e924fab5ffce21f2eea1fbaf7fb539f017",
+      "file_size": 1541,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6562916,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/a9b133dcahn1scwuvrrv20r2hsw7?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3FTXDTR4%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144441Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCICNDr4nltYvxSU%2FVspylwMdyRvu0OvxFmas%2Fs99YpinUAiEAkL316Z0wQEKSblM49pSVptuX25OxMMD5Y7ZMmH4odT0qugUIk%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDF8e1OllhLqTRJgWCSqOBY7Fh3s49xH8gsNtP1QxhZ6xKMx2eipxpEX%2FxIg9OGs7W5qTIhrisHhrzACEqutGlwAEvNHhnLPyzPhpFpbSesFPjOz5FoUnGiLbHsyRXpMOrtDDTCC9%2By513hfCPg7ec5hGZgir7PObI8%2F3UKlNniya%2FmRotdO7wGUsFkAxU26IgNRITVsCkTOSR%2BH%2FBCGCXgljSRyik2IGUJ7ERDK%2F%2Bqy%2F%2BANmb4Ej6l1rO966891oFsr3TAdqjyegN1eN4T09pzHscAZec06ON5W5CmhKmxZld8lXvO%2FyVpn4yK4OXrulg0D5M3Smj%2FR8ccyziQ%2BECgRU49wqa%2BiYWXYiSpRJTl12fBycvwPPVI5kn7dlfZnvEKOzNQtHxDabQ0M8sAJWBooLXUmRb5Ar%2B7A8t0Mnwz%2Fu76PMDWM3iB2EEwc8Ujq3hivoUK2HID6atfNCQYu35P7YbALJ8kAx5iQ5dBayLAPegMoLAyTwrFq23H3XuSjhm4nmyRcbXH00y93lNGWKwmchQSaUpqKfuOekHjdoW0xdRBS1al26GW%2FboFRe8Q%2FWzG3%2FQhejrbFLnZ9J7Wz7E70k2i2WMQUhuA4s6UXETuNG0wskQhPWWyZMWp4msrIp%2BeHIqMR2SNslVH0dyU7uXdfkKan%2BYWbQqTgcBsJLOwCfFB4%2F5l%2Bl5L0977qyUVuZoDD8gUMMXsl%2BS8rS46SYTp4d6%2F8D8ltfDt3FgslXN0CrfbvQW93yMl1Z2xC5BZq6tmzBy27HKUwRaBy6yHLkNhDJgXzKdBMwC9vTaxGsTspm3asJBIkSe3L56qI26loUD2UhIhP799e53ek3YuX8uYQI6Sjt35I0Y1nRCZeoz%2FXQMpyP3UzT3V6mxIejnzCcqtXUBjqxAUxbwLHuoa6x6YKdjKf8m5TzjZBOqYsMMLo98FFJbRlsDzwzFV3NPu8a%2FDegrj39WBgiggOxYDtccO3G21ja%2F98HEjSYyqej6c3KajswFwRpbSNSoGQHHFD2QUEcXIIJgGglCuTe%2BMji62D3reldoDffxSsMN32SQprT%2BUi%2FfzxwC%2Bszsd%2FVd5pHteRIlAAAMbh%2BYoFf9S1BeHPNbQ9%2BLNHmZVoiHrJeQPfR2obC7C58kA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e56058a225d8be064b51c77d4c7de08031871f45730d72bb8c72b9f6486c7b3f",
+      "file_size": 4092,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 3,
+  "voters": [
+    "coder_mohammed",
+    "mahadev879",
+    "l1aymen_exe"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

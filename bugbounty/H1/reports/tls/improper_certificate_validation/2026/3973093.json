@@ -1,0 +1,144 @@
+{
+  "id": 3973093,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMDkz",
+  "url": "https://hackerone.com/reports/3973093",
+  "title": "06: Incomplete fix for CVE-2026-7009: GCC/SecTrust builds silently discard stapled OCSP responses",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-27T08:32:51.863Z",
+  "submitted_at": "2026-08-27T08:32:52.054Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-7009"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-31T07:02:12.178Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-28T06:16:41.127Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`Curl_vtls_apple_verify()` in `lib/vtls/apple.c` passes the stapled OCSP response to `SecTrustSetOCSPResponse()` only when both `HAVE_BUILTIN_AVAILABLE` and `SUPPORTS_SecOCSP` are defined. When `HAVE_BUILTIN_AVAILABLE` is absent, the OCSP buffer is silently discarded. GCC does not support `__builtin_available`, so the `HAVE_BUILTIN_AVAILABLE` feature test in `CMakeLists.txt` fails for every GCC build. The macOS CI workflow (`.github/workflows/macos.yml`) runs GCC+CMake jobs with `-DUSE_APPLE_SECTRUST=ON`, confirming this is a supported configuration.\n\nThe CVE-2026-7009 fix in `ossl_apple_verify()` (`lib/vtls/openssl.c`) rejects a missing staple when `SSL_get_tlsext_status_ocsp_resp()` returns a negative length. A positive length passes that check. When SecTrust accepts the certificate chain without seeing the OCSP data, `sectrust_verified` becomes true and `Curl_ossl_check_peer_cert()` skips OpenSSL's `verifystatus()`. A nonempty invalid OCSP response therefore satisfies `--cert-status` / `CURLOPT_SSL_VERIFYSTATUS` without being parsed, signature-verified, or checked for GOOD status.\n\n## Affected versions\nIntroduced in curl 8.17.0. The GCC/SecTrust variant remains in 8.20.0–8.21.0 and affected 8.22.0 prereleases/development snapshots.\n\n## Root cause\n\nIn `lib/vtls/apple.c`, lines 128 and 203:\n\n```c\n#if defined(HAVE_BUILTIN_AVAILABLE) && defined(SUPPORTS_SecOCSP)\n```\n\n`SUPPORTS_SecOCSP` is defined on any macOS 10.9+ SDK (line 74), but the guard also requires `HAVE_BUILTIN_AVAILABLE`. Without it, the `#else` branch discards the OCSP buffer:\n\n```c\n#else\n  (void)ocsp_buf;\n  (void)ocsp_len;\n#endif\n```\n\nIn `lib/vtls/openssl.c`, `ossl_apple_verify()` only sets `ocsp_missing = TRUE` for negative `ocsp_len` (line 4759). Positive-length data that was silently discarded by SecTrust is not flagged as missing. After `Curl_vtls_apple_verify()` returns success, `sectrust_verified` is set to TRUE (line 4776), and `Curl_ossl_check_peer_cert()` skips `verifystatus()` (line 4866).\n\n## Reproduction\n1. Use curl 8.20.0 or a later affected revision, such as 8.21.0, on macOS or in a test harness that can observe calls to the Apple Security framework.\n2. Build curl with an OpenSSL-based TLS backend and Apple SecTrust enabled, using GCC through CMake. Confirm that the configuration test does not define `HAVE_BUILTIN_AVAILABLE`.\n3. Confirm that the selected Apple SDK exposes `SecTrustSetOCSPResponse()` and therefore defines the SecTrust OCSP capability, while the GCC build still compiles out the call because `HAVE_BUILTIN_AVAILABLE` is absent.\n4. Prepare a TLS certificate and private key for a test hostname whose certificate chain will otherwise be accepted by SecTrust.\n5. Configure a TLS 1.2 test server to use that certificate and staple a nonempty invalid OCSP response. An OCSP response with an `unauthorized`, `revoked`, malformed, incorrectly signed, mismatched, or expired status can be used.\n6. Instrument or interpose the Apple Security framework sufficiently to record whether curl calls `SecTrustSetOCSPResponse()`. If deterministic testing is needed, make the trust evaluation accept the certificate when no OCSP response is supplied and reject it when the invalid response is supplied.\n7. Connect to the test server with the GCC-built curl, enable the native CA store, and require OCSP stapling with `--cert-status` or `CURLOPT_SSL_VERIFYSTATUS`.\n8. Verify that curl receives a positive-length stapled OCSP response but never passes it to `SecTrustSetOCSPResponse()`.\n9. Observe the vulnerable result: SecTrust accepts the certificate chain, curl reports successful certificate verification, and the transfer succeeds even though OCSP status verification was explicitly required and the stapled response is invalid.\n10. Build a control configuration in which `HAVE_BUILTIN_AVAILABLE` is defined, using a compatible Clang compiler, and repeat the request. Verify that curl passes the OCSP response to SecTrust and that trust evaluation rejects it.\n11. As a second control, use the OpenSSL certificate-verification path instead of Apple SecTrust and repeat the request. Verify that OpenSSL parses the same response and rejects the transfer with `CURLE_SSL_INVALIDCERTSTATUS`.\n12. Confirm the fix by repeating the GCC/SecTrust case after changing curl to pass the response to `SecTrustSetOCSPResponse()` without the unavailable compiler builtin, or to fail closed when it cannot pass the response. The transfer must no longer succeed.\n\n### Expected result\n\nWhen OCSP stapling verification is required, every received response must be validated by SecTrust or OpenSSL. An invalid response must terminate the connection.\n\n### Vulnerable result\n\nIn the affected GCC/SecTrust configuration, curl treats the presence of a nonempty response as sufficient, silently discards its contents, and accepts the connection without validating the response.\n\n\n## Suggested fix\n\nDo not silently discard a required staple. Either call `SecTrustSetOCSPResponse()` without relying on `__builtin_available` when the deployment target guarantees the API (macOS >= 10.9), or fail `CURLOPT_SSL_VERIFYSTATUS` when a received OCSP response cannot be passed to SecTrust. A `REQUIRES_SecOCSP` path analogous to the existing `REQUIRES_SecTrustEvaluateWithError` pattern would close the gap for high deployment targets without affecting other configurations.\n\nI leave severity and CVE classification to you. This may be best treated as an incomplete-fix variant of CVE-2026-7009 affecting versions currently declared fixed (8.20.0 and later).\n\n## Impact\n\n## Summary:\nAn attacker possessing a hostname-valid but revoked certificate and its private key could impersonate the target server despite the client explicitly requiring OCSP verification. This may enable man-in-the-middle interception, disclosure, or modification of TLS-protected traffic.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6562785,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/oohtujflvygt6lkr1ku8gp34emrg?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYH7573PQ%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144442Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDex42%2BLe5Y08Y0eeOA9PoQFA6qBNbXD6rbjtGvtB0xpQIhAJ8Vu6lPFeuI316pbXwLqmIqwPxTJ7SSxXZmefli%2Br58KroFCJP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgzSPZhByJcEIhBMTWQqjgXXMHnnJShJjcOjO5%2FsqUJ0yokzMRTs3duSWA%2BaLg9n%2F0kBSRkdzH4Qx9io%2FM6BwItrxriUmnMKgJd7xkH5oCyxSbgjx%2B018%2BzkPyVUEmLuvJV96sYMyVZUj%2BRA%2FofbXQpRGMRsZ3rDHNZ7gl3OvJ%2BmX8Xg0htLE5oZ421ZMHhLvZ1KNXbI6HxAMBSk4Ry8gjSq1kXRzxXeWAYpQALQjP7qO%2BZiQn3GUTtlkW9yjwzPTwBSTuWkQLdlD6QGGwdL0zW%2BVsUt6wCznOMgyAAmq3JghbjZYRpAy%2BO06Hb1TQhYYnHSOtA0XquMDcqAIDhAtdUetS3zQYUUR5nXXqMfq2p9CP8BffhJLw96Ko7UR2VtOtgYK%2FjZPc4s0XQrBLkdbik1nq81mcx5v%2FqVB5pMZXUSM1vKdSqfX208EWiYvLlUxLViCxHBgMAUJL8UO%2FOGnWYWkleqQLRY%2B%2FDsR88zeGzSOVbzBI5q7r0SsjJPHyYVaY17Fw5b%2FdvVOPmtvmeCpltHDOOnBFDJ1q5O%2FUfT4jnQ5IfeNzMNkLPrO7tuaufEehmgzCWBQSliBWye%2BPSBjlTmK%2F0PEhtvsuNfm0ao58fsAkSjl482OxQyW53h%2FQL2PJXqre2plc7FgcZA0XMu5z85MKNzpe364b9oM2x5UN1G2hlL1lidYmtogP5x73izfmnFOOk84U2D%2FKgX3eK5qavBFxtNG2lNHmYUg%2B9eAesjwVA4XN3S6JJjwhSiFwGBwhQyfmmbr%2FqcSFkxqJexEU3M8zTK9CgJeEeFYAxohDUeurIK2cEnGBcIHr7%2BwAZJwUQCiu9vycsVumfJywnMLX3aGoAhYmrZho9b2J5OtnWauzQoheaj0FNxzG6JdOgwiKrV1AY6sAE5R1SuU7eL55DtYu4sZ6kssgA1IIGgU%2BvX5b0oxKABtBW74ZkQjHozoBIV7BSx%2B0XakXzG8AAr13qqg6hv4msq%2F%2BCDSkBNzrzyIsiWXzoJoKcgwVCzyawYADxskm6hFvZeHInVKPm8MUVAx5Hbey7Xhy9sz845rqlvDg%2Fy%2FpxtfYzUbW2sHZoS1c%2BpczqcEXR2J%2FyA%2BD8bZmhJuwB7j1lBIh43ydWk%2Bvfcj6uwJkqdgg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e51aa6d8365b54101c2858f053cfa8794cdd7e8285499c935931131fe3fe7a4a",
+      "file_size": 1933,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6562786,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/zx02fa4slpn3ulqf8a5r1upportd?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYH7573PQ%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144442Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDex42%2BLe5Y08Y0eeOA9PoQFA6qBNbXD6rbjtGvtB0xpQIhAJ8Vu6lPFeuI316pbXwLqmIqwPxTJ7SSxXZmefli%2Br58KroFCJP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgzSPZhByJcEIhBMTWQqjgXXMHnnJShJjcOjO5%2FsqUJ0yokzMRTs3duSWA%2BaLg9n%2F0kBSRkdzH4Qx9io%2FM6BwItrxriUmnMKgJd7xkH5oCyxSbgjx%2B018%2BzkPyVUEmLuvJV96sYMyVZUj%2BRA%2FofbXQpRGMRsZ3rDHNZ7gl3OvJ%2BmX8Xg0htLE5oZ421ZMHhLvZ1KNXbI6HxAMBSk4Ry8gjSq1kXRzxXeWAYpQALQjP7qO%2BZiQn3GUTtlkW9yjwzPTwBSTuWkQLdlD6QGGwdL0zW%2BVsUt6wCznOMgyAAmq3JghbjZYRpAy%2BO06Hb1TQhYYnHSOtA0XquMDcqAIDhAtdUetS3zQYUUR5nXXqMfq2p9CP8BffhJLw96Ko7UR2VtOtgYK%2FjZPc4s0XQrBLkdbik1nq81mcx5v%2FqVB5pMZXUSM1vKdSqfX208EWiYvLlUxLViCxHBgMAUJL8UO%2FOGnWYWkleqQLRY%2B%2FDsR88zeGzSOVbzBI5q7r0SsjJPHyYVaY17Fw5b%2FdvVOPmtvmeCpltHDOOnBFDJ1q5O%2FUfT4jnQ5IfeNzMNkLPrO7tuaufEehmgzCWBQSliBWye%2BPSBjlTmK%2F0PEhtvsuNfm0ao58fsAkSjl482OxQyW53h%2FQL2PJXqre2plc7FgcZA0XMu5z85MKNzpe364b9oM2x5UN1G2hlL1lidYmtogP5x73izfmnFOOk84U2D%2FKgX3eK5qavBFxtNG2lNHmYUg%2B9eAesjwVA4XN3S6JJjwhSiFwGBwhQyfmmbr%2FqcSFkxqJexEU3M8zTK9CgJeEeFYAxohDUeurIK2cEnGBcIHr7%2BwAZJwUQCiu9vycsVumfJywnMLX3aGoAhYmrZho9b2J5OtnWauzQoheaj0FNxzG6JdOgwiKrV1AY6sAE5R1SuU7eL55DtYu4sZ6kssgA1IIGgU%2BvX5b0oxKABtBW74ZkQjHozoBIV7BSx%2B0XakXzG8AAr13qqg6hv4msq%2F%2BCDSkBNzrzyIsiWXzoJoKcgwVCzyawYADxskm6hFvZeHInVKPm8MUVAx5Hbey7Xhy9sz845rqlvDg%2Fy%2FpxtfYzUbW2sHZoS1c%2BpczqcEXR2J%2FyA%2BD8bZmhJuwB7j1lBIh43ydWk%2Bvfcj6uwJkqdgg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f97899a0f3c15eff07933ff86b7a29e31b20c00500a05e760f3267f14015f4d4",
+      "file_size": 1323,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6562787,
+      "file_name": "fake_security.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/u22xtybgf51xfnf4iyu2grj1gyzo?response-content-disposition=attachment%3B%20filename%3D%22fake_security.c%22%3B%20filename%2A%3DUTF-8%27%27fake_security.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYH7573PQ%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144442Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDex42%2BLe5Y08Y0eeOA9PoQFA6qBNbXD6rbjtGvtB0xpQIhAJ8Vu6lPFeuI316pbXwLqmIqwPxTJ7SSxXZmefli%2Br58KroFCJP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgzSPZhByJcEIhBMTWQqjgXXMHnnJShJjcOjO5%2FsqUJ0yokzMRTs3duSWA%2BaLg9n%2F0kBSRkdzH4Qx9io%2FM6BwItrxriUmnMKgJd7xkH5oCyxSbgjx%2B018%2BzkPyVUEmLuvJV96sYMyVZUj%2BRA%2FofbXQpRGMRsZ3rDHNZ7gl3OvJ%2BmX8Xg0htLE5oZ421ZMHhLvZ1KNXbI6HxAMBSk4Ry8gjSq1kXRzxXeWAYpQALQjP7qO%2BZiQn3GUTtlkW9yjwzPTwBSTuWkQLdlD6QGGwdL0zW%2BVsUt6wCznOMgyAAmq3JghbjZYRpAy%2BO06Hb1TQhYYnHSOtA0XquMDcqAIDhAtdUetS3zQYUUR5nXXqMfq2p9CP8BffhJLw96Ko7UR2VtOtgYK%2FjZPc4s0XQrBLkdbik1nq81mcx5v%2FqVB5pMZXUSM1vKdSqfX208EWiYvLlUxLViCxHBgMAUJL8UO%2FOGnWYWkleqQLRY%2B%2FDsR88zeGzSOVbzBI5q7r0SsjJPHyYVaY17Fw5b%2FdvVOPmtvmeCpltHDOOnBFDJ1q5O%2FUfT4jnQ5IfeNzMNkLPrO7tuaufEehmgzCWBQSliBWye%2BPSBjlTmK%2F0PEhtvsuNfm0ao58fsAkSjl482OxQyW53h%2FQL2PJXqre2plc7FgcZA0XMu5z85MKNzpe364b9oM2x5UN1G2hlL1lidYmtogP5x73izfmnFOOk84U2D%2FKgX3eK5qavBFxtNG2lNHmYUg%2B9eAesjwVA4XN3S6JJjwhSiFwGBwhQyfmmbr%2FqcSFkxqJexEU3M8zTK9CgJeEeFYAxohDUeurIK2cEnGBcIHr7%2BwAZJwUQCiu9vycsVumfJywnMLX3aGoAhYmrZho9b2J5OtnWauzQoheaj0FNxzG6JdOgwiKrV1AY6sAE5R1SuU7eL55DtYu4sZ6kssgA1IIGgU%2BvX5b0oxKABtBW74ZkQjHozoBIV7BSx%2B0XakXzG8AAr13qqg6hv4msq%2F%2BCDSkBNzrzyIsiWXzoJoKcgwVCzyawYADxskm6hFvZeHInVKPm8MUVAx5Hbey7Xhy9sz845rqlvDg%2Fy%2FpxtfYzUbW2sHZoS1c%2BpczqcEXR2J%2FyA%2BD8bZmhJuwB7j1lBIh43ydWk%2Bvfcj6uwJkqdgg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=fb6f494677a6cb00eb1b22888997e3929d2e49106eb7db4dd8f618c2a07b3de8",
+      "file_size": 3564,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6562788,
+      "file_name": "Security.h",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/6kk99qcs1wdhzxl8oa67s71cczz3?response-content-disposition=attachment%3B%20filename%3D%22Security.h%22%3B%20filename%2A%3DUTF-8%27%27Security.h&response-content-type=text%2Fx-chdr&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYH7573PQ%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144442Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDex42%2BLe5Y08Y0eeOA9PoQFA6qBNbXD6rbjtGvtB0xpQIhAJ8Vu6lPFeuI316pbXwLqmIqwPxTJ7SSxXZmefli%2Br58KroFCJP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgzSPZhByJcEIhBMTWQqjgXXMHnnJShJjcOjO5%2FsqUJ0yokzMRTs3duSWA%2BaLg9n%2F0kBSRkdzH4Qx9io%2FM6BwItrxriUmnMKgJd7xkH5oCyxSbgjx%2B018%2BzkPyVUEmLuvJV96sYMyVZUj%2BRA%2FofbXQpRGMRsZ3rDHNZ7gl3OvJ%2BmX8Xg0htLE5oZ421ZMHhLvZ1KNXbI6HxAMBSk4Ry8gjSq1kXRzxXeWAYpQALQjP7qO%2BZiQn3GUTtlkW9yjwzPTwBSTuWkQLdlD6QGGwdL0zW%2BVsUt6wCznOMgyAAmq3JghbjZYRpAy%2BO06Hb1TQhYYnHSOtA0XquMDcqAIDhAtdUetS3zQYUUR5nXXqMfq2p9CP8BffhJLw96Ko7UR2VtOtgYK%2FjZPc4s0XQrBLkdbik1nq81mcx5v%2FqVB5pMZXUSM1vKdSqfX208EWiYvLlUxLViCxHBgMAUJL8UO%2FOGnWYWkleqQLRY%2B%2FDsR88zeGzSOVbzBI5q7r0SsjJPHyYVaY17Fw5b%2FdvVOPmtvmeCpltHDOOnBFDJ1q5O%2FUfT4jnQ5IfeNzMNkLPrO7tuaufEehmgzCWBQSliBWye%2BPSBjlTmK%2F0PEhtvsuNfm0ao58fsAkSjl482OxQyW53h%2FQL2PJXqre2plc7FgcZA0XMu5z85MKNzpe364b9oM2x5UN1G2hlL1lidYmtogP5x73izfmnFOOk84U2D%2FKgX3eK5qavBFxtNG2lNHmYUg%2B9eAesjwVA4XN3S6JJjwhSiFwGBwhQyfmmbr%2FqcSFkxqJexEU3M8zTK9CgJeEeFYAxohDUeurIK2cEnGBcIHr7%2BwAZJwUQCiu9vycsVumfJywnMLX3aGoAhYmrZho9b2J5OtnWauzQoheaj0FNxzG6JdOgwiKrV1AY6sAE5R1SuU7eL55DtYu4sZ6kssgA1IIGgU%2BvX5b0oxKABtBW74ZkQjHozoBIV7BSx%2B0XakXzG8AAr13qqg6hv4msq%2F%2BCDSkBNzrzyIsiWXzoJoKcgwVCzyawYADxskm6hFvZeHInVKPm8MUVAx5Hbey7Xhy9sz845rqlvDg%2Fy%2FpxtfYzUbW2sHZoS1c%2BpczqcEXR2J%2FyA%2BD8bZmhJuwB7j1lBIh43ydWk%2Bvfcj6uwJkqdgg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=15114b99d57f5d2b005d83977e4dfcb74e1b1705475985a3fdea6f077b749a51",
+      "file_size": 2159,
+      "type": "text/x-chdr",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 2,
+  "voters": [
+    "mahadev879",
+    "l1aymen_exe"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

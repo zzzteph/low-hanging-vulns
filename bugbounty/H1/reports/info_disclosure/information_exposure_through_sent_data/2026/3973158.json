@@ -1,0 +1,134 @@
+{
+  "id": 3973158,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMTU4",
+  "url": "https://hackerone.com/reports/3973158",
+  "title": "41: `main_checkfds()` pipe reuse leaks proxy credentials into HTTPS upload body",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-27T09:14:20.361Z",
+  "submitted_at": "2026-08-27T09:14:20.733Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-31T07:02:21.404Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-28T10:01:01.053Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWhen curl is launched with stdin (fd 0) and stderr (fd 2) closed, `main_checkfds()` in `src/tool_main.c` can assign opposite ends of the same pipe to fd 0 and fd 2. In verbose mode with a stdin-based upload through an authenticated proxy, the `Proxy-Authorization` header written to stderr becomes readable from stdin and is sent as upload body data to the HTTPS origin server.\n\n## Affected version\n\ncurl CLI 7.12.3 through 8.21.0, plus tested 8.22.0 prerelease/development versions on applicable POSIX systems.\n\n## Root cause\n\n`main_checkfds()` (lines 87–95 of `src/tool_main.c`) loops `pipe()` until fds 0, 1, and 2 are all open. If fd 0 and fd 2 are both closed while fd 1 is open, the first `pipe()` call allocates its read end as fd 0 and its write end as fd 2 — opposite ends of the same pipe.\n\n`tool_init_stderr()` runs before `main_checkfds()` (line 148 vs 169), binding `tool_stderr` to the C `stderr` stream backed by fd 2. In verbose mode, curl writes the outgoing CONNECT request — including `Proxy-Authorization` — to `tool_stderr` → fd 2 → pipe write end. An upload from `--upload-file .` or `--upload-file -` reads from `per->infd` = `STDIN_FILENO` (fd 0) → pipe read end. The proxy credential thus crosses into the upload body sent to the HTTPS origin.\n\n## Reproduction\n\n1. Build an affected curl command-line tool on a POSIX platform that provides `pipe()` and `fcntl()`.\n2. Start an HTTP `CONNECT` proxy that requires Basic authentication, records the incoming proxy request, and tunnels accepted connections to a separate HTTPS origin.\n3. Start the HTTPS origin with a test certificate and have it record the complete decrypted upload request, including the request body.\n4. Prepare a launcher that keeps stdout open but closes file descriptors 0 and 2 immediately before executing curl.\n5. Invoke curl through the authenticated proxy with verbose diagnostics enabled and configure an upload whose source is stdin, using either `--upload-file -` or the nonblocking stdin form `--upload-file .`.\n6. Direct the upload to the distinct HTTPS origin and allow the test certificate as appropriate for the isolated environment.\n7. Confirm that the proxy receives the expected `Proxy-Authorization` header during the `CONNECT` request.\n8. Inspect the origin's decrypted request and locate the boundary between its HTTP headers and upload body.\n9. Observe the vulnerable result: the upload body contains verbose diagnostic text, including the proxy's `Proxy-Authorization` header, even though the origin is not authorized to receive that credential.\n10. Confirm the descriptor arrangement in the launched process: repaired fd 0 is the read end and repaired fd 2 is the write end of the same pipe.\n11. Repeat the request while leaving stdin open. Confirm that the origin no longer receives the proxy credential in the body.\n12. Repeat while leaving stderr open. Confirm that the credential is not inserted into the upload.\n13. Repeat with verbose mode disabled. Confirm that no credential-bearing diagnostic text enters the upload.\n14. Repeat with verbose diagnostics redirected using `--stderr` to a dedicated file. Confirm that the origin does not receive the credential.\n15. Confirm a fix by independently attaching each missing standard descriptor to `/dev/null`, for example with `open()` and `dup2()`, instead of retaining connected pipe endpoints.\n16. Repeat the original closed-stdin-and-stderr case and verify that proxy authentication still reaches the proxy but no diagnostic bytes or credentials appear in the HTTPS upload body.\n\n### Expected result\n\nRepaired standard descriptors must be independent. Data written to stderr must never become readable as stdin or be incorporated into an upload.\n\n### Vulnerable result\n\nWhen stdin and stderr are both closed, curl can retain opposite ends of one pipe as descriptors 0 and 2. Verbose proxy diagnostics written to stderr are then read as stdin and transmitted to the origin as upload data.\n\n## Impact\n\nThe proxy credential crosses a principal boundary: the proxy is authorized to receive it, the HTTPS origin is not. TLS does not prevent the disclosure because curl injects the credential into plaintext upload data before encryption.\n\nPractical severity is limited — exploitation requires an unusual local launch configuration (closed fd 0 + fd 2, verbose mode, stdin upload, authenticated proxy, distinct origin). A remote origin cannot independently establish these prerequisites.\n\n## Suggested fix\n\nReplace the `pipe()` loop in `main_checkfds()` with `open(\"/dev/null\", O_RDWR)` and `dup2()` for each missing standard descriptor. This ensures repaired fds are independent sinks/sources rather than connected pipe endpoints.\n\n## Impact\n\n## Summary:\nUnder the required closed-descriptor launch configuration, an HTTPS origin can receive credentials intended only for an authenticated proxy because curl inserts verbose diagnostic output into the upload body. This directly discloses reusable proxy credentials to another principal, although a remote origin generally cannot create the unusual local descriptor and command-line prerequisites by itself.",
+  "weakness": {
+    "id": 113,
+    "name": "Information Exposure Through Sent Data"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6563063,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/2m0tqvocmspbatx7t3uru34flkvh?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ4CAMBJG%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144442Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIEf%2FyEM98MXV6Kk1Ulu1ry98Ludt9od6ny2Uz5TjYmDVAiEA8oxCmWbOBzUiGLJjopc0KzJd1xgrzbU290mIR09QQ1squgUIlP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDF%2FcYn2yqXgOmgVIViqOBd0jfoCmprMdosoFunZOq9aIAmxu5s2Y1yAaoUZdnz2%2Bck4T0f4R7s58xDZL4UY0JuLeMOXQA%2FyM3fqCZxbhHHGo8LuJ1HwKSO9%2BkJyZ0dGW8BxgRHgLm4PBCYolFCufQ%2FKddp%2FBhj3yAZz1HlhpQyTX1hMMeWX8haQqhc%2BpYF0%2BUjK%2BqxvNnFarcTAR%2BOLk2aZbO0pRU3FgkezwRGU%2FgFMvb3pwQ6Eg5HrVUQwfbRnR8R%2FXEHmOhAhMtHyOzCE37C87yuytOVGjYI2O95dBaBZyXZHCMINVd0A7SCGOZgpI3AgjuhISBpKwNNfTsBumZHlrhS986c4AW%2FENrId4CDZZCj8j5JMI6tIpx67rZ6MdYrwO%2FGFkO2p%2BMTn3rxFzuIRcD%2FVxt9UDOLxilS7VuqRwnhMQ5vBVvpdPBdNNkoUg21nhd6JqPR3GW0MVzrXoWRd1N8fVayh%2FT%2BcRctXv3HzSYHse88b7p4p5JhoM9XuTnMM8jBOvkfKfdUz%2BsnL3GuMGxfqX95x5LRmTFY3nJqlc%2Bg5UcRsl8%2F81U0nR%2BkwE4OkiVgVmaUz1CbcK1AnYndylyVoaQIr1O6iKGUWF2H2TmQmBbHeulxII%2FnMNkhU8Vn2%2BnrMQuLDcvym9SnGnysAnyZmLoHJaALAfb0fzXtlxXYAN6MAr0c4g1aFhkxjApTvVBQq6RAHPJ8j63UMbYK14uoojeePnW1g%2FW1a%2FZA7zWSx%2F3brlTKjFRvitirfa95dydXmycdXdIl1O7GezO62NT8BDK7qbPy15V1F8Nr0T8auVEMEbz%2Fx%2B%2Ftu9W5e5gXPLIuj%2FWd28EydoauUHwQ8zQFgbCO%2FjeYbMX1a%2BYrbDxhBlfB7wdPKJn999kTD7rdXUBjqxATOmBh5F3Q0F6f%2FsLiD14fQdO3aF2WOZAYi9T0I08E1FWU4%2Bqu6k4x81d24xfQ6rerXRf59caWQ2amiZUao3KxjikTsx2pIkC5o%2BQBljsL9Y0sXnQjji60TNjPtcWsmUf2vq6I7mqdQYZSvsy2kxuwJqpdPH5VHLVD9kWy1t4BBUT8is%2FkkdttMUayxyWZ24Mplw%2F5Dxk2i7APNdoA3WBtm8y9j9QUy2VMPq20wGF2qpWA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6a3547a2a18f132ead12f3d30008b322af0ecaa8b8ad0470f556eee20a35b6b5",
+      "file_size": 916,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6563064,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/q4go0ttp4mrjtiyqf65ehr37ublq?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ4CAMBJG%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144442Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIEf%2FyEM98MXV6Kk1Ulu1ry98Ludt9od6ny2Uz5TjYmDVAiEA8oxCmWbOBzUiGLJjopc0KzJd1xgrzbU290mIR09QQ1squgUIlP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDF%2FcYn2yqXgOmgVIViqOBd0jfoCmprMdosoFunZOq9aIAmxu5s2Y1yAaoUZdnz2%2Bck4T0f4R7s58xDZL4UY0JuLeMOXQA%2FyM3fqCZxbhHHGo8LuJ1HwKSO9%2BkJyZ0dGW8BxgRHgLm4PBCYolFCufQ%2FKddp%2FBhj3yAZz1HlhpQyTX1hMMeWX8haQqhc%2BpYF0%2BUjK%2BqxvNnFarcTAR%2BOLk2aZbO0pRU3FgkezwRGU%2FgFMvb3pwQ6Eg5HrVUQwfbRnR8R%2FXEHmOhAhMtHyOzCE37C87yuytOVGjYI2O95dBaBZyXZHCMINVd0A7SCGOZgpI3AgjuhISBpKwNNfTsBumZHlrhS986c4AW%2FENrId4CDZZCj8j5JMI6tIpx67rZ6MdYrwO%2FGFkO2p%2BMTn3rxFzuIRcD%2FVxt9UDOLxilS7VuqRwnhMQ5vBVvpdPBdNNkoUg21nhd6JqPR3GW0MVzrXoWRd1N8fVayh%2FT%2BcRctXv3HzSYHse88b7p4p5JhoM9XuTnMM8jBOvkfKfdUz%2BsnL3GuMGxfqX95x5LRmTFY3nJqlc%2Bg5UcRsl8%2F81U0nR%2BkwE4OkiVgVmaUz1CbcK1AnYndylyVoaQIr1O6iKGUWF2H2TmQmBbHeulxII%2FnMNkhU8Vn2%2BnrMQuLDcvym9SnGnysAnyZmLoHJaALAfb0fzXtlxXYAN6MAr0c4g1aFhkxjApTvVBQq6RAHPJ8j63UMbYK14uoojeePnW1g%2FW1a%2FZA7zWSx%2F3brlTKjFRvitirfa95dydXmycdXdIl1O7GezO62NT8BDK7qbPy15V1F8Nr0T8auVEMEbz%2Fx%2B%2Ftu9W5e5gXPLIuj%2FWd28EydoauUHwQ8zQFgbCO%2FjeYbMX1a%2BYrbDxhBlfB7wdPKJn999kTD7rdXUBjqxATOmBh5F3Q0F6f%2FsLiD14fQdO3aF2WOZAYi9T0I08E1FWU4%2Bqu6k4x81d24xfQ6rerXRf59caWQ2amiZUao3KxjikTsx2pIkC5o%2BQBljsL9Y0sXnQjji60TNjPtcWsmUf2vq6I7mqdQYZSvsy2kxuwJqpdPH5VHLVD9kWy1t4BBUT8is%2FkkdttMUayxyWZ24Mplw%2F5Dxk2i7APNdoA3WBtm8y9j9QUy2VMPq20wGF2qpWA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=4a1622e913397b89f1447a46af811070bc2fbc2b7c1aac05a3d1ec3da2434a66",
+      "file_size": 233,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563066,
+      "file_name": "poc.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/33itc499by487yidq8m5cne1kivv?response-content-disposition=attachment%3B%20filename%3D%22poc.py%22%3B%20filename%2A%3DUTF-8%27%27poc.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ4CAMBJG%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144442Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIEf%2FyEM98MXV6Kk1Ulu1ry98Ludt9od6ny2Uz5TjYmDVAiEA8oxCmWbOBzUiGLJjopc0KzJd1xgrzbU290mIR09QQ1squgUIlP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDF%2FcYn2yqXgOmgVIViqOBd0jfoCmprMdosoFunZOq9aIAmxu5s2Y1yAaoUZdnz2%2Bck4T0f4R7s58xDZL4UY0JuLeMOXQA%2FyM3fqCZxbhHHGo8LuJ1HwKSO9%2BkJyZ0dGW8BxgRHgLm4PBCYolFCufQ%2FKddp%2FBhj3yAZz1HlhpQyTX1hMMeWX8haQqhc%2BpYF0%2BUjK%2BqxvNnFarcTAR%2BOLk2aZbO0pRU3FgkezwRGU%2FgFMvb3pwQ6Eg5HrVUQwfbRnR8R%2FXEHmOhAhMtHyOzCE37C87yuytOVGjYI2O95dBaBZyXZHCMINVd0A7SCGOZgpI3AgjuhISBpKwNNfTsBumZHlrhS986c4AW%2FENrId4CDZZCj8j5JMI6tIpx67rZ6MdYrwO%2FGFkO2p%2BMTn3rxFzuIRcD%2FVxt9UDOLxilS7VuqRwnhMQ5vBVvpdPBdNNkoUg21nhd6JqPR3GW0MVzrXoWRd1N8fVayh%2FT%2BcRctXv3HzSYHse88b7p4p5JhoM9XuTnMM8jBOvkfKfdUz%2BsnL3GuMGxfqX95x5LRmTFY3nJqlc%2Bg5UcRsl8%2F81U0nR%2BkwE4OkiVgVmaUz1CbcK1AnYndylyVoaQIr1O6iKGUWF2H2TmQmBbHeulxII%2FnMNkhU8Vn2%2BnrMQuLDcvym9SnGnysAnyZmLoHJaALAfb0fzXtlxXYAN6MAr0c4g1aFhkxjApTvVBQq6RAHPJ8j63UMbYK14uoojeePnW1g%2FW1a%2FZA7zWSx%2F3brlTKjFRvitirfa95dydXmycdXdIl1O7GezO62NT8BDK7qbPy15V1F8Nr0T8auVEMEbz%2Fx%2B%2Ftu9W5e5gXPLIuj%2FWd28EydoauUHwQ8zQFgbCO%2FjeYbMX1a%2BYrbDxhBlfB7wdPKJn999kTD7rdXUBjqxATOmBh5F3Q0F6f%2FsLiD14fQdO3aF2WOZAYi9T0I08E1FWU4%2Bqu6k4x81d24xfQ6rerXRf59caWQ2amiZUao3KxjikTsx2pIkC5o%2BQBljsL9Y0sXnQjji60TNjPtcWsmUf2vq6I7mqdQYZSvsy2kxuwJqpdPH5VHLVD9kWy1t4BBUT8is%2FkkdttMUayxyWZ24Mplw%2F5Dxk2i7APNdoA3WBtm8y9j9QUy2VMPq20wGF2qpWA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3d59b78682d834bb2a177d61d1deb4af74d6713c5a1073fc57e5d3f99707fc65",
+      "file_size": 5649,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 2,
+  "voters": [
+    "mahadev879",
+    "l1aymen_exe"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

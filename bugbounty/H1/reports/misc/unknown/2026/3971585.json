@@ -1,0 +1,132 @@
+{
+  "id": 3971585,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcxNTg1",
+  "url": "https://hackerone.com/reports/3971585",
+  "title": "33: CONNECT_ONLY raw I/O selects wrong connection after CURLOPT_SHARE detach (incomplete fix for CVE-2020-8231)",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-26T16:07:57.026Z",
+  "submitted_at": "2026-08-26T16:07:57.211Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2020-8231"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-08-31T07:02:30.722Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-08-28T11:30:04.787Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nAfter a completed `CURLOPT_CONNECT_ONLY` transfer, detaching the shared connection pool via `curl_easy_setopt(easy, CURLOPT_SHARE, NULL)` causes `curl_easy_send()` / `curl_easy_recv()` to silently operate on an unrelated connection from a different pool. Data intended for server B is sent to server A, and A's response is accepted as B's.\n\nTested against commit `c2676bf9e639e31e44b12a2cc82cf2046231b056`.\n\n## Root cause\n\n`state.lastconnect_id` stores only a bare numeric connection ID (`lib/urldata.h:529`). Connection IDs are pool-local counters (`lib/conncache.c:576`), so independent pools both assign ID 0 to their first connection.\n\n`Curl_getconnectinfo()` resolves `lastconnect_id` via `Curl_cpool_get_conn()`, which picks the pool from the easy handle's **current** share/multi state (`lib/conncache.c:256-266`), then matches only `connection_id` (`lib/conncache.c:835`).\n\n`setopt_share()` accepts the detach because `data->conn` is NULL after `CONNECT_ONLY` (`lib/setopt.c:1423-1428`), but neither `setopt_share()` nor `Curl_share_easy_unlink()` invalidates `lastconnect_id`. The raw I/O helper `easy_connection()` only checks that `CURLOPT_CONNECT_ONLY` is enabled, not that the resolved connection is the one that was created (`lib/easy.c:1219-1241`).\n\nResult: the retained ID 0 is resolved in the wrong pool, returning an unrelated connection.\n\n## Relation to CVE-2020-8231\n\nThis is an incomplete-fix variant. CVE-2020-8231's fix replaced a stale connection pointer with a pool-local numeric ID, but the ID is not globally unique. The post-`CONNECT_ONLY` share-detach transition was not addressed. The underlying pool-local-ID collision was noted in [HackerOne #948876](https://hackerone.com/reports/948876) and [PR #8524](https://github.com/curl/curl/pull/8524).\n\n## Reproduction\n### Steps\n\nFrom the curl source root, place the three files above under `poc/` and run:\n\n```sh\ndocker build -t curl-33-poc -f poc/Dockerfile .\ndocker run --rm curl-33-poc\n```\n\n### Expected output\n\n```\nSEED_RESULT=0\nSHARE_CONNECT_RESULT=0\nCONNECT_ONLY_RESULT=0\nBEFORE_GETINFO=0\nBEFORE_PORT=18081\nSHARE_DETACH_RESULT=0\nAFTER_GETINFO=0\nAFTER_PORT=18080\nSEND_RESULT=0\nSENT=20\nRECV_RESULT=0\nRECV=A_REPLY\nSERVER_A_MARKER=YES\nSERVER_B_MARKER=NO\nVERDICT=VULNERABLE\n```\n\nKey observations:\n\n- `BEFORE_PORT=18081`: active socket points to B right after `CONNECT_ONLY`.\n- `AFTER_PORT=18080`: after `CURLOPT_SHARE=NULL`, active socket silently switches to A.\n- `SERVER_A_MARKER=YES`: A received `SECRET_FOR_SERVER_B`.\n- `SERVER_B_MARKER=NO`: B received nothing.\n- `RECV=A_REPLY`: `curl_easy_recv()` returned A's response.\n\n## Impact\n\nAn attacker controlling server A receives bytes the application intended for server B and can supply bytes accepted as B's response. This is a cross-peer confidentiality and integrity violation.\n\nPractical severity is **Low**: the attacker cannot force the required API lifecycle. The application must independently (1) keep an attacker-controlled connection alive in the private pool, (2) use a shared connection pool with `CONNECT_ONLY`, (3) detach the share after the transfer, and (4) then use raw I/O on the handle.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6558232,
+      "file_name": "client.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/1375h9163je64uxjxjo9vx9b40r5?response-content-disposition=attachment%3B%20filename%3D%22client.c%22%3B%20filename%2A%3DUTF-8%27%27client.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4NPYJOKU%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144441Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCIqCN8UvaO5umLkCXU48RYc1xtcsxxYZqJNWOOivcY%2BQIgNHe1MiZhtF3jbqENwC3WFphdCsOHHtp%2BPBejrX7N4ugqugUIlP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDLz7KzP7cRUuz%2F56oiqOBXoQsdW2r6zJrWUhTR991%2FXOmosOQCcch1tCEojvWdiYJaUWFkp5gpYQjQCM%2B8TFG7ym%2FamvlvVGRHyugo7g%2FhF4nTD5VCKqEusBFnl5rw3%2FRCLlLJi8K09Fn3a2gKk55j7E%2FTUaw3WGbDiK3EDsZHLzasUGZq7xthDcHLytWUqKMyRoKXZoPNu58oBBgb4vnW6L3kVtTg21fbr10CreEPY3qUhrvRlWLvzOCJyAk7%2Bd%2BjYC0QHBj0Vv9yd9V%2B6Ht1xZZFKjhfdFA7BbC1RdXEZbFNqKeUuBuwoEjgBzhEUZhzfpokqOXnHvqXVATpIo5krFgxepzBWz7v3pZK1RENKlw7bQ970GIRbKMptqKLakn74qb5xDCNbarcz5rtc8j%2B%2F3WJRUue7Gxoq%2BzuxRxYk%2FjWW8lqCmon43NHbbGYIENMeWHR4VfWdJuaXnTo0cxJZSaMYqmUHiPbX50HfhDzXe1vTsF62j3R8kgOw9k4nvWBm2wr%2BIVW76PBj776SbiyZWkIQXlTw4VzHEVaJzyRMf2ETD1N0b2y0EhPn0r1QcsjhjC4j6BmjYvBuUu9NZxiXqmjKozKr0lj%2FD9jjQ0SUetxWuvOl%2BAR%2BB0IhCF0baX03cC3K9FYv4%2FTxH%2B0sBuKLI6ArndCHABnGfPRJXrYa7hCenRCdpLxSPokfjNREPNgPHIr0zA6Yyv0%2BByM3lpvLMdBNNc48IjQCMHCeHFWhYcqrlNmkqYNRabxXEIAWEGWX6Pp1zfK%2FYUXncDr5U2mMidn3%2F%2FwpcOpQNqfp8MZ91gmdVXmTdIW2L%2BrzmDIwNAS5d7mBaUK1GMP9piRdIcYPIFQA%2FZOMNr0LaiLMwUPqxcf7fuDJ7EeUoFwivQDDButXUBjqxATfQa4%2BdHq1WWlLzGydV0CQcuOecc24W9OAENTPMbmd6t5CMd5%2Bqk0tkiNUk9CvxiNAYfXOyANJhkm1Yp7lGZpMkHtmYFART0%2FpHR69Bsd00TK6YP%2FqmQeQTWAAUm8fTtVY%2FDY%2FUmBdWU7AvGY01bfSPEtgQNkvVFCA5IdCiKhd%2Bh189Ip8GAER%2BnSN44O98%2BwTp5rZ1CRoKhe%2FRdUfSJJ5auo%2Be7LDCfhcjjqJXGT5TEw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=46a42e1e0c598720c9def7f46562a43c2243446f3564515f535f12eda95487a1",
+      "file_size": 3426,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6558233,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/84kf7g9ew1wp6vc9q1ywlgug9wms?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=text%2Fx-python-script&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4NPYJOKU%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144441Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCIqCN8UvaO5umLkCXU48RYc1xtcsxxYZqJNWOOivcY%2BQIgNHe1MiZhtF3jbqENwC3WFphdCsOHHtp%2BPBejrX7N4ugqugUIlP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDLz7KzP7cRUuz%2F56oiqOBXoQsdW2r6zJrWUhTR991%2FXOmosOQCcch1tCEojvWdiYJaUWFkp5gpYQjQCM%2B8TFG7ym%2FamvlvVGRHyugo7g%2FhF4nTD5VCKqEusBFnl5rw3%2FRCLlLJi8K09Fn3a2gKk55j7E%2FTUaw3WGbDiK3EDsZHLzasUGZq7xthDcHLytWUqKMyRoKXZoPNu58oBBgb4vnW6L3kVtTg21fbr10CreEPY3qUhrvRlWLvzOCJyAk7%2Bd%2BjYC0QHBj0Vv9yd9V%2B6Ht1xZZFKjhfdFA7BbC1RdXEZbFNqKeUuBuwoEjgBzhEUZhzfpokqOXnHvqXVATpIo5krFgxepzBWz7v3pZK1RENKlw7bQ970GIRbKMptqKLakn74qb5xDCNbarcz5rtc8j%2B%2F3WJRUue7Gxoq%2BzuxRxYk%2FjWW8lqCmon43NHbbGYIENMeWHR4VfWdJuaXnTo0cxJZSaMYqmUHiPbX50HfhDzXe1vTsF62j3R8kgOw9k4nvWBm2wr%2BIVW76PBj776SbiyZWkIQXlTw4VzHEVaJzyRMf2ETD1N0b2y0EhPn0r1QcsjhjC4j6BmjYvBuUu9NZxiXqmjKozKr0lj%2FD9jjQ0SUetxWuvOl%2BAR%2BB0IhCF0baX03cC3K9FYv4%2FTxH%2B0sBuKLI6ArndCHABnGfPRJXrYa7hCenRCdpLxSPokfjNREPNgPHIr0zA6Yyv0%2BByM3lpvLMdBNNc48IjQCMHCeHFWhYcqrlNmkqYNRabxXEIAWEGWX6Pp1zfK%2FYUXncDr5U2mMidn3%2F%2FwpcOpQNqfp8MZ91gmdVXmTdIW2L%2BrzmDIwNAS5d7mBaUK1GMP9piRdIcYPIFQA%2FZOMNr0LaiLMwUPqxcf7fuDJ7EeUoFwivQDDButXUBjqxATfQa4%2BdHq1WWlLzGydV0CQcuOecc24W9OAENTPMbmd6t5CMd5%2Bqk0tkiNUk9CvxiNAYfXOyANJhkm1Yp7lGZpMkHtmYFART0%2FpHR69Bsd00TK6YP%2FqmQeQTWAAUm8fTtVY%2FDY%2FUmBdWU7AvGY01bfSPEtgQNkvVFCA5IdCiKhd%2Bh189Ip8GAER%2BnSN44O98%2BwTp5rZ1CRoKhe%2FRdUfSJJ5auo%2Be7LDCfhcjjqJXGT5TEw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=99b0baefe8833d097f2a42ccb6b9d7d0473938cb635f7b547bdbc8776794d249",
+      "file_size": 2325,
+      "type": "text/x-python-script",
+      "moderated": null
+    },
+    {
+      "id": 6558234,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/45tzy5g7kcj3ip42v8s9stpk7h9m?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4NPYJOKU%2F20260831%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260831T144441Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCIqCN8UvaO5umLkCXU48RYc1xtcsxxYZqJNWOOivcY%2BQIgNHe1MiZhtF3jbqENwC3WFphdCsOHHtp%2BPBejrX7N4ugqugUIlP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDLz7KzP7cRUuz%2F56oiqOBXoQsdW2r6zJrWUhTR991%2FXOmosOQCcch1tCEojvWdiYJaUWFkp5gpYQjQCM%2B8TFG7ym%2FamvlvVGRHyugo7g%2FhF4nTD5VCKqEusBFnl5rw3%2FRCLlLJi8K09Fn3a2gKk55j7E%2FTUaw3WGbDiK3EDsZHLzasUGZq7xthDcHLytWUqKMyRoKXZoPNu58oBBgb4vnW6L3kVtTg21fbr10CreEPY3qUhrvRlWLvzOCJyAk7%2Bd%2BjYC0QHBj0Vv9yd9V%2B6Ht1xZZFKjhfdFA7BbC1RdXEZbFNqKeUuBuwoEjgBzhEUZhzfpokqOXnHvqXVATpIo5krFgxepzBWz7v3pZK1RENKlw7bQ970GIRbKMptqKLakn74qb5xDCNbarcz5rtc8j%2B%2F3WJRUue7Gxoq%2BzuxRxYk%2FjWW8lqCmon43NHbbGYIENMeWHR4VfWdJuaXnTo0cxJZSaMYqmUHiPbX50HfhDzXe1vTsF62j3R8kgOw9k4nvWBm2wr%2BIVW76PBj776SbiyZWkIQXlTw4VzHEVaJzyRMf2ETD1N0b2y0EhPn0r1QcsjhjC4j6BmjYvBuUu9NZxiXqmjKozKr0lj%2FD9jjQ0SUetxWuvOl%2BAR%2BB0IhCF0baX03cC3K9FYv4%2FTxH%2B0sBuKLI6ArndCHABnGfPRJXrYa7hCenRCdpLxSPokfjNREPNgPHIr0zA6Yyv0%2BByM3lpvLMdBNNc48IjQCMHCeHFWhYcqrlNmkqYNRabxXEIAWEGWX6Pp1zfK%2FYUXncDr5U2mMidn3%2F%2FwpcOpQNqfp8MZ91gmdVXmTdIW2L%2BrzmDIwNAS5d7mBaUK1GMP9piRdIcYPIFQA%2FZOMNr0LaiLMwUPqxcf7fuDJ7EeUoFwivQDDButXUBjqxATfQa4%2BdHq1WWlLzGydV0CQcuOecc24W9OAENTPMbmd6t5CMd5%2Bqk0tkiNUk9CvxiNAYfXOyANJhkm1Yp7lGZpMkHtmYFART0%2FpHR69Bsd00TK6YP%2FqmQeQTWAAUm8fTtVY%2FDY%2FUmBdWU7AvGY01bfSPEtgQNkvVFCA5IdCiKhd%2Bh189Ip8GAER%2BnSN44O98%2BwTp5rZ1CRoKhe%2FRdUfSJJ5auo%2Be7LDCfhcjjqJXGT5TEw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=66a9b0d5ba590f3bb40ad3c6530259b4ad42d2ae7aff7050721888aad7c873f6",
+      "file_size": 209,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 2,
+  "voters": [
+    "mahadev879",
+    "l1aymen_exe"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
