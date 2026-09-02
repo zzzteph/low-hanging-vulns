@@ -1,0 +1,177 @@
+{
+  "id": 3916059,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTE2MDU5",
+  "url": "https://hackerone.com/reports/3916059",
+  "title": "CVE-2026-18924: HTTP/2 server push UAF",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-04T15:44:52.562Z",
+  "submitted_at": "2026-08-04T15:44:52.959Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "stze",
+    "url": "/stze",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-18924"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-02T07:44:33.210Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-02T07:44:33.042Z",
+  "team_member_agreed_on_going_public_at": "2026-09-02T07:17:40.202Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWith a `CURLSH` sharing `CURL_LOCK_DATA_CONNECT` attached to an easy handle, libcurl creates the handle for an HTTP/2 server-pushed stream internally via `h2_duphandle()` → `curl_easy_duphandle()` (`lib/http2.c`). `curl_easy_duphandle()` does not copy `->share`, so that handle has `share == NULL`. `Curl_multi_add_perform()` then attaches it to the parent's connection, which is pooled in `share->cpool`.\n\nWhen the pushed transfer ends, `cpool_get_instance()` resolves the pool from the handle:\n`share == NULL` yields `multi->cpool`, not the `share->cpool` that owns the connection.\n`cpool_remove_conn()` does not find the connection, so it is freed while still linked in\n`share->cpool`'s bundle (`bits.in_cpool` remains TRUE). A later walk of `share->cpool`\ndereferences the freed `connectdata`.\n\nCWE-416 (use-after-free).\n\n## Affected versions\n\n* **curl 8.21.0** (tag `curl-8_21_0`).\n* **master `2112f185c`** (2026-08-04, libcurl 8.22.0-DEV) — reproduces 3/3.\n\nState of the three sites at `2112f185c`:\n\n| site | state |\n|---|---|\n| `h2_duphandle` — `lib/http2.c:699` | calls `curl_easy_duphandle(data)`; `share` occurs 0 times in `lib/http2.c` |\n| `curl_easy_duphandle` — `lib/easy.c:970` | does not copy `->share` |\n| `cpool_get_instance` — `lib/conncache.c:256` | resolves the pool from the handle, not the connection |\n\n## Reproduction\n\n`repro.c` (attached) is standalone pure libcurl: an in-process thread serves raw h2c frames\nover a socketpair via `CURLOPT_OPENSOCKETFUNCTION` + `CURL_SOCKOPT_ALREADY_CONNECTED`. No\nnetwork, no server, no TLS. It creates a `CURLSH` sharing `CURL_LOCK_DATA_CONNECT`, runs an\nHTTP/2 transfer, accepts a `PUSH_PROMISE` (`CURL_PUSH_OK`), and the server sends `GOAWAY`.\n\nBuilt against a release (`ENABLE_DEBUG=OFF`) + ASan libcurl:\n\n```sh\ncmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_DEBUG=OFF \\\n  -DBUILD_SHARED_LIBS=OFF -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF \\\n  -DCURL_USE_OPENSSL=OFF -DUSE_NGHTTP2=ON -DCURL_USE_LIBPSL=OFF -DUSE_LIBIDN2=OFF \\\n  -DCURL_BROTLI=OFF -DCURL_ZSTD=OFF \\\n  -DCMAKE_C_FLAGS=\"-fsanitize=address -g -fno-omit-frame-pointer\"\ncmake --build build && cmake --install build\n\ncc -fsanitize=address -g repro.c -o repro -I<prefix>/include \\\n   <prefix>/lib/libcurl.a -lnghttp2 -lz -lpthread -ldl\nASAN_OPTIONS=detect_leaks=0 ./repro\n```\n\nResult: heap-use-after-free, 3/3 runs, on both curl 8.21.0 and master `2112f185c`.\n\nIn a `DEBUGBUILD` libcurl the inconsistency aborts earlier at `DEBUGASSERT(NULL)`\n`lib/conncache.c:179` (\"Should have been in the bundle list\") instead of reaching the free.\n\n## AddressSanitizer output (master `2112f185c`, release + ASan)\n\n`READ of size 8` into a freed 776-byte `connectdata` (the struct was 832 bytes in 8.21.0).\nFull log: `asan-retest-master-2026-08-04.txt`.\n\n```\nREAD of size 8:\n  Curl_node_elem            lib/llist.c:237\n  cpool_get_first           lib/conncache.c:142\n  Curl_cpool_destroy        lib/conncache.c:242\n  share_destroy             lib/curl_share.c:41\n  curl_share_cleanup        lib/curl_share.c:370\n\nfreed by:\n  Curl_cshutdn_terminate    lib/cshutdn.c:159\n  cpool_discard_conn        lib/conncache.c:226\n  Curl_conn_terminate       lib/conncache.c:692\n  Curl_cpool_do_locked      lib/conncache.c:833\n  multi_done                lib/multi.c:750\n  multi_handle_timeout      lib/multi.c:1848\n  multi_runsingle           lib/multi.c:2757\n  multi_perform             lib/multi.c:2888\n\npreviously allocated by:\n  allocate_conn             lib/url.c:1182\n  url_create_needle         lib/url.c:2010\n  url_find_or_create_conn   lib/url.c:2250\n  Curl_connect              lib/url.c:2456\n```\n\n`verifynode()` (`lib/llist.c:36`) is `DEBUGBUILD`-only; in a release build the read lands at\n`Curl_node_elem()`.\n\n## Root cause\n\n1. `curl_easy_duphandle()` does not copy `->share` (`docs/libcurl/curl_easy_duphandle.md`:\n   the clone is \"created as if `CURLOPT_SHARE` was set to NULL\").\n2. `push_promise()` → `h2_duphandle()` → `curl_easy_duphandle()` ⇒ pushed handle has\n   `share == NULL`.\n3. `push_promise()` → `Curl_multi_add_perform(data->multi, newhandle, cf->conn)` →\n   `Curl_attach_connection(newhandle, cf->conn)` ⇒ the pushed handle holds the parent's\n   connection, which is in `share->cpool`.\n4. `cpool_get_instance(data)` (`lib/conncache.c:256`) returns `&data->share->cpool` only when\n   `CURL_SHARE_KEEP_CONNECT(data->share)`; for the pushed handle it returns `multi->cpool`.\n5. `multi_done()` → `Curl_cpool_do_locked()` → `Curl_conn_terminate()` →\n   `cpool_remove_conn(multi->cpool, conn)`: the connection is not in that pool, so it is not\n   unlinked and `bits.in_cpool` stays TRUE.\n6. `cpool_discard_conn()` → `Curl_cshutdn_terminate()` frees the `connectdata`.\n7. `curl_share_cleanup()` → `share_destroy()` → `Curl_cpool_destroy()` → `cpool_get_first()` → `Curl_node_elem()` reads the freed `connectdata`.\n\n## Trigger\n\nApplication setup, all before the transfer starts:\n\n```c\nCURLSH *sh = curl_share_init();\ncurl_share_setopt(sh, CURLSHOPT_SHARE, CURL_LOCK_DATA_CONNECT);\ncurl_easy_setopt(easy, CURLOPT_SHARE, sh);\ncurl_multi_setopt(multi, CURLMOPT_PUSHFUNCTION, push_cb);  /* returns CURL_PUSH_OK */\n```\n\nThe push callback returns `CURL_PUSH_OK` and calls no libcurl function. No option or share is modified after the transfer starts. Single-threaded. The pushed-stream handle is created by libcurl, not by the application.\n\nServer side: send `PUSH_PROMISE`, then end the pushed stream before it completes. The attached reproducer uses `GOAWAY`. `RST_STREAM`, connection close, `CURLOPT_TIMEOUT_MS` expiry, and `curl_multi_remove_handle()` of the pushed handle all reach `multi_done()` → `Curl_conn_terminate()` with the share-less handle.\n\n## Suggested fix\n\nPropagate the parent's share to the pushed handle in `h2_duphandle()`/`push_promise()` before `Curl_multi_add_perform()` (`newhandle->share = data->share;` plus refcount/lock handling), or terminate a connection against the cpool that owns it rather than\n`cpool_get_instance(data)`.\n\n## Attachments\n\n| file | contents |\n|---|---|\n| `repro.c`, `run.sh` | standalone reproducer |\n| `asan-retest-master-2026-08-04.txt` | ASan log, master `2112f185c` |\n| `asan-standalone.txt` | ASan log, 8.21.0 |\n| `asan-recover-master-2026-08-04.txt` | ASan log with `-fsanitize-recover`, showing all three reads |\n| `repro-harness.bin` | original fuzzer input (debug build, asserts at `conncache.c:179`) |\n| `RETEST-2026-08-04.md` | retest method and build details |\n\n## Impact\n\nThe freed `connectdata` stays linked in `share->cpool`'s bundle with `bits.in_cpool` set, so it remains reachable from any subsequent operation on that pool — not only from\n`curl_share_cleanup()`.\n\nMeasured on master `2112f185c` with a release + ASan libcurl built with\n`-fsanitize-recover=address` and run under `ASAN_OPTIONS=halt_on_error=0`, so execution continues past the first error (`asan-recover-master-2026-08-04.txt`):\n\n| # | access | offset into the freed 776-byte region | site |\n|---|---|---|---|\n| 1 | `READ of size 8` | 8 | `Curl_node_elem` — `lib/llist.c:237` |\n| 2 | `READ of size 8` | 0 | `Curl_node_llist` — `lib/llist.c:269` |\n| 3 | `READ of size 8` | 88 | `cpool_remove_conn` — `lib/conncache.c:169` |\n\nThree reads of freed heap memory at three distinct offsets and three distinct sites. **No\nwrite to the freed region was observed** in that run.\n\nThe connection object is heap-allocated by `allocate_conn()` (`lib/url.c:1182`) and freed by `Curl_cshutdn_terminate()` (`lib/cshutdn.c:159`); the interval between the free and the reads contains further libcurl allocation activity.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6394990,
+      "file_name": "asan-retest-master-2026-08-04.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/jahkjf5oqoic4fe0er55fznjxx09?response-content-disposition=attachment%3B%20filename%3D%22asan-retest-master-2026-08-04.txt%22%3B%20filename%2A%3DUTF-8%27%27asan-retest-master-2026-08-04.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRH6MZGYA%2F20260902%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260902T102343Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDBMHD5H%2B6Ra2KtKtX29EQvGuoNwU3HrCFlY6tHRq17ZgIgfa05cdotMU2UHlco6RNBL37v5du5SKRgomxwZkXYWPMqugUIwv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDKN116akOOh0zSdeDiqOBYxh0tz0%2B%2FeMr8YfQe4DHbnvdl04MTZSrd%2FLv7abhoEGW3R25A5KXJZUuwWWYXvLvXQlVhvwreLGGmhSQykL8v62ZTU%2B6x6USvVT93icgdrRnkDaEp1ANWtP2w5JZNYvcjO%2BHNUCxwy6I6LCYEKqK9qA%2B%2B0TTlrsmSwsPDg%2BdWtY%2FAhio7bIkOOoAGPX0S09RXnnDzlJX4yHvgYdClPClVrgJ2s%2FdVblyVUa8uYaSvOk5Qq18gMqE8NbabKlxvKjYmqEMZd4ndVij0CcnYXeNAJT9D0sCWPxx0B3sdEI6dNGPiUmJ8r9eT6YiwM1c2tcOcZnNh4fn6bgmy%2BkQ%2BwoKmeTcOmtlbI%2F026qcjzY1tUchQIaxxkcAsJUE1VmfrVXn%2FWr7ZTF4rNgOYmn2BNEzdG%2B%2F3RjK0R49UWePba%2FU2%2BuR5AbIVBQlMzS5uTphyyv1jtV2PvZ5dxVmrsLUPgi2A4K0BHlh0GRZwfJCuwQhCl1kN5z2FAI7dHPzVna3U7JH4dj56TaNSnW6sgMbynzBz2%2FzbjIKMqwYwhULJard6mMgD%2BSqZH1ZuCB5ITqQaKGbKpTJ0ycdkk3%2B2PS0p2vJlsbggh33LHqQh8FPHYv%2BZc6uqU6x%2FxL7JjqoTwYNWLGPMTid9%2FgAUfKNOfRf8tIUplsmsnVtHMM8gq3jj%2FjVQzsi1n7lDhAGPKEk3GLdxV4qDw3rU1gx8sSrJuzEXdB1OSjqkwUcllZEbeUmpeVS7dwGr5wnPk58CQ%2BCWtLt1fUoPsbhhCI7lt9nlx2B6PMOetAWDr395PR7vRaW4L0yt98mlSuxfZpXNRSmyJ5%2BCE0F9Ny0vE79luDxnQZb4YKDtJZ%2Fv6%2BraTyz1PkGhM%2FHTDdxd%2FUBjqxAY556TljIOFSG5eUrK83cDJ3k8D2nDVF0ztg7IbYnhTLYkbchCa5MXG6fGo3aaM63EvErkYkoAzNaV76U9oteNDPF9M2aFHvGxUYUYFwtLxLDdjHYez2cNnLN889n%2BVbGC6e%2BJvzVbj3ayuB69NyC0QJNsAChltAvPmk4NRzcDJ8dwTNBee4ADMW0UEymZxH3JRENEX8c%2BwjxwswmPw670vu1hAc6scCRUU46tb%2FXCt7RQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=198bf0cd2f87880de62b9347b510dd4f772d381d71e9fc9ef4d4f4cf657b6bc1",
+      "file_size": 7109,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 6394991,
+      "file_name": "asan-recover-master-2026-08-04.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/04b59v8f33v71k04ylfmqoqk7715?response-content-disposition=attachment%3B%20filename%3D%22asan-recover-master-2026-08-04.txt%22%3B%20filename%2A%3DUTF-8%27%27asan-recover-master-2026-08-04.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRH6MZGYA%2F20260902%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260902T102343Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDBMHD5H%2B6Ra2KtKtX29EQvGuoNwU3HrCFlY6tHRq17ZgIgfa05cdotMU2UHlco6RNBL37v5du5SKRgomxwZkXYWPMqugUIwv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDKN116akOOh0zSdeDiqOBYxh0tz0%2B%2FeMr8YfQe4DHbnvdl04MTZSrd%2FLv7abhoEGW3R25A5KXJZUuwWWYXvLvXQlVhvwreLGGmhSQykL8v62ZTU%2B6x6USvVT93icgdrRnkDaEp1ANWtP2w5JZNYvcjO%2BHNUCxwy6I6LCYEKqK9qA%2B%2B0TTlrsmSwsPDg%2BdWtY%2FAhio7bIkOOoAGPX0S09RXnnDzlJX4yHvgYdClPClVrgJ2s%2FdVblyVUa8uYaSvOk5Qq18gMqE8NbabKlxvKjYmqEMZd4ndVij0CcnYXeNAJT9D0sCWPxx0B3sdEI6dNGPiUmJ8r9eT6YiwM1c2tcOcZnNh4fn6bgmy%2BkQ%2BwoKmeTcOmtlbI%2F026qcjzY1tUchQIaxxkcAsJUE1VmfrVXn%2FWr7ZTF4rNgOYmn2BNEzdG%2B%2F3RjK0R49UWePba%2FU2%2BuR5AbIVBQlMzS5uTphyyv1jtV2PvZ5dxVmrsLUPgi2A4K0BHlh0GRZwfJCuwQhCl1kN5z2FAI7dHPzVna3U7JH4dj56TaNSnW6sgMbynzBz2%2FzbjIKMqwYwhULJard6mMgD%2BSqZH1ZuCB5ITqQaKGbKpTJ0ycdkk3%2B2PS0p2vJlsbggh33LHqQh8FPHYv%2BZc6uqU6x%2FxL7JjqoTwYNWLGPMTid9%2FgAUfKNOfRf8tIUplsmsnVtHMM8gq3jj%2FjVQzsi1n7lDhAGPKEk3GLdxV4qDw3rU1gx8sSrJuzEXdB1OSjqkwUcllZEbeUmpeVS7dwGr5wnPk58CQ%2BCWtLt1fUoPsbhhCI7lt9nlx2B6PMOetAWDr395PR7vRaW4L0yt98mlSuxfZpXNRSmyJ5%2BCE0F9Ny0vE79luDxnQZb4YKDtJZ%2Fv6%2BraTyz1PkGhM%2FHTDdxd%2FUBjqxAY556TljIOFSG5eUrK83cDJ3k8D2nDVF0ztg7IbYnhTLYkbchCa5MXG6fGo3aaM63EvErkYkoAzNaV76U9oteNDPF9M2aFHvGxUYUYFwtLxLDdjHYez2cNnLN889n%2BVbGC6e%2BJvzVbj3ayuB69NyC0QJNsAChltAvPmk4NRzcDJ8dwTNBee4ADMW0UEymZxH3JRENEX8c%2BwjxwswmPw670vu1hAc6scCRUU46tb%2FXCt7RQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=cb8cbc6d1be76d398b29653c53e607cd3c9d90f7c6d16805a6c9b64cccc3ba88",
+      "file_size": 23067,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 6394992,
+      "file_name": "RETEST-2026-08-04.md",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/qgf6ew5bgycqz1a315yud9fgaemv?response-content-disposition=attachment%3B%20filename%3D%22RETEST-2026-08-04.md%22%3B%20filename%2A%3DUTF-8%27%27RETEST-2026-08-04.md&response-content-type=text%2Fmarkdown&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRH6MZGYA%2F20260902%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260902T102343Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDBMHD5H%2B6Ra2KtKtX29EQvGuoNwU3HrCFlY6tHRq17ZgIgfa05cdotMU2UHlco6RNBL37v5du5SKRgomxwZkXYWPMqugUIwv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDKN116akOOh0zSdeDiqOBYxh0tz0%2B%2FeMr8YfQe4DHbnvdl04MTZSrd%2FLv7abhoEGW3R25A5KXJZUuwWWYXvLvXQlVhvwreLGGmhSQykL8v62ZTU%2B6x6USvVT93icgdrRnkDaEp1ANWtP2w5JZNYvcjO%2BHNUCxwy6I6LCYEKqK9qA%2B%2B0TTlrsmSwsPDg%2BdWtY%2FAhio7bIkOOoAGPX0S09RXnnDzlJX4yHvgYdClPClVrgJ2s%2FdVblyVUa8uYaSvOk5Qq18gMqE8NbabKlxvKjYmqEMZd4ndVij0CcnYXeNAJT9D0sCWPxx0B3sdEI6dNGPiUmJ8r9eT6YiwM1c2tcOcZnNh4fn6bgmy%2BkQ%2BwoKmeTcOmtlbI%2F026qcjzY1tUchQIaxxkcAsJUE1VmfrVXn%2FWr7ZTF4rNgOYmn2BNEzdG%2B%2F3RjK0R49UWePba%2FU2%2BuR5AbIVBQlMzS5uTphyyv1jtV2PvZ5dxVmrsLUPgi2A4K0BHlh0GRZwfJCuwQhCl1kN5z2FAI7dHPzVna3U7JH4dj56TaNSnW6sgMbynzBz2%2FzbjIKMqwYwhULJard6mMgD%2BSqZH1ZuCB5ITqQaKGbKpTJ0ycdkk3%2B2PS0p2vJlsbggh33LHqQh8FPHYv%2BZc6uqU6x%2FxL7JjqoTwYNWLGPMTid9%2FgAUfKNOfRf8tIUplsmsnVtHMM8gq3jj%2FjVQzsi1n7lDhAGPKEk3GLdxV4qDw3rU1gx8sSrJuzEXdB1OSjqkwUcllZEbeUmpeVS7dwGr5wnPk58CQ%2BCWtLt1fUoPsbhhCI7lt9nlx2B6PMOetAWDr395PR7vRaW4L0yt98mlSuxfZpXNRSmyJ5%2BCE0F9Ny0vE79luDxnQZb4YKDtJZ%2Fv6%2BraTyz1PkGhM%2FHTDdxd%2FUBjqxAY556TljIOFSG5eUrK83cDJ3k8D2nDVF0ztg7IbYnhTLYkbchCa5MXG6fGo3aaM63EvErkYkoAzNaV76U9oteNDPF9M2aFHvGxUYUYFwtLxLDdjHYez2cNnLN889n%2BVbGC6e%2BJvzVbj3ayuB69NyC0QJNsAChltAvPmk4NRzcDJ8dwTNBee4ADMW0UEymZxH3JRENEX8c%2BwjxwswmPw670vu1hAc6scCRUU46tb%2FXCt7RQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=da22a89f8eea3ef48bd144613aa6ff4704ce7c49b893b126fb78ee236f1fb0e5",
+      "file_size": 3790,
+      "type": "text/markdown",
+      "moderated": null
+    },
+    {
+      "id": 6394993,
+      "file_name": "repro-harness.bin",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/b9d0imoha8o2qmcd8brvx9qtcs4n?response-content-disposition=attachment%3B%20filename%3D%22repro-harness.bin%22%3B%20filename%2A%3DUTF-8%27%27repro-harness.bin&response-content-type=font%2Fttf&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRH6MZGYA%2F20260902%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260902T102343Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDBMHD5H%2B6Ra2KtKtX29EQvGuoNwU3HrCFlY6tHRq17ZgIgfa05cdotMU2UHlco6RNBL37v5du5SKRgomxwZkXYWPMqugUIwv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDKN116akOOh0zSdeDiqOBYxh0tz0%2B%2FeMr8YfQe4DHbnvdl04MTZSrd%2FLv7abhoEGW3R25A5KXJZUuwWWYXvLvXQlVhvwreLGGmhSQykL8v62ZTU%2B6x6USvVT93icgdrRnkDaEp1ANWtP2w5JZNYvcjO%2BHNUCxwy6I6LCYEKqK9qA%2B%2B0TTlrsmSwsPDg%2BdWtY%2FAhio7bIkOOoAGPX0S09RXnnDzlJX4yHvgYdClPClVrgJ2s%2FdVblyVUa8uYaSvOk5Qq18gMqE8NbabKlxvKjYmqEMZd4ndVij0CcnYXeNAJT9D0sCWPxx0B3sdEI6dNGPiUmJ8r9eT6YiwM1c2tcOcZnNh4fn6bgmy%2BkQ%2BwoKmeTcOmtlbI%2F026qcjzY1tUchQIaxxkcAsJUE1VmfrVXn%2FWr7ZTF4rNgOYmn2BNEzdG%2B%2F3RjK0R49UWePba%2FU2%2BuR5AbIVBQlMzS5uTphyyv1jtV2PvZ5dxVmrsLUPgi2A4K0BHlh0GRZwfJCuwQhCl1kN5z2FAI7dHPzVna3U7JH4dj56TaNSnW6sgMbynzBz2%2FzbjIKMqwYwhULJard6mMgD%2BSqZH1ZuCB5ITqQaKGbKpTJ0ycdkk3%2B2PS0p2vJlsbggh33LHqQh8FPHYv%2BZc6uqU6x%2FxL7JjqoTwYNWLGPMTid9%2FgAUfKNOfRf8tIUplsmsnVtHMM8gq3jj%2FjVQzsi1n7lDhAGPKEk3GLdxV4qDw3rU1gx8sSrJuzEXdB1OSjqkwUcllZEbeUmpeVS7dwGr5wnPk58CQ%2BCWtLt1fUoPsbhhCI7lt9nlx2B6PMOetAWDr395PR7vRaW4L0yt98mlSuxfZpXNRSmyJ5%2BCE0F9Ny0vE79luDxnQZb4YKDtJZ%2Fv6%2BraTyz1PkGhM%2FHTDdxd%2FUBjqxAY556TljIOFSG5eUrK83cDJ3k8D2nDVF0ztg7IbYnhTLYkbchCa5MXG6fGo3aaM63EvErkYkoAzNaV76U9oteNDPF9M2aFHvGxUYUYFwtLxLDdjHYez2cNnLN889n%2BVbGC6e%2BJvzVbj3ayuB69NyC0QJNsAChltAvPmk4NRzcDJ8dwTNBee4ADMW0UEymZxH3JRENEX8c%2BwjxwswmPw670vu1hAc6scCRUU46tb%2FXCt7RQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=76a671205ac80bc89f29c29dbd172a584ea05300f5b7e2026fa67daa166e8d54",
+      "file_size": 3041,
+      "type": "font/ttf",
+      "moderated": null
+    },
+    {
+      "id": 6394994,
+      "file_name": "repro.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/gpzm3tlbf7mzwev91g44fnwuhsdj?response-content-disposition=attachment%3B%20filename%3D%22repro.c%22%3B%20filename%2A%3DUTF-8%27%27repro.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRH6MZGYA%2F20260902%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260902T102343Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDBMHD5H%2B6Ra2KtKtX29EQvGuoNwU3HrCFlY6tHRq17ZgIgfa05cdotMU2UHlco6RNBL37v5du5SKRgomxwZkXYWPMqugUIwv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDKN116akOOh0zSdeDiqOBYxh0tz0%2B%2FeMr8YfQe4DHbnvdl04MTZSrd%2FLv7abhoEGW3R25A5KXJZUuwWWYXvLvXQlVhvwreLGGmhSQykL8v62ZTU%2B6x6USvVT93icgdrRnkDaEp1ANWtP2w5JZNYvcjO%2BHNUCxwy6I6LCYEKqK9qA%2B%2B0TTlrsmSwsPDg%2BdWtY%2FAhio7bIkOOoAGPX0S09RXnnDzlJX4yHvgYdClPClVrgJ2s%2FdVblyVUa8uYaSvOk5Qq18gMqE8NbabKlxvKjYmqEMZd4ndVij0CcnYXeNAJT9D0sCWPxx0B3sdEI6dNGPiUmJ8r9eT6YiwM1c2tcOcZnNh4fn6bgmy%2BkQ%2BwoKmeTcOmtlbI%2F026qcjzY1tUchQIaxxkcAsJUE1VmfrVXn%2FWr7ZTF4rNgOYmn2BNEzdG%2B%2F3RjK0R49UWePba%2FU2%2BuR5AbIVBQlMzS5uTphyyv1jtV2PvZ5dxVmrsLUPgi2A4K0BHlh0GRZwfJCuwQhCl1kN5z2FAI7dHPzVna3U7JH4dj56TaNSnW6sgMbynzBz2%2FzbjIKMqwYwhULJard6mMgD%2BSqZH1ZuCB5ITqQaKGbKpTJ0ycdkk3%2B2PS0p2vJlsbggh33LHqQh8FPHYv%2BZc6uqU6x%2FxL7JjqoTwYNWLGPMTid9%2FgAUfKNOfRf8tIUplsmsnVtHMM8gq3jj%2FjVQzsi1n7lDhAGPKEk3GLdxV4qDw3rU1gx8sSrJuzEXdB1OSjqkwUcllZEbeUmpeVS7dwGr5wnPk58CQ%2BCWtLt1fUoPsbhhCI7lt9nlx2B6PMOetAWDr395PR7vRaW4L0yt98mlSuxfZpXNRSmyJ5%2BCE0F9Ny0vE79luDxnQZb4YKDtJZ%2Fv6%2BraTyz1PkGhM%2FHTDdxd%2FUBjqxAY556TljIOFSG5eUrK83cDJ3k8D2nDVF0ztg7IbYnhTLYkbchCa5MXG6fGo3aaM63EvErkYkoAzNaV76U9oteNDPF9M2aFHvGxUYUYFwtLxLDdjHYez2cNnLN889n%2BVbGC6e%2BJvzVbj3ayuB69NyC0QJNsAChltAvPmk4NRzcDJ8dwTNBee4ADMW0UEymZxH3JRENEX8c%2BwjxwswmPw670vu1hAc6scCRUU46tb%2FXCt7RQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=47c73a7caa8f656b570c53a8e56b18ec8c79f6a01493d8f9dab6756bac61bd69",
+      "file_size": 6171,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6394995,
+      "file_name": "asan-standalone.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/er2s2matdhliglinacaoz4jjpwiu?response-content-disposition=attachment%3B%20filename%3D%22asan-standalone.txt%22%3B%20filename%2A%3DUTF-8%27%27asan-standalone.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRH6MZGYA%2F20260902%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260902T102343Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDBMHD5H%2B6Ra2KtKtX29EQvGuoNwU3HrCFlY6tHRq17ZgIgfa05cdotMU2UHlco6RNBL37v5du5SKRgomxwZkXYWPMqugUIwv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDKN116akOOh0zSdeDiqOBYxh0tz0%2B%2FeMr8YfQe4DHbnvdl04MTZSrd%2FLv7abhoEGW3R25A5KXJZUuwWWYXvLvXQlVhvwreLGGmhSQykL8v62ZTU%2B6x6USvVT93icgdrRnkDaEp1ANWtP2w5JZNYvcjO%2BHNUCxwy6I6LCYEKqK9qA%2B%2B0TTlrsmSwsPDg%2BdWtY%2FAhio7bIkOOoAGPX0S09RXnnDzlJX4yHvgYdClPClVrgJ2s%2FdVblyVUa8uYaSvOk5Qq18gMqE8NbabKlxvKjYmqEMZd4ndVij0CcnYXeNAJT9D0sCWPxx0B3sdEI6dNGPiUmJ8r9eT6YiwM1c2tcOcZnNh4fn6bgmy%2BkQ%2BwoKmeTcOmtlbI%2F026qcjzY1tUchQIaxxkcAsJUE1VmfrVXn%2FWr7ZTF4rNgOYmn2BNEzdG%2B%2F3RjK0R49UWePba%2FU2%2BuR5AbIVBQlMzS5uTphyyv1jtV2PvZ5dxVmrsLUPgi2A4K0BHlh0GRZwfJCuwQhCl1kN5z2FAI7dHPzVna3U7JH4dj56TaNSnW6sgMbynzBz2%2FzbjIKMqwYwhULJard6mMgD%2BSqZH1ZuCB5ITqQaKGbKpTJ0ycdkk3%2B2PS0p2vJlsbggh33LHqQh8FPHYv%2BZc6uqU6x%2FxL7JjqoTwYNWLGPMTid9%2FgAUfKNOfRf8tIUplsmsnVtHMM8gq3jj%2FjVQzsi1n7lDhAGPKEk3GLdxV4qDw3rU1gx8sSrJuzEXdB1OSjqkwUcllZEbeUmpeVS7dwGr5wnPk58CQ%2BCWtLt1fUoPsbhhCI7lt9nlx2B6PMOetAWDr395PR7vRaW4L0yt98mlSuxfZpXNRSmyJ5%2BCE0F9Ny0vE79luDxnQZb4YKDtJZ%2Fv6%2BraTyz1PkGhM%2FHTDdxd%2FUBjqxAY556TljIOFSG5eUrK83cDJ3k8D2nDVF0ztg7IbYnhTLYkbchCa5MXG6fGo3aaM63EvErkYkoAzNaV76U9oteNDPF9M2aFHvGxUYUYFwtLxLDdjHYez2cNnLN889n%2BVbGC6e%2BJvzVbj3ayuB69NyC0QJNsAChltAvPmk4NRzcDJ8dwTNBee4ADMW0UEymZxH3JRENEX8c%2BwjxwswmPw670vu1hAc6scCRUU46tb%2FXCt7RQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d694b7b348bcf98c2a36a85bfe903283c55f7196e0a591160b146b06deb68498",
+      "file_size": 5877,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 6394996,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/lr826objspuk65xmmx40cd6zfxfh?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRH6MZGYA%2F20260902%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260902T102343Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDBMHD5H%2B6Ra2KtKtX29EQvGuoNwU3HrCFlY6tHRq17ZgIgfa05cdotMU2UHlco6RNBL37v5du5SKRgomxwZkXYWPMqugUIwv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDKN116akOOh0zSdeDiqOBYxh0tz0%2B%2FeMr8YfQe4DHbnvdl04MTZSrd%2FLv7abhoEGW3R25A5KXJZUuwWWYXvLvXQlVhvwreLGGmhSQykL8v62ZTU%2B6x6USvVT93icgdrRnkDaEp1ANWtP2w5JZNYvcjO%2BHNUCxwy6I6LCYEKqK9qA%2B%2B0TTlrsmSwsPDg%2BdWtY%2FAhio7bIkOOoAGPX0S09RXnnDzlJX4yHvgYdClPClVrgJ2s%2FdVblyVUa8uYaSvOk5Qq18gMqE8NbabKlxvKjYmqEMZd4ndVij0CcnYXeNAJT9D0sCWPxx0B3sdEI6dNGPiUmJ8r9eT6YiwM1c2tcOcZnNh4fn6bgmy%2BkQ%2BwoKmeTcOmtlbI%2F026qcjzY1tUchQIaxxkcAsJUE1VmfrVXn%2FWr7ZTF4rNgOYmn2BNEzdG%2B%2F3RjK0R49UWePba%2FU2%2BuR5AbIVBQlMzS5uTphyyv1jtV2PvZ5dxVmrsLUPgi2A4K0BHlh0GRZwfJCuwQhCl1kN5z2FAI7dHPzVna3U7JH4dj56TaNSnW6sgMbynzBz2%2FzbjIKMqwYwhULJard6mMgD%2BSqZH1ZuCB5ITqQaKGbKpTJ0ycdkk3%2B2PS0p2vJlsbggh33LHqQh8FPHYv%2BZc6uqU6x%2FxL7JjqoTwYNWLGPMTid9%2FgAUfKNOfRf8tIUplsmsnVtHMM8gq3jj%2FjVQzsi1n7lDhAGPKEk3GLdxV4qDw3rU1gx8sSrJuzEXdB1OSjqkwUcllZEbeUmpeVS7dwGr5wnPk58CQ%2BCWtLt1fUoPsbhhCI7lt9nlx2B6PMOetAWDr395PR7vRaW4L0yt98mlSuxfZpXNRSmyJ5%2BCE0F9Ny0vE79luDxnQZb4YKDtJZ%2Fv6%2BraTyz1PkGhM%2FHTDdxd%2FUBjqxAY556TljIOFSG5eUrK83cDJ3k8D2nDVF0ztg7IbYnhTLYkbchCa5MXG6fGo3aaM63EvErkYkoAzNaV76U9oteNDPF9M2aFHvGxUYUYFwtLxLDdjHYez2cNnLN889n%2BVbGC6e%2BJvzVbj3ayuB69NyC0QJNsAChltAvPmk4NRzcDJ8dwTNBee4ADMW0UEymZxH3JRENEX8c%2BwjxwswmPw670vu1hAc6scCRUU46tb%2FXCt7RQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=fcbb93f2f0b659f6df8d20ba3bfd0d052d22e16515e78bef753e65cba842428c",
+      "file_size": 945,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 6,
+  "voters": [
+    "nixxiess",
+    "abughazi",
+    "0xashbornhere",
+    "varshithrajbasa",
+    "cl05e",
+    "stackraid"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
