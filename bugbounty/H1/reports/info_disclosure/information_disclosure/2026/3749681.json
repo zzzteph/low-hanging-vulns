@@ -1,0 +1,121 @@
+{
+  "id": 3749681,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzQ5Njgx",
+  "url": "https://hackerone.com/reports/3749681",
+  "title": "Background sync cache retains outgoing additional transaction secret keys",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-20T06:01:46.226Z",
+  "submitted_at": "2026-05-20T06:01:46.520Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "qttps",
+    "url": "/qttps",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0c4rlnulbnr1p89xgwsgyldjhkg9/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-08-20T23:51:01.181Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-07-21T23:50:59.292Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nMonero wallet background sync is documented as scanning \"with just the view key while the wallet is locked.\" The source also documents `wallet2::clear_user_data()` as the scrub step intended to remove data not needed by a background wallet with only a hot view key.\n\nIn the reviewed source tree, `wallet2::store_background_cache()` clones the full wallet cache, calls `clear_user_data()`, and stores the result as the background cache. `clear_user_data()` clears `m_tx_keys`, but it does not clear `m_additional_tx_keys`, even though `m_additional_tx_keys` is a serialized wallet-cache field containing `std::vector<crypto::secret_key>` values indexed by transaction hash.\n\nThis appears to leave outgoing additional transaction secret keys in the lower-trust background cache encrypted under the background cache key rather than only under the main wallet cache protection.\n\nThis is not a spend-key or seed disclosure issue. The theoretical impact is limited to wallet privacy / proof-key material exposure for outgoing transactions that used additional tx keys.\n\n## Releases Affected:\n\n  * Reviewed local source tree: `src/version.cpp.in` declares `DEF_MONERO_VERSION \"0.18.1.0\"`.\n  * Affected OS: likely OS-independent wallet cache logic on Linux, macOS, Windows, and other supported platforms if this code is present.\n  * Exact maintained release range was not validated and should be confirmed by maintainers against current supported branches.\n\n## Steps To Reproduce:\nNo exploit, payload, crash trigger, or live-network validation was performed. These are source-code review steps only.\n\n  1. Review `wallet2::store_background_cache()`: it serializes the current wallet object, deserializes it into a background wallet object, calls `background_w2->clear_user_data()`, then stores the background cache.\n  1. Review `wallet2::clear_user_data()`: it clears `m_tx_keys`, notes, destinations, labels, attributes, and related user data, but does not clear `m_additional_tx_keys`.\n  1. Review wallet serialization: `m_additional_tx_keys` is serialized in the wallet cache.\n  1. Review the field definition: `m_additional_tx_keys` stores `std::vector<crypto::secret_key>` values.\n  1. Review transaction commit/signing paths: outgoing transaction information stores `ptx.additional_tx_keys` into `m_additional_tx_keys` when `store_tx_info()` is enabled, which is the default.\n  1. Review proof/check logic: additional tx keys are later used as secret inputs for tx-key checks and tx proofs, showing they are sensitive transaction secret material.\n\n## Supporting Material/References:\n\n  * `src/wallet/wallet2.cpp:13751` - `wallet2::store_background_cache()` clones, scrubs, and stores the background cache.\n  * `src/wallet/wallet2.cpp:4532` - `wallet2::clear_user_data()` clears `m_tx_keys` but not `m_additional_tx_keys`.\n  * `src/wallet/wallet2.h:1819` - comment explains `clear_user_data()` exists for background wallet sensitive-data minimization.\n  * `src/wallet/wallet2.h:1390` - `m_additional_tx_keys` is serialized into the wallet cache.\n  * `src/wallet/wallet2.h:1934` - `m_additional_tx_keys` stores `std::vector<crypto::secret_key>`.\n  * `src/wallet/wallet2.cpp:7627` - commit path stores `ptx.additional_tx_keys`.\n  * `src/wallet/wallet2.cpp:1200` - `m_store_tx_info` defaults to true.\n  * `src/wallet/wallet2.cpp:12088` - additional tx keys are used in tx-key checks.\n  * `src/wallet/wallet2.cpp:12252` - additional tx keys are used to generate tx proofs.\n\n## Why this may be reportable:\nThe code has an explicit scrub function for background sync data minimization. That scrub clears the primary outgoing transaction secret-key map, `m_tx_keys`, but misses the adjacent serialized secret-key map, `m_additional_tx_keys`.\n\nBecause background sync can use a custom background password and is described as view-key-only scanning while locked, retaining extra outgoing transaction secret keys in the background cache appears to cross the intended wallet-lock/background-sync trust boundary.\n\n## Why this may be a false positive:\nMaintainers may consider the background cache password/key sufficient protection for all cached metadata, or may classify additional tx keys as acceptable to retain in the background cache. Also, practical impact requires local access to the background cache and relevant background credentials, and only affects transactions with non-empty additional tx keys.\n\n## Suggested remediation:\nClear `m_additional_tx_keys` in `wallet2::clear_user_data()` alongside `m_tx_keys`.\n\nConsider adding a regression test or static serialization assertion that a background cache produced from a wallet containing both `m_tx_keys` and `m_additional_tx_keys` retains neither field.\n\n## AI Usage Acknowledgement:\nThis report was prepared with AI assistance for source-code navigation, candidate triage, and drafting. The substantive claim is based on the cited Monero source files. No PoC, exploit code, payload, fuzzing, crash triggering, live-network testing, or reproduction script was created.\n\n## Housekeeping\n\n1. I have reviewed the program policy before submitting.\n2. XMR address: 479Zu6GkFNTfRcNkesCtHNJg37KE72PAG5VLFC1bQNBjLEi2ZqhUByff67M1KsHVpsEs5CBP6YgNwgrJTZRPmbRZUSVvtM6\n\n## Impact\n\nA local actor who can access the background wallet cache and its background password/key, but not the main wallet password, may be able to recover outgoing additional transaction secret keys retained in `m_additional_tx_keys`.\n\nThe likely impact is transaction privacy degradation and unintended disclosure of proof-capable outgoing transaction key material for affected transactions. This could help prove or link wallet involvement in specific outgoing payments under some conditions, especially when combined with transaction IDs, recipient addresses, or other wallet/cache metadata.\n\nThis does not appear to expose the wallet seed, private spend key, or private view key, and it does not appear to allow spending funds.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-08-20T23:50:59.800Z",
+  "allow_singular_disclosure_after": -1122909.41209118,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "sottam"
+  ],
+  "severity": {
+    "rating": "low",
+    "score": 2.8,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
