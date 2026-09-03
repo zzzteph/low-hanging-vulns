@@ -1,0 +1,133 @@
+{
+  "id": 3822248,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODIyMjQ4",
+  "url": "https://hackerone.com/reports/3822248",
+  "title": "CVE-2026-13608: OpenLDAP SASL authentication bypass",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-06-24T08:36:36.503Z",
+  "submitted_at": "2026-06-24T08:36:37.065Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "hahahkim",
+    "url": "/hahahkim",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-13608"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-03T00:35:55.993Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-03T00:35:55.878Z",
+  "team_member_agreed_on_going_public_at": "2026-09-02T07:17:20.510Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nIn `lib/openldap.c`, `oldap_state_sasl_resp()` transitions to `OLDAP_STOP` (connection ready)\nwhenever `Curl_sasl_continue()` returns `CURLE_OK` with `progress != SASL_INPROGRESS`. This\ncondition does not distinguish `SASL_DONE` (authentication completed) from `SASL_IDLE` (no\nmechanism available). A malicious LDAP server can send a malformed SASL challenge, causing the\nclient to cancel the mechanism and retry with no remaining mechanisms. `Curl_sasl_start()` then\nreturns `CURLE_OK` with `progress == SASL_IDLE`, and the connection proceeds as if authentication\nsucceeded. This bypasses Kerberos (GSSAPI) mutual authentication: an attacker without a valid\nkeytab can impersonate a server and inject arbitrary LDAP responses.\n\n## Affected version\n```\ncurl 8.21.0-DEV (Linux) libcurl/8.21.0-DEV OpenSSL/3.0.13 zlib/1.3 mit-krb5/1.20.1 OpenLDAP/2.6.10\nRelease-Date: [unreleased]\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns ldap ldaps pop3 pop3s rtsp smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS GSS-API HSTS HTTPS-proxy IPv6 Kerberos Largefile libz SPNEGO SSL threadsafe TLS-SRP UnixSockets\n```\n\nTested on Ubuntu 24.04 (x86_64) against commit `68720b4837284335b2d63cb358f8f6ce65f5bc55` (HEAD\nof master as of 2026-06-24). The vulnerable code has been present since the OpenLDAP SASL support\nwas introduced and is unchanged in the current release.\n\nPlatform: Linux 6.8.0, x86_64, MIT Kerberos 1.20.1, OpenLDAP 2.6.10.\n\n## Steps To Reproduce:\n\n### Prerequisites\n\n1. curl/libcurl built with OpenLDAP backend (`-DUSE_OPENLDAP=ON`) and GSSAPI (`-DCURL_USE_GSSAPI=ON`)\n2. A working Kerberos environment (KDC with realm, `kinit` to obtain a TGT)\n3. Python 3 (for the mock server)\n\n### Setup\n\n```bash\n# Build curl with OpenLDAP + GSSAPI\ncmake -B build -DCURL_DISABLE_LDAP=OFF -DUSE_OPENLDAP=ON \\\n  -DCURL_USE_GSSAPI=ON -DCURL_USE_OPENSSL=ON -DCURL_USE_LIBPSL=OFF \\\n  -DCURL_USE_LIBIDN2=OFF -DCMAKE_BUILD_TYPE=Debug\ncmake --build build -j$(nproc)\n\n# Set up minimal KDC (example for MIT Kerberos)\nsudo kdb5_util create -s -P testpass123          # realm: TEST.LOCAL\nsudo kadmin.local -q \"addprinc -pw testpass testuser@TEST.LOCAL\"\nsudo kadmin.local -q \"addprinc -randkey ldap/localhost@TEST.LOCAL\"\nsudo kadmin.local -q \"ktadd -k /tmp/ldap.keytab ldap/localhost@TEST.LOCAL\"\nsudo krb5kdc\n\n# Obtain TGT\necho testpass | kinit testuser@TEST.LOCAL\n```\n\n### Mock LDAP server (attacker — has NO keytab)\n\nRun the attached `mock_gssapi_server.py`:\n\n```bash\npython3 mock_gssapi_server.py 3893\n```\n\nThe server triggers `SASL_CANCEL` as follows:\n\n1. Advertises only GSSAPI in `supportedSASLMechanisms`.\n2. Receives the client's SASL BindRequest containing a Kerberos AP-REQ (which it cannot decrypt).\n3. Replies with `LDAP_SASL_BIND_IN_PROGRESS` (resultCode 14) and a garbage `serverSaslCreds`\n   value (`\\x60\\x10\\xDE\\xAD...`). This invalid GSSAPI token causes `gss_init_sec_context()` to\n   fail, which libcurl translates to `CURLE_BAD_CONTENT_ENCODING` — the condition that enters the\n   `SASL_CANCEL` state.\n4. Acknowledges the subsequent cancel BindRequest with `LDAP_SUCCESS` (resultCode 0).\n\n### Trigger the bug\n\n```bash\n# Ensure valid TGT exists\nklist\n\n# Connect to malicious server with GSSAPI auth\n./build/src/curl --user \"testuser@TEST.LOCAL:testpass\" \\\n    --login-options \"AUTH=GSSAPI\" \\\n    \"ldap://localhost:3893/dc=example,dc=com?*?sub\" \\\n    --connect-timeout 5 --max-time 10\n```\n\n### Expected result (fixed behavior)\n\ncurl should report authentication failure (exit code 67, `CURLE_LOGIN_DENIED`).\n\n### Actual result\n\n```\nDN: cn=admin,dc=example,dc=com\n\tcn: admin\n\tuid: attacker-injected\n\tuserPassword: {CLEAR}pwned\n\tsshPublicKey: ssh-ed25519 AAAA_ATTACKER_KEY attacker@evil\n\tdescription: INJECTED via CWE-306 Kerberos bypass\n\nExit code: 0\n```\n\ncurl considers the connection authenticated and proceeds to execute the LDAP query. The attacker's\ninjected data is returned to the client as trusted LDAP results.\n\n## Root Cause\n\nIn `lib/openldap.c` line 786:\n\n```c\nresult = Curl_sasl_continue(&li->sasl, data, code, &progress);\nif(!result && progress != SASL_INPROGRESS)   // ← does not distinguish SASL_DONE from SASL_IDLE\n    oldap_state(data, li, OLDAP_STOP);\n```\n\nhttps://github.com/curl/curl/blob/68720b4837284335b2d63cb358f8f6ce65f5bc55/lib/openldap.c#L786-L787\n\nWhen `Curl_sasl_continue()` enters the `SASL_CANCEL` case (`lib/curl_sasl.c` line 773-780), it\nremoves the failed mechanism and calls `Curl_sasl_start()`. If no mechanisms remain,\n`Curl_sasl_start()` returns `CURLE_OK` with `*progress = SASL_IDLE` (line 519):\n\nhttps://github.com/curl/curl/blob/68720b4837284335b2d63cb358f8f6ce65f5bc55/lib/curl_sasl.c#L519\nhttps://github.com/curl/curl/blob/68720b4837284335b2d63cb358f8f6ce65f5bc55/lib/curl_sasl.c#L773-L780\n\n### Suggested fix\n\n```c\nresult = Curl_sasl_continue(&li->sasl, data, code, &progress);\nif(!result && progress == SASL_DONE)          // ← only accept explicit completion\n    oldap_state(data, li, OLDAP_STOP);\nelse if(!result && progress == SASL_IDLE)\n    result = CURLE_LOGIN_DENIED;\n```\n\n## Impact\n\n## Summary:\nA malicious LDAP server (or network attacker in MITM position) can bypass SASL authentication in\nlibcurl's OpenLDAP backend by sending a single malformed SASL challenge. The most significant\nimpact is against GSSAPI (Kerberos), where the bypass nullifies mutual authentication: the client\nproceeds without verifying the server holds a valid keytab. This allows the attacker to:\n\n1. **Capture client queries** — leaking the LDAP search base DN, filter, and requested attributes.\n2. **Inject arbitrary LDAP results** — the client accepts fabricated directory entries (e.g.,\n   forged SSH public keys, group memberships, or credentials) as trusted data.\n\n**Prerequisites:**\n\n1. libcurl built with the OpenLDAP backend (`USE_OPENLDAP`) and Kerberos support.\n2. The application must configure SASL authentication (e.g., `CURLOPT_LOGIN_OPTIONS \"AUTH=GSSAPI\"`).\n3. The attacker must be positioned as MITM or control the target LDAP server's address (DNS\n   poisoning, ARP spoofing, etc.).\n4. The connection must not use LDAPS/TLS (or the client must not properly validate the server\n   certificate), since TLS would independently block MITM.\n\nThe impact is highest in environments that rely on Kerberos for server identity verification on non-TLS LDAP connections.\n---\n\nThe initial discovery was made by AI. All technical claims have been reviewed and revised by human experts.\n\nReporting on behalf of Autonomous Code Security (ACS) team at Microsoft.",
+  "weakness": {
+    "id": 184,
+    "name": "Authentication Bypass by Primary Weakness"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6144315,
+      "file_name": "mock_gssapi_server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fgwhwxuhd3mf53trz8hdnv7x3wnm?response-content-disposition=attachment%3B%20filename%3D%22mock_gssapi_server.py%22%3B%20filename%2A%3DUTF-8%27%27mock_gssapi_server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXW433JUY%2F20260903%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260903T023131Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEAoaCXVzLXdlc3QtMiJHMEUCIQChJVi0Ob56I1meotrpPVLwveIfuueFkvpSI9Rx0Kd21QIgLVSch%2FFxg7BazZUWg8%2B%2BTqvkopX5OL9xrD6dhHTn%2BbYquwUI0%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDBKQcu%2F%2BvvQ8TJv6RCqPBdoPbou59fgw4jWLrz2IWnATjrpsROs6bEW7FtoYQ%2Froh%2Fw9ns7VSApEGshIaS9H1DKdo4FU6SuSI49Zz4OLO%2FJY9EuOwX1V1hU%2BUCzrxoOULOn1I54Bk8Dc1bNmEq30KlbqouWJk06Q9%2BCTD66VKhx7PhdEmrExRC6REsTX5Ogvp6eNxP5Sb6WpGOvbtrgYWofJnEikIDqY07WKavQ7L4CqfrYlAcqvob1Akn2RG2c36UjepqNaUWJnA%2FrXPozFdDWwwx%2FgY%2F0cCMBKN11AR3lvHpJf3Wt4Fc%2BSTRl7K2yeTpPdQCAnTDcs7kCsxZXcETmO9E0SkRg7fKDAc2bTNQ6F2O3nFl8u1EgFnfKrvfrGj48X3Y3e49XJ7hLNAbBL5QIM9FiaKpuNvmnd1Q8nfHLQPs4D%2FNqcP7XBLlLkFfvsLI2IPyttocyrf8M5AulAgawK8dAg5abimBdVxraEHIYcKK145hKWQsoleOZt3jRtQ6EQGevH0EdcEWSzbEZfr0qeZoMjeEwxEBWkI9A2SNvD2GgLlyNyw7NB2kvGpugVnhQ967124ox2gdQX1DakS0TwnBlEPsu%2B7128dpt8muhiWFUyrU6R1yElgY%2BBIJy2g0CXUHFjeSLE3ZXT3ywSljh6rDEa%2BMEDyFuKueIWv8Omz8YHXW5QlBJrqNExe3VPZLoVWtAgvXejLwVTgxfnCtT20fUXjeciQ934LI8Q1Y7c24XhZO4U9nbNgvGUiN0AUnjoe9CKu7LFeR55OSBe%2FHbGbTbstnRWqlNUmKiubHw5AfLZpjzdV78nA5OzmT8YXXQZJXgr7yGtLgxp3tHG82B%2Fe2tqult4wX2r6JvRKvNtKX6zzYUTl50fENQ14MYwtaHj1AY6sQHMF7RZ9OTkJoM56BwHXyWLNGtiUPzjl3a5GjNkh3w2TqmJZf8Gw0fReWF8mOopqB%2B1QDqGbnGk3FYMCW%2Fqij9v8qOQMZjD61lI8yqIWN5UmlY1ON73g6BC8vM4bUOcX%2F0eT06AwCI5d9pnLB3IKXVhs9yelDH52Zuh9s75Iei49m9WB4uDa4IteGpL2T4CPJ84PwAdV%2FTRZymzaKATByiU8JJ4s4%2BzlBt4G93a0bXpMbA%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e7640d609b2f274a69f09767c861b7e57cc3c2adeeb728e6313c7853fea562af",
+      "file_size": 12529,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6144316,
+      "file_name": "run_gssapi_poc.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/zcfxt2m1p6vqecuasco7jjcdjzna?response-content-disposition=attachment%3B%20filename%3D%22run_gssapi_poc.sh%22%3B%20filename%2A%3DUTF-8%27%27run_gssapi_poc.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXW433JUY%2F20260903%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260903T023131Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEAoaCXVzLXdlc3QtMiJHMEUCIQChJVi0Ob56I1meotrpPVLwveIfuueFkvpSI9Rx0Kd21QIgLVSch%2FFxg7BazZUWg8%2B%2BTqvkopX5OL9xrD6dhHTn%2BbYquwUI0%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDBKQcu%2F%2BvvQ8TJv6RCqPBdoPbou59fgw4jWLrz2IWnATjrpsROs6bEW7FtoYQ%2Froh%2Fw9ns7VSApEGshIaS9H1DKdo4FU6SuSI49Zz4OLO%2FJY9EuOwX1V1hU%2BUCzrxoOULOn1I54Bk8Dc1bNmEq30KlbqouWJk06Q9%2BCTD66VKhx7PhdEmrExRC6REsTX5Ogvp6eNxP5Sb6WpGOvbtrgYWofJnEikIDqY07WKavQ7L4CqfrYlAcqvob1Akn2RG2c36UjepqNaUWJnA%2FrXPozFdDWwwx%2FgY%2F0cCMBKN11AR3lvHpJf3Wt4Fc%2BSTRl7K2yeTpPdQCAnTDcs7kCsxZXcETmO9E0SkRg7fKDAc2bTNQ6F2O3nFl8u1EgFnfKrvfrGj48X3Y3e49XJ7hLNAbBL5QIM9FiaKpuNvmnd1Q8nfHLQPs4D%2FNqcP7XBLlLkFfvsLI2IPyttocyrf8M5AulAgawK8dAg5abimBdVxraEHIYcKK145hKWQsoleOZt3jRtQ6EQGevH0EdcEWSzbEZfr0qeZoMjeEwxEBWkI9A2SNvD2GgLlyNyw7NB2kvGpugVnhQ967124ox2gdQX1DakS0TwnBlEPsu%2B7128dpt8muhiWFUyrU6R1yElgY%2BBIJy2g0CXUHFjeSLE3ZXT3ywSljh6rDEa%2BMEDyFuKueIWv8Omz8YHXW5QlBJrqNExe3VPZLoVWtAgvXejLwVTgxfnCtT20fUXjeciQ934LI8Q1Y7c24XhZO4U9nbNgvGUiN0AUnjoe9CKu7LFeR55OSBe%2FHbGbTbstnRWqlNUmKiubHw5AfLZpjzdV78nA5OzmT8YXXQZJXgr7yGtLgxp3tHG82B%2Fe2tqult4wX2r6JvRKvNtKX6zzYUTl50fENQ14MYwtaHj1AY6sQHMF7RZ9OTkJoM56BwHXyWLNGtiUPzjl3a5GjNkh3w2TqmJZf8Gw0fReWF8mOopqB%2B1QDqGbnGk3FYMCW%2Fqij9v8qOQMZjD61lI8yqIWN5UmlY1ON73g6BC8vM4bUOcX%2F0eT06AwCI5d9pnLB3IKXVhs9yelDH52Zuh9s75Iei49m9WB4uDa4IteGpL2T4CPJ84PwAdV%2FTRZymzaKATByiU8JJ4s4%2BzlBt4G93a0bXpMbA%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=7db2f807bdc79402d8b7e4961a4163281767a5a944c8c8d125d9e0a120e0b86d",
+      "file_size": 1259,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 2,
+  "voters": [
+    "2026",
+    "stackraid"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
