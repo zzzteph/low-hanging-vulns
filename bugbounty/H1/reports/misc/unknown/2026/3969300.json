@@ -1,0 +1,118 @@
+{
+  "id": 3969300,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTY5MzAw",
+  "url": "https://hackerone.com/reports/3969300",
+  "title": "CVE-2026-80230: OpenSSL pinning bypass",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "none",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-25T18:14:37.562Z",
+  "submitted_at": "2026-08-25T18:14:37.727Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-80230"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-03T06:08:50.563Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-02T07:16:48.572Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`Curl_ossl_check_peer_cert()` (line 4795) calls `SSL_get1_peer_certificate()`. When no peer certificate is available — as with anonymous cipher suites like `AECDH-AES128-SHA` — the function returns NULL. The subsequent guard at lines 4798–4799 checks `!(conn_config->verifypeer || conn_config->verifyhost)`; when both are disabled (`--insecure`), it executes `goto out`, jumping past `ossl_check_pinned_key()` at line 4874 and returning `CURLE_OK`.\n\nThis means a user who specifies `--insecure --pinnedpubkey <hash>` expects certificate verification to be relaxed but public-key pinning to remain enforced. Instead, the pin check is silently skipped when the server presents no certificate.\n\n## Preconditions\n\n- libcurl built with OpenSSL\n- Client sets `--insecure` (or `CURLOPT_SSL_VERIFYPEER=0`, `CURLOPT_SSL_VERIFYHOST=0`)\n- Client sets `--pinnedpubkey` with a specific hash\n- Client allows an anonymous cipher suite (e.g. `--ciphers AECDH-AES128-SHA:@SECLEVEL=0`)\n- TLS version ≤ 1.2 (`--tls-max 1.2`) — TLS 1.3 does not support anonymous authentication\n- Server configured with matching anonymous cipher (no certificate loaded)\n\n## Reproduction\n\nThe PoC (`poc.py`) starts a Python TLS server with `AECDH-AES128-SHA` (no certificate), then invokes:\n\n```sh\n/opt/curl/bin/curl --insecure \\\n  --pinnedpubkey \"sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\" \\\n  --ciphers \"AECDH-AES128-SHA:@SECLEVEL=0\" \\\n  --tls-max 1.2 \\\n  https://127.0.0.1:PORT/\n```\n\n**Success criterion:** curl exits 0 and receives the HTTP response. Expected behavior: `CURLE_SSL_PINNEDPUBKEYNOTMATCH` (exit 90).\n\n**Negative control:** Same wrong pin against a server with a real certificate → curl exits 90. This confirms the pin check functions when a certificate is present.\n\n## Root cause trace\n\n1. Client connects with `--insecure` and `--pinnedpubkey <hash>`, negotiating an anonymous cipher.\n2. `Curl_ossl_check_peer_cert()` calls `SSL_get1_peer_certificate(octx->ssl)` → returns NULL (line 4795).\n3. Guard at line 4798: `!(conn_config->verifypeer || conn_config->verifyhost)` → TRUE because `--insecure` disables both.\n4. `goto out` (line 4799) jumps to line 4876, skipping `ossl_check_pinned_key()` at line 4874.\n5. `result` is still `CURLE_OK` → function returns success.\n6. curl completes the transfer without checking the public-key pin.\n\n## Remediation\n\nBefore the `goto out` at line 4799, check whether `pinned_key` is set. If a pin is configured but no certificate is available to verify it against, return `CURLE_SSL_PINNEDPUBKEYNOTMATCH` instead of silently succeeding. Alternatively, restructure the function to always reach `ossl_check_pinned_key()` when `pinned_key` is non-NULL, regardless of the `verifypeer`/`verifyhost` state.\n\n## Impact\n\nAn active MITM attacker who controls the network can force negotiation of an anonymous cipher (if the client allows it via `--ciphers`) and intercept traffic even though the client specified a public-key pin. The attack requires the client to use `--insecure` (or `CURLOPT_SSL_VERIFYPEER=0`) together with `--pinnedpubkey`, and the client must allow an anonymous cipher suite. While `--insecure` already weakens security, users who combine it with pinning rely on the pin as their sole authentication — this bypass removes that guarantee.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6551292,
+      "file_name": "poc.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/kh0m5naxbz4ke0fzala5bfpo1crh?response-content-disposition=attachment%3B%20filename%3D%22poc.py%22%3B%20filename%2A%3DUTF-8%27%27poc.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQV2SWRX6Y%2F20260903%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260903T073752Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBAaCXVzLXdlc3QtMiJGMEQCICUoj2bHOa8Zu35slzr5ukG0ntSJzXaNoKenFX0m3GdIAiBUy07eLLY%2FylkCOi4wh0xRoGN%2BkeHwCBNLUcr7LLggXyq6BQjY%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMkxvVksQfqzYTugHPKo4FcGG30pG1wtTYZ%2BYYTjQIVvmom9qQlpcLbgLSlT9d5ppOO9KFrnK3vpKGaKGhEjS5l%2BW%2F4YyarXLdvwM1eJYoyWgYcQm0s1kXfCYjXlixQpLiMOPgFcmiJsOhbysdrHrL31FBbd7AWPNserowPFknIjVHm9%2F0f%2FSoK1coK8j18EtLoh18k0X8VVxHofBBbEb8wn%2BiDf1EIN6S7k89iOIG94IwfoBdHWhDgZ7bMrb5DEvFLLknBaIaCuE%2FRb3DVQyqLROON0dL52T%2Fu9eGzjBNp3FnR8IskfCcRnbq1HChTaqd1PraGCgtlLmW0g0FO8VugtWufLs2kkM6ByR%2B5MU96b7DPcw8wsvA1O0yG2%2F%2BDLGC1BfPCs8ZhSkxNw6pLNEmAkSr48n3HJCMJMxz18Qt7u36eGLsPHaLULcQDrhEQEG45lNX5v4Jee%2F0gX5xPYT4URBZxOCFvuUxKvbdT5RW%2B8ipJk3ddZJOuil5nwCOsqFppllBR4GCFwK5pWtcSAndHMOin1x70S3SDFHrGkP4r%2BWs3SI8by5HL%2FHC9N%2FwAMpPBpQQImD3yVB2o0qN0brZaQ1kokG0ta7xoA%2BouRr55qStRNcu%2F%2FyuDmR52NtKlvxIK1xcGuYXPZQgRInSCNIc9BSnKg8VNObPG7g2Kx5UbIXWgmqQwUklAz6YvHUzNqrAugFIc8juxLidyY30AOk5iNKixIv1Dlu0IqY5lUhttM8v4cdL2xJq2iGS3rd6j%2F56D2DeaXk%2BDx8xZgJNkX9pWOKI7v%2FHyQt5UsITNW9KeTHpW6nJA587MpljGsG3%2BxKDCNmaIh2VFYKVCR4zcURzjtM5NdNHBbIKQ1a%2BatJR1Hh9gKZNYXRIQTAORamvMJ6%2F5NQGOrIBuGEb%2Fjg7zgDLOKJCaeMq0o4hUiPAlJSP9WXAN%2F0nl%2BA9B1p7Nkd0r2gWHL1lTYYaqby2Ab0Zpb6m7wAo%2FOY3o%2FN26hdSh9DejGdowv7TVP1lEKAZwTLLlB3NKhLU8X6qZol%2FwR4ZuVAsnL0a6DQRpx8aplvt%2B76EF9bg9wuzYw3ZdUqfJiQNdruw3LK8aQzdKLa56MsPy6svLdCXlhohatrqr2WxQ%2FvJjd8y8UpHN3fiVw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=fb853dfe3f4d1d8cdc96bcae4711d628e5c9e19293f9ebd8f520a7a54817699e",
+      "file_size": 8470,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

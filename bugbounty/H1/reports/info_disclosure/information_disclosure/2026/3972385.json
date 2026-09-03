@@ -1,0 +1,141 @@
+{
+  "id": 3972385,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcyMzg1",
+  "url": "https://hackerone.com/reports/3972385",
+  "title": "CVE-2026-82209: domain-scoped PSL domain cookie",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-26T22:49:19.035Z",
+  "submitted_at": "2026-08-26T22:49:19.256Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-82209"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-03T06:09:21.787Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-02T07:17:52.879Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWhen libpsl is enabled and a response host is itself a public suffix (e.g. `github.io`), a `Set-Cookie` header whose `Domain` attribute exactly equals that host is accepted by `psl_is_cookie_domain_acceptable()` but stored with `tailmatch = TRUE`. RFC 6265 §5.3 requires this exact-match case to produce a host-only cookie. Because curl keeps it domain-scoped, the cookie is sent to any sibling host (e.g. `attacker.github.io`) on a subsequent request or redirect.\n\n## Affected versions\n\nThe vulnerable code path exists in at least curl 8.21.0 (latest GA release) and the current 8.22.0-DEV tree. The `parse_domain()` logic has been unchanged across many prior releases. libpsl must be enabled at build time (`--with-libpsl`), which most distribution packages do.\n\n## Root cause\n\nIn `lib/cookie.c`, `parse_domain()` unconditionally sets `co->tailmatch = TRUE` for every explicit non-IP `Domain` attribute (line ~512):\n\n```c\nif(!is_ip)\n  co->tailmatch = TRUE;\n```\n\nLater, `is_public_suffix()` calls `psl_is_cookie_domain_acceptable(psl, \"github.io\", \"github.io\")`. libpsl intentionally returns \"acceptable\" for exact equality — the caller is expected to handle the host-only conversion. curl never does.\n\nWhen `Curl_cookie_getlist()` builds the outgoing `Cookie` header, it calls `cookie_tailmatch(\"github.io\", 9, \"attacker.github.io\")` which returns `TRUE` (suffix match with a preceding `.`), so the cookie leaks.\n\n## Reproduction\n1. Build curl at commit c2676bf9e639e31e44b12a2cc82cf2046231b056 (or any version from 8.21.0 onward) on a 64-bit Linux or macOS host, ensuring libpsl is enabled (--with-libpsl or -DCURL_USE_LIBPSL=ON). Confirm the build includes libpsl by checking that curl --version output contains libpsl.\n\n2. Start a local HTTP server on port 8080 that serves two endpoints:\n\n/set-domain — responds with 302, sets Set-Cookie: sid=SECRET; Domain=github.io; Path=/, and redirects to http://attacker.github.io:8080/sink.\n/sink — responds with 200 and echoes back the received Cookie header value in the response body.\n\n3. Map the test hostnames to localhost using curl's --resolve flag:\n\ngithub.io:8080:127.0.0.1\nattacker.github.io:8080:127.0.0.1\n\n4. Run the vulnerable request — make a request to http://github.io:8080/set-domain with redirect following enabled (-L) and a cookie jar (-c /tmp/domain.jar):\n\n```\ncurl -sS -L --noproxy '*' \\\n  --resolve github.io:8080:127.0.0.1 \\\n  --resolve attacker.github.io:8080:127.0.0.1 \\\n  -c /tmp/domain.jar \\\n  http://github.io:8080/set-domain\n```\n\n5. Observe the response body — it will contain sid=SECRET, proving the cookie was sent to attacker.github.io (the redirect target), a sibling host under the same public suffix.\n\n6. Inspect the cookie jar — the entry for the domain cookie will show .github.io with the subdomain-match flag set to TRUE, confirming it was incorrectly stored as domain-scoped.\n\n7. Run a negative control — repeat the same flow but have the server set the cookie without an explicit Domain attribute (i.e., Set-Cookie: sid=HOST_ONLY; Path=/). The redirect target at attacker.github.io will receive <none> — the cookie is correctly not sent. The cookie jar will show github.io with subdomain-match FALSE (host-only).\n\n8. Run a second negative control — issue the same Domain=github.io cookie from a sibling host (tenant.github.io) instead of the apex. Curl correctly rejects it — the cookie jar will be empty and nothing is sent to the redirect target.\n\n## Suggested fix\n\nAfter `psl_is_cookie_domain_acceptable()` accepts exact equality between the request host and a public-suffix cookie domain, clear `tailmatch` so the cookie becomes host-only. Non-exact public-suffix Domain attempts should continue to be rejected. Concretely, after the PSL acceptance in `Curl_cookie_add()`, add:\n\n```c\nif(co->tailmatch && domain && co->domain &&\n   curl_strequal(co->domain, domain) &&\n   psl_is_public_suffix(psl, lcookie))\n  co->tailmatch = FALSE;\n```\n\n## Impact\n\n## Summary:\nAn attacker controlling a sibling host under a public suffix (trivial on hosting platforms like GitHub Pages, Heroku, Netlify) can receive cookies that the public-suffix apex issued with an explicit `Domain` matching itself. The attacker cannot *plant* the cookie — exploitation requires the apex to issue such a cookie and the curl client to subsequently contact the attacker sibling. The PSL boundary that libpsl is intended to enforce is violated.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6560659,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bkxe78t5md6o0p3humm6mgxabc8y?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2Y74FQVH%2F20260903%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260903T073751Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBAaCXVzLXdlc3QtMiJGMEQCIE76%2BXOW5mLO7MpZgCoDXt9PrKId5AFTdxuzn9EeH%2BnqAiAF6vRpWnvLvkEugh0JRxbQQLeA5%2F17AN1xBdudKt1c1iq7BQjZ%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMsxwdDsgOTqvSCjksKo8Fc8Jn8V2zyZMO%2BjQQN9DreL12scDrze8ySgNoKtWV9h04ah8qCyb2Rk%2F3ncumSYgheJ6jrfqNIguCrCHX2k03maS7WyhyukOx0BBCPgXJBeYZqhlQmVc7GaEwhXmaPPQ1qmGi%2FmmSTHwMsPgqcWdsps%2BN6ornQmhNSy0uB2c1EhuUwH1GJkrAjDJ6DA3y7i%2BUqBthknGOlLP1nnSPxP1IX726rwEIU3ZDM3XdZR4w7OD%2F6NlSLk%2F8KGF%2B%2Fic2MhtqGnLY%2FgvAHNYhZPq7xeW5e%2B1eMTeDLERG7S0vTL86cRpoiC74gO1vspjDabL%2B7%2F4JqQqi5AnuZLA%2F89zq8UvBs6S4oezKUt6qDjLrQ%2Fiw5okwT0lqGiEaUce%2B%2BdmogtE0Ov9EDqH0%2BWgOjPv6lb9C%2Fa1ZWlCNMnhyLZpqhpyflksqyyRVE12IKVu4XmQVVjTugKSNaPKylFV0saQR1YB2IrNonFmIZmvGBPoYFa2oMd42auLjEGUEcrTwAyBYhIGBG5avHkuMpGxvU4YZJZcc8zlIXD3H2fjSkYnatrekN21hqhUq4Sfa60ZtoX55mvlVM63TKA8qq4W%2ByWZGIWkUfK2wHgxpjVNSGuWhfZh0r6SjclKa9MUXsLxcQhWKMdknEwQ2TMoV1Wu%2Bn1cTsoAyx74QqPYcVcY99sYRgn53ofY%2FA03Cf3Z4OlAFAKi3IBm5CqZudKfDMVtJu%2FIlRCrygq4LaWpAdWmC9JPBXdIwgsYRvqyWj02wr8O39RVGdxhSCKEBKU9azTALy0rbaIXgJKq0pCGx3fUd3XrFx1ONRWMifbmdmQ9jVt6TS8w%2F1W%2FKwNU1t7hoaG5qwBsv4E7lotf%2Bi3tiDpRGKgKejqji0zC8wOTUBjqyAUZIHFV%2BtK8Xhsv6LNJgJ%2FH1bFzNk8KBfhMg9knXgW50a5z78qLwT015SJ8bYKEguoF%2FhSRpNAghpNxJ1TfUTYUTV7yblIVyJq0DyTP8rAILVIz3IBZVx4p5iUzqWT8pecpTDyUNxICOsRy09GyVE3GcKTJm3XC7eWvb2pBixMkPcv2jZcFc%2BthKksPoKSv1DRRYi3Fc2YkZ5HZ6bs50hOEt9qh1dI5qM9KzOO1Agd6Oa2k%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=5ec980d19865ce878c3b6bd437244505553c1e923eebb7949e090c3da1fcdab9",
+      "file_size": 1800,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6560660,
+      "file_name": "reproduce.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/4d811fjo1nbfb09z7bestne6omct?response-content-disposition=attachment%3B%20filename%3D%22reproduce.sh%22%3B%20filename%2A%3DUTF-8%27%27reproduce.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2Y74FQVH%2F20260903%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260903T073751Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBAaCXVzLXdlc3QtMiJGMEQCIE76%2BXOW5mLO7MpZgCoDXt9PrKId5AFTdxuzn9EeH%2BnqAiAF6vRpWnvLvkEugh0JRxbQQLeA5%2F17AN1xBdudKt1c1iq7BQjZ%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMsxwdDsgOTqvSCjksKo8Fc8Jn8V2zyZMO%2BjQQN9DreL12scDrze8ySgNoKtWV9h04ah8qCyb2Rk%2F3ncumSYgheJ6jrfqNIguCrCHX2k03maS7WyhyukOx0BBCPgXJBeYZqhlQmVc7GaEwhXmaPPQ1qmGi%2FmmSTHwMsPgqcWdsps%2BN6ornQmhNSy0uB2c1EhuUwH1GJkrAjDJ6DA3y7i%2BUqBthknGOlLP1nnSPxP1IX726rwEIU3ZDM3XdZR4w7OD%2F6NlSLk%2F8KGF%2B%2Fic2MhtqGnLY%2FgvAHNYhZPq7xeW5e%2B1eMTeDLERG7S0vTL86cRpoiC74gO1vspjDabL%2B7%2F4JqQqi5AnuZLA%2F89zq8UvBs6S4oezKUt6qDjLrQ%2Fiw5okwT0lqGiEaUce%2B%2BdmogtE0Ov9EDqH0%2BWgOjPv6lb9C%2Fa1ZWlCNMnhyLZpqhpyflksqyyRVE12IKVu4XmQVVjTugKSNaPKylFV0saQR1YB2IrNonFmIZmvGBPoYFa2oMd42auLjEGUEcrTwAyBYhIGBG5avHkuMpGxvU4YZJZcc8zlIXD3H2fjSkYnatrekN21hqhUq4Sfa60ZtoX55mvlVM63TKA8qq4W%2ByWZGIWkUfK2wHgxpjVNSGuWhfZh0r6SjclKa9MUXsLxcQhWKMdknEwQ2TMoV1Wu%2Bn1cTsoAyx74QqPYcVcY99sYRgn53ofY%2FA03Cf3Z4OlAFAKi3IBm5CqZudKfDMVtJu%2FIlRCrygq4LaWpAdWmC9JPBXdIwgsYRvqyWj02wr8O39RVGdxhSCKEBKU9azTALy0rbaIXgJKq0pCGx3fUd3XrFx1ONRWMifbmdmQ9jVt6TS8w%2F1W%2FKwNU1t7hoaG5qwBsv4E7lotf%2Bi3tiDpRGKgKejqji0zC8wOTUBjqyAUZIHFV%2BtK8Xhsv6LNJgJ%2FH1bFzNk8KBfhMg9knXgW50a5z78qLwT015SJ8bYKEguoF%2FhSRpNAghpNxJ1TfUTYUTV7yblIVyJq0DyTP8rAILVIz3IBZVx4p5iUzqWT8pecpTDyUNxICOsRy09GyVE3GcKTJm3XC7eWvb2pBixMkPcv2jZcFc%2BthKksPoKSv1DRRYi3Fc2YkZ5HZ6bs50hOEt9qh1dI5qM9KzOO1Agd6Oa2k%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=21dd29cd661ca13ccfc4546fd0cbbdf4b416ecd2756dc6c3393f236606fa4b6a",
+      "file_size": 277,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6560661,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/r72a2dn4dx2qewof1nu49vwv52fb?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=text%2Fx-python-script&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2Y74FQVH%2F20260903%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260903T073751Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBAaCXVzLXdlc3QtMiJGMEQCIE76%2BXOW5mLO7MpZgCoDXt9PrKId5AFTdxuzn9EeH%2BnqAiAF6vRpWnvLvkEugh0JRxbQQLeA5%2F17AN1xBdudKt1c1iq7BQjZ%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMsxwdDsgOTqvSCjksKo8Fc8Jn8V2zyZMO%2BjQQN9DreL12scDrze8ySgNoKtWV9h04ah8qCyb2Rk%2F3ncumSYgheJ6jrfqNIguCrCHX2k03maS7WyhyukOx0BBCPgXJBeYZqhlQmVc7GaEwhXmaPPQ1qmGi%2FmmSTHwMsPgqcWdsps%2BN6ornQmhNSy0uB2c1EhuUwH1GJkrAjDJ6DA3y7i%2BUqBthknGOlLP1nnSPxP1IX726rwEIU3ZDM3XdZR4w7OD%2F6NlSLk%2F8KGF%2B%2Fic2MhtqGnLY%2FgvAHNYhZPq7xeW5e%2B1eMTeDLERG7S0vTL86cRpoiC74gO1vspjDabL%2B7%2F4JqQqi5AnuZLA%2F89zq8UvBs6S4oezKUt6qDjLrQ%2Fiw5okwT0lqGiEaUce%2B%2BdmogtE0Ov9EDqH0%2BWgOjPv6lb9C%2Fa1ZWlCNMnhyLZpqhpyflksqyyRVE12IKVu4XmQVVjTugKSNaPKylFV0saQR1YB2IrNonFmIZmvGBPoYFa2oMd42auLjEGUEcrTwAyBYhIGBG5avHkuMpGxvU4YZJZcc8zlIXD3H2fjSkYnatrekN21hqhUq4Sfa60ZtoX55mvlVM63TKA8qq4W%2ByWZGIWkUfK2wHgxpjVNSGuWhfZh0r6SjclKa9MUXsLxcQhWKMdknEwQ2TMoV1Wu%2Bn1cTsoAyx74QqPYcVcY99sYRgn53ofY%2FA03Cf3Z4OlAFAKi3IBm5CqZudKfDMVtJu%2FIlRCrygq4LaWpAdWmC9JPBXdIwgsYRvqyWj02wr8O39RVGdxhSCKEBKU9azTALy0rbaIXgJKq0pCGx3fUd3XrFx1ONRWMifbmdmQ9jVt6TS8w%2F1W%2FKwNU1t7hoaG5qwBsv4E7lotf%2Bi3tiDpRGKgKejqji0zC8wOTUBjqyAUZIHFV%2BtK8Xhsv6LNJgJ%2FH1bFzNk8KBfhMg9knXgW50a5z78qLwT015SJ8bYKEguoF%2FhSRpNAghpNxJ1TfUTYUTV7yblIVyJq0DyTP8rAILVIz3IBZVx4p5iUzqWT8pecpTDyUNxICOsRy09GyVE3GcKTJm3XC7eWvb2pBixMkPcv2jZcFc%2BthKksPoKSv1DRRYi3Fc2YkZ5HZ6bs50hOEt9qh1dI5qM9KzOO1Agd6Oa2k%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=8b50db0389a4def7e6138cd2e7336307d96a1cc1c8f43ea57c0013243338c350",
+      "file_size": 1336,
+      "type": "text/x-python-script",
+      "moderated": null
+    },
+    {
+      "id": 6560663,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/aai9bysi7qn6vgjtvf9rms2vfgjx?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2Y74FQVH%2F20260903%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260903T073751Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBAaCXVzLXdlc3QtMiJGMEQCIE76%2BXOW5mLO7MpZgCoDXt9PrKId5AFTdxuzn9EeH%2BnqAiAF6vRpWnvLvkEugh0JRxbQQLeA5%2F17AN1xBdudKt1c1iq7BQjZ%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMsxwdDsgOTqvSCjksKo8Fc8Jn8V2zyZMO%2BjQQN9DreL12scDrze8ySgNoKtWV9h04ah8qCyb2Rk%2F3ncumSYgheJ6jrfqNIguCrCHX2k03maS7WyhyukOx0BBCPgXJBeYZqhlQmVc7GaEwhXmaPPQ1qmGi%2FmmSTHwMsPgqcWdsps%2BN6ornQmhNSy0uB2c1EhuUwH1GJkrAjDJ6DA3y7i%2BUqBthknGOlLP1nnSPxP1IX726rwEIU3ZDM3XdZR4w7OD%2F6NlSLk%2F8KGF%2B%2Fic2MhtqGnLY%2FgvAHNYhZPq7xeW5e%2B1eMTeDLERG7S0vTL86cRpoiC74gO1vspjDabL%2B7%2F4JqQqi5AnuZLA%2F89zq8UvBs6S4oezKUt6qDjLrQ%2Fiw5okwT0lqGiEaUce%2B%2BdmogtE0Ov9EDqH0%2BWgOjPv6lb9C%2Fa1ZWlCNMnhyLZpqhpyflksqyyRVE12IKVu4XmQVVjTugKSNaPKylFV0saQR1YB2IrNonFmIZmvGBPoYFa2oMd42auLjEGUEcrTwAyBYhIGBG5avHkuMpGxvU4YZJZcc8zlIXD3H2fjSkYnatrekN21hqhUq4Sfa60ZtoX55mvlVM63TKA8qq4W%2ByWZGIWkUfK2wHgxpjVNSGuWhfZh0r6SjclKa9MUXsLxcQhWKMdknEwQ2TMoV1Wu%2Bn1cTsoAyx74QqPYcVcY99sYRgn53ofY%2FA03Cf3Z4OlAFAKi3IBm5CqZudKfDMVtJu%2FIlRCrygq4LaWpAdWmC9JPBXdIwgsYRvqyWj02wr8O39RVGdxhSCKEBKU9azTALy0rbaIXgJKq0pCGx3fUd3XrFx1ONRWMifbmdmQ9jVt6TS8w%2F1W%2FKwNU1t7hoaG5qwBsv4E7lotf%2Bi3tiDpRGKgKejqji0zC8wOTUBjqyAUZIHFV%2BtK8Xhsv6LNJgJ%2FH1bFzNk8KBfhMg9knXgW50a5z78qLwT015SJ8bYKEguoF%2FhSRpNAghpNxJ1TfUTYUTV7yblIVyJq0DyTP8rAILVIz3IBZVx4p5iUzqWT8pecpTDyUNxICOsRy09GyVE3GcKTJm3XC7eWvb2pBixMkPcv2jZcFc%2BthKksPoKSv1DRRYi3Fc2YkZ5HZ6bs50hOEt9qh1dI5qM9KzOO1Agd6Oa2k%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b1dcf49b82ed3ffd2fc3884b9a41321c5663abe47b0d116627aedcd5e8ee2beb",
+      "file_size": 332,
+      "type": "application/octet-stream",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
