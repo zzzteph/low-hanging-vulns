@@ -1,0 +1,137 @@
+{
+  "id": 3972293,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcyMjkz",
+  "url": "https://hackerone.com/reports/3972293",
+  "title": "43: HTTP proxy CONNECT header chooses the `-OJ` filename after a redirect",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-26T22:01:49.955Z",
+  "submitted_at": "2026-08-26T22:01:50.211Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-07T21:06:15.061Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-05T13:57:52.927Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWhen curl follows an HTTPS redirect through an HTTP CONNECT proxy, a stale response code lets the proxy's CONNECT response `Content-Disposition` header control the local output filename. With `--location --remote-name --remote-header-name`, the proxy-provided filename is used for the TLS-verified origin's response body, crossing the CONNECT/origin trust boundary.\n\n## Root cause\n\n`Curl_req_soft_reset()` in `lib/request.c` does not clear `data->info.httpcode`. After the first origin's 302 response, this stale value persists while curl establishes a new CONNECT tunnel for the redirect target.\n\n`single_header()` in `lib/cf-h1-proxy.c` delivers CONNECT response headers to the header callback with `CLIENTWRITE_CONNECT`, but this provenance bit is internal to the writer chain — it never reaches `CURLOPT_HEADERFUNCTION`. The stale httpcode is only cleared when the tunnel reaches `H1_TUNNEL_ESTABLISHED`, after headers have already been delivered.\n\n`tool_header_cb()` in `src/tool_cb_hdr.c` calls `CURLINFO_RESPONSE_CODE`, sees the stale 302, and passes the proxy's `Content-Disposition` header to `content_disposition()`, which opens the output file under the proxy-chosen name and disables further filename handling. The real origin's `Content-Disposition` header arrives later but is ignored.\n\n## Steps to reproduce\n\nThe PoC uses two certificate-verified HTTPS origins and an HTTP/1.1 CONNECT proxy, all on loopback. Origin 1 returns a 302 redirect to Origin 2. The proxy injects `Content-Disposition: attachment; filename=\"proxy-chosen.bin\"` in the CONNECT response for Origin 2. Origin 2 returns `Content-Disposition: attachment; filename=\"origin-name.bin\"` with a body.\n\n\n### Expected vs actual output\n\n**Expected:** All three cases produce `origin-name.bin` — the filename from the TLS-verified origin.\n\n**Actual:** The redirect case produces `proxy-chosen.bin` containing the authenticated origin's body. The two controls correctly produce `origin-name.bin`. This shows the proxy's CONNECT response header overwrites the filename only when a stale 3xx code is present from a prior redirect.\n\n## Suggested fix\n\nPrevent CONNECT-provenance headers from participating in `--remote-header-name` processing. The strongest fix would propagate header provenance to the command-line callback so it can distinguish CONNECT headers from origin headers. Alternatively, clearing `data->info.httpcode` before CONNECT headers are delivered (rather than after, in `H1_TUNNEL_ESTABLISHED`) would close this specific trigger.\n\n## Impact\n\nA malicious HTTP proxy (or an on-path attacker against the plaintext proxy hop) can choose the local basename for data returned by an authenticated HTTPS origin. The attacker cannot modify the TLS-protected response body, but controls the name under which curl stores it.\n\nThe filename is subject to curl's basename sanitization. Existing files are preserved by default; `--clobber` permits replacement. Using `--suppress-connect-headers` mitigates the issue.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6560395,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/tejmqhjsegva92kf7e7q697z5ute?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=text%2Fx-python-script&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSLUXJMUE%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232244Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJIMEYCIQCXP0t4gyKiP2iMxxDFe1cHp%2FVzQoNxvpxTBTXs6v%2FhSwIhAIZBx6Jr5W1SQONQQiJw9qHUPauEfSr8aUjRa1MbLeCRKrEFCEgQAxoMMDEzNjE5Mjc0ODQ5IgzYNjncN5fdhn7pxskqjgXQuN56wlvzvG4fwAzCTai6UoIp8ifknsKz4HzrftrjV01MObpAMZyRAS9sIv%2FuX%2BqemtmQ0sQDy7VvdCCsgLtFotUktXm9U7WmO0FAhVSDYi8zJLo2N%2BuCis%2Bhqs9IErCt0RnrVICmSwvy7QtMLw7EvswIUGvGYOJOQ38vzZcoJJ%2BbjF0zaR0t%2BHSE1EYseyrHmWKaReOYRmS%2BNTJCqM6a6wxzu2UOyahIEaN06oFyi92do1F9%2BxTphWLxr1lrSF14kEtPl8SbzY64dCAx8bBtZTyJ0qit4H%2B8JkEB4U%2F1sspPzOIfdb4VFp2pyiJTj5pb6kFf0BDPUBxvv5IDrCa97ceNVk4Fj%2B4grkSeP5Goz%2BswNQoCOzSkbKfhycR7bR8VMIHfo3tI9vm5m%2BGme50Xe4b7L3H8DCqPUM4RziUjqYhq%2FTlLdetBSN3y0aO23ORJAZwGAcayP2%2Fw9Vi1O1R3y63yOw1nXg%2FOLKfvdtgeqssG3cP27AhtuWrg%2Be7wvS4QYT2G6GLvhGfNlUts7g1k6QKboyC8W%2F0mzd%2F9o6wtmLfSfFuInJ3LhmV3eJuqIOu0gHjOp8zfg5%2BDZfhcyE7BBFaF23LRDbCM3uIka7CJ5uvw1uI1hbEvd94wZ8VmOHQul9ZV5JOz3Rl%2BxUvG0cmdU5F%2Ft31vq4QGHdJ%2B9U9F4R6vl6C7IKk33SdIceKOL6lMo1oHogjAIDlVtn86tNMJbAlW%2FLUYSAbSSOJwopMciI3rniHTV275jtFFmxInIIZLnrgn%2FDnmsDJg6PtkygX87TB9zeaUQHhmJCqSGxFUU8IPnWp31X9OrZWN6oOae9gdRudE9rOhk78PlWeJeIkmEt85ZW36YmUzRhxiYg0w3f781AY6sAEbERAiiLVcGZBzVnbF15kY2VaKyfuZzCXDItXe6SJ04HjiFKsawYrofRYydG2Tz%2B%2F%2BnRt132mRJ0ask6mbdiEjWUxelYpiKx1JfFBvoKz0ul4hi%2FFP%2BrAlvZK9dRjSIDGMNeH%2FuiX%2BniZkLRv6x3pRU%2FIB9Pux%2Fu%2FuHGhGdz83QVj4HcIji%2BwrM3ZaT28fpdS7414kcIr%2FSt1StgobpBKoRu1kiamsei9ZMoPrbjexvQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=99eb2ab8b4863b3b0b44f167aa1ff633c762469e5ecc7e55234e3c9196bab253",
+      "file_size": 3148,
+      "type": "text/x-python-script",
+      "moderated": null
+    },
+    {
+      "id": 6560398,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9xf4fabt7h49hueiy78npju66dj7?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSLUXJMUE%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232244Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJIMEYCIQCXP0t4gyKiP2iMxxDFe1cHp%2FVzQoNxvpxTBTXs6v%2FhSwIhAIZBx6Jr5W1SQONQQiJw9qHUPauEfSr8aUjRa1MbLeCRKrEFCEgQAxoMMDEzNjE5Mjc0ODQ5IgzYNjncN5fdhn7pxskqjgXQuN56wlvzvG4fwAzCTai6UoIp8ifknsKz4HzrftrjV01MObpAMZyRAS9sIv%2FuX%2BqemtmQ0sQDy7VvdCCsgLtFotUktXm9U7WmO0FAhVSDYi8zJLo2N%2BuCis%2Bhqs9IErCt0RnrVICmSwvy7QtMLw7EvswIUGvGYOJOQ38vzZcoJJ%2BbjF0zaR0t%2BHSE1EYseyrHmWKaReOYRmS%2BNTJCqM6a6wxzu2UOyahIEaN06oFyi92do1F9%2BxTphWLxr1lrSF14kEtPl8SbzY64dCAx8bBtZTyJ0qit4H%2B8JkEB4U%2F1sspPzOIfdb4VFp2pyiJTj5pb6kFf0BDPUBxvv5IDrCa97ceNVk4Fj%2B4grkSeP5Goz%2BswNQoCOzSkbKfhycR7bR8VMIHfo3tI9vm5m%2BGme50Xe4b7L3H8DCqPUM4RziUjqYhq%2FTlLdetBSN3y0aO23ORJAZwGAcayP2%2Fw9Vi1O1R3y63yOw1nXg%2FOLKfvdtgeqssG3cP27AhtuWrg%2Be7wvS4QYT2G6GLvhGfNlUts7g1k6QKboyC8W%2F0mzd%2F9o6wtmLfSfFuInJ3LhmV3eJuqIOu0gHjOp8zfg5%2BDZfhcyE7BBFaF23LRDbCM3uIka7CJ5uvw1uI1hbEvd94wZ8VmOHQul9ZV5JOz3Rl%2BxUvG0cmdU5F%2Ft31vq4QGHdJ%2B9U9F4R6vl6C7IKk33SdIceKOL6lMo1oHogjAIDlVtn86tNMJbAlW%2FLUYSAbSSOJwopMciI3rniHTV275jtFFmxInIIZLnrgn%2FDnmsDJg6PtkygX87TB9zeaUQHhmJCqSGxFUU8IPnWp31X9OrZWN6oOae9gdRudE9rOhk78PlWeJeIkmEt85ZW36YmUzRhxiYg0w3f781AY6sAEbERAiiLVcGZBzVnbF15kY2VaKyfuZzCXDItXe6SJ04HjiFKsawYrofRYydG2Tz%2B%2F%2BnRt132mRJ0ask6mbdiEjWUxelYpiKx1JfFBvoKz0ul4hi%2FFP%2BrAlvZK9dRjSIDGMNeH%2FuiX%2BniZkLRv6x3pRU%2FIB9Pux%2Fu%2FuHGhGdz83QVj4HcIji%2BwrM3ZaT28fpdS7414kcIr%2FSt1StgobpBKoRu1kiamsei9ZMoPrbjexvQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=7da255d25ce82cdaea63f9a0598a99ebbcca15abee361c2fbd72b489407f07ba",
+      "file_size": 206,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6560400,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/xdyanm5e3exk8b5mbk3bpidha050?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSLUXJMUE%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232244Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJIMEYCIQCXP0t4gyKiP2iMxxDFe1cHp%2FVzQoNxvpxTBTXs6v%2FhSwIhAIZBx6Jr5W1SQONQQiJw9qHUPauEfSr8aUjRa1MbLeCRKrEFCEgQAxoMMDEzNjE5Mjc0ODQ5IgzYNjncN5fdhn7pxskqjgXQuN56wlvzvG4fwAzCTai6UoIp8ifknsKz4HzrftrjV01MObpAMZyRAS9sIv%2FuX%2BqemtmQ0sQDy7VvdCCsgLtFotUktXm9U7WmO0FAhVSDYi8zJLo2N%2BuCis%2Bhqs9IErCt0RnrVICmSwvy7QtMLw7EvswIUGvGYOJOQ38vzZcoJJ%2BbjF0zaR0t%2BHSE1EYseyrHmWKaReOYRmS%2BNTJCqM6a6wxzu2UOyahIEaN06oFyi92do1F9%2BxTphWLxr1lrSF14kEtPl8SbzY64dCAx8bBtZTyJ0qit4H%2B8JkEB4U%2F1sspPzOIfdb4VFp2pyiJTj5pb6kFf0BDPUBxvv5IDrCa97ceNVk4Fj%2B4grkSeP5Goz%2BswNQoCOzSkbKfhycR7bR8VMIHfo3tI9vm5m%2BGme50Xe4b7L3H8DCqPUM4RziUjqYhq%2FTlLdetBSN3y0aO23ORJAZwGAcayP2%2Fw9Vi1O1R3y63yOw1nXg%2FOLKfvdtgeqssG3cP27AhtuWrg%2Be7wvS4QYT2G6GLvhGfNlUts7g1k6QKboyC8W%2F0mzd%2F9o6wtmLfSfFuInJ3LhmV3eJuqIOu0gHjOp8zfg5%2BDZfhcyE7BBFaF23LRDbCM3uIka7CJ5uvw1uI1hbEvd94wZ8VmOHQul9ZV5JOz3Rl%2BxUvG0cmdU5F%2Ft31vq4QGHdJ%2B9U9F4R6vl6C7IKk33SdIceKOL6lMo1oHogjAIDlVtn86tNMJbAlW%2FLUYSAbSSOJwopMciI3rniHTV275jtFFmxInIIZLnrgn%2FDnmsDJg6PtkygX87TB9zeaUQHhmJCqSGxFUU8IPnWp31X9OrZWN6oOae9gdRudE9rOhk78PlWeJeIkmEt85ZW36YmUzRhxiYg0w3f781AY6sAEbERAiiLVcGZBzVnbF15kY2VaKyfuZzCXDItXe6SJ04HjiFKsawYrofRYydG2Tz%2B%2F%2BnRt132mRJ0ask6mbdiEjWUxelYpiKx1JfFBvoKz0ul4hi%2FFP%2BrAlvZK9dRjSIDGMNeH%2FuiX%2BniZkLRv6x3pRU%2FIB9Pux%2Fu%2FuHGhGdz83QVj4HcIji%2BwrM3ZaT28fpdS7414kcIr%2FSt1StgobpBKoRu1kiamsei9ZMoPrbjexvQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=0e4f0f2c9057c4aa5571d9d8505b00613effa3c0ad2997487f21ef1738d9472d",
+      "file_size": 926,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6560402,
+      "file_name": "run-container.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/grtkt09kyp2dbassp0j6rsr0v9x7?response-content-disposition=attachment%3B%20filename%3D%22run-container.sh%22%3B%20filename%2A%3DUTF-8%27%27run-container.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSLUXJMUE%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232244Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJIMEYCIQCXP0t4gyKiP2iMxxDFe1cHp%2FVzQoNxvpxTBTXs6v%2FhSwIhAIZBx6Jr5W1SQONQQiJw9qHUPauEfSr8aUjRa1MbLeCRKrEFCEgQAxoMMDEzNjE5Mjc0ODQ5IgzYNjncN5fdhn7pxskqjgXQuN56wlvzvG4fwAzCTai6UoIp8ifknsKz4HzrftrjV01MObpAMZyRAS9sIv%2FuX%2BqemtmQ0sQDy7VvdCCsgLtFotUktXm9U7WmO0FAhVSDYi8zJLo2N%2BuCis%2Bhqs9IErCt0RnrVICmSwvy7QtMLw7EvswIUGvGYOJOQ38vzZcoJJ%2BbjF0zaR0t%2BHSE1EYseyrHmWKaReOYRmS%2BNTJCqM6a6wxzu2UOyahIEaN06oFyi92do1F9%2BxTphWLxr1lrSF14kEtPl8SbzY64dCAx8bBtZTyJ0qit4H%2B8JkEB4U%2F1sspPzOIfdb4VFp2pyiJTj5pb6kFf0BDPUBxvv5IDrCa97ceNVk4Fj%2B4grkSeP5Goz%2BswNQoCOzSkbKfhycR7bR8VMIHfo3tI9vm5m%2BGme50Xe4b7L3H8DCqPUM4RziUjqYhq%2FTlLdetBSN3y0aO23ORJAZwGAcayP2%2Fw9Vi1O1R3y63yOw1nXg%2FOLKfvdtgeqssG3cP27AhtuWrg%2Be7wvS4QYT2G6GLvhGfNlUts7g1k6QKboyC8W%2F0mzd%2F9o6wtmLfSfFuInJ3LhmV3eJuqIOu0gHjOp8zfg5%2BDZfhcyE7BBFaF23LRDbCM3uIka7CJ5uvw1uI1hbEvd94wZ8VmOHQul9ZV5JOz3Rl%2BxUvG0cmdU5F%2Ft31vq4QGHdJ%2B9U9F4R6vl6C7IKk33SdIceKOL6lMo1oHogjAIDlVtn86tNMJbAlW%2FLUYSAbSSOJwopMciI3rniHTV275jtFFmxInIIZLnrgn%2FDnmsDJg6PtkygX87TB9zeaUQHhmJCqSGxFUU8IPnWp31X9OrZWN6oOae9gdRudE9rOhk78PlWeJeIkmEt85ZW36YmUzRhxiYg0w3f781AY6sAEbERAiiLVcGZBzVnbF15kY2VaKyfuZzCXDItXe6SJ04HjiFKsawYrofRYydG2Tz%2B%2F%2BnRt132mRJ0ask6mbdiEjWUxelYpiKx1JfFBvoKz0ul4hi%2FFP%2BrAlvZK9dRjSIDGMNeH%2FuiX%2BniZkLRv6x3pRU%2FIB9Pux%2Fu%2FuHGhGdz83QVj4HcIji%2BwrM3ZaT28fpdS7414kcIr%2FSt1StgobpBKoRu1kiamsei9ZMoPrbjexvQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3b7cead589389253e6b3e5b8ca920b5ea28ceced725fda4a19bbb2f39b2a4ca6",
+      "file_size": 2122,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "al-theeb"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

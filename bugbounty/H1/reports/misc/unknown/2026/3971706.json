@@ -1,0 +1,145 @@
+{
+  "id": 3971706,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcxNzA2",
+  "url": "https://hackerone.com/reports/3971706",
+  "title": "36: HTTP upload resume offset consumed twice after early 307/308 redirect",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-26T17:04:11.682Z",
+  "submitted_at": "2026-08-26T17:04:11.976Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-07T21:06:05.657Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-05T10:30:20.564Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nA read-backed HTTP POST using `CURLOPT_RESUME_FROM_LARGE` with a non-seekable source silently uploads the wrong data when the server returns a 307 or 308 redirect before the request body is sent. `curl_easy_perform()` returns `CURLE_OK`, so the caller cannot detect the substitution.\n\nThe bug is in `cr_in_resume_from()` (`lib/sendf.c`): when it falls back to reading-and-discarding through `ctx->read_cb` (no seek callback available), it does not set `ctx->has_used_cb`. On redirect, `cr_in_needs_rewind()` checks only that flag and reports no rewind needed. A fresh reader is created and `http_resume()` applies the persistent `resume_from` offset a second time. For a source of configured size N and offset O, the followed request sends N−O bytes starting at source offset 2O instead of O.\n\nIntroduced by commit `14bcea074a` (\"lib: enhance client reader resume + rewind\"), present since curl 8.7.0. Tested against commit `c2676bf9e639`.\n\n## Root cause detail\n\n1. `cr_in_resume_from()` at `lib/sendf.c:798-820` invokes `ctx->read_cb` to skip past the offset but never sets `ctx->has_used_cb = TRUE`. The normal read path at line 687 does set it.\n\n2. `cr_in_needs_rewind()` at `lib/sendf.c:755-760` returns only `ctx->has_used_cb`, so `http_perhapsrewind()` concludes no rewind is needed.\n\n3. `http_resume()` at `lib/http.c:2400` guards with `!data->req.authneg` and a comment saying \"only act on the first request,\" but that condition does not exclude redirects. On the followed 308, `set_reader()` + `http_resume()` runs again (lines 3112-3116) and applies the offset a second time.\n\n## Reproduction\n\n### Prerequisites\n\nDocker and a curl source tree at commit `c2676bf9e639` or later (the bug is still present on HEAD).\n\n### Steps\n\n1. Build curl from source at commit `c2676bf9e639` (or any commit since 8.7.0):\n\n```sh\ncmake -S . -B build \\\n  -DBUILD_SHARED_LIBS=ON -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF \\\n  -DCURL_USE_OPENSSL=OFF -DCURL_USE_LIBPSL=OFF -DCURL_ZLIB=OFF\ncmake --build build -j$(nproc)\n```\n\n2. Compile the client:\n\n```sh\ncc client.c -Iinclude -Lbuild/lib -lcurl -o poc-client\n```\n\n3. Start the server:\n\n```sh\npython3 -u server.py &\n```\n\n4. Run the client:\n\n```sh\nLD_LIBRARY_PATH=build/lib ./poc-client\n```\n\n### Expected output (fixed curl)\n\nThe sink receives 4096 bytes of `B` (byte value 66), `curl_easy_perform` returns 0, and the callback consumes 8192 bytes total (4096 skipped + 4096 sent).\n\n### Actual output (vulnerable curl)\n\n```\nSINK_LENGTH=4096\nSINK_BYTE_VALUES=[67]\nVERDICT=VULNERABLE\nCURL_RESULT=0\nSOURCE_BYTES_CONSUMED=12288\n```\n\nThe sink receives 4096 bytes of `C` (byte value 67). The callback consumed 12288 bytes: the offset was applied twice (4096 skipped on first request + 4096 skipped again on redirected request + 4096 `C` bytes sent). `curl_easy_perform` returns `CURLE_OK`.\n\n## Suggested fix\n\nSet `ctx->has_used_cb = TRUE` in `cr_in_resume_from()` when the fallback read-and-discard path invokes `ctx->read_cb`. This makes `cr_in_needs_rewind()` return true after resume, so redirect handling requests a rewind. Seekable sources rewind and reapply the offset once; non-seekable sources fail with `CURLE_SEND_FAIL_REWIND` instead of silently uploading the wrong interval.\n\nI am aware that `docs/cmdline-opts/continue-at.md` describes HTTP upload resume as non-standard and \"not guaranteed.\" The issue here is the local reader-position bookkeeping and the silent wrong-body success, not server-side interoperability.\n\n## Impact\n\nA malicious or misconfigured server returning an early body-preserving redirect causes libcurl to upload bytes from a different region of the application's upload source while reporting success. The caller has no indication that the wrong data was sent.\n\nConstraints:\n\n- Requires a read-backed POST/PUT with a positive resume offset.\n- The source must lack a seek callback (non-seekable).\n- `CURLOPT_FOLLOWLOCATION` must be enabled (off by default in libcurl).\n- The server must return 307/308 before the body is sent.\n- The read callback must be able to supply data beyond the configured upload size.\n\nDoes not read arbitrary process memory; the extra bytes come from the application's own read callback.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6558622,
+      "file_name": "client.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/kqunxqwcybavr0tv0shqmyq2uq5i?response-content-disposition=attachment%3B%20filename%3D%22client.c%22%3B%20filename%2A%3DUTF-8%27%27client.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYVDAVYMV%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232245Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCIQCIb7npEKmQVtUaj38lEvc%2FF6TxPtq4w6rdDxqGNDueFAIgWTSTbeDn6d9e3G3o%2Bap2ZH2uAlSPB6ylysq6NSbbgvoqsgUISBADGgwwMTM2MTkyNzQ4NDkiDBQ8OkvHu8zBQQT9ASqPBaG0ovjFYfR6SwFZofm1XQl7T4vQ8HytdQDpcubwPk0u8cJkePhkkStBMGj6CCiHxz1Q4q0JI%2F42swVprHOaCveuG8Ak54OQjfMadUJ947yLy%2F2PVoICMTKpnKTkeYscqUBnnrhRE5PeuZQjvosg6hXviGBEnXP%2BjNr%2BijdAcJkUM2CfdE6y8yJyR%2FwoL3iPTLYeRZ40b2ogg%2B3rDMVozNqRD%2FuYhLD1R2nlPr7I2DrzLibU%2F8Vu%2F4N0cS4ijuGgVGn28uRWwT4wA8zHOhDKgQ%2BUSMRNrW0qGLycThgpOhua%2BBbHYdelrV99ypNHBw8zP%2F6y3%2FfVdJobxjqN5uAg06RvYgCcn8K27VehLSDmpWOJJgXRMh%2FbqWyKp3BIDTmEdJiADHPQ5U9BCTPR1miayN78XAfLvbqv8GojHrFtt%2Ba%2F3jho1oLUMZARr8KxApfEPZ3PP0H59CgSsq%2FUhvykLhM%2Bl1RXHROk58bfyPmAPKVFmBKB33XsIRW01X1GVfA3sfan6nZVMQOwDe0MgfkhkHSTHkVhnXdsOfQGDCRf6vDQB6nL2McXlLRluktCyG7NlvBb1ZhwmAs4CBUlXrrVP4TckGpfXCn3npqZoUsEajhR058%2FPZJ8LMyTl%2B%2F8LrpAllDQJM9wbp65th3mgfMiEknmhVRtlAI%2BokOAQbes0qGunRYzuBffpzyMoWNZ%2FUMLxnNDIrTyTWruB65qSq184NDkci%2Bt8%2FRACzkQbUlK3gmCzp84qJuBachlR%2Bjzj03TkE4LnBGqYgY0oYT93xHbZykn19zSRaiQizR4xjVsqtzaLCqmH1aPB4p%2FAQonZ2tgr%2BaeCARnrtxRPbV9jRn9kvjyKj3mMQIo3ug2HFjUQfQw4oT91AY6sQHLb3NGe6Esnf%2Fxe33IxDWPc4TqbronhW3B%2BcOxEB8TCOsY4Bmn9GlBRyYLZ3ej0vRTw5j2CF0oM8OFswvz1r3NQUgfR22wa4lrvOKK82KBjRonFWa2c%2FuyRdVyp3PTBDUk70XH6DiNGG1H1WRNQUrSv39q25RoAFCmDoaOdTzWXs6O8BUyfOp0bkuiQCI5TWzUD8xzfjOay11KPbaQB4iL%2FHhTJFM2nd2DDYKwBxccr7g%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b8420f9201a86df38060e929129984629ba1dcbb3f53dded985f7b0d8bb49da3",
+      "file_size": 1722,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6558627,
+      "file_name": "run-container.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/lwrlf0q6wjvh1pjbryfblntwv9sm?response-content-disposition=attachment%3B%20filename%3D%22run-container.sh%22%3B%20filename%2A%3DUTF-8%27%27run-container.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYVDAVYMV%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232245Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCIQCIb7npEKmQVtUaj38lEvc%2FF6TxPtq4w6rdDxqGNDueFAIgWTSTbeDn6d9e3G3o%2Bap2ZH2uAlSPB6ylysq6NSbbgvoqsgUISBADGgwwMTM2MTkyNzQ4NDkiDBQ8OkvHu8zBQQT9ASqPBaG0ovjFYfR6SwFZofm1XQl7T4vQ8HytdQDpcubwPk0u8cJkePhkkStBMGj6CCiHxz1Q4q0JI%2F42swVprHOaCveuG8Ak54OQjfMadUJ947yLy%2F2PVoICMTKpnKTkeYscqUBnnrhRE5PeuZQjvosg6hXviGBEnXP%2BjNr%2BijdAcJkUM2CfdE6y8yJyR%2FwoL3iPTLYeRZ40b2ogg%2B3rDMVozNqRD%2FuYhLD1R2nlPr7I2DrzLibU%2F8Vu%2F4N0cS4ijuGgVGn28uRWwT4wA8zHOhDKgQ%2BUSMRNrW0qGLycThgpOhua%2BBbHYdelrV99ypNHBw8zP%2F6y3%2FfVdJobxjqN5uAg06RvYgCcn8K27VehLSDmpWOJJgXRMh%2FbqWyKp3BIDTmEdJiADHPQ5U9BCTPR1miayN78XAfLvbqv8GojHrFtt%2Ba%2F3jho1oLUMZARr8KxApfEPZ3PP0H59CgSsq%2FUhvykLhM%2Bl1RXHROk58bfyPmAPKVFmBKB33XsIRW01X1GVfA3sfan6nZVMQOwDe0MgfkhkHSTHkVhnXdsOfQGDCRf6vDQB6nL2McXlLRluktCyG7NlvBb1ZhwmAs4CBUlXrrVP4TckGpfXCn3npqZoUsEajhR058%2FPZJ8LMyTl%2B%2F8LrpAllDQJM9wbp65th3mgfMiEknmhVRtlAI%2BokOAQbes0qGunRYzuBffpzyMoWNZ%2FUMLxnNDIrTyTWruB65qSq184NDkci%2Bt8%2FRACzkQbUlK3gmCzp84qJuBachlR%2Bjzj03TkE4LnBGqYgY0oYT93xHbZykn19zSRaiQizR4xjVsqtzaLCqmH1aPB4p%2FAQonZ2tgr%2BaeCARnrtxRPbV9jRn9kvjyKj3mMQIo3ug2HFjUQfQw4oT91AY6sQHLb3NGe6Esnf%2Fxe33IxDWPc4TqbronhW3B%2BcOxEB8TCOsY4Bmn9GlBRyYLZ3ej0vRTw5j2CF0oM8OFswvz1r3NQUgfR22wa4lrvOKK82KBjRonFWa2c%2FuyRdVyp3PTBDUk70XH6DiNGG1H1WRNQUrSv39q25RoAFCmDoaOdTzWXs6O8BUyfOp0bkuiQCI5TWzUD8xzfjOay11KPbaQB4iL%2FHhTJFM2nd2DDYKwBxccr7g%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=da54736f939b944ec84cf293fc32a28935f458807fa028e8a11106c06b02572d",
+      "file_size": 253,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6558628,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/20lwuu04fnvlq7k1izcv0oe6eg6b?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYVDAVYMV%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232245Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCIQCIb7npEKmQVtUaj38lEvc%2FF6TxPtq4w6rdDxqGNDueFAIgWTSTbeDn6d9e3G3o%2Bap2ZH2uAlSPB6ylysq6NSbbgvoqsgUISBADGgwwMTM2MTkyNzQ4NDkiDBQ8OkvHu8zBQQT9ASqPBaG0ovjFYfR6SwFZofm1XQl7T4vQ8HytdQDpcubwPk0u8cJkePhkkStBMGj6CCiHxz1Q4q0JI%2F42swVprHOaCveuG8Ak54OQjfMadUJ947yLy%2F2PVoICMTKpnKTkeYscqUBnnrhRE5PeuZQjvosg6hXviGBEnXP%2BjNr%2BijdAcJkUM2CfdE6y8yJyR%2FwoL3iPTLYeRZ40b2ogg%2B3rDMVozNqRD%2FuYhLD1R2nlPr7I2DrzLibU%2F8Vu%2F4N0cS4ijuGgVGn28uRWwT4wA8zHOhDKgQ%2BUSMRNrW0qGLycThgpOhua%2BBbHYdelrV99ypNHBw8zP%2F6y3%2FfVdJobxjqN5uAg06RvYgCcn8K27VehLSDmpWOJJgXRMh%2FbqWyKp3BIDTmEdJiADHPQ5U9BCTPR1miayN78XAfLvbqv8GojHrFtt%2Ba%2F3jho1oLUMZARr8KxApfEPZ3PP0H59CgSsq%2FUhvykLhM%2Bl1RXHROk58bfyPmAPKVFmBKB33XsIRW01X1GVfA3sfan6nZVMQOwDe0MgfkhkHSTHkVhnXdsOfQGDCRf6vDQB6nL2McXlLRluktCyG7NlvBb1ZhwmAs4CBUlXrrVP4TckGpfXCn3npqZoUsEajhR058%2FPZJ8LMyTl%2B%2F8LrpAllDQJM9wbp65th3mgfMiEknmhVRtlAI%2BokOAQbes0qGunRYzuBffpzyMoWNZ%2FUMLxnNDIrTyTWruB65qSq184NDkci%2Bt8%2FRACzkQbUlK3gmCzp84qJuBachlR%2Bjzj03TkE4LnBGqYgY0oYT93xHbZykn19zSRaiQizR4xjVsqtzaLCqmH1aPB4p%2FAQonZ2tgr%2BaeCARnrtxRPbV9jRn9kvjyKj3mMQIo3ug2HFjUQfQw4oT91AY6sQHLb3NGe6Esnf%2Fxe33IxDWPc4TqbronhW3B%2BcOxEB8TCOsY4Bmn9GlBRyYLZ3ej0vRTw5j2CF0oM8OFswvz1r3NQUgfR22wa4lrvOKK82KBjRonFWa2c%2FuyRdVyp3PTBDUk70XH6DiNGG1H1WRNQUrSv39q25RoAFCmDoaOdTzWXs6O8BUyfOp0bkuiQCI5TWzUD8xzfjOay11KPbaQB4iL%2FHhTJFM2nd2DDYKwBxccr7g%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=860effb9f966c12ba5d4fd5a225071a8affc7a8124d069184312b1faa5d6ac1a",
+      "file_size": 206,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6558631,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/gx355ona5dq5o7rbnlpo228jk6jb?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYVDAVYMV%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232245Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCIQCIb7npEKmQVtUaj38lEvc%2FF6TxPtq4w6rdDxqGNDueFAIgWTSTbeDn6d9e3G3o%2Bap2ZH2uAlSPB6ylysq6NSbbgvoqsgUISBADGgwwMTM2MTkyNzQ4NDkiDBQ8OkvHu8zBQQT9ASqPBaG0ovjFYfR6SwFZofm1XQl7T4vQ8HytdQDpcubwPk0u8cJkePhkkStBMGj6CCiHxz1Q4q0JI%2F42swVprHOaCveuG8Ak54OQjfMadUJ947yLy%2F2PVoICMTKpnKTkeYscqUBnnrhRE5PeuZQjvosg6hXviGBEnXP%2BjNr%2BijdAcJkUM2CfdE6y8yJyR%2FwoL3iPTLYeRZ40b2ogg%2B3rDMVozNqRD%2FuYhLD1R2nlPr7I2DrzLibU%2F8Vu%2F4N0cS4ijuGgVGn28uRWwT4wA8zHOhDKgQ%2BUSMRNrW0qGLycThgpOhua%2BBbHYdelrV99ypNHBw8zP%2F6y3%2FfVdJobxjqN5uAg06RvYgCcn8K27VehLSDmpWOJJgXRMh%2FbqWyKp3BIDTmEdJiADHPQ5U9BCTPR1miayN78XAfLvbqv8GojHrFtt%2Ba%2F3jho1oLUMZARr8KxApfEPZ3PP0H59CgSsq%2FUhvykLhM%2Bl1RXHROk58bfyPmAPKVFmBKB33XsIRW01X1GVfA3sfan6nZVMQOwDe0MgfkhkHSTHkVhnXdsOfQGDCRf6vDQB6nL2McXlLRluktCyG7NlvBb1ZhwmAs4CBUlXrrVP4TckGpfXCn3npqZoUsEajhR058%2FPZJ8LMyTl%2B%2F8LrpAllDQJM9wbp65th3mgfMiEknmhVRtlAI%2BokOAQbes0qGunRYzuBffpzyMoWNZ%2FUMLxnNDIrTyTWruB65qSq184NDkci%2Bt8%2FRACzkQbUlK3gmCzp84qJuBachlR%2Bjzj03TkE4LnBGqYgY0oYT93xHbZykn19zSRaiQizR4xjVsqtzaLCqmH1aPB4p%2FAQonZ2tgr%2BaeCARnrtxRPbV9jRn9kvjyKj3mMQIo3ug2HFjUQfQw4oT91AY6sQHLb3NGe6Esnf%2Fxe33IxDWPc4TqbronhW3B%2BcOxEB8TCOsY4Bmn9GlBRyYLZ3ej0vRTw5j2CF0oM8OFswvz1r3NQUgfR22wa4lrvOKK82KBjRonFWa2c%2FuyRdVyp3PTBDUk70XH6DiNGG1H1WRNQUrSv39q25RoAFCmDoaOdTzWXs6O8BUyfOp0bkuiQCI5TWzUD8xzfjOay11KPbaQB4iL%2FHhTJFM2nd2DDYKwBxccr7g%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=32e5d8b8e04629feb85e37200a15739654f9cc29bdaa790f8cdf675457f9e681",
+      "file_size": 997,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6558632,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/pg0hg3aowbjt089g4chok1mdm07y?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=text%2Fx-python-script&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYVDAVYMV%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232245Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCIQCIb7npEKmQVtUaj38lEvc%2FF6TxPtq4w6rdDxqGNDueFAIgWTSTbeDn6d9e3G3o%2Bap2ZH2uAlSPB6ylysq6NSbbgvoqsgUISBADGgwwMTM2MTkyNzQ4NDkiDBQ8OkvHu8zBQQT9ASqPBaG0ovjFYfR6SwFZofm1XQl7T4vQ8HytdQDpcubwPk0u8cJkePhkkStBMGj6CCiHxz1Q4q0JI%2F42swVprHOaCveuG8Ak54OQjfMadUJ947yLy%2F2PVoICMTKpnKTkeYscqUBnnrhRE5PeuZQjvosg6hXviGBEnXP%2BjNr%2BijdAcJkUM2CfdE6y8yJyR%2FwoL3iPTLYeRZ40b2ogg%2B3rDMVozNqRD%2FuYhLD1R2nlPr7I2DrzLibU%2F8Vu%2F4N0cS4ijuGgVGn28uRWwT4wA8zHOhDKgQ%2BUSMRNrW0qGLycThgpOhua%2BBbHYdelrV99ypNHBw8zP%2F6y3%2FfVdJobxjqN5uAg06RvYgCcn8K27VehLSDmpWOJJgXRMh%2FbqWyKp3BIDTmEdJiADHPQ5U9BCTPR1miayN78XAfLvbqv8GojHrFtt%2Ba%2F3jho1oLUMZARr8KxApfEPZ3PP0H59CgSsq%2FUhvykLhM%2Bl1RXHROk58bfyPmAPKVFmBKB33XsIRW01X1GVfA3sfan6nZVMQOwDe0MgfkhkHSTHkVhnXdsOfQGDCRf6vDQB6nL2McXlLRluktCyG7NlvBb1ZhwmAs4CBUlXrrVP4TckGpfXCn3npqZoUsEajhR058%2FPZJ8LMyTl%2B%2F8LrpAllDQJM9wbp65th3mgfMiEknmhVRtlAI%2BokOAQbes0qGunRYzuBffpzyMoWNZ%2FUMLxnNDIrTyTWruB65qSq184NDkci%2Bt8%2FRACzkQbUlK3gmCzp84qJuBachlR%2Bjzj03TkE4LnBGqYgY0oYT93xHbZykn19zSRaiQizR4xjVsqtzaLCqmH1aPB4p%2FAQonZ2tgr%2BaeCARnrtxRPbV9jRn9kvjyKj3mMQIo3ug2HFjUQfQw4oT91AY6sQHLb3NGe6Esnf%2Fxe33IxDWPc4TqbronhW3B%2BcOxEB8TCOsY4Bmn9GlBRyYLZ3ej0vRTw5j2CF0oM8OFswvz1r3NQUgfR22wa4lrvOKK82KBjRonFWa2c%2FuyRdVyp3PTBDUk70XH6DiNGG1H1WRNQUrSv39q25RoAFCmDoaOdTzWXs6O8BUyfOp0bkuiQCI5TWzUD8xzfjOay11KPbaQB4iL%2FHhTJFM2nd2DDYKwBxccr7g%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f182eed6267824a5c7ca6579c61ae28786be3b935b2b72251aa3270907a2e3b8",
+      "file_size": 1306,
+      "type": "text/x-python-script",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "al-theeb"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

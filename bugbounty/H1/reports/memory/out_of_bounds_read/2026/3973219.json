@@ -1,0 +1,149 @@
+{
+  "id": 3973219,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMjE5",
+  "url": "https://hackerone.com/reports/3973219",
+  "title": "57: Heap out-of-bounds read in `curl_easy_escape_ccsid()` / `curl_easy_unescape_ccsid()`",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-27T09:41:06.594Z",
+  "submitted_at": "2026-08-27T09:41:06.905Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-07T21:06:24.672Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-05T20:54:25.144Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`curl_easy_escape_ccsid()` and `curl_easy_unescape_ccsid()` in `projects/OS400/ccsidcurl.c` discard the converted byte count returned by `dynconvert()` and pass `0` to the downstream `curl_easy_escape()` / `curl_easy_unescape()`. When the caller supplies a positive explicit `length` with non-NUL-terminated input, `dynconvert()` does not append a NUL and may shrink the allocation to exactly the converted size. The downstream `0` triggers `strlen()`, which reads past the allocation boundary.\n\nPresent from `curl-7_17_0` through at least `curl-8_21_0`. Tested at commit `c2676bf9e639e31e44b12a2cc82cf2046231b056`.\n\n## Root cause\n\nIn `projects/OS400/ccsidcurl.c`, `dynconvert()` only appends a NUL when `slen < 0` (lines 180-193). With positive `slen`, it converts exactly that many bytes, then `realloc`s down to the exact converted count (line 196).\n\nBoth wrappers discard this length:\n\n```c\n// curl_easy_escape_ccsid — line 283\ns = dynconvert(ASCII_CCSID, string, length ? length : -1, sccsid, NULL);\n// ...\nd = curl_easy_escape(handle, s, 0);   // line 288 — 0 means strlen()\n\n// curl_easy_unescape_ccsid — line 312\ns = dynconvert(ASCII_CCSID, string, length ? length : -1, sccsid, NULL);\n// ...\nd = curl_easy_unescape(handle, s, 0, outlength);  // line 317\n```\n\n`curl_easy_escape()` at `lib/escape.c:59` and `Curl_urldecode()` at `lib/escape.c:115` both resolve `0` via `strlen()`, scanning past the tight allocation into adjacent heap memory.\n\n## Affected versions:\n\n IBM i/OS400-specific wrappers in curl 7.17.0 through 8.21.0, plus affected 8.22.0 prerelease/development versions.\n\n## Reproduction\n\n1. Build an affected curl release, starting with 7.17.0, including the IBM i CCSID compatibility wrappers from `ccsidcurl.c`.\n2. Enable AddressSanitizer or an equivalent heap-bounds detector if the target environment supports it.\n3. Write a small application that calls the public `curl_easy_escape_ccsid()` and `curl_easy_unescape_ccsid()` wrappers.\n4. Allocate an input buffer containing a few ordinary bytes with no trailing NUL terminator, and pass its exact positive byte length to the wrapper.\n5. Use matching source and destination CCSIDs, such as CCSID 819 to CCSID 819, to exercise the deterministic copy path without making the result depend on a complex character conversion.\n6. Invoke `curl_easy_escape_ccsid()` with the bounded, nonterminated input.\n7. Observe that the internal conversion allocates exactly the converted byte count and does not append a NUL because the caller supplied a positive length.\n8. Confirm that the wrapper discards that converted length and calls `curl_easy_escape()` with length zero.\n9. Observe the vulnerable result: the zero length causes `strlen()` to scan beyond the converted heap allocation, and the memory checker reports a heap out-of-bounds read.\n10. Repeat the test independently with `curl_easy_unescape_ccsid()` and an output-length pointer.\n11. Confirm that the unescape path also passes zero downstream and produces an out-of-bounds read through the URL-decoding path.\n12. As a control, use a NUL-terminated buffer and verify that the accidental `strlen()` dependency no longer crosses the allocation boundary.\n13. If native IBM i instrumentation is unavailable, compile the actual IBM i wrapper source in a sanitizer-enabled environment with only the minimum platform declarations needed for compilation. Keep the tested path on the same-CCSID copy branch so platform conversion stubs are not executed.\n14. Confirm a fix by requesting the converted byte count from the conversion helper and forwarding that positive length to `curl_easy_escape()` and `curl_easy_unescape()`.\n15. Repeat both nonterminated-input tests and verify that each function processes exactly the caller-specified bytes without a sanitizer finding.\n16. Separately test embedded-NUL input to ensure the final repair consistently preserves the documented bounded-input semantics across both conversion stages.\n\n### Expected result\n\nWhen the caller supplies a positive length, both CCSID wrappers must process exactly that many bytes without requiring or searching for a NUL terminator.\n\n### Vulnerable result\n\nThe wrappers discard the known converted length and pass zero to the underlying APIs. Zero requests `strlen()`-based length discovery, causing a read beyond the exact-sized nonterminated conversion buffer.\n\n\n## Suggested fix\n\nRequest the converted length through `dynconvert()`'s `olen` parameter and forward it:\n\n```diff\n--- a/projects/OS400/ccsidcurl.c\n+++ b/projects/OS400/ccsidcurl.c\n@@ -273,6 +273,7 @@\n {\n   char *s;\n   char *d;\n+  int converted_length;\n\n   if(!string) {\n@@ -280,12 +281,13 @@\n     return (char *)NULL;\n   }\n\n-  s = dynconvert(ASCII_CCSID, string, length ? length : -1, sccsid, NULL);\n+  s = dynconvert(ASCII_CCSID, string, length ? length : -1, sccsid,\n+                 &converted_length);\n\n   if(!s)\n     return (char *)NULL;\n\n-  d = curl_easy_escape(handle, s, 0);\n+  d = curl_easy_escape(handle, s, converted_length);\n   free(s);\n```\n\nSame change for `curl_easy_unescape_ccsid()` (pass `converted_length` instead of `0`).\n\n## Impact\n\nTriggering requires the IBM i CCSID API, a positive explicit input length, and non-NUL-terminated converted output. The consequence is a heap out-of-bounds read: the escape path may return percent-encoded bytes from adjacent heap memory; the unescape path may process bytes beyond the intended boundary. I have not reproduced the overread natively on IBM i or identified a remote application path through these wrappers. I would consider **Low** the maximum plausible severity given the platform-specific API, application-controlled input, and undemonstrated native impact.\n\n## Impact\n\n## Summary:\nAn application using the IBM i CCSID escape wrappers with attacker-influenced bounded input may read beyond the converted heap allocation. This can crash the process or cause adjacent heap bytes to be incorporated into escaped output, potentially disclosing process memory; however, native IBM i disclosure and a concrete remote application path have not been demonstrated.",
+  "weakness": {
+    "id": 8,
+    "name": "Out-of-bounds Read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6563310,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/khlcbpkvdoa7hmrv5dkov8wd6ytm?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ72KMEMNN%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232244Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCIQC6X0P22ROD3lDTIM%2BHmoYcq7iRgCDaih%2BdZY7RNPnnRAIgZmhtefZd%2Fcy81hFBHOmjNGC1KSV7%2BaKkWf1xWtW%2BMn8qsQUISBADGgwwMTM2MTkyNzQ4NDkiDGFskcJzLVJY99Al9iqOBdNQh7Rwr%2B7iKBRE%2BD%2BYB3reZiIDlkEF%2BteN5q2UDMndzef925OmQ0GvEN1tcsFXLucCy7lfC0IRNVFpBDethkoc1nK6DXfZZM%2Bk8oB4pStop%2FXhghsYqIS4QXV852fePyRtFX6e0QIjNS2EFfdJjsALnlMp6gu%2FbhqhLGGMvcSpxvDWMzI4xCu5WkaFSe43r40yzsSbvoDKROGwVut5X0jmyVCxVr15dOHB0qPCOyUjqjT6ajlWTRaTaynrKYJCMddFpv9datWFWX%2BSaRQxP5mQdRnr5ZgQfVmdsEw8H3B4ICwRrO%2BjX2nv50Vr82%2Ff87jtRHM%2Bw1%2Br9LGXBzgHO4B2JnOTTiySW9imMTXOEHWODyJ29BWYWNC4mv0X6eLcE2IGyop52EtzzHy7AKNhghiny1yI%2F%2FAzViVmM7gmWOu51IRzuaT2nkwQqQBUbPPE0U26tQaPQkANGWWlF5%2BEbOVHwxxk9RDEfzocNi480r%2BoSDAt3vxKLxBeIGc9VsSsXvoLAxb3QWmyI7%2BH9r5CWHtteUoBHQUOCSe7WBgTsegjsBj7ySM5841QwLsEv8%2F7om6vfjX4XGyiGDh8nFkdL62rlkVYEqE67TeI%2BRz2obUfmw1RTXra%2Bo5aer1D7K72MHq6B57n%2BblIis%2FG1ujUPXhytE2aaxTf9TF795JPaaa%2BNWlvZX5xzChIHgPVKzRpGycwzPEnB7cYYpOF19lQOPkGZyoUiW%2BqHRcZB5K2KA5vxcxDOMVomTR5EyAkwvKGK%2FXzOnx%2FrXP0L8vgXJ7mhDvuXcBzY9reL973lnZASjpGlb7Nr8HA%2F2yfq4dq%2Bh%2FFBrPlUlynubgdEGwz3Gqgnk90DOT0idS6kf7Su8qA3zC4%2FfzUBjqxAWY7qjslap9kg6v7yD32sp%2FAeZjg6AVcWWEYOoPpWcHdvc%2B0y6EkWC3fxWMTvhNc9FhzUU%2FL16NAszuPoH5M0VKq9EcaIJwaEeX1GkiA1ZCWDcilUTHOB7LQoTEomr0I3Br3y1C%2BI7G58EUjEbrY9CzAILYXQxYejsTFvmXmR1lWMoRxfSlMEC1SLvJ221XBiPfYQgZDkBv4NMp%2B%2B53UEEea%2B0WoL4P2HGdYFfh2ySUCWg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6d92eb15ad9c57fc698b7090a3ff59442ad3f8fc880533abdc54c4f0706f001c",
+      "file_size": 2476,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6563311,
+      "file_name": "iconv.h",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9o3faa95n14jhyfjqf31mqj1wp0z?response-content-disposition=attachment%3B%20filename%3D%22iconv.h%22%3B%20filename%2A%3DUTF-8%27%27iconv.h&response-content-type=text%2Fx-chdr&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ72KMEMNN%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232244Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCIQC6X0P22ROD3lDTIM%2BHmoYcq7iRgCDaih%2BdZY7RNPnnRAIgZmhtefZd%2Fcy81hFBHOmjNGC1KSV7%2BaKkWf1xWtW%2BMn8qsQUISBADGgwwMTM2MTkyNzQ4NDkiDGFskcJzLVJY99Al9iqOBdNQh7Rwr%2B7iKBRE%2BD%2BYB3reZiIDlkEF%2BteN5q2UDMndzef925OmQ0GvEN1tcsFXLucCy7lfC0IRNVFpBDethkoc1nK6DXfZZM%2Bk8oB4pStop%2FXhghsYqIS4QXV852fePyRtFX6e0QIjNS2EFfdJjsALnlMp6gu%2FbhqhLGGMvcSpxvDWMzI4xCu5WkaFSe43r40yzsSbvoDKROGwVut5X0jmyVCxVr15dOHB0qPCOyUjqjT6ajlWTRaTaynrKYJCMddFpv9datWFWX%2BSaRQxP5mQdRnr5ZgQfVmdsEw8H3B4ICwRrO%2BjX2nv50Vr82%2Ff87jtRHM%2Bw1%2Br9LGXBzgHO4B2JnOTTiySW9imMTXOEHWODyJ29BWYWNC4mv0X6eLcE2IGyop52EtzzHy7AKNhghiny1yI%2F%2FAzViVmM7gmWOu51IRzuaT2nkwQqQBUbPPE0U26tQaPQkANGWWlF5%2BEbOVHwxxk9RDEfzocNi480r%2BoSDAt3vxKLxBeIGc9VsSsXvoLAxb3QWmyI7%2BH9r5CWHtteUoBHQUOCSe7WBgTsegjsBj7ySM5841QwLsEv8%2F7om6vfjX4XGyiGDh8nFkdL62rlkVYEqE67TeI%2BRz2obUfmw1RTXra%2Bo5aer1D7K72MHq6B57n%2BblIis%2FG1ujUPXhytE2aaxTf9TF795JPaaa%2BNWlvZX5xzChIHgPVKzRpGycwzPEnB7cYYpOF19lQOPkGZyoUiW%2BqHRcZB5K2KA5vxcxDOMVomTR5EyAkwvKGK%2FXzOnx%2FrXP0L8vgXJ7mhDvuXcBzY9reL973lnZASjpGlb7Nr8HA%2F2yfq4dq%2Bh%2FFBrPlUlynubgdEGwz3Gqgnk90DOT0idS6kf7Su8qA3zC4%2FfzUBjqxAWY7qjslap9kg6v7yD32sp%2FAeZjg6AVcWWEYOoPpWcHdvc%2B0y6EkWC3fxWMTvhNc9FhzUU%2FL16NAszuPoH5M0VKq9EcaIJwaEeX1GkiA1ZCWDcilUTHOB7LQoTEomr0I3Br3y1C%2BI7G58EUjEbrY9CzAILYXQxYejsTFvmXmR1lWMoRxfSlMEC1SLvJ221XBiPfYQgZDkBv4NMp%2B%2B53UEEea%2B0WoL4P2HGdYFfh2ySUCWg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2971450fc5c31ae0c312bebbd854d78a9c333444d9027ecea1008824e7d0df9e",
+      "file_size": 871,
+      "type": "text/x-chdr",
+      "moderated": null
+    },
+    {
+      "id": 6563312,
+      "file_name": "poc.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/t0tpidjy48ln0gho98g12lutkhot?response-content-disposition=attachment%3B%20filename%3D%22poc.c%22%3B%20filename%2A%3DUTF-8%27%27poc.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ72KMEMNN%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232244Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCIQC6X0P22ROD3lDTIM%2BHmoYcq7iRgCDaih%2BdZY7RNPnnRAIgZmhtefZd%2Fcy81hFBHOmjNGC1KSV7%2BaKkWf1xWtW%2BMn8qsQUISBADGgwwMTM2MTkyNzQ4NDkiDGFskcJzLVJY99Al9iqOBdNQh7Rwr%2B7iKBRE%2BD%2BYB3reZiIDlkEF%2BteN5q2UDMndzef925OmQ0GvEN1tcsFXLucCy7lfC0IRNVFpBDethkoc1nK6DXfZZM%2Bk8oB4pStop%2FXhghsYqIS4QXV852fePyRtFX6e0QIjNS2EFfdJjsALnlMp6gu%2FbhqhLGGMvcSpxvDWMzI4xCu5WkaFSe43r40yzsSbvoDKROGwVut5X0jmyVCxVr15dOHB0qPCOyUjqjT6ajlWTRaTaynrKYJCMddFpv9datWFWX%2BSaRQxP5mQdRnr5ZgQfVmdsEw8H3B4ICwRrO%2BjX2nv50Vr82%2Ff87jtRHM%2Bw1%2Br9LGXBzgHO4B2JnOTTiySW9imMTXOEHWODyJ29BWYWNC4mv0X6eLcE2IGyop52EtzzHy7AKNhghiny1yI%2F%2FAzViVmM7gmWOu51IRzuaT2nkwQqQBUbPPE0U26tQaPQkANGWWlF5%2BEbOVHwxxk9RDEfzocNi480r%2BoSDAt3vxKLxBeIGc9VsSsXvoLAxb3QWmyI7%2BH9r5CWHtteUoBHQUOCSe7WBgTsegjsBj7ySM5841QwLsEv8%2F7om6vfjX4XGyiGDh8nFkdL62rlkVYEqE67TeI%2BRz2obUfmw1RTXra%2Bo5aer1D7K72MHq6B57n%2BblIis%2FG1ujUPXhytE2aaxTf9TF795JPaaa%2BNWlvZX5xzChIHgPVKzRpGycwzPEnB7cYYpOF19lQOPkGZyoUiW%2BqHRcZB5K2KA5vxcxDOMVomTR5EyAkwvKGK%2FXzOnx%2FrXP0L8vgXJ7mhDvuXcBzY9reL973lnZASjpGlb7Nr8HA%2F2yfq4dq%2Bh%2FFBrPlUlynubgdEGwz3Gqgnk90DOT0idS6kf7Su8qA3zC4%2FfzUBjqxAWY7qjslap9kg6v7yD32sp%2FAeZjg6AVcWWEYOoPpWcHdvc%2B0y6EkWC3fxWMTvhNc9FhzUU%2FL16NAszuPoH5M0VKq9EcaIJwaEeX1GkiA1ZCWDcilUTHOB7LQoTEomr0I3Br3y1C%2BI7G58EUjEbrY9CzAILYXQxYejsTFvmXmR1lWMoRxfSlMEC1SLvJ221XBiPfYQgZDkBv4NMp%2B%2B53UEEea%2B0WoL4P2HGdYFfh2ySUCWg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2d34a9f77ed5f20a19432d4f1ead2482e39cf350b264ed6a48b11d189be6cd5f",
+      "file_size": 1164,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6563313,
+      "file_name": "run-container.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/rkxrbtxtnkcvg2r6wtho7yk62752?response-content-disposition=attachment%3B%20filename%3D%22run-container.sh%22%3B%20filename%2A%3DUTF-8%27%27run-container.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ72KMEMNN%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232244Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCIQC6X0P22ROD3lDTIM%2BHmoYcq7iRgCDaih%2BdZY7RNPnnRAIgZmhtefZd%2Fcy81hFBHOmjNGC1KSV7%2BaKkWf1xWtW%2BMn8qsQUISBADGgwwMTM2MTkyNzQ4NDkiDGFskcJzLVJY99Al9iqOBdNQh7Rwr%2B7iKBRE%2BD%2BYB3reZiIDlkEF%2BteN5q2UDMndzef925OmQ0GvEN1tcsFXLucCy7lfC0IRNVFpBDethkoc1nK6DXfZZM%2Bk8oB4pStop%2FXhghsYqIS4QXV852fePyRtFX6e0QIjNS2EFfdJjsALnlMp6gu%2FbhqhLGGMvcSpxvDWMzI4xCu5WkaFSe43r40yzsSbvoDKROGwVut5X0jmyVCxVr15dOHB0qPCOyUjqjT6ajlWTRaTaynrKYJCMddFpv9datWFWX%2BSaRQxP5mQdRnr5ZgQfVmdsEw8H3B4ICwRrO%2BjX2nv50Vr82%2Ff87jtRHM%2Bw1%2Br9LGXBzgHO4B2JnOTTiySW9imMTXOEHWODyJ29BWYWNC4mv0X6eLcE2IGyop52EtzzHy7AKNhghiny1yI%2F%2FAzViVmM7gmWOu51IRzuaT2nkwQqQBUbPPE0U26tQaPQkANGWWlF5%2BEbOVHwxxk9RDEfzocNi480r%2BoSDAt3vxKLxBeIGc9VsSsXvoLAxb3QWmyI7%2BH9r5CWHtteUoBHQUOCSe7WBgTsegjsBj7ySM5841QwLsEv8%2F7om6vfjX4XGyiGDh8nFkdL62rlkVYEqE67TeI%2BRz2obUfmw1RTXra%2Bo5aer1D7K72MHq6B57n%2BblIis%2FG1ujUPXhytE2aaxTf9TF795JPaaa%2BNWlvZX5xzChIHgPVKzRpGycwzPEnB7cYYpOF19lQOPkGZyoUiW%2BqHRcZB5K2KA5vxcxDOMVomTR5EyAkwvKGK%2FXzOnx%2FrXP0L8vgXJ7mhDvuXcBzY9reL973lnZASjpGlb7Nr8HA%2F2yfq4dq%2Bh%2FFBrPlUlynubgdEGwz3Gqgnk90DOT0idS6kf7Su8qA3zC4%2FfzUBjqxAWY7qjslap9kg6v7yD32sp%2FAeZjg6AVcWWEYOoPpWcHdvc%2B0y6EkWC3fxWMTvhNc9FhzUU%2FL16NAszuPoH5M0VKq9EcaIJwaEeX1GkiA1ZCWDcilUTHOB7LQoTEomr0I3Br3y1C%2BI7G58EUjEbrY9CzAILYXQxYejsTFvmXmR1lWMoRxfSlMEC1SLvJ221XBiPfYQgZDkBv4NMp%2B%2B53UEEea%2B0WoL4P2HGdYFfh2ySUCWg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=deb6f5d31df1e05f84db3caa00e1db2bc660854ddaa0dbc5f87d784411f7fe08",
+      "file_size": 615,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563314,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/gom1jo81u5n0nnwsr8ggy94pew8c?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ72KMEMNN%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232244Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCIQC6X0P22ROD3lDTIM%2BHmoYcq7iRgCDaih%2BdZY7RNPnnRAIgZmhtefZd%2Fcy81hFBHOmjNGC1KSV7%2BaKkWf1xWtW%2BMn8qsQUISBADGgwwMTM2MTkyNzQ4NDkiDGFskcJzLVJY99Al9iqOBdNQh7Rwr%2B7iKBRE%2BD%2BYB3reZiIDlkEF%2BteN5q2UDMndzef925OmQ0GvEN1tcsFXLucCy7lfC0IRNVFpBDethkoc1nK6DXfZZM%2Bk8oB4pStop%2FXhghsYqIS4QXV852fePyRtFX6e0QIjNS2EFfdJjsALnlMp6gu%2FbhqhLGGMvcSpxvDWMzI4xCu5WkaFSe43r40yzsSbvoDKROGwVut5X0jmyVCxVr15dOHB0qPCOyUjqjT6ajlWTRaTaynrKYJCMddFpv9datWFWX%2BSaRQxP5mQdRnr5ZgQfVmdsEw8H3B4ICwRrO%2BjX2nv50Vr82%2Ff87jtRHM%2Bw1%2Br9LGXBzgHO4B2JnOTTiySW9imMTXOEHWODyJ29BWYWNC4mv0X6eLcE2IGyop52EtzzHy7AKNhghiny1yI%2F%2FAzViVmM7gmWOu51IRzuaT2nkwQqQBUbPPE0U26tQaPQkANGWWlF5%2BEbOVHwxxk9RDEfzocNi480r%2BoSDAt3vxKLxBeIGc9VsSsXvoLAxb3QWmyI7%2BH9r5CWHtteUoBHQUOCSe7WBgTsegjsBj7ySM5841QwLsEv8%2F7om6vfjX4XGyiGDh8nFkdL62rlkVYEqE67TeI%2BRz2obUfmw1RTXra%2Bo5aer1D7K72MHq6B57n%2BblIis%2FG1ujUPXhytE2aaxTf9TF795JPaaa%2BNWlvZX5xzChIHgPVKzRpGycwzPEnB7cYYpOF19lQOPkGZyoUiW%2BqHRcZB5K2KA5vxcxDOMVomTR5EyAkwvKGK%2FXzOnx%2FrXP0L8vgXJ7mhDvuXcBzY9reL973lnZASjpGlb7Nr8HA%2F2yfq4dq%2Bh%2FFBrPlUlynubgdEGwz3Gqgnk90DOT0idS6kf7Su8qA3zC4%2FfzUBjqxAWY7qjslap9kg6v7yD32sp%2FAeZjg6AVcWWEYOoPpWcHdvc%2B0y6EkWC3fxWMTvhNc9FhzUU%2FL16NAszuPoH5M0VKq9EcaIJwaEeX1GkiA1ZCWDcilUTHOB7LQoTEomr0I3Br3y1C%2BI7G58EUjEbrY9CzAILYXQxYejsTFvmXmR1lWMoRxfSlMEC1SLvJ221XBiPfYQgZDkBv4NMp%2B%2B53UEEea%2B0WoL4P2HGdYFfh2ySUCWg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=9149f3d38c0853e2b78050fee210f7364f1132e8997a8666bed0cb65394fd82d",
+      "file_size": 207,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "al-theeb"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,150 @@
+{
+  "id": 3973213,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMjEz",
+  "url": "https://hackerone.com/reports/3973213",
+  "title": "54: Rejected HTTP/2 push destroys MIME callback state still used by parent (use-after-free)",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-27T09:38:00.747Z",
+  "submitted_at": "2026-08-27T09:38:00.980Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-07T21:06:36.208Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-05T20:54:42.224Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`push_promise()` in `lib/http2.c` duplicates the parent easy handle **before** validating the pushed URL. When validation fails (e.g. unsupported scheme), `discard_newhandle()` destroys the duplicate. For callback-backed MIME uploads, `Curl_mime_duppart()` copies the same `readfunc`, `freefunc`, and `arg` pointer, so destroying the duplicate calls `freefunc(arg)` while the parent still holds and reads from that same `arg`. The `CURLMOPT_PUSHFUNCTION` callback is never invoked for the rejected push, so the application has no opportunity to add a reference. A malicious HTTP/2 server can therefore trigger a heap-use-after-free in the parent's MIME read callback.\n\n## Root cause\n\nIn `push_promise()` (lib/http2.c), the ordering is:\n\n1. `h2_duphandle()` → `curl_easy_duphandle()` → `dupset()` → `Curl_mime_duppart()` — duplicates the MIME tree, copying callback `arg`/`freefunc` as-is for `MIMEKIND_CALLBACK` parts.\n2. `set_transfer_url()` — validates the `:scheme`/`:authority`/`:path` from the PUSH_PROMISE headers.\n3. On validation failure: `discard_newhandle()` → `Curl_close()` → `Curl_mime_cleanpart()` → `cleanup_part_content()` → `freefunc(arg)`.\n4. The push callback at line 827 is never reached; the application cannot account for this hidden duplicate.\n\n`curl_mime_data_cb(3)` documents that duplicated handles share `arg` and call `freefunc` for each copy, and `CURLMOPT_PUSHFUNCTION(3)` documents that the pushed handle is duplicated from the parent. An application's defense is to add a reference in the push callback — but that callback is skipped for URL-invalid pushes.\n\n## Affected versions\n\ncurl 7.77.0 through 8.21.0, plus affected 8.22.0 prerelease/development versions.\n\n## Impact\n\nA malicious HTTP/2 server triggers a heap-use-after-free in an application that uses `CURLMOPT_PUSHFUNCTION` with a callback-backed MIME upload. The demonstrated result is memory corruption and crash. Exploitability beyond denial of service was not established. The required combination of opt-in features (server push + MIME callback uploads with `freefunc` ownership) limits the attack surface.\n\n## Reproduction\n\n1. Build an affected curl release, starting with 7.77.0, with HTTP/2 server-push support and AddressSanitizer enabled.\n2. Start an HTTP/2 server that accepts a request and can send a crafted `PUSH_PROMISE` while the parent transfer remains active.\n3. Create a libcurl multi handle and register a `CURLMOPT_PUSHFUNCTION` callback.\n4. Allocate a heap-backed upload-state object with an explicit reference count initialized for the parent transfer.\n5. Create a callback-backed MIME part with `curl_mime_data_cb()`, using the allocated state as its callback argument and supplying read, seek, and free callbacks.\n6. Make the MIME read callback pause on its first invocation so that the parent easy handle remains alive while the server push is processed.\n7. In the push callback, increment the shared MIME state's reference count for the duplicated pushed handle, then deny the push. This models the ownership accounting available through the documented API.\n8. Add the parent easy handle to the multi handle and begin the MIME upload over HTTP/2.\n9. After the parent pauses, have the server send a syntactically formed `PUSH_PROMISE` whose promised URL curl rejects before invoking the application push callback, such as one with an unsupported scheme.\n10. Observe that curl first duplicates the parent easy handle and its callback-backed MIME tree, including the same callback argument and free function.\n11. Confirm that URL validation then fails, the hidden duplicate is destroyed, and its MIME cleanup invokes the shared free callback.\n12. Confirm that the application push callback was never called and therefore had no opportunity to add the duplicate's reference.\n13. Resume the parent upload after the rejected push has been processed.\n14. Observe the vulnerable result: the parent's MIME read callback accesses the state freed during rejected-push cleanup, and AddressSanitizer reports a heap use-after-free.\n15. As a control, repeat the test with a valid same-origin push URL that reaches `CURLMOPT_PUSHFUNCTION`.\n16. Confirm that the callback increments the reference count before denying the push, duplicate cleanup releases only that reference, and the parent upload resumes without a sanitizer error.\n17. Confirm a fix by validating and constructing the promised URL before duplicating the parent easy handle.\n18. Repeat the invalid-push test and verify that no MIME duplicate is created, the shared free callback is not called prematurely, and the parent resumes safely.\n\n### Expected result\n\nA push rejected before the application callback must not create and destroy a hidden duplicate that owns shared MIME callback state. The parent must retain valid ownership until its own cleanup.\n\n### Vulnerable result\n\nCurl duplicates the parent before validating the pushed URL. Rejecting that URL destroys the duplicate and frees callback state still referenced by the live parent, causing a heap use-after-free when the upload resumes.\n\n\n## Suggested fix\n\nValidate and construct the promised URL **before** duplicating the parent handle. This way a rejected push never creates a MIME callback clone hidden from the application.\n\n## Impact\n\nA malicious HTTP/2 server can send a rejected push promise that causes curl to free heap-backed MIME callback state while the parent upload still references it. Resuming the upload triggers memory corruption and can reliably terminate the application; more severe exploitation may be possible depending on allocator behavior and surrounding application state, but code execution was not demonstrated.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6563295,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/hogxyz9fxwu3ohuq1zqhvuru4bny?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQJX5FDKY%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232243Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCICXkNrDBixl3sqzry4T%2BxXm2Zsbb%2FZccSCrSiQ1z%2B%2FjaAiEAyd6stlVR2WO7wReVydE%2B0f3XDL5jC6GyfXlmUkaichsqsQUISBADGgwwMTM2MTkyNzQ4NDkiDBOiOLIkATD9rd%2BDZyqOBWrPMdhzbA5Ot5nCXaxTUm%2FhOyyO1xlJ32fTaLUMiaWwWPCdVw917uxC4E8Ln1poQcAjlXo3izYiiNUJC1Vgy%2BYTvkpG4leY%2BcpaYIfJ1tFLhfHOCGBv0M2NEWFo77EfYx7hbe6WL4ZKsT5UClLW4m1ZJ8x8GkxcpR3id033mjkvfkF%2BaV8UtJetsIqbsBdvbVOi%2B84Bds68w5pCrmhvq0M1GXe6FRqu9tldnbES20aYptUe9CUCI750XHIsBR2jgfUUrjHGtrWjXcUhgAPA8ycr3z5IpcISgfqm%2Frxm%2BQVE3tLolMwq%2BzbqaQSn8DM83kQqFZ6ERmKchT3dGckZgeUqt6sZhtn1Lmw%2BnRD5qiJ9dLxtjAB8z1r9MpZs0pdTvx3YTzkz9vrn48JEL4F1q2JOFe2f5%2BaE3ajpgJqLZhLbxQU%2BS3nXew8DNYL8IKsng1kbhMH7uM0Qlfhi3ARBUEP6T2Ase2tIAGOipnZiSQsNmX3o2i5CEly6P9ncGK3mY%2FdYmhHW%2BMqgSBRQfQljJah0nlc%2B8O49wl3bEFryQ%2F4n3IOuqQBjb4RhXcemk0YNveeVB%2FOvV2l%2BCmXAw9cScbROkNs8azB8Q8w1io4PO9MCPwf%2BEQ0e1G3Z%2BGKfa%2BUEmrfaP2RysgqQHNtkBW29hfcJpAv9I6J%2BJ6tDqopR%2BbcnJko6%2Fhv%2Ba2SnInvyNvqDpec6IwxeQ2pfdmKk8LwgcHBogWkhNCPA7eMlVuguW561O1Viq1Em1qRdHjUjIILKqzMUbb5b7UKtR3%2B%2FSwRx8A6ic2gicKfUWGsFYuiG06SnZk8nO0c58XbcF2s0zDXpFzyyGeqdQUuVWaIkv%2FdlvMfYz4y%2FL%2BwBczTPpD0NTTCViP3UBjqxASg12YMK8P5huthZVls4Qy0lP8vRwLJlvhY4DaSlS5JM4QssAsA4s5M8XwITeLg1vfLM2EIHWfZTLtZqKmHXhwfBdRYdb57BUJfyK3tyvqJHZpkmUFWqABwxcx5wJOKd%2B0xZ3CURYTHw4nIMGKwjnYAuV8%2BokimiUHOAJB8n1VQvFN0wq0aEAC4HMIqtPUjxlD45vGkkM3ET6KTHsrdeM5DXYQ%2FAbeXiWLNGML6gOTi3Bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=528bbc8db46f315317f618729cd4c194d17cd6aef44db75d761c2c69be9a3b17",
+      "file_size": 1515,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6563296,
+      "file_name": "client.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/36gjp49xz9pxook7ujewd50rfmwt?response-content-disposition=attachment%3B%20filename%3D%22client.c%22%3B%20filename%2A%3DUTF-8%27%27client.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQJX5FDKY%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232243Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCICXkNrDBixl3sqzry4T%2BxXm2Zsbb%2FZccSCrSiQ1z%2B%2FjaAiEAyd6stlVR2WO7wReVydE%2B0f3XDL5jC6GyfXlmUkaichsqsQUISBADGgwwMTM2MTkyNzQ4NDkiDBOiOLIkATD9rd%2BDZyqOBWrPMdhzbA5Ot5nCXaxTUm%2FhOyyO1xlJ32fTaLUMiaWwWPCdVw917uxC4E8Ln1poQcAjlXo3izYiiNUJC1Vgy%2BYTvkpG4leY%2BcpaYIfJ1tFLhfHOCGBv0M2NEWFo77EfYx7hbe6WL4ZKsT5UClLW4m1ZJ8x8GkxcpR3id033mjkvfkF%2BaV8UtJetsIqbsBdvbVOi%2B84Bds68w5pCrmhvq0M1GXe6FRqu9tldnbES20aYptUe9CUCI750XHIsBR2jgfUUrjHGtrWjXcUhgAPA8ycr3z5IpcISgfqm%2Frxm%2BQVE3tLolMwq%2BzbqaQSn8DM83kQqFZ6ERmKchT3dGckZgeUqt6sZhtn1Lmw%2BnRD5qiJ9dLxtjAB8z1r9MpZs0pdTvx3YTzkz9vrn48JEL4F1q2JOFe2f5%2BaE3ajpgJqLZhLbxQU%2BS3nXew8DNYL8IKsng1kbhMH7uM0Qlfhi3ARBUEP6T2Ase2tIAGOipnZiSQsNmX3o2i5CEly6P9ncGK3mY%2FdYmhHW%2BMqgSBRQfQljJah0nlc%2B8O49wl3bEFryQ%2F4n3IOuqQBjb4RhXcemk0YNveeVB%2FOvV2l%2BCmXAw9cScbROkNs8azB8Q8w1io4PO9MCPwf%2BEQ0e1G3Z%2BGKfa%2BUEmrfaP2RysgqQHNtkBW29hfcJpAv9I6J%2BJ6tDqopR%2BbcnJko6%2Fhv%2Ba2SnInvyNvqDpec6IwxeQ2pfdmKk8LwgcHBogWkhNCPA7eMlVuguW561O1Viq1Em1qRdHjUjIILKqzMUbb5b7UKtR3%2B%2FSwRx8A6ic2gicKfUWGsFYuiG06SnZk8nO0c58XbcF2s0zDXpFzyyGeqdQUuVWaIkv%2FdlvMfYz4y%2FL%2BwBczTPpD0NTTCViP3UBjqxASg12YMK8P5huthZVls4Qy0lP8vRwLJlvhY4DaSlS5JM4QssAsA4s5M8XwITeLg1vfLM2EIHWfZTLtZqKmHXhwfBdRYdb57BUJfyK3tyvqJHZpkmUFWqABwxcx5wJOKd%2B0xZ3CURYTHw4nIMGKwjnYAuV8%2BokimiUHOAJB8n1VQvFN0wq0aEAC4HMIqtPUjxlD45vGkkM3ET6KTHsrdeM5DXYQ%2FAbeXiWLNGML6gOTi3Bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2d273c096a6cf6d98dc9445f65bf0c9259def6dcf77a83969ed1396197c2b317",
+      "file_size": 4719,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6563297,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fdwpq6s7p8rkizqiuad9thyugrvc?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQJX5FDKY%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232243Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCICXkNrDBixl3sqzry4T%2BxXm2Zsbb%2FZccSCrSiQ1z%2B%2FjaAiEAyd6stlVR2WO7wReVydE%2B0f3XDL5jC6GyfXlmUkaichsqsQUISBADGgwwMTM2MTkyNzQ4NDkiDBOiOLIkATD9rd%2BDZyqOBWrPMdhzbA5Ot5nCXaxTUm%2FhOyyO1xlJ32fTaLUMiaWwWPCdVw917uxC4E8Ln1poQcAjlXo3izYiiNUJC1Vgy%2BYTvkpG4leY%2BcpaYIfJ1tFLhfHOCGBv0M2NEWFo77EfYx7hbe6WL4ZKsT5UClLW4m1ZJ8x8GkxcpR3id033mjkvfkF%2BaV8UtJetsIqbsBdvbVOi%2B84Bds68w5pCrmhvq0M1GXe6FRqu9tldnbES20aYptUe9CUCI750XHIsBR2jgfUUrjHGtrWjXcUhgAPA8ycr3z5IpcISgfqm%2Frxm%2BQVE3tLolMwq%2BzbqaQSn8DM83kQqFZ6ERmKchT3dGckZgeUqt6sZhtn1Lmw%2BnRD5qiJ9dLxtjAB8z1r9MpZs0pdTvx3YTzkz9vrn48JEL4F1q2JOFe2f5%2BaE3ajpgJqLZhLbxQU%2BS3nXew8DNYL8IKsng1kbhMH7uM0Qlfhi3ARBUEP6T2Ase2tIAGOipnZiSQsNmX3o2i5CEly6P9ncGK3mY%2FdYmhHW%2BMqgSBRQfQljJah0nlc%2B8O49wl3bEFryQ%2F4n3IOuqQBjb4RhXcemk0YNveeVB%2FOvV2l%2BCmXAw9cScbROkNs8azB8Q8w1io4PO9MCPwf%2BEQ0e1G3Z%2BGKfa%2BUEmrfaP2RysgqQHNtkBW29hfcJpAv9I6J%2BJ6tDqopR%2BbcnJko6%2Fhv%2Ba2SnInvyNvqDpec6IwxeQ2pfdmKk8LwgcHBogWkhNCPA7eMlVuguW561O1Viq1Em1qRdHjUjIILKqzMUbb5b7UKtR3%2B%2FSwRx8A6ic2gicKfUWGsFYuiG06SnZk8nO0c58XbcF2s0zDXpFzyyGeqdQUuVWaIkv%2FdlvMfYz4y%2FL%2BwBczTPpD0NTTCViP3UBjqxASg12YMK8P5huthZVls4Qy0lP8vRwLJlvhY4DaSlS5JM4QssAsA4s5M8XwITeLg1vfLM2EIHWfZTLtZqKmHXhwfBdRYdb57BUJfyK3tyvqJHZpkmUFWqABwxcx5wJOKd%2B0xZ3CURYTHw4nIMGKwjnYAuV8%2BokimiUHOAJB8n1VQvFN0wq0aEAC4HMIqtPUjxlD45vGkkM3ET6KTHsrdeM5DXYQ%2FAbeXiWLNGML6gOTi3Bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d8965e0cd7b0eb59992097930eee4404b4c4a9d521320bd4604af3483ad764e3",
+      "file_size": 206,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563298,
+      "file_name": "run-container.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/690w2oa73vw6wsi6zvmxd57c915a?response-content-disposition=attachment%3B%20filename%3D%22run-container.sh%22%3B%20filename%2A%3DUTF-8%27%27run-container.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQJX5FDKY%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232243Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCICXkNrDBixl3sqzry4T%2BxXm2Zsbb%2FZccSCrSiQ1z%2B%2FjaAiEAyd6stlVR2WO7wReVydE%2B0f3XDL5jC6GyfXlmUkaichsqsQUISBADGgwwMTM2MTkyNzQ4NDkiDBOiOLIkATD9rd%2BDZyqOBWrPMdhzbA5Ot5nCXaxTUm%2FhOyyO1xlJ32fTaLUMiaWwWPCdVw917uxC4E8Ln1poQcAjlXo3izYiiNUJC1Vgy%2BYTvkpG4leY%2BcpaYIfJ1tFLhfHOCGBv0M2NEWFo77EfYx7hbe6WL4ZKsT5UClLW4m1ZJ8x8GkxcpR3id033mjkvfkF%2BaV8UtJetsIqbsBdvbVOi%2B84Bds68w5pCrmhvq0M1GXe6FRqu9tldnbES20aYptUe9CUCI750XHIsBR2jgfUUrjHGtrWjXcUhgAPA8ycr3z5IpcISgfqm%2Frxm%2BQVE3tLolMwq%2BzbqaQSn8DM83kQqFZ6ERmKchT3dGckZgeUqt6sZhtn1Lmw%2BnRD5qiJ9dLxtjAB8z1r9MpZs0pdTvx3YTzkz9vrn48JEL4F1q2JOFe2f5%2BaE3ajpgJqLZhLbxQU%2BS3nXew8DNYL8IKsng1kbhMH7uM0Qlfhi3ARBUEP6T2Ase2tIAGOipnZiSQsNmX3o2i5CEly6P9ncGK3mY%2FdYmhHW%2BMqgSBRQfQljJah0nlc%2B8O49wl3bEFryQ%2F4n3IOuqQBjb4RhXcemk0YNveeVB%2FOvV2l%2BCmXAw9cScbROkNs8azB8Q8w1io4PO9MCPwf%2BEQ0e1G3Z%2BGKfa%2BUEmrfaP2RysgqQHNtkBW29hfcJpAv9I6J%2BJ6tDqopR%2BbcnJko6%2Fhv%2Ba2SnInvyNvqDpec6IwxeQ2pfdmKk8LwgcHBogWkhNCPA7eMlVuguW561O1Viq1Em1qRdHjUjIILKqzMUbb5b7UKtR3%2B%2FSwRx8A6ic2gicKfUWGsFYuiG06SnZk8nO0c58XbcF2s0zDXpFzyyGeqdQUuVWaIkv%2FdlvMfYz4y%2FL%2BwBczTPpD0NTTCViP3UBjqxASg12YMK8P5huthZVls4Qy0lP8vRwLJlvhY4DaSlS5JM4QssAsA4s5M8XwITeLg1vfLM2EIHWfZTLtZqKmHXhwfBdRYdb57BUJfyK3tyvqJHZpkmUFWqABwxcx5wJOKd%2B0xZ3CURYTHw4nIMGKwjnYAuV8%2BokimiUHOAJB8n1VQvFN0wq0aEAC4HMIqtPUjxlD45vGkkM3ET6KTHsrdeM5DXYQ%2FAbeXiWLNGML6gOTi3Bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=856149f0e527b9e588996249f24c13783c617f0691518bbaba7bbac2bed54d4d",
+      "file_size": 1123,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563299,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/og17ot6i0q0pke4z5pxoy4tw45yk?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQJX5FDKY%2F20260907%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260907T232243Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH8aCXVzLXdlc3QtMiJHMEUCICXkNrDBixl3sqzry4T%2BxXm2Zsbb%2FZccSCrSiQ1z%2B%2FjaAiEAyd6stlVR2WO7wReVydE%2B0f3XDL5jC6GyfXlmUkaichsqsQUISBADGgwwMTM2MTkyNzQ4NDkiDBOiOLIkATD9rd%2BDZyqOBWrPMdhzbA5Ot5nCXaxTUm%2FhOyyO1xlJ32fTaLUMiaWwWPCdVw917uxC4E8Ln1poQcAjlXo3izYiiNUJC1Vgy%2BYTvkpG4leY%2BcpaYIfJ1tFLhfHOCGBv0M2NEWFo77EfYx7hbe6WL4ZKsT5UClLW4m1ZJ8x8GkxcpR3id033mjkvfkF%2BaV8UtJetsIqbsBdvbVOi%2B84Bds68w5pCrmhvq0M1GXe6FRqu9tldnbES20aYptUe9CUCI750XHIsBR2jgfUUrjHGtrWjXcUhgAPA8ycr3z5IpcISgfqm%2Frxm%2BQVE3tLolMwq%2BzbqaQSn8DM83kQqFZ6ERmKchT3dGckZgeUqt6sZhtn1Lmw%2BnRD5qiJ9dLxtjAB8z1r9MpZs0pdTvx3YTzkz9vrn48JEL4F1q2JOFe2f5%2BaE3ajpgJqLZhLbxQU%2BS3nXew8DNYL8IKsng1kbhMH7uM0Qlfhi3ARBUEP6T2Ase2tIAGOipnZiSQsNmX3o2i5CEly6P9ncGK3mY%2FdYmhHW%2BMqgSBRQfQljJah0nlc%2B8O49wl3bEFryQ%2F4n3IOuqQBjb4RhXcemk0YNveeVB%2FOvV2l%2BCmXAw9cScbROkNs8azB8Q8w1io4PO9MCPwf%2BEQ0e1G3Z%2BGKfa%2BUEmrfaP2RysgqQHNtkBW29hfcJpAv9I6J%2BJ6tDqopR%2BbcnJko6%2Fhv%2Ba2SnInvyNvqDpec6IwxeQ2pfdmKk8LwgcHBogWkhNCPA7eMlVuguW561O1Viq1Em1qRdHjUjIILKqzMUbb5b7UKtR3%2B%2FSwRx8A6ic2gicKfUWGsFYuiG06SnZk8nO0c58XbcF2s0zDXpFzyyGeqdQUuVWaIkv%2FdlvMfYz4y%2FL%2BwBczTPpD0NTTCViP3UBjqxASg12YMK8P5huthZVls4Qy0lP8vRwLJlvhY4DaSlS5JM4QssAsA4s5M8XwITeLg1vfLM2EIHWfZTLtZqKmHXhwfBdRYdb57BUJfyK3tyvqJHZpkmUFWqABwxcx5wJOKd%2B0xZ3CURYTHw4nIMGKwjnYAuV8%2BokimiUHOAJB8n1VQvFN0wq0aEAC4HMIqtPUjxlD45vGkkM3ET6KTHsrdeM5DXYQ%2FAbeXiWLNGML6gOTi3Bg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=38d022d035e828f7216e7ad6abe5e48dea25e81f9cec4ca3ea204f07fa972cb6",
+      "file_size": 2585,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 2,
+  "voters": [
+    "epsst",
+    "al-theeb"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
