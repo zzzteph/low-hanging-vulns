@@ -1,0 +1,151 @@
+{
+  "id": 3973111,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMTEx",
+  "url": "https://hackerone.com/reports/3973111",
+  "title": "08: CVE-2026-7009 fix incomplete for AWS-LC: `--cert-status` bypass on SecTrust path",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-27T08:45:21.582Z",
+  "submitted_at": "2026-08-27T08:45:21.916Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-7009"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-08T06:14:53.967Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-05T20:55:23.610Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe fix for CVE-2026-7009 (commit `51905671e0`) does not cover AWS-LC. In `ossl_apple_verify()` in `lib/vtls/openssl.c`, a missing OCSP staple is detected only when `SSL_get_tlsext_status_ocsp_resp()` returns a negative length. OpenSSL returns `-1` for absence, but AWS-LC returns `0` with a `NULL` output pointer. On an AWS-LC + `USE_APPLE_SECTRUST` build, `--cert-status` silently accepts a certificate chain with no stapled OCSP response instead of failing with `CURLE_SSL_INVALIDCERTSTATUS` (91).\n\n## Root cause\n\n`ossl_apple_verify()` in `lib/vtls/openssl.c` (lines 4752–4762):\n\n```c\nlong ocsp_len = 0;\nbool ocsp_missing = FALSE;\nif(conn_config->verifystatus && !octx->reused_session)\n  ocsp_len = (long)SSL_get_tlsext_status_ocsp_resp(octx->ssl, &ocsp_data);\n\nif(ocsp_len < 0) {\n  ocsp_len = 0;\n  ocsp_missing = TRUE;\n}\n```\n\nAWS-LC declares `SSL_get_tlsext_status_ocsp_resp` as returning `size_t`. Its header (`include/openssl/ssl.h`) documents: \"If there was no response, it sets `|*out|` to NULL and returns zero.\" The cast `(long)0` is not `< 0`, so `ocsp_missing` stays `FALSE`.\n\nThe fallback `verifystatus()` check later in `Curl_ossl_check_peer_cert()` is also skipped because it is gated behind `!octx->sectrust_verified` (lines 4864–4868). Both layers of OCSP enforcement are bypassed.\n\n## Affected configuration\n\n- curl built with AWS-LC as the OpenSSL backend (`HAVE_BORINGSSL_LIKE`)\n- `USE_APPLE_SECTRUST=ON` (macOS, off by default)\n- `--cert-status` / `CURLOPT_SSL_VERIFYSTATUS` enabled\n- Fresh (non-reused) TLS session\n- Server sends no OCSP staple\n\nThe CVE-2026-7009 advisory lists curl 8.20.0+ as unaffected and includes AWS-LC among affected backends, so the affected range may need revisiting.\n\n## Reproduction\n\n1. Use curl 8.20.0 or 8.21.0 on macOS and build it against a current AWS-LC release with `CURL_USE_OPENSSL=ON` and `USE_APPLE_SECTRUST=ON`.\n2. Confirm that the resulting binary reports both AWS-LC as its TLS backend and Apple SecTrust support.\n3. Prepare an HTTPS test server with a hostname-valid certificate chain that Apple SecTrust accepts. A private test CA may be installed in a dedicated test keychain for this purpose.\n4. Configure the server not to send a stapled OCSP response. Independently verify the absence of the TLS Certificate Status response with a TLS diagnostic client.\n5. Ensure the test uses a fresh TLS connection without session resumption, because the affected check is performed for a non-reused session.\n6. Connect with the AWS-LC-backed curl using the native CA store and require OCSP stapling with `--cert-status` or `CURLOPT_SSL_VERIFYSTATUS`.\n7. Instrument `ossl_apple_verify()` or inspect it in a debugger and confirm that AWS-LC's `SSL_get_tlsext_status_ocsp_resp()` returns length zero and sets the response pointer to `NULL`.\n8. Confirm that the affected condition checks only for a negative length, leaving `ocsp_missing` false for AWS-LC's zero-length result.\n9. Observe the vulnerable result: Apple SecTrust accepts the otherwise trusted certificate chain and curl completes the transfer successfully despite the required OCSP staple being absent.\n10. Change the missing-response test so that a non-positive length is treated as missing, rebuild curl, and repeat the request.\n11. Observe the expected result: curl rejects the connection with `CURLE_SSL_INVALIDCERTSTATUS` and reports that no OCSP response was received.\n12. As a regression control, configure the server to provide a valid, nonempty OCSP staple and repeat the request with the corrected build. Confirm that the valid response is still passed to SecTrust and the transfer succeeds.\n13. Alternatively, verify the upstream correction by testing a revision containing commit `c878bb36f8`; the no-staple case must fail while the valid-staple case continues to work.\n\n### Expected result\n\nWhen OCSP stapling is explicitly required, the absence of a response must terminate the connection with `CURLE_SSL_INVALIDCERTSTATUS`, regardless of the OpenSSL-compatible backend's return-value convention.\n\n### Vulnerable result\n\nAWS-LC reports an absent response as `(0, NULL)`, but curl checks only for a negative length. SecTrust can therefore accept the certificate chain and curl can complete the transfer without the required OCSP status.\n\n\n## Suggested fix\n\n```c\nif(ocsp_len <= 0 || !ocsp_data) {\n  ocsp_len = 0;\n  ocsp_missing = TRUE;\n}\n```\n\nThis covers OpenSSL's `-1` convention, AWS-LC's `0 + NULL` convention, and any future backend that may signal absence differently.\n\n## Impact\n\n## Summary:\nAn attacker possessing a hostname-valid certificate and private key that SecTrust accepts—such as a revoked certificate whose status is not otherwise known locally—could impersonate the target without providing the required OCSP staple. This can enable interception or modification of TLS-protected traffic despite the client explicitly requesting certificate-status verification.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6562856,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/y4xuvtzjhb9zhgtav39j7pn8mbd5?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSCARXEZJ%2F20260908%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260908T074205Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEIf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFviy20aUF%2FX0DPBqap3lLZdtNUU7UIP%2Brdt4gwyhzFDAiB2Yy4jDi6uuftdUjExGkjfysrh3v2oGvcQIa1OoPEK6iqyBQhQEAMaDDAxMzYxOTI3NDg0OSIMDF2lHF7V8P0UMm5GKo8FOeRCg8L932dDArZLWclGq7h6YBu64Iigxk2EyRSxEwYNwoobglg5dbrg7qlFylSJHdGbhfPwSrjBfhF%2B2zt4XVNmjKoxpLELgZumMWEnDIwUAWy8m4Xb8vDhP86cGQaqDK5%2FHHEmtwEZswFyh2PpJ34tk2Hpsdrie%2F%2FnavLSUhnQvdukpFif2qWBMjugVEcw3IrE7oLaiAefbWEsPl9kTqJEU7uoD3bcHLeZIONyVSsazB6Dmvzu6W4yDCcAHNzsgrKgHYRzLm8B8btwZdf6XmU5JegiFlsqGryY%2Btxv%2F6CkqbVYkaupcwFYRuSvY71BWum6TR1Qepp1zYldotbsgsCOsFFQYSLTF9Jrnkr7FP6cotmuylCOe9883XLaFb4oSteKdOb6cn38Wm8HsHr1R%2Bft7aJ5pPVrXKph0XdPs79fVjbwZkGijTpXwEUJNQKXLyIh1iUWJwqMixeP%2BsyhlIz29zgKjHMkCev6T79mdTXpsF6WwxmlMLuGux0SQrvjxbdfVT3WAr0kBqLHaG%2FoiyihWDoU5rZOg%2BhiCXyA01Gbb%2B9gHloAtsUblm7ewcdTkpI%2FB7dPdap1BAnbVoGun06S%2BSklWwIVjVnESQA70C5J4NMrw5DORhglSGCuZ3W4m2mgeueOjumeGGrjZIYfyMkanO4gGZyidn1uwJe2q6fjCgcUcm%2BLFqhTowacaaiqzQjxEWvkkoC65mS0bX27w9IdiWOP7la70Go2NNnC4WVRKZTKyCxht5qVNgE5HfBQ%2Fz3NgTujPV%2B%2FkhpvTe7MvqAg5%2FloPXW%2FDMedkfbRup3Opf2y1XqqkrjYfOVhzvV4C3xMDskfiaUafdaid6nKZmh39YJlpzRJkDC9y%2FRKhTCF3P7UBjqyAXBE5VtrK7BWiMnvsaBmV2cDFW5LLQ%2Fwh%2BJVmxywq3Ij7JLKgdpjhSCQVvbH2N7q58NO7JakKwDpCFVq1Oj8vg60euus5LRhW9pWN%2BTlqqmTr71WgJcNJYhE%2B8ktcS7HL3NWdj3ejBViTN2wE1bQaJTbVzlfq%2BGZMpoRntwkS0%2FmBa4n1wbLIzYcOmZvlRO44XIKDaKIKN0RQLSWvlC9PQV0VecLM3dOGsoaBjMRuCz5qsw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a80113b78d1395fbdf40087ace1a331540a765e3b245c2b9d4a141f6488d6a0f",
+      "file_size": 2203,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6562858,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/8tkuhx8mizhvt2ay1qtub5fa23wr?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSCARXEZJ%2F20260908%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260908T074205Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEIf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFviy20aUF%2FX0DPBqap3lLZdtNUU7UIP%2Brdt4gwyhzFDAiB2Yy4jDi6uuftdUjExGkjfysrh3v2oGvcQIa1OoPEK6iqyBQhQEAMaDDAxMzYxOTI3NDg0OSIMDF2lHF7V8P0UMm5GKo8FOeRCg8L932dDArZLWclGq7h6YBu64Iigxk2EyRSxEwYNwoobglg5dbrg7qlFylSJHdGbhfPwSrjBfhF%2B2zt4XVNmjKoxpLELgZumMWEnDIwUAWy8m4Xb8vDhP86cGQaqDK5%2FHHEmtwEZswFyh2PpJ34tk2Hpsdrie%2F%2FnavLSUhnQvdukpFif2qWBMjugVEcw3IrE7oLaiAefbWEsPl9kTqJEU7uoD3bcHLeZIONyVSsazB6Dmvzu6W4yDCcAHNzsgrKgHYRzLm8B8btwZdf6XmU5JegiFlsqGryY%2Btxv%2F6CkqbVYkaupcwFYRuSvY71BWum6TR1Qepp1zYldotbsgsCOsFFQYSLTF9Jrnkr7FP6cotmuylCOe9883XLaFb4oSteKdOb6cn38Wm8HsHr1R%2Bft7aJ5pPVrXKph0XdPs79fVjbwZkGijTpXwEUJNQKXLyIh1iUWJwqMixeP%2BsyhlIz29zgKjHMkCev6T79mdTXpsF6WwxmlMLuGux0SQrvjxbdfVT3WAr0kBqLHaG%2FoiyihWDoU5rZOg%2BhiCXyA01Gbb%2B9gHloAtsUblm7ewcdTkpI%2FB7dPdap1BAnbVoGun06S%2BSklWwIVjVnESQA70C5J4NMrw5DORhglSGCuZ3W4m2mgeueOjumeGGrjZIYfyMkanO4gGZyidn1uwJe2q6fjCgcUcm%2BLFqhTowacaaiqzQjxEWvkkoC65mS0bX27w9IdiWOP7la70Go2NNnC4WVRKZTKyCxht5qVNgE5HfBQ%2Fz3NgTujPV%2B%2FkhpvTe7MvqAg5%2FloPXW%2FDMedkfbRup3Opf2y1XqqkrjYfOVhzvV4C3xMDskfiaUafdaid6nKZmh39YJlpzRJkDC9y%2FRKhTCF3P7UBjqyAXBE5VtrK7BWiMnvsaBmV2cDFW5LLQ%2Fwh%2BJVmxywq3Ij7JLKgdpjhSCQVvbH2N7q58NO7JakKwDpCFVq1Oj8vg60euus5LRhW9pWN%2BTlqqmTr71WgJcNJYhE%2B8ktcS7HL3NWdj3ejBViTN2wE1bQaJTbVzlfq%2BGZMpoRntwkS0%2FmBa4n1wbLIzYcOmZvlRO44XIKDaKIKN0RQLSWvlC9PQV0VecLM3dOGsoaBjMRuCz5qsw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f48db160c96e8addcb8da49c7cd45a237b5998f657c0a05cd3cac7bde0c03993",
+      "file_size": 1013,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6562859,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/34ieoe76houkn4ugr8z23ah1vzfh?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSCARXEZJ%2F20260908%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260908T074205Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEIf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFviy20aUF%2FX0DPBqap3lLZdtNUU7UIP%2Brdt4gwyhzFDAiB2Yy4jDi6uuftdUjExGkjfysrh3v2oGvcQIa1OoPEK6iqyBQhQEAMaDDAxMzYxOTI3NDg0OSIMDF2lHF7V8P0UMm5GKo8FOeRCg8L932dDArZLWclGq7h6YBu64Iigxk2EyRSxEwYNwoobglg5dbrg7qlFylSJHdGbhfPwSrjBfhF%2B2zt4XVNmjKoxpLELgZumMWEnDIwUAWy8m4Xb8vDhP86cGQaqDK5%2FHHEmtwEZswFyh2PpJ34tk2Hpsdrie%2F%2FnavLSUhnQvdukpFif2qWBMjugVEcw3IrE7oLaiAefbWEsPl9kTqJEU7uoD3bcHLeZIONyVSsazB6Dmvzu6W4yDCcAHNzsgrKgHYRzLm8B8btwZdf6XmU5JegiFlsqGryY%2Btxv%2F6CkqbVYkaupcwFYRuSvY71BWum6TR1Qepp1zYldotbsgsCOsFFQYSLTF9Jrnkr7FP6cotmuylCOe9883XLaFb4oSteKdOb6cn38Wm8HsHr1R%2Bft7aJ5pPVrXKph0XdPs79fVjbwZkGijTpXwEUJNQKXLyIh1iUWJwqMixeP%2BsyhlIz29zgKjHMkCev6T79mdTXpsF6WwxmlMLuGux0SQrvjxbdfVT3WAr0kBqLHaG%2FoiyihWDoU5rZOg%2BhiCXyA01Gbb%2B9gHloAtsUblm7ewcdTkpI%2FB7dPdap1BAnbVoGun06S%2BSklWwIVjVnESQA70C5J4NMrw5DORhglSGCuZ3W4m2mgeueOjumeGGrjZIYfyMkanO4gGZyidn1uwJe2q6fjCgcUcm%2BLFqhTowacaaiqzQjxEWvkkoC65mS0bX27w9IdiWOP7la70Go2NNnC4WVRKZTKyCxht5qVNgE5HfBQ%2Fz3NgTujPV%2B%2FkhpvTe7MvqAg5%2FloPXW%2FDMedkfbRup3Opf2y1XqqkrjYfOVhzvV4C3xMDskfiaUafdaid6nKZmh39YJlpzRJkDC9y%2FRKhTCF3P7UBjqyAXBE5VtrK7BWiMnvsaBmV2cDFW5LLQ%2Fwh%2BJVmxywq3Ij7JLKgdpjhSCQVvbH2N7q58NO7JakKwDpCFVq1Oj8vg60euus5LRhW9pWN%2BTlqqmTr71WgJcNJYhE%2B8ktcS7HL3NWdj3ejBViTN2wE1bQaJTbVzlfq%2BGZMpoRntwkS0%2FmBa4n1wbLIzYcOmZvlRO44XIKDaKIKN0RQLSWvlC9PQV0VecLM3dOGsoaBjMRuCz5qsw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6622604a2de466c9d482fe4afcdf7b79de1c886123c6a8d0e35ec018a94f7ce2",
+      "file_size": 669,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6562863,
+      "file_name": "Security.h",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/m5lp37lfnsla0v2i98ls1o862fa0?response-content-disposition=attachment%3B%20filename%3D%22Security.h%22%3B%20filename%2A%3DUTF-8%27%27Security.h&response-content-type=text%2Fx-chdr&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSCARXEZJ%2F20260908%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260908T074205Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEIf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFviy20aUF%2FX0DPBqap3lLZdtNUU7UIP%2Brdt4gwyhzFDAiB2Yy4jDi6uuftdUjExGkjfysrh3v2oGvcQIa1OoPEK6iqyBQhQEAMaDDAxMzYxOTI3NDg0OSIMDF2lHF7V8P0UMm5GKo8FOeRCg8L932dDArZLWclGq7h6YBu64Iigxk2EyRSxEwYNwoobglg5dbrg7qlFylSJHdGbhfPwSrjBfhF%2B2zt4XVNmjKoxpLELgZumMWEnDIwUAWy8m4Xb8vDhP86cGQaqDK5%2FHHEmtwEZswFyh2PpJ34tk2Hpsdrie%2F%2FnavLSUhnQvdukpFif2qWBMjugVEcw3IrE7oLaiAefbWEsPl9kTqJEU7uoD3bcHLeZIONyVSsazB6Dmvzu6W4yDCcAHNzsgrKgHYRzLm8B8btwZdf6XmU5JegiFlsqGryY%2Btxv%2F6CkqbVYkaupcwFYRuSvY71BWum6TR1Qepp1zYldotbsgsCOsFFQYSLTF9Jrnkr7FP6cotmuylCOe9883XLaFb4oSteKdOb6cn38Wm8HsHr1R%2Bft7aJ5pPVrXKph0XdPs79fVjbwZkGijTpXwEUJNQKXLyIh1iUWJwqMixeP%2BsyhlIz29zgKjHMkCev6T79mdTXpsF6WwxmlMLuGux0SQrvjxbdfVT3WAr0kBqLHaG%2FoiyihWDoU5rZOg%2BhiCXyA01Gbb%2B9gHloAtsUblm7ewcdTkpI%2FB7dPdap1BAnbVoGun06S%2BSklWwIVjVnESQA70C5J4NMrw5DORhglSGCuZ3W4m2mgeueOjumeGGrjZIYfyMkanO4gGZyidn1uwJe2q6fjCgcUcm%2BLFqhTowacaaiqzQjxEWvkkoC65mS0bX27w9IdiWOP7la70Go2NNnC4WVRKZTKyCxht5qVNgE5HfBQ%2Fz3NgTujPV%2B%2FkhpvTe7MvqAg5%2FloPXW%2FDMedkfbRup3Opf2y1XqqkrjYfOVhzvV4C3xMDskfiaUafdaid6nKZmh39YJlpzRJkDC9y%2FRKhTCF3P7UBjqyAXBE5VtrK7BWiMnvsaBmV2cDFW5LLQ%2Fwh%2BJVmxywq3Ij7JLKgdpjhSCQVvbH2N7q58NO7JakKwDpCFVq1Oj8vg60euus5LRhW9pWN%2BTlqqmTr71WgJcNJYhE%2B8ktcS7HL3NWdj3ejBViTN2wE1bQaJTbVzlfq%2BGZMpoRntwkS0%2FmBa4n1wbLIzYcOmZvlRO44XIKDaKIKN0RQLSWvlC9PQV0VecLM3dOGsoaBjMRuCz5qsw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b2d1929a79a6dc94f4de5d8972ad8e4ba76da27eea9bcfc1403eda4bf5363a3e",
+      "file_size": 147,
+      "type": "text/x-chdr",
+      "moderated": null
+    },
+    {
+      "id": 6562867,
+      "file_name": "apple_stub.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/u5alp8bunu0yv8c4v15jq0j0whkl?response-content-disposition=attachment%3B%20filename%3D%22apple_stub.c%22%3B%20filename%2A%3DUTF-8%27%27apple_stub.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSCARXEZJ%2F20260908%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260908T074205Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEIf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFviy20aUF%2FX0DPBqap3lLZdtNUU7UIP%2Brdt4gwyhzFDAiB2Yy4jDi6uuftdUjExGkjfysrh3v2oGvcQIa1OoPEK6iqyBQhQEAMaDDAxMzYxOTI3NDg0OSIMDF2lHF7V8P0UMm5GKo8FOeRCg8L932dDArZLWclGq7h6YBu64Iigxk2EyRSxEwYNwoobglg5dbrg7qlFylSJHdGbhfPwSrjBfhF%2B2zt4XVNmjKoxpLELgZumMWEnDIwUAWy8m4Xb8vDhP86cGQaqDK5%2FHHEmtwEZswFyh2PpJ34tk2Hpsdrie%2F%2FnavLSUhnQvdukpFif2qWBMjugVEcw3IrE7oLaiAefbWEsPl9kTqJEU7uoD3bcHLeZIONyVSsazB6Dmvzu6W4yDCcAHNzsgrKgHYRzLm8B8btwZdf6XmU5JegiFlsqGryY%2Btxv%2F6CkqbVYkaupcwFYRuSvY71BWum6TR1Qepp1zYldotbsgsCOsFFQYSLTF9Jrnkr7FP6cotmuylCOe9883XLaFb4oSteKdOb6cn38Wm8HsHr1R%2Bft7aJ5pPVrXKph0XdPs79fVjbwZkGijTpXwEUJNQKXLyIh1iUWJwqMixeP%2BsyhlIz29zgKjHMkCev6T79mdTXpsF6WwxmlMLuGux0SQrvjxbdfVT3WAr0kBqLHaG%2FoiyihWDoU5rZOg%2BhiCXyA01Gbb%2B9gHloAtsUblm7ewcdTkpI%2FB7dPdap1BAnbVoGun06S%2BSklWwIVjVnESQA70C5J4NMrw5DORhglSGCuZ3W4m2mgeueOjumeGGrjZIYfyMkanO4gGZyidn1uwJe2q6fjCgcUcm%2BLFqhTowacaaiqzQjxEWvkkoC65mS0bX27w9IdiWOP7la70Go2NNnC4WVRKZTKyCxht5qVNgE5HfBQ%2Fz3NgTujPV%2B%2FkhpvTe7MvqAg5%2FloPXW%2FDMedkfbRup3Opf2y1XqqkrjYfOVhzvV4C3xMDskfiaUafdaid6nKZmh39YJlpzRJkDC9y%2FRKhTCF3P7UBjqyAXBE5VtrK7BWiMnvsaBmV2cDFW5LLQ%2Fwh%2BJVmxywq3Ij7JLKgdpjhSCQVvbH2N7q58NO7JakKwDpCFVq1Oj8vg60euus5LRhW9pWN%2BTlqqmTr71WgJcNJYhE%2B8ktcS7HL3NWdj3ejBViTN2wE1bQaJTbVzlfq%2BGZMpoRntwkS0%2FmBa4n1wbLIzYcOmZvlRO44XIKDaKIKN0RQLSWvlC9PQV0VecLM3dOGsoaBjMRuCz5qsw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1e052ba9b20cd2c5c25badcca5c11cc1deb7fcaba6656bd441807468d01016d6",
+      "file_size": 792,
+      "type": "text/x-csrc",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "bugsatti"
+  ],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

