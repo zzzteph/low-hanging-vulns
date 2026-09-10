@@ -1,0 +1,131 @@
+{
+  "id": 3972338,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcyMzM4",
+  "url": "https://hackerone.com/reports/3972338",
+  "title": "12: SASL DIGEST-MD5 does not validate the server's `rspauth` proof",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-26T22:26:00.710Z",
+  "submitted_at": "2026-08-26T22:26:01.120Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-10T15:09:37.951Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-08T06:43:36.727Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\ncurl never verifies the `rspauth` value the server sends during SASL DIGEST-MD5 authentication. In `Curl_sasl_continue()` (`lib/curl_sasl.c`), the `SASL_DIGESTMD5_RESP` handler unconditionally sends an empty acknowledgment without reading or checking the server's continuation data. Authentication then succeeds based solely on the final protocol status code (e.g. SMTP `235`). This affects SMTP, IMAP, and POP3 — they all share the same SASL state machine.\n\nRFC 2831 §2.1.3 requires the client to validate `rspauth` to authenticate the server. Without that check, a server that does not know the shared secret can return any `rspauth` (or garbage), get accepted, and receive subsequent application data.\n\n## Root cause\n\n```c\n// lib/curl_sasl.c, inside Curl_sasl_continue()\ncase SASL_DIGESTMD5_RESP:\n    /* Keep response NULL to output an empty line. */\n    break;\n```\n\nNo call to `get_server_message()`, no parsing of `rspauth`, no comparison with the expected digest. The state just falls through to `SASL_FINAL`, which only checks the status code.\n\n##  Affected Versions\ncurl 7.26.0 through 8.21.0 (latest release), and current master.\n\n## Reproduciton steps:\n1.  Start a local SMTP server on 127.0.0.1 that advertises AUTH DIGEST-MD5.\n2. Have the server issue a valid DIGEST-MD5 challenge (realm, nonce, algorithm=md5-sess, qop=\"auth\").\n4. After receiving the client's digest response, have the server reply with a 334 continuation containing a deliberately wrong rspauth (e.g. rspauth=00000000000000000000000000000000), then 235 Authentication successful.\n4. Run curl --url smtp://127.0.0.1:<port> --user \"user:secret\" --mail-from sender@example.com --mail-rcpt recipient@example.com --upload-file message.txt.\n5. Observe curl exits 0, sends the empty acknowledgment, and delivers the full email body — despite the server never knowing the password.\n6. As a control, repeat but have the server skip the 334 continuation and send 235 directly after the digest response.\n7. Observe curl correctly rejects with exit 67, proving it requires the continuation but never validates its content.\n\n## Suggested fix\n\nEither add `rspauth` validation (retain the digest state from the client-response step, compute the expected server proof per RFC 2831 using the server-side A2, parse and compare), or remove DIGEST-MD5 support entirely — the mechanism was moved to Historic by RFC 6331 in 2011.\n\n## Impact\n\n## Summary:\nOn a connection without independently authenticated TLS, an impersonating endpoint that does not know the password can complete DIGEST-MD5 authentication and receive whatever the client sends next (email body, IMAP commands, etc.). The password itself is not disclosed. Exploitation requires MITM positioning and DIGEST-MD5 negotiation without TLS, which limits practical severity.",
+  "weakness": {
+    "id": 159,
+    "name": "Missing Critical Step in Authentication"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6560493,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/zuc0uxbsq6yo0f6qsam9bmcgux48?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=text%2Fx-python-script&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVTIJB4LS%2F20260910%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260910T165038Z&X-Amz-Expires=493&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQC2qarIMClquThyIdvawcQxNnckNcuScpdfZYWBKkD5bgIhALAFAKffqSCJCTMJjL7Tdtd%2BXG1GQPhe95YP2AelEieYKroFCIT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxJRGKDfHn0aCpEpk4qjgV8KQeCYP9mYPGkRdNVBMLFBuUhnUX5NliSdQ66gR3YqfueGK7MEjaRKmag9WLqotCZYcIe7T5f1mULtTkCNGKUj5b4B0WHVVzFMw1MGDN29aMl85IPUhuysF2njXKUnt5%2BUreThscFAGOuOyfiM8YXr84OrJrlCzNSErBdNiidfwqVfyM%2FkmsQIDTFFW4Dk4mgCpj2OaUL4dUDL7bClxWPTzbwORBCv4MD%2BkrP1rLVPO84DsKPlTL%2BV8NfL2jo4Ymm%2FDY0X5HAfvLFNpbZvHyUxmI63eK2Imi2OoE3kaxqfKylWlAD0DUB2RU2gUcK%2B7R4Zucv3gDzknx6glrPZUwPB353V%2BqH%2BA%2BvK8iqjE%2F8lqbxfodHUswqMsxX53DjTJ8WhfbUNpduDgkXG0jR%2Bxzbd1eNS95rgx2YOfWCyU35pDnTU8Z4kei1xI4hX%2BAEvClukOHHVJp0%2FVKxJL%2Flwrdwvc4q2awa5K9iz6oHivesiAzilJPjUKowdcjGvBAyXqX0OL9XfCBM%2FwErFzheWeJL70%2BMolghMmZXHrwsTmSVu2r9EqIj8Asf5PzgxlahpK13Bjw%2F4wmi%2FPCOdgZYOD3XQhoG%2Fj6tM7cXNp6CN3ohy9IZ4oD71X21UbeX7Qz4aWKSEujzFsLj0eo%2FlL4X3U5Pg645nOas9e3eH5riu%2BMFeiJtxQ%2FSThGk46IaqEuayG3VMPn90wOTkxSYVZF%2BkF9RPiVevqPV7MyXVfGYt2omUZoQfakEgB5kx3SV5InoLVCx3k8nYOKwNRO312Jjsc%2BNrKIcS0fNwQpJzhQyFoGxsly1dqCfgy7uzxUmDLhFcVcidfors40XVkRTKQ4WOStfNn9qhPQpCS%2FfRfxIA0cwtJmK1QY6sAF4%2FV%2B0CIkQW%2B6fTJyidVq4fS9%2BXgB%2FBWvAsQEROo8WWGuYGUWa%2BXo9jZtUHSAI5X6foI3dUrAWk0AMlv37Db2IzJGB%2BXpCNq0kUw7r9TpPyzO17UtSOeGxji3VOXG%2FxnJjSHu2sMhlComBUZQye2QCUnDP3hLu2NkO0H2R9vb6rU2Q79arGQ178QviT8DfmYhjhR6v38kBRx0Ic9SI4D0mn4Ok%2FzH3oDoLomsYklGc8A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c9784c82e92c99aa7ee8d5252dea8357d0b27b90f876083d60bf31e0acc3704a",
+      "file_size": 4557,
+      "type": "text/x-python-script",
+      "moderated": null
+    },
+    {
+      "id": 6560494,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/dzw25mgwszwftr9zwz6a5dvjwzij?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVTIJB4LS%2F20260910%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260910T165038Z&X-Amz-Expires=493&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQC2qarIMClquThyIdvawcQxNnckNcuScpdfZYWBKkD5bgIhALAFAKffqSCJCTMJjL7Tdtd%2BXG1GQPhe95YP2AelEieYKroFCIT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxJRGKDfHn0aCpEpk4qjgV8KQeCYP9mYPGkRdNVBMLFBuUhnUX5NliSdQ66gR3YqfueGK7MEjaRKmag9WLqotCZYcIe7T5f1mULtTkCNGKUj5b4B0WHVVzFMw1MGDN29aMl85IPUhuysF2njXKUnt5%2BUreThscFAGOuOyfiM8YXr84OrJrlCzNSErBdNiidfwqVfyM%2FkmsQIDTFFW4Dk4mgCpj2OaUL4dUDL7bClxWPTzbwORBCv4MD%2BkrP1rLVPO84DsKPlTL%2BV8NfL2jo4Ymm%2FDY0X5HAfvLFNpbZvHyUxmI63eK2Imi2OoE3kaxqfKylWlAD0DUB2RU2gUcK%2B7R4Zucv3gDzknx6glrPZUwPB353V%2BqH%2BA%2BvK8iqjE%2F8lqbxfodHUswqMsxX53DjTJ8WhfbUNpduDgkXG0jR%2Bxzbd1eNS95rgx2YOfWCyU35pDnTU8Z4kei1xI4hX%2BAEvClukOHHVJp0%2FVKxJL%2Flwrdwvc4q2awa5K9iz6oHivesiAzilJPjUKowdcjGvBAyXqX0OL9XfCBM%2FwErFzheWeJL70%2BMolghMmZXHrwsTmSVu2r9EqIj8Asf5PzgxlahpK13Bjw%2F4wmi%2FPCOdgZYOD3XQhoG%2Fj6tM7cXNp6CN3ohy9IZ4oD71X21UbeX7Qz4aWKSEujzFsLj0eo%2FlL4X3U5Pg645nOas9e3eH5riu%2BMFeiJtxQ%2FSThGk46IaqEuayG3VMPn90wOTkxSYVZF%2BkF9RPiVevqPV7MyXVfGYt2omUZoQfakEgB5kx3SV5InoLVCx3k8nYOKwNRO312Jjsc%2BNrKIcS0fNwQpJzhQyFoGxsly1dqCfgy7uzxUmDLhFcVcidfors40XVkRTKQ4WOStfNn9qhPQpCS%2FfRfxIA0cwtJmK1QY6sAF4%2FV%2B0CIkQW%2B6fTJyidVq4fS9%2BXgB%2FBWvAsQEROo8WWGuYGUWa%2BXo9jZtUHSAI5X6foI3dUrAWk0AMlv37Db2IzJGB%2BXpCNq0kUw7r9TpPyzO17UtSOeGxji3VOXG%2FxnJjSHu2sMhlComBUZQye2QCUnDP3hLu2NkO0H2R9vb6rU2Q79arGQ178QviT8DfmYhjhR6v38kBRx0Ic9SI4D0mn4Ok%2FzH3oDoLomsYklGc8A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=af55429c8b421571c1c80e0f7aa52b7e8986d153a063abe7ea8fcaa4b7ab91be",
+      "file_size": 206,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6560500,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/phxjf8a8fxkidknkr4ztqmf0vd92?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVTIJB4LS%2F20260910%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260910T165038Z&X-Amz-Expires=493&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQC2qarIMClquThyIdvawcQxNnckNcuScpdfZYWBKkD5bgIhALAFAKffqSCJCTMJjL7Tdtd%2BXG1GQPhe95YP2AelEieYKroFCIT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxJRGKDfHn0aCpEpk4qjgV8KQeCYP9mYPGkRdNVBMLFBuUhnUX5NliSdQ66gR3YqfueGK7MEjaRKmag9WLqotCZYcIe7T5f1mULtTkCNGKUj5b4B0WHVVzFMw1MGDN29aMl85IPUhuysF2njXKUnt5%2BUreThscFAGOuOyfiM8YXr84OrJrlCzNSErBdNiidfwqVfyM%2FkmsQIDTFFW4Dk4mgCpj2OaUL4dUDL7bClxWPTzbwORBCv4MD%2BkrP1rLVPO84DsKPlTL%2BV8NfL2jo4Ymm%2FDY0X5HAfvLFNpbZvHyUxmI63eK2Imi2OoE3kaxqfKylWlAD0DUB2RU2gUcK%2B7R4Zucv3gDzknx6glrPZUwPB353V%2BqH%2BA%2BvK8iqjE%2F8lqbxfodHUswqMsxX53DjTJ8WhfbUNpduDgkXG0jR%2Bxzbd1eNS95rgx2YOfWCyU35pDnTU8Z4kei1xI4hX%2BAEvClukOHHVJp0%2FVKxJL%2Flwrdwvc4q2awa5K9iz6oHivesiAzilJPjUKowdcjGvBAyXqX0OL9XfCBM%2FwErFzheWeJL70%2BMolghMmZXHrwsTmSVu2r9EqIj8Asf5PzgxlahpK13Bjw%2F4wmi%2FPCOdgZYOD3XQhoG%2Fj6tM7cXNp6CN3ohy9IZ4oD71X21UbeX7Qz4aWKSEujzFsLj0eo%2FlL4X3U5Pg645nOas9e3eH5riu%2BMFeiJtxQ%2FSThGk46IaqEuayG3VMPn90wOTkxSYVZF%2BkF9RPiVevqPV7MyXVfGYt2omUZoQfakEgB5kx3SV5InoLVCx3k8nYOKwNRO312Jjsc%2BNrKIcS0fNwQpJzhQyFoGxsly1dqCfgy7uzxUmDLhFcVcidfors40XVkRTKQ4WOStfNn9qhPQpCS%2FfRfxIA0cwtJmK1QY6sAF4%2FV%2B0CIkQW%2B6fTJyidVq4fS9%2BXgB%2FBWvAsQEROo8WWGuYGUWa%2BXo9jZtUHSAI5X6foI3dUrAWk0AMlv37Db2IzJGB%2BXpCNq0kUw7r9TpPyzO17UtSOeGxji3VOXG%2FxnJjSHu2sMhlComBUZQye2QCUnDP3hLu2NkO0H2R9vb6rU2Q79arGQ178QviT8DfmYhjhR6v38kBRx0Ic9SI4D0mn4Ok%2FzH3oDoLomsYklGc8A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c00782c41664302f48acc1442e1043867860d4e60d89fbc62b3747a47ce96731",
+      "file_size": 922,
+      "type": "application/octet-stream",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
