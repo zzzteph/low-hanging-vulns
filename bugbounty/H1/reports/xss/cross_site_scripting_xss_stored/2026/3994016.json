@@ -1,0 +1,133 @@
+{
+  "id": 3994016,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTk0MDE2",
+  "url": "https://hackerone.com/reports/3994016",
+  "title": "Action Text to_markdown: <code>/<pre> content escapes its delimiter, letting a stored body inject arbitrary Markdown",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-03T16:44:04.661Z",
+  "submitted_at": "2026-09-03T16:44:05.090Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "seoafoz",
+    "url": "/seoafoz",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22,
+    "url": "https://hackerone.com/rails",
+    "handle": "rails",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/022/5e2b46658c8b86bed62f574d8e1793f353cbbc63_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Ruby on Rails",
+      "twitter_handle": "rails",
+      "website": "http://rubyonrails.org/security",
+      "about": "Web development that doesn't hurt."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-12T19:08:55.117Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-12T19:07:50.859Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`ActionText::Content#to_markdown` escapes text nodes so that a stored rich text body cannot\nturn into Markdown syntax. Text whose immediate parent is `<code>` or `<pre>` is exempt from\nthat escaping (`MarkdownConversion::SKIP_ESCAPING_PARENTS`) and is instead kept inert by the\ndelimiter its visitor wraps around it. The converter never checks that the delimiter it emits\nactually delimits anything, and there are two ways for stored content to make it stop working:\n\n1. `inline_code` (`markdown_conversion.rb:368-376`) widens the backtick run and pads when the\n   content starts or ends with a backtick, but it does not consider blank lines. A CommonMark\n   code span cannot contain a blank line: the blank line ends the paragraph, so the span is\n   never closed and everything after it is read as ordinary Markdown.\n\n2. `visit_pre` (`:180-184`) emits a ``` fence, which only opens a code block at the start of a\n   line. `visit__heading` (`:197-199`) splices that block output into a line it has already\n   begun, so the fence opens nothing and the content it was meant to fence is live.\n   `visit_summary` (`:247-249`), `visit_tr` (`:237-245`) and `visit__table_header_row`\n   (`:282-287`) do the same thing; the attached test covers all four.\n\nEither way a rich text body can emit link syntax with a URI scheme that `visit_a` (`:222-229`)\nrefuses for a real `<a href>` via `Rails::HTML::Sanitizer.allowed_uri?`, and raw `<` / `>` that\n`escape_markdown_text` escapes everywhere else (existing test: \"text escaping: angle bracket\n(HTML block)\").\n\nAffected: `main` at 152594147f (8.2.0.alpha). `to_markdown` has not shipped in a release, so no\nreleased version is affected.\n\nThis is not the `<action-text-markdown>` path from my earlier report #3727743. That path is\nstill closed and I re-checked it before filing; see \"Why this is not covered by #3727743\".\n\n## Why the payload gets that far\n\n`has_rich_text` assigns through `ActionText::Content`, which canonicalizes but does not\nsanitize; sanitization happens at render time in `ContentHelper`. `to_markdown` therefore runs\nagainst the stored body. `code` and `pre` are on the default safelist anyway, so the payload\nsurvives either path.\n\nThe blank line does not have to be a literal newline in the stored HTML. `visit_br` emits\n`\"\\n\"`, and `<br>` is how Trix represents a newline (noted in the comment above `visit_div`),\nso a `<br><br>` pair reaches the same output:\n\n    <div><code>x<br><br>[click](javascript:alert(1))</code></div>\n\n## Steps to reproduce\n\nDrop the attached `markdown_conversion_poc_test.rb` into `actiontext/test/unit/` and run it\nagainst a clean checkout of 152594147f:\n\n    cd actiontext\n    bundle exec ruby -Itest test/unit/markdown_conversion_poc_test.rb\n\nResult on pristine `main` (full output in `RESULTS-poc-test.txt`):\n\n    12 runs, 25 assertions, 8 failures, 0 errors, 0 skips\n\nThe control tests pass, so the escaping works for the same payload in ordinary text.\nEach failing test asserts an invariant of the emitted Markdown and prints the output: a code\nspan may not contain a blank line, and a ``` run that does not begin its line must be closed on\nthe same line.\n\n`ActionText::Content#to_markdown` on 152594147f, stored body on the left:\n\n    \"<p>[click](javascript:alert(1))</p>\"                        (control)\n      => \"\\\\[click\\\\](javascript:alert(1))\"\n\n    \"<div><code>x<br><br>[click](javascript:alert(1))</code></div>\"\n      => \"`x\\n\\n[click](javascript:alert(1))`\"\n\n    \"<h1><code>x<br><br>[click](javascript:alert(1))</code></h1>\"\n      => \"# `x\\n\\n[click](javascript:alert(1))`\"\n\n    \"<blockquote><code>x<br><br>[click](javascript:alert(1))</code></blockquote>\"\n      => \"> `x\\n> \\n> [click](javascript:alert(1))`\"\n\n    \"<h1><pre>[click](javascript:alert(1))</pre></h1>\"\n      => \"# ```\\n[click](javascript:alert(1))\\n```\"\n\n    \"<p><code>x<br><br>&lt;img src=x onerror=alert(1)&gt;</code></p>\"\n      => \"`x\\n\\n<img src=x onerror=alert(1)>`\"\n\n`attachments/standalone/` reproduces the same outputs without a Rails app: it loads the four\nupstream files unmodified in a container with nokogiri, activesupport and rails-html-sanitizer.\n\n## Why this is not covered by #3727743\n\nThe fix for my earlier report #3727743 (2191ca0d6c) unwraps user-supplied\n`<action-text-markdown>` during canonicalization and adds this note to `node_to_markdown`:\n\n    NOTE: text inside `<action-text-markdown>` elements is emitted without escaping, so this\n    method is not safe for untrusted content. Convert user-supplied markup through\n    ActionText::Content, which strips those elements while canonicalizing.\n\nThe payload in this report meets that stated precondition and still leaks. Two tests in the\nattached file document the separation, and both pass on pristine main:\n\n- \"the payload satisfies the precondition stated by the fix for #3727743\" - the body carries no\n  marker tag, and `Content.new(html).to_html` is identical with and without canonicalization, so\n  the earlier fix is a no-op on it.\n- \"the marker-tag path itself is still closed, including foreign content\" - I re-checked that\n  root cause before filing. The plain element and the `<svg>`, `<math>` and `<template>` foreign\n  content variants are all unwrapped correctly, so this is not another way in through that door.\n\nThe code at fault is older than that report and landed for unrelated reasons: `inline_code` and\n`code_fence` in #56871 (2026-02-24), `visit_pre` and `visit__heading` in #56858 (2026-02-24).\n2191ca0d6c touched neither, and its regression tests are all about the marker tag.\n\nThat the generated Markdown must not contain a link with a rejected scheme is an invariant this\nmodule already defends with seven dedicated tests (`markdown_conversion_test.rb:569-595`:\n`<a href>` with `javascript:` obfuscated by leading space, tab, entity encoding, entity-encoded\ncolon, case, and newline). This report reaches that same output without touching `<a href>`.\n\n## On fixing it\n\nA patch is attached (`SUGGESTED-PATCH.diff`), not as a recommendation but as evidence that the\ntwo shapes are separable from intended behaviour: with it applied the attached tests pass and\n`markdown_conversion_test.rb` stays at 174 runs, 217 assertions, 0 failures, so nothing the\nexisting suite pins about the current output depends on the broken delimiters. What the real\nfix should look like is yours to decide.\n\n## Environment\n\n    rails/rails main @ 152594147f2dff25093829aebe8aa8eecf7de286\n    ruby 3.4, nokogiri 1.19.1, rails-html-sanitizer 1.7.0\n\n## Impact\n\nA user who may post rich text controls the structure of the Markdown that `to_markdown`\ngenerates for that body, not just its text. From inside a `<code>` or `<pre>` element they can\nstart a new Markdown block and emit link syntax, headings, HTML blocks, or anything else, none\nof which the escaping is supposed to allow. The link they emit never passes the URI scheme\ncheck that `visit_a` applies to a real `<a href>`, so `javascript:` and friends survive.\n\nWhat that turns into depends on what consumes the Markdown.\n\nRenderer defaults, nothing enabled or disabled (`RENDERERS.txt`), for the body\n`<div><code>x<br><br>[click](javascript:alert(1))</code></div>`:\n\n    redcarpet 3.6.1      <p>`x</p><p><a href=\"javascript:alert(1)\">click</a>`</p>\n    kramdown 2.5.2       <p>`x</p><p><a href=\"javascript:alert(1)\">click</a>`</p>\n    commonmarker 2.10.0  <p>`x</p><p><a href=\"\">click</a>`</p>\n\nand for `<p><code>x<br><br>&lt;img src=x onerror=alert(1)&gt;</code></p>`:\n\n    redcarpet 3.6.1      <p>`x</p><p><img src=x onerror=alert(1)>`</p>\n    kramdown 2.5.2       escaped\n    commonmarker 2.10.0  <!-- raw HTML omitted -->\n\nOn an application that renders the generated Markdown with Redcarpet or kramdown at their\ndefaults, that is stored XSS: one user saves the payload and it executes in the browser of\neveryone who views the rendered output. On cmark-gfm the scheme is stripped, but a link element\nis still manufactured where Rails promised an escaped literal, which is content and structure\ninjection into whatever consumes the document, such as a mail body or an export.\n\nThe guarantee that breaks here is Rails', not the renderer's. `escape_markdown_text` escapes\n`[`, `]`, `<` and `>` in every other text node, and `visit_a` refuses schemes that\n`Rails::HTML::Sanitizer.allowed_uri?` rejects, precisely because the converter cannot know what\nwill render its output. The `<code>` path bypasses both.\n\nOn the \"not HTML safe\" note in the docs: it is a warning that the output is Markdown rather\nthan HTML, and it did not stop #3727743 from being treated as a defect and fixed. If that note\nwere sufficient, the scheme check in this module would have nothing to protect.\n\nNo released version of Rails is affected; `to_markdown` exists only on `main`.",
+  "weakness": {
+    "id": 62,
+    "name": "Cross-site Scripting (XSS) - Stored"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6623099,
+      "file_name": "attachments.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/cl185j59k7iir8xi191kpx1unsdb?response-content-disposition=attachment%3B%20filename%3D%22attachments.zip%22%3B%20filename%2A%3DUTF-8%27%27attachments.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQ5A4FXQA%2F20260912%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260912T200108Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPH%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIB7s0vpw3058ayCCx%2Fw6MVOsmFVkgyF4frMw%2BqTYpyzvAiABzbfKi%2BBeh67F2X8njxXzyvlXZ%2BNixc%2F7HdiXHTcfCCq6BQi6%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMOqVm9Grzk3vmGxkKKo4FtqNLk93M3h%2BEMgk4Vcyi%2FC%2FSE%2F5nhtsGBEd62JVmn%2BR3G%2BwnKHlde0KaZSWbp150g8u6S5tpQWm0XG3Lal88UPkwFpblGKL89azhZ0jcFRHR3Iuhyhm1Ws5DWXWK%2BU1Dl7V3yU%2BvNUA44YN4jUc2eBPo5jrYQsAPnkVSxRv9RWC2M2xuUcs9piDWvXtnvyvlZ1wMtAGe8yL9Q%2FFzhgo%2Ftx5v1omJn1C83%2BCy6SHVuRSpK6UvczXJjH9CaV9IdlSzvNzWozDOkMMgdTqr%2FdVboZFzZ2j6j%2FmQiZOCKJ%2FwatNt1xAcNxxcN5rnYAXUlwVjsoDD2KCQDMzugL4v604NLT0WyZk1pDd8JKaMF8TpoBaq4QxKAil6vSsOePx9rDCCtAmaKSwnDofIkKC8LbriAlNmylkOdVEvDoVw6t4PckizwWNrDvxMeRpSZd%2BDTQxz6RRjaaGzXnsGEeHUaiTZR442A4gsaFLy9a84IWIy9v7VOklbCKuWqOswkwb%2B97l49ZFepYF6a30JpB1o%2BqFlF0MGTjAKI6QlefFa43BpuMr3tJjiRozesNIroP9E%2FC5L7J0k3tRGaypKmRCigKHMYoFbYQ41ngrZV98MI6yrpoa172fEA1I%2FrYrTDUGEHgWBp8DdTr8MNj3LaQUOltzEPeqH3P4eWUwkRJgYRbL%2BP%2BXGgDXdHsqV%2F6uw1VPJxXQmvbA1pWgr64WM1JtIwsBm5e3ETac%2FW5pfPYrzBuSGcJLxCPlqgSakk%2FuExCqEQfADRVIhw7m80IIrRlyCAFkx0nu%2B9Ow8dRgHfv4QCSvblo50g1%2BMw9rg1yGdgyDD3eW0OwjKEexeX%2FGVjWWrKmRknosfie4SMSRghJiPjlgxMJb6ldUGOrIBUph7U0xDfaKw0fA%2FnxPYae1QgkyzOcNnKQ0gdik6gqhlqpi7VCtdr6Y59k2T4p3MyU8kEKsyrkRaJ2JXFFkgeCfOucmBAb6%2F2SUK%2FPYXzkHJ1B%2B2c2k05xkIgbZbK2jYHspfweI1k6XZIdjM0bWjAKI5yRZTD6UyRau3DaLtiVH2qFm%2BItjK68JEIR3ubQ3X7ZctHNCNEfKxRehRY6TxIOtepjf7obWRinve6Wh%2BgomylA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6abac05009c0ba03992db5f2ac8d41f555bd5d4e520744d70e172fa86e3bbaa1",
+      "file_size": 16585,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-12T19:07:51.155Z",
+  "allow_singular_disclosure_after": 2588802.305078268,
+  "singular_disclosure_allowed": false,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "score": 4.3,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 160,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/rails/rails",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
