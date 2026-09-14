@@ -1,0 +1,139 @@
+{
+  "id": 3972323,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcyMzIz",
+  "url": "https://hackerone.com/reports/3972323",
+  "title": "10: CURLOPT_MAXLIFETIME_CONN bypass on active HTTP/2 connections",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-26T22:17:11.845Z",
+  "submitted_at": "2026-08-26T22:17:12.058Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-14T06:58:27.378Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-10T15:11:13.098Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`CURLOPT_MAXLIFETIME_CONN` is not enforced when a new transfer is attached to an active multiplexed HTTP/2 connection. The connection-age eligibility check in `url_match_conn()` is gated behind `!CONN_INUSE(conn)`, so an in-use HTTP/2 connection with spare stream capacity is accepted without any age check. A new transfer silently reuses an over-age connection, bypassing certificate revalidation.\n\nSince 8.17.0 this option defaults to 24 hours and `libcurl-security.md` recommends it as the mechanism to bound how long a validated connection remains eligible: \"Further transfers require a new connection with validation performed again.\" The bypass defeats that guarantee for any multiplexed connection that still has an active stream.\n\n## Root cause\n\nIn `lib/url.c`, `url_match_conn()` calls `Curl_cpool_conn_seems_healthy()` only for idle connections:\n\n```c\nif(!CONN_INUSE(conn) &&\n   !Curl_cpool_conn_seems_healthy(conn, m->data, &m->now)) {\n```\n\nAn active multiplexed connection passes `url_match_multiplex_limits()` (stream capacity check) and then falls through directly to `m->found = conn` without any health or age check.\n\nInside `Curl_cpool_conn_seems_healthy()` in `lib/conncache.c`, the age check is also guarded:\n\n```c\nif(!CONN_INUSE(conn) && cpool_conn_maxage(data, conn, pnow))\n  return FALSE;\n```\n\nSo the creation-age check (`conn_max_age_ms`) never evaluates for an in-use multiplexed connection.\n\n## Reproduction\n\nTested at commit `c2676bf9e639e31e44b12a2cc82cf2046231b056` with OpenSSL and nghttp2. All files below are self-contained in a Docker build.\n\n```\ndocker build -t curl-maxlifetime-h2-poc .\ndocker run --rm curl-maxlifetime-h2-poc\n```\n\nThe PoC does:\n\n1. Generate CA A, unrelated CA B, and a localhost server cert signed by CA A.\n2. Start an HTTP/2 TLS server on port 8443.\n3. Transfer A opens an HTTP/2 stream using CA A. The server holds this stream open (sends headers but no end-of-stream), keeping the connection active.\n4. Wait 2.2 seconds (CURLOPT_MAXLIFETIME_CONN is set to 1 second).\n5. Replace the CA file on disk with CA B (same path). TLS session cache and CA cache are disabled.\n6. Transfer B is added normally. It succeeds on the same connection (conn_id=0, num_connects=0) — the age check was skipped.\n7. Transfer C is added with CURLOPT_FRESH_CONNECT=1 as a control. It opens a new connection and fails with CURLE_PEER_FAILED_VERIFICATION (60), proving the CA replacement is effective.\n\n## Suggested fix\n\nApply the creation-age eligibility check before attaching any matching connection, including active multiplexed ones. An over-age active connection should be rejected for the new transfer and marked non-reusable, while allowing its existing streams to finish normally.\n\n## Affected versions\n7.80.0 through 8.21.0+ (current master). The severity increased in 8.17.0 when the option became enabled by default (24-hour lifetime).\n\n## Impact\n\n## Summary:\nA new transfer can silently reuse an HTTP/2 connection that has exceeded its configured maximum lifetime, bypassing the certificate revalidation that would occur on a fresh connection.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6560469,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9l6nouia59id8kzqmdtz3qjrba24?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZMMJ5JJU%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112902Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJGMEQCIHfm6ft%2FnLq0wLMJiE9XDoy2vHxI%2F60GMSs8LOzjppm4AiBTIv36k8eQ8fOJArBA6RAllB4JHJCEl9X6MnqPTOC7biq7BQjf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMP8o9Aiqr7OnGJh81Ko8Fa9ZdMOi%2FBm4B5E57Uq8obzUfhKFzFbyc2zG30axpUxkHANmxZtuZPPSAit5Kl8I3edbc%2FqXY51FNTc5rkZ09ybwMOg5erny31Nu86KACIa9%2BSYEmCww%2Bd0NSkqG%2B4FxWwMz8tylJCusXIY%2Bg%2Bk8U4hwusoQHmilaYH%2Bo2G4jK7QAAbrPfOGZYA6MDGNBdEdIUjQ3Fj4kV4fUmZj23aUswHjUq0RXVXItWKPPIIWshg1yWX5Ivh0L6TANe2iTqCyXkvznl5y5GAv0TcoRSWX3POBLgDjw09vNX8i9gq1f21axTqbSWKtqMQ2af7xLC4oo%2FF67M0a4tnVg%2FXIkSk6UPOIS5meKCMIaHLDspkPLQcNkByRXsE3fVJOB24Y2qcQGgzgigS3iY46Ilc2AjCYps7DJ0n7RJCwWNIgMvlJoA3JCjaI5BvOd%2FW8A7EQLzooo%2B42AcUD%2FVrKaOZ%2FI%2FeRR7njrEroKf9jBrigCepjvfFUOHfDqA3%2FVDEb%2FkU7E5YEMZZ5FusBaQNhx6eMNaswabHby3WEgTlSt5dWBFOj%2BnFhef%2B2UH6rrNuEcBci11SGRHC%2F7dVqLFO2%2Fy8%2FcP6euQMJ59xZTHSY07Y2jp9LQVpFA2DjzLdcu2N6%2BtbAt5IP%2Bbg88y7M%2BZWNTaqeEWWp25qSF4X%2FgOPA7BRLe8n21bM2UbDKSmMn2iGomxtfChYQSFZzPXhXk7H1b3mqfigClNpExIXomvvgFOUKmHROI5nBeHEqgfzaTgzRNV%2FfhPMNawF0GeIG%2FMSHSBSnLwChzlpYGu2qDsBUMVzWDeoBDfuLfSFqT6hlhImNPwuNixtHeEBE26tCxYhloy%2BODyhVoekzYfPDDUyimkugcyfELrzC9op7VBjqyAdhZMCenzqN3nGG767nNbhXE3GdlhJ06oiyKW8CQDqT7QxrKB%2BIKqrpWdWgs8Rj2D%2FTVgdPR7BOBAHPiYi5wuj%2BpxSZQBEpL3q8pNbmp9Gich3%2FdMbFm6tivGHWjnB0Ha66JvD2Up8BD92PGrAFnQJDql41GKf8c0ilDTSxSb79w5p36GYn0c7QK5ztqRw7LTq%2ByX8pC4VoSKX7OV4vXgpjSyO2ku9rqMC1CHqL%2BT3PRFLA%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d03d844907e61a9721eb77491a950fc7089c9e44bd03b8833fd329f0503e7312",
+      "file_size": 1038,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6560471,
+      "file_name": "poc.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/d08m5x0zq8frklufqoimt3zilv56?response-content-disposition=attachment%3B%20filename%3D%22poc.c%22%3B%20filename%2A%3DUTF-8%27%27poc.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZMMJ5JJU%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112902Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJGMEQCIHfm6ft%2FnLq0wLMJiE9XDoy2vHxI%2F60GMSs8LOzjppm4AiBTIv36k8eQ8fOJArBA6RAllB4JHJCEl9X6MnqPTOC7biq7BQjf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMP8o9Aiqr7OnGJh81Ko8Fa9ZdMOi%2FBm4B5E57Uq8obzUfhKFzFbyc2zG30axpUxkHANmxZtuZPPSAit5Kl8I3edbc%2FqXY51FNTc5rkZ09ybwMOg5erny31Nu86KACIa9%2BSYEmCww%2Bd0NSkqG%2B4FxWwMz8tylJCusXIY%2Bg%2Bk8U4hwusoQHmilaYH%2Bo2G4jK7QAAbrPfOGZYA6MDGNBdEdIUjQ3Fj4kV4fUmZj23aUswHjUq0RXVXItWKPPIIWshg1yWX5Ivh0L6TANe2iTqCyXkvznl5y5GAv0TcoRSWX3POBLgDjw09vNX8i9gq1f21axTqbSWKtqMQ2af7xLC4oo%2FF67M0a4tnVg%2FXIkSk6UPOIS5meKCMIaHLDspkPLQcNkByRXsE3fVJOB24Y2qcQGgzgigS3iY46Ilc2AjCYps7DJ0n7RJCwWNIgMvlJoA3JCjaI5BvOd%2FW8A7EQLzooo%2B42AcUD%2FVrKaOZ%2FI%2FeRR7njrEroKf9jBrigCepjvfFUOHfDqA3%2FVDEb%2FkU7E5YEMZZ5FusBaQNhx6eMNaswabHby3WEgTlSt5dWBFOj%2BnFhef%2B2UH6rrNuEcBci11SGRHC%2F7dVqLFO2%2Fy8%2FcP6euQMJ59xZTHSY07Y2jp9LQVpFA2DjzLdcu2N6%2BtbAt5IP%2Bbg88y7M%2BZWNTaqeEWWp25qSF4X%2FgOPA7BRLe8n21bM2UbDKSmMn2iGomxtfChYQSFZzPXhXk7H1b3mqfigClNpExIXomvvgFOUKmHROI5nBeHEqgfzaTgzRNV%2FfhPMNawF0GeIG%2FMSHSBSnLwChzlpYGu2qDsBUMVzWDeoBDfuLfSFqT6hlhImNPwuNixtHeEBE26tCxYhloy%2BODyhVoekzYfPDDUyimkugcyfELrzC9op7VBjqyAdhZMCenzqN3nGG767nNbhXE3GdlhJ06oiyKW8CQDqT7QxrKB%2BIKqrpWdWgs8Rj2D%2FTVgdPR7BOBAHPiYi5wuj%2BpxSZQBEpL3q8pNbmp9Gich3%2FdMbFm6tivGHWjnB0Ha66JvD2Up8BD92PGrAFnQJDql41GKf8c0ilDTSxSb79w5p36GYn0c7QK5ztqRw7LTq%2ByX8pC4VoSKX7OV4vXgpjSyO2ku9rqMC1CHqL%2BT3PRFLA%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=84ee1598631bf49e5b3012905e8f7a0d418f80248b44568fdc0ced4f5a154d1e",
+      "file_size": 6631,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6560472,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/zw4v6n0adv4oakmdj8rv8g0d0fpc?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZMMJ5JJU%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112902Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJGMEQCIHfm6ft%2FnLq0wLMJiE9XDoy2vHxI%2F60GMSs8LOzjppm4AiBTIv36k8eQ8fOJArBA6RAllB4JHJCEl9X6MnqPTOC7biq7BQjf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMP8o9Aiqr7OnGJh81Ko8Fa9ZdMOi%2FBm4B5E57Uq8obzUfhKFzFbyc2zG30axpUxkHANmxZtuZPPSAit5Kl8I3edbc%2FqXY51FNTc5rkZ09ybwMOg5erny31Nu86KACIa9%2BSYEmCww%2Bd0NSkqG%2B4FxWwMz8tylJCusXIY%2Bg%2Bk8U4hwusoQHmilaYH%2Bo2G4jK7QAAbrPfOGZYA6MDGNBdEdIUjQ3Fj4kV4fUmZj23aUswHjUq0RXVXItWKPPIIWshg1yWX5Ivh0L6TANe2iTqCyXkvznl5y5GAv0TcoRSWX3POBLgDjw09vNX8i9gq1f21axTqbSWKtqMQ2af7xLC4oo%2FF67M0a4tnVg%2FXIkSk6UPOIS5meKCMIaHLDspkPLQcNkByRXsE3fVJOB24Y2qcQGgzgigS3iY46Ilc2AjCYps7DJ0n7RJCwWNIgMvlJoA3JCjaI5BvOd%2FW8A7EQLzooo%2B42AcUD%2FVrKaOZ%2FI%2FeRR7njrEroKf9jBrigCepjvfFUOHfDqA3%2FVDEb%2FkU7E5YEMZZ5FusBaQNhx6eMNaswabHby3WEgTlSt5dWBFOj%2BnFhef%2B2UH6rrNuEcBci11SGRHC%2F7dVqLFO2%2Fy8%2FcP6euQMJ59xZTHSY07Y2jp9LQVpFA2DjzLdcu2N6%2BtbAt5IP%2Bbg88y7M%2BZWNTaqeEWWp25qSF4X%2FgOPA7BRLe8n21bM2UbDKSmMn2iGomxtfChYQSFZzPXhXk7H1b3mqfigClNpExIXomvvgFOUKmHROI5nBeHEqgfzaTgzRNV%2FfhPMNawF0GeIG%2FMSHSBSnLwChzlpYGu2qDsBUMVzWDeoBDfuLfSFqT6hlhImNPwuNixtHeEBE26tCxYhloy%2BODyhVoekzYfPDDUyimkugcyfELrzC9op7VBjqyAdhZMCenzqN3nGG767nNbhXE3GdlhJ06oiyKW8CQDqT7QxrKB%2BIKqrpWdWgs8Rj2D%2FTVgdPR7BOBAHPiYi5wuj%2BpxSZQBEpL3q8pNbmp9Gich3%2FdMbFm6tivGHWjnB0Ha66JvD2Up8BD92PGrAFnQJDql41GKf8c0ilDTSxSb79w5p36GYn0c7QK5ztqRw7LTq%2ByX8pC4VoSKX7OV4vXgpjSyO2ku9rqMC1CHqL%2BT3PRFLA%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=dea707110246ea4a22bccc927849121c87b356630cd150311b5c758b6d83e491",
+      "file_size": 1234,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6560473,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/eprxp44atheg4wwug1350h7r0ga3?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZMMJ5JJU%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112902Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJGMEQCIHfm6ft%2FnLq0wLMJiE9XDoy2vHxI%2F60GMSs8LOzjppm4AiBTIv36k8eQ8fOJArBA6RAllB4JHJCEl9X6MnqPTOC7biq7BQjf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMP8o9Aiqr7OnGJh81Ko8Fa9ZdMOi%2FBm4B5E57Uq8obzUfhKFzFbyc2zG30axpUxkHANmxZtuZPPSAit5Kl8I3edbc%2FqXY51FNTc5rkZ09ybwMOg5erny31Nu86KACIa9%2BSYEmCww%2Bd0NSkqG%2B4FxWwMz8tylJCusXIY%2Bg%2Bk8U4hwusoQHmilaYH%2Bo2G4jK7QAAbrPfOGZYA6MDGNBdEdIUjQ3Fj4kV4fUmZj23aUswHjUq0RXVXItWKPPIIWshg1yWX5Ivh0L6TANe2iTqCyXkvznl5y5GAv0TcoRSWX3POBLgDjw09vNX8i9gq1f21axTqbSWKtqMQ2af7xLC4oo%2FF67M0a4tnVg%2FXIkSk6UPOIS5meKCMIaHLDspkPLQcNkByRXsE3fVJOB24Y2qcQGgzgigS3iY46Ilc2AjCYps7DJ0n7RJCwWNIgMvlJoA3JCjaI5BvOd%2FW8A7EQLzooo%2B42AcUD%2FVrKaOZ%2FI%2FeRR7njrEroKf9jBrigCepjvfFUOHfDqA3%2FVDEb%2FkU7E5YEMZZ5FusBaQNhx6eMNaswabHby3WEgTlSt5dWBFOj%2BnFhef%2B2UH6rrNuEcBci11SGRHC%2F7dVqLFO2%2Fy8%2FcP6euQMJ59xZTHSY07Y2jp9LQVpFA2DjzLdcu2N6%2BtbAt5IP%2Bbg88y7M%2BZWNTaqeEWWp25qSF4X%2FgOPA7BRLe8n21bM2UbDKSmMn2iGomxtfChYQSFZzPXhXk7H1b3mqfigClNpExIXomvvgFOUKmHROI5nBeHEqgfzaTgzRNV%2FfhPMNawF0GeIG%2FMSHSBSnLwChzlpYGu2qDsBUMVzWDeoBDfuLfSFqT6hlhImNPwuNixtHeEBE26tCxYhloy%2BODyhVoekzYfPDDUyimkugcyfELrzC9op7VBjqyAdhZMCenzqN3nGG767nNbhXE3GdlhJ06oiyKW8CQDqT7QxrKB%2BIKqrpWdWgs8Rj2D%2FTVgdPR7BOBAHPiYi5wuj%2BpxSZQBEpL3q8pNbmp9Gich3%2FdMbFm6tivGHWjnB0Ha66JvD2Up8BD92PGrAFnQJDql41GKf8c0ilDTSxSb79w5p36GYn0c7QK5ztqRw7LTq%2ByX8pC4VoSKX7OV4vXgpjSyO2ku9rqMC1CHqL%2BT3PRFLA%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2d3976e412a18275fcabee09248d7e1d20829a880371f311e87a5723bb0b246d",
+      "file_size": 1991,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

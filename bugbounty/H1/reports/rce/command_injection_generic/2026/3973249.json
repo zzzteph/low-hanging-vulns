@@ -1,0 +1,139 @@
+{
+  "id": 3973249,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMjQ5",
+  "url": "https://hackerone.com/reports/3973249",
+  "title": "56: IBM i CL wrapper `parse_command_line()` never enters quote mode",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-27T09:56:29.899Z",
+  "submitted_at": "2026-08-27T09:56:30.170Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-14T06:58:37.618Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-10T15:11:25.682Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nIn `projects/OS400/curlcl.c`, the `parse_command_line()` function initializes `quote` to `'\\0'` but no code path ever assigns an opening `'` or `\"` to it. The close-quote check (line 82), quote-aware backslash handling (line 88), and unterminated-quote error (line 106) are all dead code. As a result, quote characters are retained literally, and whitespace inside quotes splits arguments.\n\nThe `README.OS400` documents that the CL command's `CMDARGS` field supports \"quoting and escaping, in the same form as expected by the standard CLI program.\" This contract is broken: `--header \"X Test\"` produces four arguments (`--header`, `\"X`, `Test\"`, URL) instead of three.\n\nIf an IBM i application constructs `CMDARGS` from partially untrusted data and relies on quoting to keep that data in a single argument, the broken parser exposes the embedded tokens as separate arguments, which can include curl options like `--upload-file`.\n\n## Affected versions\n\nIBM i CL wrapper in curl 8.3.0 through 8.21.0, plus affected 8.22.0 prerelease/development versions.\n\n## Root cause\n\n`projects/OS400/curlcl.c`, function `parse_command_line()`:\n\n```c\nchar quote = '\\0';          // line 60 — initialized to NUL\n...\nif(quote && quote == c) {   // line 82 — close-quote: unreachable because quote is always NUL\n  quote = '\\0';\n  continue;\n}\n```\n\nNo branch between initialization and the close-quote check ever assigns `quote = '\\''` or `quote = '\"'`. The variable stays NUL for the entire parse.\n\n## Reproduction\n\n\n1. Build an affected IBM i curl CL wrapper, starting with curl 8.3.0, or compile its production `parse_command_line()` function in an isolated test harness.\n2. Invoke the parser with a documented-style command string containing whitespace inside double quotes, such as a header option whose value contains a space followed by a URL.\n3. Record the resulting argument count and each generated argument.\n4. Observe that the quoted value is split at the embedded whitespace and that the quote characters remain in the generated arguments.\n5. Confirm that the parser produces more arguments than the documented command syntax requires.\n6. Repeat with single quotes and confirm that they also fail to establish an argument boundary.\n7. Construct an injection-shaped input in which an application places attacker-influenced text inside quotes after a trusted curl option.\n8. Include whitespace followed by a valid curl option, its value, and a URL within the supposedly quoted data.\n9. Parse the command and inspect the generated argument array.\n10. Observe the vulnerable result: tokens between the quote-contaminated boundary fragments emerge as clean standalone curl options and operands.\n11. If testing the complete wrapper, invoke it only against isolated files and endpoints and verify that the injected option is interpreted by curl rather than remaining part of the intended single argument.\n12. As a control, backslash-escape the embedded whitespace and confirm that the parser keeps the escaped text in one argument.\n13. Supply an opening quote without a closing quote and confirm that the parser incorrectly accepts it instead of reaching its documented unterminated-quote error.\n14. Add `--` before attacker-influenced positional data and confirm that subsequent tokens are no longer interpreted as curl options, demonstrating a usable mitigation.\n15. Confirm a fix by entering quote mode whenever an unquoted single or double quote is encountered, omitting the quote delimiter from output, and leaving quote mode only at the matching closing delimiter.\n16. Add controls for empty quoted arguments, adjacent quoted and unquoted text, escaped quotes, escaped whitespace, and unterminated quotes.\n17. Repeat the injection-shaped test and verify that all attacker-influenced quoted text remains one argument and cannot create additional curl options.\n\n### Expected result\n\nSingle and double quotes documented in `CMDARGS` must preserve whitespace and option-like text as part of one argument. Unterminated quotes must be rejected.\n\n### Vulnerable result\n\nThe parser never enters quote mode. Whitespace inside quotes splits the string into separate arguments, allowing option-like tokens in attacker-influenced data to be interpreted as curl command-line options.\n\n\n\n## Suggested fix\n\nEnter quote mode when an unquoted `'` or `\"` is encountered. A minimal patch in `parse_command_line()`:\n\n```diff\n--- a/projects/OS400/curlcl.c\n+++ b/projects/OS400/curlcl.c\n@@ -92,7 +92,12 @@ static int parse_command_line(...)\n     if(quote != '\\'' && c == '\\\\') {\n       ...\n     }\n-    else if(!quote && is_ifs(c)) {\n+    else if(!quote && (c == '\\'' || c == '\"')) {\n+      quote = c;\n+      continue;\n+    }\n+    else if(!quote && is_ifs(c)) {\n       inarg = 0;\n```\n\n## Impact\n\nIf an IBM i application interpolates attacker-controlled text into CMDARGS and relies on quotes to preserve one argument, the attacker may inject additional curl options. Depending on the surrounding command and process permissions, this could trigger unintended network requests, disclose credentials, read and upload local files, or write downloaded content to attacker-chosen locations. The wrapper itself does not introduce untrusted input, so exploitation depends on a vulnerable calling application.",
+  "weakness": {
+    "id": 58,
+    "name": "Command Injection - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6563444,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/mpmpe5gwdmns3rx4pno36v0h6y7k?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7IWNCME5%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112901Z&X-Amz-Expires=2633&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIQDau8oNcOqnzPX5fjBrr0cm7Dc7Z19j7jCUkahIHZ5UawIgdM6mDPSy%2BaWOWvbTgS5O6G5oqeBhBVSYRJDwW4HWSL4quwUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDGzPAsuY41vsnfwveyqPBQlylvH99vn563%2BAYH9mqYvGHhSYWmXHshGuwgKkr%2BlPHk6NVMJnj7eJqmLSQVDe9x9CotGphM3J%2FOxLk2wUBZ9RQyfZOGnlh5wALzI7NEsAHgTNNLR%2BUr%2BgYthUJXvx%2FVI3kIp4iCG9XE17srl8qvJupA2faAY4lEUQ3H6Ogduixiy9LB5AghWZeDUjCLFwR6AG8XuxuaiI7Jm1lcSY97LxiuVkjjMTwTQ2jxEl2Bm0jSl%2B2fJruVrddfDZuniR%2BH0CUWLCNrqnkE5Sd1Mni2L1Whuo%2Fe5Lf3q7%2BXMs3leDjlEom9oryjzZu9IiAMfQBKnlAyeq1qGax5z4dqESPZGucJPjl5MlqsQRrtTBNAvdlS95w8cBa2Cie4OWjKdiRKdqmtt725aUm96KUaeddK2TKdlxGQ2brWPbMxcs89JVZwgEVyJDCbrdkmihiKl1oH29%2BhwoCQcJMzHMA3CMftA4ZtaGXu58Qq20LnGGEfYCM8h1xFob%2BzWiNaqKS4OEAJVT%2BY9mb761ESL%2F%2BN9cq9i5s6fAHW%2F2Y4kCLxqcFF08RMptQNcgGWg9SaWJCBU%2BoIhbI2dgKcK4Y3pRaHpJRhY%2FSGV07CACYQAckH62NKfYzxE6VFBrmsm1%2BQIsSKrDgTZ9cnURAWOh6uUqSR91Xs%2F4xuaN5eZk0UJOzgwZoXg8xHz9n1GcEX%2BPUBBkwfl8An2euWX0mvH48BmSm7UKqr5m737k3y58IRwqZSx5nGmRZUnZzoCs0W%2B5M%2BIGfNfdTpq7BtF5I%2FU8rxuxtuKZepGKqn%2Bz%2Fr%2BndsnMfkd16B3Haq0P7G3ahH%2B%2FbS4t4ouaK%2Fa8%2BCjP9tvZmj0PRGH1fTFyDbEOc1XIHKiqFBIXgNUwlpOe1QY6sQGpShx1jcGsEWWOt1XnF60NOm438Srwt7rKsJwXVE2NrdZR1M9xRuhmVfXz45uZ59YX3dqA0PU5VQLlIE0Hej8gbh2RBfPC7zA2JfyTjUSrwAuZdB04jlIgEQ1gJ71LyLarFJX2t1sGMDbBHlcB2VU7QSGT801KLPqVKkCE77sip9%2BIl0BL1InWxsX1DRuYeXiciJUD5CnMQrdgPFlaLi9kHWA2pcx1ulVvGz%2B5WmbhDN0%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c49b7bc44960de0f79c02eccd27a4f54f9984d313ba088611c50999b869540be",
+      "file_size": 286,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6563445,
+      "file_name": "poc.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bsqhaxw3jar9he6kan4niefq4i3i?response-content-disposition=attachment%3B%20filename%3D%22poc.c%22%3B%20filename%2A%3DUTF-8%27%27poc.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7IWNCME5%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112901Z&X-Amz-Expires=2633&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIQDau8oNcOqnzPX5fjBrr0cm7Dc7Z19j7jCUkahIHZ5UawIgdM6mDPSy%2BaWOWvbTgS5O6G5oqeBhBVSYRJDwW4HWSL4quwUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDGzPAsuY41vsnfwveyqPBQlylvH99vn563%2BAYH9mqYvGHhSYWmXHshGuwgKkr%2BlPHk6NVMJnj7eJqmLSQVDe9x9CotGphM3J%2FOxLk2wUBZ9RQyfZOGnlh5wALzI7NEsAHgTNNLR%2BUr%2BgYthUJXvx%2FVI3kIp4iCG9XE17srl8qvJupA2faAY4lEUQ3H6Ogduixiy9LB5AghWZeDUjCLFwR6AG8XuxuaiI7Jm1lcSY97LxiuVkjjMTwTQ2jxEl2Bm0jSl%2B2fJruVrddfDZuniR%2BH0CUWLCNrqnkE5Sd1Mni2L1Whuo%2Fe5Lf3q7%2BXMs3leDjlEom9oryjzZu9IiAMfQBKnlAyeq1qGax5z4dqESPZGucJPjl5MlqsQRrtTBNAvdlS95w8cBa2Cie4OWjKdiRKdqmtt725aUm96KUaeddK2TKdlxGQ2brWPbMxcs89JVZwgEVyJDCbrdkmihiKl1oH29%2BhwoCQcJMzHMA3CMftA4ZtaGXu58Qq20LnGGEfYCM8h1xFob%2BzWiNaqKS4OEAJVT%2BY9mb761ESL%2F%2BN9cq9i5s6fAHW%2F2Y4kCLxqcFF08RMptQNcgGWg9SaWJCBU%2BoIhbI2dgKcK4Y3pRaHpJRhY%2FSGV07CACYQAckH62NKfYzxE6VFBrmsm1%2BQIsSKrDgTZ9cnURAWOh6uUqSR91Xs%2F4xuaN5eZk0UJOzgwZoXg8xHz9n1GcEX%2BPUBBkwfl8An2euWX0mvH48BmSm7UKqr5m737k3y58IRwqZSx5nGmRZUnZzoCs0W%2B5M%2BIGfNfdTpq7BtF5I%2FU8rxuxtuKZepGKqn%2Bz%2Fr%2BndsnMfkd16B3Haq0P7G3ahH%2B%2FbS4t4ouaK%2Fa8%2BCjP9tvZmj0PRGH1fTFyDbEOc1XIHKiqFBIXgNUwlpOe1QY6sQGpShx1jcGsEWWOt1XnF60NOm438Srwt7rKsJwXVE2NrdZR1M9xRuhmVfXz45uZ59YX3dqA0PU5VQLlIE0Hej8gbh2RBfPC7zA2JfyTjUSrwAuZdB04jlIgEQ1gJ71LyLarFJX2t1sGMDbBHlcB2VU7QSGT801KLPqVKkCE77sip9%2BIl0BL1InWxsX1DRuYeXiciJUD5CnMQrdgPFlaLi9kHWA2pcx1ulVvGz%2B5WmbhDN0%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=859148e9e05d790fc0f1575f7f38be7e3c161f25785be68a7646bb23ed4d19ae",
+      "file_size": 3002,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6563446,
+      "file_name": "poc.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/16oz41noavn84sixddv2ug9m6g35?response-content-disposition=attachment%3B%20filename%3D%22poc.sh%22%3B%20filename%2A%3DUTF-8%27%27poc.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7IWNCME5%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112901Z&X-Amz-Expires=2633&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIQDau8oNcOqnzPX5fjBrr0cm7Dc7Z19j7jCUkahIHZ5UawIgdM6mDPSy%2BaWOWvbTgS5O6G5oqeBhBVSYRJDwW4HWSL4quwUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDGzPAsuY41vsnfwveyqPBQlylvH99vn563%2BAYH9mqYvGHhSYWmXHshGuwgKkr%2BlPHk6NVMJnj7eJqmLSQVDe9x9CotGphM3J%2FOxLk2wUBZ9RQyfZOGnlh5wALzI7NEsAHgTNNLR%2BUr%2BgYthUJXvx%2FVI3kIp4iCG9XE17srl8qvJupA2faAY4lEUQ3H6Ogduixiy9LB5AghWZeDUjCLFwR6AG8XuxuaiI7Jm1lcSY97LxiuVkjjMTwTQ2jxEl2Bm0jSl%2B2fJruVrddfDZuniR%2BH0CUWLCNrqnkE5Sd1Mni2L1Whuo%2Fe5Lf3q7%2BXMs3leDjlEom9oryjzZu9IiAMfQBKnlAyeq1qGax5z4dqESPZGucJPjl5MlqsQRrtTBNAvdlS95w8cBa2Cie4OWjKdiRKdqmtt725aUm96KUaeddK2TKdlxGQ2brWPbMxcs89JVZwgEVyJDCbrdkmihiKl1oH29%2BhwoCQcJMzHMA3CMftA4ZtaGXu58Qq20LnGGEfYCM8h1xFob%2BzWiNaqKS4OEAJVT%2BY9mb761ESL%2F%2BN9cq9i5s6fAHW%2F2Y4kCLxqcFF08RMptQNcgGWg9SaWJCBU%2BoIhbI2dgKcK4Y3pRaHpJRhY%2FSGV07CACYQAckH62NKfYzxE6VFBrmsm1%2BQIsSKrDgTZ9cnURAWOh6uUqSR91Xs%2F4xuaN5eZk0UJOzgwZoXg8xHz9n1GcEX%2BPUBBkwfl8An2euWX0mvH48BmSm7UKqr5m737k3y58IRwqZSx5nGmRZUnZzoCs0W%2B5M%2BIGfNfdTpq7BtF5I%2FU8rxuxtuKZepGKqn%2Bz%2Fr%2BndsnMfkd16B3Haq0P7G3ahH%2B%2FbS4t4ouaK%2Fa8%2BCjP9tvZmj0PRGH1fTFyDbEOc1XIHKiqFBIXgNUwlpOe1QY6sQGpShx1jcGsEWWOt1XnF60NOm438Srwt7rKsJwXVE2NrdZR1M9xRuhmVfXz45uZ59YX3dqA0PU5VQLlIE0Hej8gbh2RBfPC7zA2JfyTjUSrwAuZdB04jlIgEQ1gJ71LyLarFJX2t1sGMDbBHlcB2VU7QSGT801KLPqVKkCE77sip9%2BIl0BL1InWxsX1DRuYeXiciJUD5CnMQrdgPFlaLi9kHWA2pcx1ulVvGz%2B5WmbhDN0%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=140e355be276f939ae96ceaaa693033a551ff87e0a2092a21a2a0efea716413c",
+      "file_size": 607,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563448,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/nbnzcpsypkvb65igqxpxad633i8h?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7IWNCME5%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112901Z&X-Amz-Expires=2633&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIQDau8oNcOqnzPX5fjBrr0cm7Dc7Z19j7jCUkahIHZ5UawIgdM6mDPSy%2BaWOWvbTgS5O6G5oqeBhBVSYRJDwW4HWSL4quwUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDGzPAsuY41vsnfwveyqPBQlylvH99vn563%2BAYH9mqYvGHhSYWmXHshGuwgKkr%2BlPHk6NVMJnj7eJqmLSQVDe9x9CotGphM3J%2FOxLk2wUBZ9RQyfZOGnlh5wALzI7NEsAHgTNNLR%2BUr%2BgYthUJXvx%2FVI3kIp4iCG9XE17srl8qvJupA2faAY4lEUQ3H6Ogduixiy9LB5AghWZeDUjCLFwR6AG8XuxuaiI7Jm1lcSY97LxiuVkjjMTwTQ2jxEl2Bm0jSl%2B2fJruVrddfDZuniR%2BH0CUWLCNrqnkE5Sd1Mni2L1Whuo%2Fe5Lf3q7%2BXMs3leDjlEom9oryjzZu9IiAMfQBKnlAyeq1qGax5z4dqESPZGucJPjl5MlqsQRrtTBNAvdlS95w8cBa2Cie4OWjKdiRKdqmtt725aUm96KUaeddK2TKdlxGQ2brWPbMxcs89JVZwgEVyJDCbrdkmihiKl1oH29%2BhwoCQcJMzHMA3CMftA4ZtaGXu58Qq20LnGGEfYCM8h1xFob%2BzWiNaqKS4OEAJVT%2BY9mb761ESL%2F%2BN9cq9i5s6fAHW%2F2Y4kCLxqcFF08RMptQNcgGWg9SaWJCBU%2BoIhbI2dgKcK4Y3pRaHpJRhY%2FSGV07CACYQAckH62NKfYzxE6VFBrmsm1%2BQIsSKrDgTZ9cnURAWOh6uUqSR91Xs%2F4xuaN5eZk0UJOzgwZoXg8xHz9n1GcEX%2BPUBBkwfl8An2euWX0mvH48BmSm7UKqr5m737k3y58IRwqZSx5nGmRZUnZzoCs0W%2B5M%2BIGfNfdTpq7BtF5I%2FU8rxuxtuKZepGKqn%2Bz%2Fr%2BndsnMfkd16B3Haq0P7G3ahH%2B%2FbS4t4ouaK%2Fa8%2BCjP9tvZmj0PRGH1fTFyDbEOc1XIHKiqFBIXgNUwlpOe1QY6sQGpShx1jcGsEWWOt1XnF60NOm438Srwt7rKsJwXVE2NrdZR1M9xRuhmVfXz45uZ59YX3dqA0PU5VQLlIE0Hej8gbh2RBfPC7zA2JfyTjUSrwAuZdB04jlIgEQ1gJ71LyLarFJX2t1sGMDbBHlcB2VU7QSGT801KLPqVKkCE77sip9%2BIl0BL1InWxsX1DRuYeXiciJUD5CnMQrdgPFlaLi9kHWA2pcx1ulVvGz%2B5WmbhDN0%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=47b7013191f51c51b5adf09f0f9e58368c80f7c580376e71c2c569d25c477129",
+      "file_size": 285,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,131 @@
+{
+  "id": 3973152,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMTUy",
+  "url": "https://hackerone.com/reports/3973152",
+  "title": "37: `curl_mprintf` `%F` format specifier not consumed, causing variadic argument desynchronization",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-27T09:11:30.203Z",
+  "submitted_at": "2026-08-27T09:11:30.600Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-14T06:58:17.163Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-10T15:10:52.432Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`docs/libcurl/curl_mprintf.md` documents `%F` as a conversion that consumes a `double`, alongside `%f`. However, `parse_conversion()` in `lib/mprintf.c` has no `F` case — it falls through to the default branch and returns without assigning an input slot. In a sequential format like `\"%F%s\"`, the `%s` conversion is assigned the slot that the caller filled with a `double`. On ABIs where variadic floats and pointers share one argument area (32-bit x86), this produces a type-confused pointer fetch: `%s` dereferences bits from the skipped double, and `%n` writes through them.\n\n## Affected versions\n\nThe faulty implementation dates to curl’s custom printf introduction, approximately curl 5.4 through 8.21.0, plus tested 8.22.0 prerelease/development versions. Exploitability is ABI-dependent.\n\n## Root cause\n\nIn `lib/mprintf.c`, `parse_conversion()` (lines 329-424) maps format characters to argument types. It handles `f`, `e`, `E`, `g`, `G` but has no `F` case:\n\n```c\ncase 'f':\n  type = MTYPE_DOUBLE;\n  break;\n// ... e, E, g, G handled ...\ndefault:\n  /* invalid instruction, disregard and continue */\n  return TRUE;\n```\n\nThe caller in `parsefmt()` (lines 493-494) skips all slot assignment when `parse_conversion()` returns TRUE:\n\n```c\nif(parse_conversion(*fmt, &flags, &type))\n  continue;\n```\n\nThis `continue` bypasses the `param = param_num++` increment at line 533. The next valid conversion inherits the slot that the caller's `double` occupies, creating a type mismatch during `va_arg` collection.\n\n## Security impact\n\nOn a 32-bit x86 ABI (unified variadic argument area), the skipped double's bit pattern is fetched as a pointer. This enables:\n\n- **Controlled read**: `\"%F%s\"` — `%s` dereferences an address encoded in the low 32 bits of the double.\n- **Controlled write**: `\"%F%n\"` — `%n` writes the output byte count to an address encoded in the double.\n\nNo format-string injection is needed; the PoC uses fixed, correctly-typed format strings per the documentation.\n\nConstraints:\n\n1. Only exploitable on ABIs where variadic floats and pointers share one argument area (32-bit x86). On 64-bit x86 and ARM64, separate register classes cause `%s`/`%n` to consume the legitimate later pointer instead.\n2. The attacker must control the `double` argument value with enough precision to encode a useful address.\n3. A downstream application must use `curl_mprintf` with a sequential format containing `%F` before a pointer-consuming conversion.\n4. No curl-internal format string uses `%F` — this does not affect curl's own protocol handling.\n5. The documentation discourages new use of this API (\"We discourage users from using any of these functions in new applications\").\n\nGiven these constraints, the practical severity is likely Low. I have not identified an affected curl protocol path or concrete downstream application. I am reporting the confirmed type-confusion primitive for the security team to assess.\n\n## Reproduction\n1. Build an affected libcurl version for a 32-bit x86 target, or another ABI where floating-point and pointer variadic arguments use the same argument area.\n2. Build a small test application against libcurl's public `curl_msnprintf()` or another `curl_mprintf`-family API.\n3. Define a readable target buffer containing a recognizable string, a writable integer initialized to a sentinel value, and separate legitimate pointer arguments that can be checked afterward.\n4. Construct a finite `double` whose low pointer-sized portion contains the address of the readable target. Preserve the exact bit representation rather than relying on an imprecise decimal conversion.\n5. Call the formatting function with a constant sequential format containing `%F` followed by `%s`. Supply the crafted `double` for `%F` and a legitimate string pointer for `%s`, matching the documented argument types.\n6. Inspect the formatted result.\n7. Observe the vulnerable read behavior: `%F` is emitted or disregarded without consuming its `double`, and `%s` dereferences the address encoded in the double instead of the legitimate string pointer.\n8. Confirm that the recognizable target string appears in the output and that the legitimate `%s` argument was not used.\n9. Construct another finite `double` whose low pointer-sized portion contains the address of the writable target integer.\n10. Call the formatting function with a constant sequential format containing some output followed by `%F%n`. Supply the crafted `double` and then a legitimate pointer for `%n`.\n11. Observe the vulnerable write behavior: `%n` writes the current output count through the address encoded in the double, while the legitimate `%n` target retains its sentinel value.\n12. Use a debugger or memory instrumentation to confirm that the read and write addresses originate from the skipped `%F` argument rather than from out-of-range test data.\n13. As a control, replace `%F` with the implemented `%f` conversion while keeping the remaining argument structure equivalent.\n14. Confirm that `%f` consumes the double correctly and the following `%s` or `%n` uses the legitimate pointer.\n15. Repeat the test on an ABI with separate floating-point and general-purpose variadic argument streams, such as common x86-64 configurations, and document that the selected-address primitive may not reproduce there.\n16. Confirm a fix by recognizing `%F` as a double conversion during format parsing and preserving its uppercase formatting semantics.\n17. Repeat the sequential read and write tests and verify that `%F` consumes the double and every following conversion receives its intended argument.\n\n### Expected result\n\nThe documented `%F` conversion must consume one `double`. Every subsequent conversion must read the next correctly typed variadic argument.\n\n### Vulnerable result\n\nThe parser treats `%F` as unknown and does not allocate an argument slot for its double. A following pointer conversion can therefore interpret the skipped double's bits as an address, producing an ABI-dependent memory read or write.\n\n\n## Suggested fix\n\nAdd `'F'` to `parse_conversion()` as an `MTYPE_DOUBLE` conversion with `FLAGS_UPPER`, mirroring the `'E'`/`'G'` treatment. Preserve uppercase `INF`/`NAN` output in `out_double()`. Add a regression test that places a pointer conversion after `%F` to verify correct argument consumption.\n\n## Impact\n\n## Summary:\nIn a downstream application with the required format sequence and attacker-controlled double value, an attacker may convert the %F argument into a selected-address memory read or write. This could disclose process memory, corrupt application state, cause a crash, or potentially enable code execution, although exploitation requires a compatible ABI, address knowledge, and a suitable application call site.",
+  "weakness": {
+    "id": 66,
+    "name": "Type Confusion"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6563018,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/8z11e0dyz6b2ipukkqm05gw7049i?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4CXA5VYW%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112902Z&X-Amz-Expires=1731&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIFOktw%2FwX4O0daxzl1%2BAbcIXA1NPQQQ7qj84Nyl3MfypAiEAt%2BuADxn4LbRQ14cclaQOSrjuJ5a00qTP1mun1L6QOrMqugUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDFzWy7wOVHArTfQrKyqOBT3tQyktF2IP%2FpKemBO7OFLeVhAlA%2FByzy5HUfkaZTrzqugm4pWiNZtktItx7y3c8R4Y%2FFRAWtN1aS2hAekbvh7COu%2BOMksDFel5HZXYg8X2fkypTcEMR3gm696lATyCqFFrN5u2q%2FehucxFp%2BGRRoTq3flZHtXonmmQVv%2FmdLsDTr8PtuNudNtK1WwHIbknx4mfd%2F%2FPXtKAK6RpRYfJZKEJAoAC%2FtGFG6knrm2aXbD3lBZ4%2BKAELIJxXcMAqwPIYXbftz6VLnhzX%2FVS5rd%2BmtWQ6Tycx4tzp1xdRWYzQMcEqpEG8I6Sk1bXE%2BdEx6vLSxnysfvJvB5G7G61SDxpy63NhlNWsPvl%2F7B7MCIzqMJ9UsszHCRjjb34rFYWSdCsoraiCWmZp0NaMotbUWldWWjNmeyIfxAbXaQyhOLuu7l4D2L%2BcKI7VI7v2qgASGOk5xK%2F%2BhcUM9yB7wiuWqZ4GnDME9CGle9Xbb7dM%2ByXk3jHHmu9NvhIS2eOjnvglaAlEjBU9YIDjb2zzpgP1Y1XukAp9C%2BaBq4zeiaY2wJ9umDCOcXXbNtolzp78%2B2%2BpBK4ex4KB4TC9ebMGK5xfh%2BEA50sqDgL6MYbYkWADqWmMTjc2m1nEj2LY%2F9NakaBcsPGG8PMHBYZbOAl6IWok03qZuCsfvgb%2F39cWz%2BvtXw7INSLDzwoSfPrRL48zIJqF%2FV1tnbu1yx%2FRgZhL9DUSZq%2FWDjBaIxxo3K3xUX2%2FpzInqn0JJzJ%2FznCWE1BuQR3VD74i1B4bwtu5k8J%2FRSqkPcyl6dNGGk1cjUqdY65lKRuC3rZpbABT%2BV2afGM%2B%2FzmiabK6VZy1%2F8hwHQZ1717K08aZc%2BMDh0FXi%2FRV2mmjW76gDC8k57VBjqxAeqPJgV5tFyl77VlLeLGoTNvqtRkhNywANcql6Hs%2BkE3p%2F7MKavfVr8cc%2BQxQJggKSrB0fhoEdwYywe%2BEmsj6LW6GvHNeehd%2Fw2LomwNCgkGPC82mLjOqbVs0J0lqyEGjrIDe4axIyhfzqmHGp6CxGCe8Hmyy%2Bz1nMc6E1ojaTPy7ktZ9osmCU7hQbd0LKyaft%2BDIl%2Br4gVly4VYaYPWzoRBRx22PCBuDcncgMYTR1GGtw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=9d9191b0987acddef3c493b9ccc2599be66cd4adae61e66b9192815c6485d83b",
+      "file_size": 972,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6563019,
+      "file_name": "poc.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/y9cq8rvahgkchtf6mk1ng2gqmx31?response-content-disposition=attachment%3B%20filename%3D%22poc.c%22%3B%20filename%2A%3DUTF-8%27%27poc.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4CXA5VYW%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112902Z&X-Amz-Expires=1731&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIFOktw%2FwX4O0daxzl1%2BAbcIXA1NPQQQ7qj84Nyl3MfypAiEAt%2BuADxn4LbRQ14cclaQOSrjuJ5a00qTP1mun1L6QOrMqugUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDFzWy7wOVHArTfQrKyqOBT3tQyktF2IP%2FpKemBO7OFLeVhAlA%2FByzy5HUfkaZTrzqugm4pWiNZtktItx7y3c8R4Y%2FFRAWtN1aS2hAekbvh7COu%2BOMksDFel5HZXYg8X2fkypTcEMR3gm696lATyCqFFrN5u2q%2FehucxFp%2BGRRoTq3flZHtXonmmQVv%2FmdLsDTr8PtuNudNtK1WwHIbknx4mfd%2F%2FPXtKAK6RpRYfJZKEJAoAC%2FtGFG6knrm2aXbD3lBZ4%2BKAELIJxXcMAqwPIYXbftz6VLnhzX%2FVS5rd%2BmtWQ6Tycx4tzp1xdRWYzQMcEqpEG8I6Sk1bXE%2BdEx6vLSxnysfvJvB5G7G61SDxpy63NhlNWsPvl%2F7B7MCIzqMJ9UsszHCRjjb34rFYWSdCsoraiCWmZp0NaMotbUWldWWjNmeyIfxAbXaQyhOLuu7l4D2L%2BcKI7VI7v2qgASGOk5xK%2F%2BhcUM9yB7wiuWqZ4GnDME9CGle9Xbb7dM%2ByXk3jHHmu9NvhIS2eOjnvglaAlEjBU9YIDjb2zzpgP1Y1XukAp9C%2BaBq4zeiaY2wJ9umDCOcXXbNtolzp78%2B2%2BpBK4ex4KB4TC9ebMGK5xfh%2BEA50sqDgL6MYbYkWADqWmMTjc2m1nEj2LY%2F9NakaBcsPGG8PMHBYZbOAl6IWok03qZuCsfvgb%2F39cWz%2BvtXw7INSLDzwoSfPrRL48zIJqF%2FV1tnbu1yx%2FRgZhL9DUSZq%2FWDjBaIxxo3K3xUX2%2FpzInqn0JJzJ%2FznCWE1BuQR3VD74i1B4bwtu5k8J%2FRSqkPcyl6dNGGk1cjUqdY65lKRuC3rZpbABT%2BV2afGM%2B%2FzmiabK6VZy1%2F8hwHQZ1717K08aZc%2BMDh0FXi%2FRV2mmjW76gDC8k57VBjqxAeqPJgV5tFyl77VlLeLGoTNvqtRkhNywANcql6Hs%2BkE3p%2F7MKavfVr8cc%2BQxQJggKSrB0fhoEdwYywe%2BEmsj6LW6GvHNeehd%2Fw2LomwNCgkGPC82mLjOqbVs0J0lqyEGjrIDe4axIyhfzqmHGp6CxGCe8Hmyy%2Bz1nMc6E1ojaTPy7ktZ9osmCU7hQbd0LKyaft%2BDIl%2Br4gVly4VYaYPWzoRBRx22PCBuDcncgMYTR1GGtw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=060942262aef0efca976f859ec4ba1cd50edff1f702b00c6706ea69c212ff675",
+      "file_size": 1427,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6563020,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/4x1w10fn88w21469jjh2pppzwz9v?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4CXA5VYW%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112902Z&X-Amz-Expires=1731&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIFOktw%2FwX4O0daxzl1%2BAbcIXA1NPQQQ7qj84Nyl3MfypAiEAt%2BuADxn4LbRQ14cclaQOSrjuJ5a00qTP1mun1L6QOrMqugUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDFzWy7wOVHArTfQrKyqOBT3tQyktF2IP%2FpKemBO7OFLeVhAlA%2FByzy5HUfkaZTrzqugm4pWiNZtktItx7y3c8R4Y%2FFRAWtN1aS2hAekbvh7COu%2BOMksDFel5HZXYg8X2fkypTcEMR3gm696lATyCqFFrN5u2q%2FehucxFp%2BGRRoTq3flZHtXonmmQVv%2FmdLsDTr8PtuNudNtK1WwHIbknx4mfd%2F%2FPXtKAK6RpRYfJZKEJAoAC%2FtGFG6knrm2aXbD3lBZ4%2BKAELIJxXcMAqwPIYXbftz6VLnhzX%2FVS5rd%2BmtWQ6Tycx4tzp1xdRWYzQMcEqpEG8I6Sk1bXE%2BdEx6vLSxnysfvJvB5G7G61SDxpy63NhlNWsPvl%2F7B7MCIzqMJ9UsszHCRjjb34rFYWSdCsoraiCWmZp0NaMotbUWldWWjNmeyIfxAbXaQyhOLuu7l4D2L%2BcKI7VI7v2qgASGOk5xK%2F%2BhcUM9yB7wiuWqZ4GnDME9CGle9Xbb7dM%2ByXk3jHHmu9NvhIS2eOjnvglaAlEjBU9YIDjb2zzpgP1Y1XukAp9C%2BaBq4zeiaY2wJ9umDCOcXXbNtolzp78%2B2%2BpBK4ex4KB4TC9ebMGK5xfh%2BEA50sqDgL6MYbYkWADqWmMTjc2m1nEj2LY%2F9NakaBcsPGG8PMHBYZbOAl6IWok03qZuCsfvgb%2F39cWz%2BvtXw7INSLDzwoSfPrRL48zIJqF%2FV1tnbu1yx%2FRgZhL9DUSZq%2FWDjBaIxxo3K3xUX2%2FpzInqn0JJzJ%2FznCWE1BuQR3VD74i1B4bwtu5k8J%2FRSqkPcyl6dNGGk1cjUqdY65lKRuC3rZpbABT%2BV2afGM%2B%2FzmiabK6VZy1%2F8hwHQZ1717K08aZc%2BMDh0FXi%2FRV2mmjW76gDC8k57VBjqxAeqPJgV5tFyl77VlLeLGoTNvqtRkhNywANcql6Hs%2BkE3p%2F7MKavfVr8cc%2BQxQJggKSrB0fhoEdwYywe%2BEmsj6LW6GvHNeehd%2Fw2LomwNCgkGPC82mLjOqbVs0J0lqyEGjrIDe4axIyhfzqmHGp6CxGCe8Hmyy%2Bz1nMc6E1ojaTPy7ktZ9osmCU7hQbd0LKyaft%2BDIl%2Br4gVly4VYaYPWzoRBRx22PCBuDcncgMYTR1GGtw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f072658bf917415214d0552189bd63830cd0a9f80f522660ea9288b77bf3d19e",
+      "file_size": 248,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

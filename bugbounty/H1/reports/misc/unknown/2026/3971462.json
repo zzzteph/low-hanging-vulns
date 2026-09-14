@@ -1,0 +1,124 @@
+{
+  "id": 3971462,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcxNDYy",
+  "url": "https://hackerone.com/reports/3971462",
+  "title": "Heap-use-after-free in CURLOPT_REFERER when passed a CURLINFO_REFERER pointer",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-26T15:16:09.896Z",
+  "submitted_at": "2026-08-26T15:16:10.229Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-14T06:59:01.447Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-10T15:12:03.838Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nSetting `CURLOPT_REFERER` with a pointer previously obtained from `CURLINFO_REFERER` on the same easy handle triggers a heap-use-after-free. The `CURLOPT_REFERER` handler frees `data->state.referer` (line `lib/setopt.c:2089`) before `Curl_setstropt` reads from the now-dangling pointer (line `lib/setopt.c:2090`→`85`).\n\nThe bug was introduced in commit `ff300ac4aa` (\"setopt: defref the old referer when setting a new\", closing PR #21826).\n\n## Root cause\n\n`CURLINFO_REFERER` returns `Curl_bufref_ptr(&data->state.referer)` — a direct pointer into handle-internal heap memory allocated during redirect handling in `Curl_http_follow()`.\n\nThe `CURLOPT_REFERER` handler does:\n\n```c\n// lib/setopt.c:2085-2091\ncase CURLOPT_REFERER:\n    Curl_bufref_free(&data->state.referer);          // frees the buffer\n    result = Curl_setstropt(data, STRING_SET_REFERER, ptr); // reads from ptr\n    break;\n```\n\nWhen `ptr` is the same pointer returned by `CURLINFO_REFERER`, the free on line 2089 invalidates the memory that `Curl_setstropt` then reads via `strlen(s)` on line 85.\n\nThis usage is not prohibited by the API documentation. `CURLINFO_REFERER` documents that the pointer is private memory the application must not free. `curl_easy_setopt` documents that string arguments are copied and the application does not need to retain them. Passing a valid `const char *` from one API to another that promises to copy it is a reasonable composition.\n\n## Reproduction\n- The curl source tree at or after commit `ff300ac4aa`\n1. Build curl at the affected commit with ASan:\n\n```sh\ncmake -S . -B build \\\n  -DCMAKE_BUILD_TYPE=Debug \\\n  -DCMAKE_C_FLAGS=\"-fsanitize=address -fno-omit-frame-pointer -O1\" \\\n  -DCMAKE_SHARED_LINKER_FLAGS=\"-fsanitize=address\" \\\n  -DBUILD_SHARED_LIBS=ON -DBUILD_CURL_EXE=OFF -DBUILD_TESTING=OFF \\\n  -DCURL_USE_OPENSSL=ON\ncmake --build build -j$(nproc)\n```\n\n1. Compile the PoC:\n\n```sh\ncc -fsanitize=address -fno-omit-frame-pointer -O1 \\\n  poc.c -Iinclude -Lbuild/lib -Wl,-rpath,build/lib -lcurl -o poc\n```\n\n1. Start the server and run both paths:\n\n```sh\npython3 server.py &\nsleep 1\n\n# Control (strdup'd copy) — succeeds cleanly:\n./poc control\n\n# Aliased pointer — triggers heap-use-after-free:\n./poc vulnerable\n```\n\n### Expected vs. actual\n\n- **Control path**: completes with `SETOPT_RESULT=0`. No ASan errors.\n- **Aliased path**: ASan reports `heap-use-after-free` in `strlen` called from `Curl_setstropt` (`lib/setopt.c:85`), on memory freed by `Curl_bufref_free` at `lib/setopt.c:2089`.\n\n```\nERROR: AddressSanitizer: heap-use-after-free\nREAD of size 3\n    #0 ... in strlen\n    #1 ... in Curl_setstropt lib/setopt.c:85\n    #2 ... in setopt_cptr_http_mqtt lib/setopt.c:2090\n\nfreed by thread T0 here:\n    #1 ... in Curl_bufref_free lib/bufref.c:61\n    #2 ... in setopt_cptr_http_mqtt lib/setopt.c:2089\n\npreviously allocated by thread T0 here:\n    #8 ... in curl_url_get lib/urlapi.c:1713\n    #9 ... in Curl_http_follow lib/http.c:1224\n```\n\n## Impact\n\nThe immediate effect is an invalid heap read during `strlen`. In an unsanitized build, libcurl may crash or copy stale heap contents into its Referer value, potentially sending those bytes in a later HTTP request.\n\nTriggering requires all of:\n\n1. `CURLOPT_FOLLOWLOCATION` + `CURLOPT_AUTOREFERER` enabled.\n2. The application retrieves the auto-generated referer via `CURLINFO_REFERER`.\n3. The application passes that exact pointer back to `CURLOPT_REFERER` on the same handle.\n\nA remote peer cannot trigger this in an arbitrary libcurl application without the application performing this pointer round-trip. This is an application-side usage pattern rather than a remotely exploitable primitive, which limits the practical attack surface.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6557772,
+      "file_name": "poc.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/tbqokw0effd3gxltlm8mkk4ifogl?response-content-disposition=attachment%3B%20filename%3D%22poc.c%22%3B%20filename%2A%3DUTF-8%27%27poc.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ656YQWNX%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112900Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIQDjlXVBBVWfgwbiG4Bd%2BerZvNxvXZgnT7PVDN0nHxTfUwIgWlFME8E%2FLvwVBgslc%2BNM4GkruOwJJ1OIVKt%2FIv1vP5wquwUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDJ9UIX1kG5C2YlpJziqPBa%2B%2F%2F6IfHpEmkQmxPscu7VNeARFoKmqtBLMo3eBufibyOHy6PjASUK6kdhvO5DLF4kZbqaQo3gaVqEawJtKc4em0vKfdMNGrWro%2BpaxI1ldmOKVm5NdN8potlh4iD8HqLcNnrFKg3AdUrHnnzfMzQu%2Bimq6H0f73djhJLCgoQiUyPVEzT5JMfrtRN2KqGC4eQlG7EIoPYuo0WeYjooyzZ4AH0ZsAEuP8cMa60ppwOzltTqU9hrEbKyE8FRc94xghNMjsWD8DFvNsmUQocNrsc0vXbw3lco8yewLV7lY54PRXi%2BekRolFMq0XfwoVUoSL5MWFLpHK4X%2FAY7h1636JSiht2Qug7EulQbzP0mTTLGOYAaYfKW4NvjskvIk%2B1NwF8p3AP0%2BOXZqQPQ2eg6TJjoEkSSmBNH2vc7XvESt3UHs5AJHUg0yOjJpw%2F%2BJb0%2FUHofd8vOqj6P4eX4rDiPlu7TkZqDkkoQMiCLC3g5j%2BtAY65jGoWeURngIsFCGox1mBgMiprs573G%2B7ee54Ao4LqlTmeEWQMa92Xd5FnJK6vncdOIy8CmUDXjWqcJIviHikgjc0%2BkGyUXD0rExocKby0tgE8qDgngmLOnl6w5EafndLvyH%2FYm0HVTWGrR4CDgf5Wx1MYuRmXf160ztcVcr3yrow5H%2FWWGQ2nhwYdYLCZjqmsiWiMM7UbEZMYc4NI%2BJuoJT0A%2FaXYv85fvTPvk77mrk0VkaBrX2seQZAh1w5H9tGb%2FWRcOOwk6SlWpl5lW%2BXT7qu2mRBOlQuAvjRqnZpw9JZj4hvu3%2B1HGPOZjl5dr0G1Vafm3hqXVYZpwNGTRllb%2BVcf06QB5YBreQiq%2BK4ZDalNoYvhIhUvbonO3Y7t2Mwx6Ce1QY6sQERJ3nmksy1S3bbmEDn52lBDnQfLLRHUr2K8L3WIvOpIAQdYs05xswiNNT7BymX9lNMVd6%2FB9VmAD0fCD7W4YUtyiju7NgZwdkoXntTt9lvnDR57dte4ZixUIiY4q22K0MY8grILcZy5qS7isyanFRIMkvC0DnHd8Ew%2Bpo4M0S%2Fli7IvFxqMn8TnYEpabj2JR1uELHeZDz%2BFG3Ntyn%2FsHb9YSCLD3qt4AQmx%2FbEeyAOD8E%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=39140127988af4bf0b6fa8b71e8444d8e1210a806b4c28659f20e30378b78d50",
+      "file_size": 1446,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6557774,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/malbjnthwr68hevshxs5ckzrlvjj?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ656YQWNX%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112900Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBYaCXVzLXdlc3QtMiJHMEUCIQDjlXVBBVWfgwbiG4Bd%2BerZvNxvXZgnT7PVDN0nHxTfUwIgWlFME8E%2FLvwVBgslc%2BNM4GkruOwJJ1OIVKt%2FIv1vP5wquwUI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDJ9UIX1kG5C2YlpJziqPBa%2B%2F%2F6IfHpEmkQmxPscu7VNeARFoKmqtBLMo3eBufibyOHy6PjASUK6kdhvO5DLF4kZbqaQo3gaVqEawJtKc4em0vKfdMNGrWro%2BpaxI1ldmOKVm5NdN8potlh4iD8HqLcNnrFKg3AdUrHnnzfMzQu%2Bimq6H0f73djhJLCgoQiUyPVEzT5JMfrtRN2KqGC4eQlG7EIoPYuo0WeYjooyzZ4AH0ZsAEuP8cMa60ppwOzltTqU9hrEbKyE8FRc94xghNMjsWD8DFvNsmUQocNrsc0vXbw3lco8yewLV7lY54PRXi%2BekRolFMq0XfwoVUoSL5MWFLpHK4X%2FAY7h1636JSiht2Qug7EulQbzP0mTTLGOYAaYfKW4NvjskvIk%2B1NwF8p3AP0%2BOXZqQPQ2eg6TJjoEkSSmBNH2vc7XvESt3UHs5AJHUg0yOjJpw%2F%2BJb0%2FUHofd8vOqj6P4eX4rDiPlu7TkZqDkkoQMiCLC3g5j%2BtAY65jGoWeURngIsFCGox1mBgMiprs573G%2B7ee54Ao4LqlTmeEWQMa92Xd5FnJK6vncdOIy8CmUDXjWqcJIviHikgjc0%2BkGyUXD0rExocKby0tgE8qDgngmLOnl6w5EafndLvyH%2FYm0HVTWGrR4CDgf5Wx1MYuRmXf160ztcVcr3yrow5H%2FWWGQ2nhwYdYLCZjqmsiWiMM7UbEZMYc4NI%2BJuoJT0A%2FaXYv85fvTPvk77mrk0VkaBrX2seQZAh1w5H9tGb%2FWRcOOwk6SlWpl5lW%2BXT7qu2mRBOlQuAvjRqnZpw9JZj4hvu3%2B1HGPOZjl5dr0G1Vafm3hqXVYZpwNGTRllb%2BVcf06QB5YBreQiq%2BK4ZDalNoYvhIhUvbonO3Y7t2Mwx6Ce1QY6sQERJ3nmksy1S3bbmEDn52lBDnQfLLRHUr2K8L3WIvOpIAQdYs05xswiNNT7BymX9lNMVd6%2FB9VmAD0fCD7W4YUtyiju7NgZwdkoXntTt9lvnDR57dte4ZixUIiY4q22K0MY8grILcZy5qS7isyanFRIMkvC0DnHd8Ew%2Bpo4M0S%2Fli7IvFxqMn8TnYEpabj2JR1uELHeZDz%2BFG3Ntyn%2FsHb9YSCLD3qt4AQmx%2FbEeyAOD8E%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1750367bd30a29b0e6df4cba42f52306e8d38a1afe76d7cc860587255b740311",
+      "file_size": 736,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

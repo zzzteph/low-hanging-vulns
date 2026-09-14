@@ -1,0 +1,135 @@
+{
+  "id": 3973234,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMjM0",
+  "url": "https://hackerone.com/reports/3973234",
+  "title": "53: HTTP/1 CONNECT chunked-407 trailers bypass CURLOPT_SUPPRESS_CONNECT_HEADERS and lose CURLH_CONNECT classification",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-08-27T09:49:24.781Z",
+  "submitted_at": "2026-08-27T09:49:25.114Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-14T06:58:50.746Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-10T15:11:42.411Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWhen an HTTP/1 proxy returns a chunked `407 Proxy Authentication Required` during a CONNECT handshake, any trailer fields in that response are delivered to the header callback even when `CURLOPT_SUPPRESS_CONNECT_HEADERS` is enabled, and are classified as `CURLH_TRAILER` instead of `CURLH_CONNECT` in the Headers API. This allows a proxy to inject metadata that an application receives and queries as if it came from the certificate-verified HTTPS origin.\n\nTested at commit `c2676bf9e639e31e44b12a2cc82cf2046231b056`.\n\n## Root cause\n\n`single_header()` in `lib/cf-h1-proxy.c:486` sends ordinary CONNECT response lines with `CLIENTWRITE_HEADER | CLIENTWRITE_CONNECT`. When the 407 body is chunked, the CONNECT state machine enters `KEEPON_IGNORE` and feeds bytes to the shared `Curl_httpchunk_read()` decoder (`lib/cf-h1-proxy.c:611`). That decoder emits trailer fields with only `CLIENTWRITE_HEADER | CLIENTWRITE_TRAILER` (`lib/http_chunks.c:273-279`) — it has no context that it is consuming a CONNECT response.\n\nThe missing `CLIENTWRITE_CONNECT` bit causes two downstream failures:\n\n1. **Suppression bypass** — `lib/sendf.c:190` suppresses non-body CONNECT output only when `CLIENTWRITE_CONNECT` is present, so the trailer reaches the header callback.\n2. **Misclassification** — `lib/headers.c:331` assigns `CURLH_CONNECT` only when `CLIENTWRITE_CONNECT` is set; without it, the field becomes `CURLH_TRAILER`, sharing the same origin and request scope as genuine origin trailers.\n\n## Impact\n\nA proxy-controlled trailer can share a field name with an origin trailer and appear as two `CURLH_TRAILER` entries in the same request scope — one from the proxy, one from the verified origin — despite suppression being enabled. Querying the proxy field as `CURLH_CONNECT` returns `CURLHE_MISSING`.\n\nI have not identified a curl-internal or deployed application that makes a security-sensitive decision based on trailer classification, so I am not claiming a demonstrated exploit or specific severity. The concrete issue is that proxy-controlled metadata crosses the CONNECT/origin classification boundary in a way that contradicts the documented behavior of both `CURLOPT_SUPPRESS_CONNECT_HEADERS` and `CURLH_CONNECT`.\n\n## Reproduction\n\n1. Build an affected libcurl release with HTTP/1 proxy tunneling, chunked transfer decoding, TLS, and the Headers API enabled.\n2. Start an HTTPS origin with a certificate that the client trusts.\n3. Configure the HTTPS origin to return a chunked response containing a trailer with a recognizable field name and value.\n4. Start an HTTP/1 proxy that accepts a persistent client connection and records successive `CONNECT` requests.\n5. Have the proxy answer the first unauthenticated `CONNECT` request with `407 Proxy Authentication Required`, `Transfer-Encoding: chunked`, and a zero-length chunk followed by a trailer field.\n6. Give the proxy trailer the same field name as the HTTPS origin trailer but a distinguishable value.\n7. Keep the proxy connection open, accept a second authenticated `CONNECT` request, return a successful tunnel response, and relay the connection to the HTTPS origin.\n8. Configure a libcurl easy handle for the HTTPS origin through the proxy and provide valid proxy credentials.\n9. Force HTTP/1 for the proxy exchange, enable `CURLOPT_SUPPRESS_CONNECT_HEADERS`, register a header callback, and configure normal certificate verification for the origin.\n10. Perform the request and confirm that the authenticated proxy tunnel and certificate-verified HTTPS transfer both complete successfully.\n11. Inspect values delivered to the header callback.\n12. Observe the suppression bypass: the callback receives the trailer from the proxy's chunked 407 response despite `CURLOPT_SUPPRESS_CONNECT_HEADERS`.\n13. Query the shared field name through `curl_easy_header()` using the `CURLH_TRAILER` origin.\n14. Observe the provenance error: both the proxy-controlled value and the genuine HTTPS-origin value appear as trailer entries in the same request scope.\n15. Query the proxy-controlled field using `CURLH_CONNECT` and confirm that it is missing instead of being associated with the CONNECT exchange.\n16. As a decoding control, disable HTTP transfer decoding and repeat the transfer. Confirm that the chunk decoder no longer emits either trailer while the tunnel and HTTPS transfer otherwise complete.\n17. Confirm a fix by carrying CONNECT provenance into trailer delivery whenever the chunk decoder is processing a CONNECT response body.\n18. Repeat the original transfer and verify that the proxy trailer is suppressed from callbacks when suppression is enabled, is classified as `CURLH_CONNECT` internally, and never appears as an origin `CURLH_TRAILER`.\n19. Confirm that the genuine trailer from the tunneled HTTPS origin remains available as `CURLH_TRAILER`.\n\n### Expected result\n\nAll headers and trailers belonging to a proxy CONNECT exchange must retain CONNECT provenance. Suppression must cover them, and they must never be classified in the same origin scope as HTTPS response trailers.\n\n### Vulnerable result\n\nThe shared chunk decoder emits CONNECT-response trailers without the CONNECT marker. Proxy-controlled metadata bypasses suppression and is stored as an ordinary trailer indistinguishable by provenance from metadata sent by the verified HTTPS origin.\n\n\n## Suggested fix\n\nPropagate CONNECT provenance into the chunk decoder so that trailers parsed while consuming a CONNECT response body retain `CLIENTWRITE_CONNECT`. A caller-supplied write-type flag or equivalent context is preferable to globally marking chunk trailers, since ordinary origin trailers must remain `CURLH_TRAILER`.\n\n## Impact\n\n## Summary:\nA malicious configured proxy can inject trailer metadata that an application receives and queries as though it came from the verified HTTPS origin. If the application trusts trailer provenance for authorization, integrity checks, routing, or other security decisions, the proxy may spoof those values or influence policy despite TLS verification; no universal exploit in curl itself was demonstrated.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6563350,
+      "file_name": "poc.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/2dnjrz71hc09nimi2y9cvpykpfat?response-content-disposition=attachment%3B%20filename%3D%22poc.c%22%3B%20filename%2A%3DUTF-8%27%27poc.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4B5ZUCZO%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112901Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBcaCXVzLXdlc3QtMiJHMEUCICLpA5F3HwXaQHFm51wisyay8KgGeAuYoU2HOWY%2FuzIqAiEA6YIJmTRcnIzZ1brR62bsizOPQnBcgwl7XKdfrt3%2B8s0qugUI4P%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDOzzeOXhuC11NnxrnyqOBTsNESRidNhsoOcx3m0mkhJDZOLspZmFajV5n0XKonX1F4W%2BW%2BNlLjnmm1%2BuCfTWuu95SkCkyBKLN4Sjgttae6UYYxS1u3MNqM%2BZLCaVEDoOrx7eSBwi98UwFDJiwU5X4tAJ1yaIGAvq5H33AZgpNcgoGlpOJ3P8c4hWdSbIkpo0d2xUwaZQwbdpOU4juyNzYI8U3rQy3IT1MYVVGSzcYd7EXbcvING%2BdR6YJHx7sXkrNASrwAv8H8pjwAi8maP8wQMWMyS6XEwIsZeGsKbMY1g1y2U9CXojjoHUgJLznTX0NQG9ABDQx3s9OiZOqPdLLcvL4jpNqG7317yg6e0lEFqNl27ZHclXs6pmr6%2BJHls94VjhI3EvW3%2FfmjXdy5lhiISrcHdJAvwr7B%2B8HR4QqmeS5bcVBxnnciPAPZbWZvlN%2FF2xqmx1vLdmOT3ADY22lzx5amfrNq5BDr%2BRInp11f8BpeI%2FDhLAmNGdg4JdV%2FRX8xHaElbG%2BD8FaeNwbJ0u9000etXEz0LbFVoJ7Z8REjVgXPayIdeJSCEIkBLX93a8OvfLxseluXKRP7SMsCC4q3yCRU7slyKZft8CLYVlVbbjWywrGpYWO1rQpoRzNG5LMAtbAkO1lvKa7FokolbwoPBhnNaFNH1%2F1b4VnwNPvFL4TCdBCIr%2FAEmxchPEb2snAAjJYtWpiQ7LC2lbBAEe%2BozipBVqExS54JKF4gS6Y9%2FFOmqpdkoLCWcej5iUzDcR3AaLyWV3%2FLKNAbTPoxehwKJlJATUaqngwLi15le75sGfgEN9QHFkvgOSs4tYOwEG7Wua0WZRXsypkDjLpy%2BMxIAlOiO%2BDMfV4TRsn6AGV%2BZK7lTD3vexPEnJMpqqkDCPpp7VBjqxAenfE61DBg1VkB8w8%2FObomZYBNT%2BHSOvzUO6xL3Gje%2B7lPI6DymkMBEi17a3%2B%2FhE2K757Y3AevV6rKmLx%2BLc4F3TRsHAwEHqzaIYXa7H5h6bdVfj760DgJVWE8nUN9QIwJKi0hNCDCDN8ouV%2Bv53FWJPgm86AjniBKeN3458ey3lF4UzX3azwOd9C9Q3XeD2rvImm7l0tWDQ17qrikAN4zHwewrPWxs73v54RznV74RwZg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=68977f4efe8c299c0cf06c7833c6245ad83ab14e2402be51e53e45f39fa87b7c",
+      "file_size": 3429,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6563351,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/horkrlnkssafzxmjaj6vikhkv3ex?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4B5ZUCZO%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112901Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBcaCXVzLXdlc3QtMiJHMEUCICLpA5F3HwXaQHFm51wisyay8KgGeAuYoU2HOWY%2FuzIqAiEA6YIJmTRcnIzZ1brR62bsizOPQnBcgwl7XKdfrt3%2B8s0qugUI4P%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDOzzeOXhuC11NnxrnyqOBTsNESRidNhsoOcx3m0mkhJDZOLspZmFajV5n0XKonX1F4W%2BW%2BNlLjnmm1%2BuCfTWuu95SkCkyBKLN4Sjgttae6UYYxS1u3MNqM%2BZLCaVEDoOrx7eSBwi98UwFDJiwU5X4tAJ1yaIGAvq5H33AZgpNcgoGlpOJ3P8c4hWdSbIkpo0d2xUwaZQwbdpOU4juyNzYI8U3rQy3IT1MYVVGSzcYd7EXbcvING%2BdR6YJHx7sXkrNASrwAv8H8pjwAi8maP8wQMWMyS6XEwIsZeGsKbMY1g1y2U9CXojjoHUgJLznTX0NQG9ABDQx3s9OiZOqPdLLcvL4jpNqG7317yg6e0lEFqNl27ZHclXs6pmr6%2BJHls94VjhI3EvW3%2FfmjXdy5lhiISrcHdJAvwr7B%2B8HR4QqmeS5bcVBxnnciPAPZbWZvlN%2FF2xqmx1vLdmOT3ADY22lzx5amfrNq5BDr%2BRInp11f8BpeI%2FDhLAmNGdg4JdV%2FRX8xHaElbG%2BD8FaeNwbJ0u9000etXEz0LbFVoJ7Z8REjVgXPayIdeJSCEIkBLX93a8OvfLxseluXKRP7SMsCC4q3yCRU7slyKZft8CLYVlVbbjWywrGpYWO1rQpoRzNG5LMAtbAkO1lvKa7FokolbwoPBhnNaFNH1%2F1b4VnwNPvFL4TCdBCIr%2FAEmxchPEb2snAAjJYtWpiQ7LC2lbBAEe%2BozipBVqExS54JKF4gS6Y9%2FFOmqpdkoLCWcej5iUzDcR3AaLyWV3%2FLKNAbTPoxehwKJlJATUaqngwLi15le75sGfgEN9QHFkvgOSs4tYOwEG7Wua0WZRXsypkDjLpy%2BMxIAlOiO%2BDMfV4TRsn6AGV%2BZK7lTD3vexPEnJMpqqkDCPpp7VBjqxAenfE61DBg1VkB8w8%2FObomZYBNT%2BHSOvzUO6xL3Gje%2B7lPI6DymkMBEi17a3%2B%2FhE2K757Y3AevV6rKmLx%2BLc4F3TRsHAwEHqzaIYXa7H5h6bdVfj760DgJVWE8nUN9QIwJKi0hNCDCDN8ouV%2Bv53FWJPgm86AjniBKeN3458ey3lF4UzX3azwOd9C9Q3XeD2rvImm7l0tWDQ17qrikAN4zHwewrPWxs73v54RznV74RwZg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a643920978ba948f072a8a7f7a35d870505ffc21d775cd7ce09aa499f0cab54f",
+      "file_size": 226,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563352,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/m8rp04xr87rm6zsp4unjl2xzntij?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4B5ZUCZO%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112901Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBcaCXVzLXdlc3QtMiJHMEUCICLpA5F3HwXaQHFm51wisyay8KgGeAuYoU2HOWY%2FuzIqAiEA6YIJmTRcnIzZ1brR62bsizOPQnBcgwl7XKdfrt3%2B8s0qugUI4P%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDOzzeOXhuC11NnxrnyqOBTsNESRidNhsoOcx3m0mkhJDZOLspZmFajV5n0XKonX1F4W%2BW%2BNlLjnmm1%2BuCfTWuu95SkCkyBKLN4Sjgttae6UYYxS1u3MNqM%2BZLCaVEDoOrx7eSBwi98UwFDJiwU5X4tAJ1yaIGAvq5H33AZgpNcgoGlpOJ3P8c4hWdSbIkpo0d2xUwaZQwbdpOU4juyNzYI8U3rQy3IT1MYVVGSzcYd7EXbcvING%2BdR6YJHx7sXkrNASrwAv8H8pjwAi8maP8wQMWMyS6XEwIsZeGsKbMY1g1y2U9CXojjoHUgJLznTX0NQG9ABDQx3s9OiZOqPdLLcvL4jpNqG7317yg6e0lEFqNl27ZHclXs6pmr6%2BJHls94VjhI3EvW3%2FfmjXdy5lhiISrcHdJAvwr7B%2B8HR4QqmeS5bcVBxnnciPAPZbWZvlN%2FF2xqmx1vLdmOT3ADY22lzx5amfrNq5BDr%2BRInp11f8BpeI%2FDhLAmNGdg4JdV%2FRX8xHaElbG%2BD8FaeNwbJ0u9000etXEz0LbFVoJ7Z8REjVgXPayIdeJSCEIkBLX93a8OvfLxseluXKRP7SMsCC4q3yCRU7slyKZft8CLYVlVbbjWywrGpYWO1rQpoRzNG5LMAtbAkO1lvKa7FokolbwoPBhnNaFNH1%2F1b4VnwNPvFL4TCdBCIr%2FAEmxchPEb2snAAjJYtWpiQ7LC2lbBAEe%2BozipBVqExS54JKF4gS6Y9%2FFOmqpdkoLCWcej5iUzDcR3AaLyWV3%2FLKNAbTPoxehwKJlJATUaqngwLi15le75sGfgEN9QHFkvgOSs4tYOwEG7Wua0WZRXsypkDjLpy%2BMxIAlOiO%2BDMfV4TRsn6AGV%2BZK7lTD3vexPEnJMpqqkDCPpp7VBjqxAenfE61DBg1VkB8w8%2FObomZYBNT%2BHSOvzUO6xL3Gje%2B7lPI6DymkMBEi17a3%2B%2FhE2K757Y3AevV6rKmLx%2BLc4F3TRsHAwEHqzaIYXa7H5h6bdVfj760DgJVWE8nUN9QIwJKi0hNCDCDN8ouV%2Bv53FWJPgm86AjniBKeN3458ey3lF4UzX3azwOd9C9Q3XeD2rvImm7l0tWDQ17qrikAN4zHwewrPWxs73v54RznV74RwZg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=03a218f54179aa88d43ed1f61e7fe0fc36f8ea5246cebe053434aad53950720e",
+      "file_size": 2819,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563353,
+      "file_name": "run-container.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/wuffzzluwnut6jlciutsf7ln5wn8?response-content-disposition=attachment%3B%20filename%3D%22run-container.sh%22%3B%20filename%2A%3DUTF-8%27%27run-container.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4B5ZUCZO%2F20260914%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260914T112901Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBcaCXVzLXdlc3QtMiJHMEUCICLpA5F3HwXaQHFm51wisyay8KgGeAuYoU2HOWY%2FuzIqAiEA6YIJmTRcnIzZ1brR62bsizOPQnBcgwl7XKdfrt3%2B8s0qugUI4P%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDOzzeOXhuC11NnxrnyqOBTsNESRidNhsoOcx3m0mkhJDZOLspZmFajV5n0XKonX1F4W%2BW%2BNlLjnmm1%2BuCfTWuu95SkCkyBKLN4Sjgttae6UYYxS1u3MNqM%2BZLCaVEDoOrx7eSBwi98UwFDJiwU5X4tAJ1yaIGAvq5H33AZgpNcgoGlpOJ3P8c4hWdSbIkpo0d2xUwaZQwbdpOU4juyNzYI8U3rQy3IT1MYVVGSzcYd7EXbcvING%2BdR6YJHx7sXkrNASrwAv8H8pjwAi8maP8wQMWMyS6XEwIsZeGsKbMY1g1y2U9CXojjoHUgJLznTX0NQG9ABDQx3s9OiZOqPdLLcvL4jpNqG7317yg6e0lEFqNl27ZHclXs6pmr6%2BJHls94VjhI3EvW3%2FfmjXdy5lhiISrcHdJAvwr7B%2B8HR4QqmeS5bcVBxnnciPAPZbWZvlN%2FF2xqmx1vLdmOT3ADY22lzx5amfrNq5BDr%2BRInp11f8BpeI%2FDhLAmNGdg4JdV%2FRX8xHaElbG%2BD8FaeNwbJ0u9000etXEz0LbFVoJ7Z8REjVgXPayIdeJSCEIkBLX93a8OvfLxseluXKRP7SMsCC4q3yCRU7slyKZft8CLYVlVbbjWywrGpYWO1rQpoRzNG5LMAtbAkO1lvKa7FokolbwoPBhnNaFNH1%2F1b4VnwNPvFL4TCdBCIr%2FAEmxchPEb2snAAjJYtWpiQ7LC2lbBAEe%2BozipBVqExS54JKF4gS6Y9%2FFOmqpdkoLCWcej5iUzDcR3AaLyWV3%2FLKNAbTPoxehwKJlJATUaqngwLi15le75sGfgEN9QHFkvgOSs4tYOwEG7Wua0WZRXsypkDjLpy%2BMxIAlOiO%2BDMfV4TRsn6AGV%2BZK7lTD3vexPEnJMpqqkDCPpp7VBjqxAenfE61DBg1VkB8w8%2FObomZYBNT%2BHSOvzUO6xL3Gje%2B7lPI6DymkMBEi17a3%2B%2FhE2K757Y3AevV6rKmLx%2BLc4F3TRsHAwEHqzaIYXa7H5h6bdVfj760DgJVWE8nUN9QIwJKi0hNCDCDN8ouV%2Bv53FWJPgm86AjniBKeN3458ey3lF4UzX3azwOd9C9Q3XeD2rvImm7l0tWDQ17qrikAN4zHwewrPWxs73v54RznV74RwZg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=287f52557a784a77fc084c6e251cf946f6725d27287f3e4330d9fd5e097d6c77",
+      "file_size": 325,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
