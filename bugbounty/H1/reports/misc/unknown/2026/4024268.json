@@ -1,0 +1,107 @@
+{
+  "id": 4024268,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDI0MjY4",
+  "url": "https://hackerone.com/reports/4024268",
+  "title": "Out-of-bounds read in curl_formadd when CURLFORM_NAMELENGTH is explicitly 0",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "none",
+  "readable_substate": "Informative",
+  "created_at": "2026-09-12T14:22:00.446Z",
+  "submitted_at": "2026-09-12T14:22:00.623Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-15T08:20:59.383Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-14T07:11:40.246Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nI've discovered a heap out-of-bounds read in `curl_formadd` that causes libcurl to silently read past a caller-supplied buffer and transmit the leaked contents to the remote server. It's confirmed under ASan and reachable without violating any documented precondition.\n\n## Impact\n\nAn application that passes a dynamically-computed length of `0` alongside a non-null-terminated buffer to `curl_formadd` will have libcurl read an unbounded number of bytes past the end of that allocation and include the overread data in the form submission. The practical scenario is an application that constructs multipart form fields from user input or file content, where an empty field name (zero bytes) is a valid state. In that case the application may legitimately pass `CURLFORM_NAMELENGTH, 0L` alongside a freshly allocated buffer that hasn't been null-terminated.\n\n## Root cause\n\nThe problem is in `forminfo_copyfield` (`lib/formdata.c:121`):\n\n```c\nstatic CURLcode forminfo_copyfield(struct bufref *field, size_t len)\n{\n  const char *value = Curl_bufref_ptr(field);\n  CURLcode result = CURLE_OK;\n\n  if(value) {\n    if(!len)\n      len = strlen(value);           /* line 128 */\n    result = Curl_bufref_memdup0(field, value, len);\n  }\n\n  return result;\n}\n```\n\nThe intent of the `if(!len)` branch is to handle the case where the caller didn't supply a length at all, so libcurl should derive it from the string. The problem is that `struct FormInfo` stores `namelength` as a plain `size_t`, zero-initialized, and there's no separate flag indicating whether the caller actually provided a value. Zero means both \"not set\" and \"explicitly set to zero\".\n\nWhen `formadd_check` runs (`lib/formdata.c:264`) it passes `form->namelength` directly:\n\n```c\nif(!(form->flags & HTTPPOST_PTRNAME) &&\n   forminfo_copyfield(&form->name, form->namelength))\n  return CURL_FORMADD_MEMORY;\n```\n\nIf the caller passed `CURLFORM_NAMELENGTH, 0L`, `form->namelength` is 0, and `forminfo_copyfield` falls through to `strlen(value)`. If `value` points to a buffer that was never null-terminated (say, a `malloc(8)` whose bytes are all `0x41`), `strlen` walks past the end of the allocation until it finds a null byte. Whatever it reads gets duplicated into the form part and sent to the server.\n\nNote also that the `CURLFORM_NAMELENGTH` handler in `formadd` (`lib/formdata.c:380`) treats a nonzero stored value as \"already set\" for the duplicate-option check:\n\n```c\nif(curr->namelength)\n    retval = CURL_FORMADD_OPTION_TWICE;\nelse\n    curr->namelength = (size_t)form_int_arg(long);\n```\n\nSo passing `CURLFORM_NAMELENGTH, 0L` stores 0, skips the duplicate check, and leaves no trace that the option was explicitly provided.\n\n## PoC\n\n```c\n#include <curl/curl.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\nint main(void)\n{\n  struct curl_httppost *post = NULL;\n  struct curl_httppost *last = NULL;\n  char *name = malloc(8);\n  CURLFORMcode rc;\n\n  if(!name)\n    return 1;\n  memset(name, 'A', 8);\n\n  curl_global_init(CURL_GLOBAL_ALL);\n  rc = curl_formadd(&post, &last,\n                    CURLFORM_COPYNAME, name,\n                    CURLFORM_NAMELENGTH, 0L,\n                    CURLFORM_COPYCONTENTS, \"value\",\n                    CURLFORM_END);\n  printf(\"curl_formadd returned %d\\n\", (int)rc);\n  curl_formfree(post);\n  curl_global_cleanup();\n  free(name);\n  return 0;\n}\n```\n\n...\n\n```text\n=================================================================\n==71006==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x602000000838 at pc 0x000105efe93c bp 0x00016b9054f0 sp 0x00016b904cb0\nREAD of size 9 at 0x602000000838 thread T0\n    #0 0x000105efe938 in strlen+0x1b4 (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x7a938)\n    #1 0x000104673f54 in forminfo_copyfield formdata.c:128\n    #2 0x0001046734bc in formadd_check formdata.c:264\n    #3 0x00010466eb58 in formadd formdata.c:565\n    #4 0x00010466c4c0 in curl_formadd formdata.c:610\n    #5 0x0001044f8f68 in main poc_formadd_namelen_zero.c:18\n    #6 0x0001853b6b94  (<unknown module>)\n\n0x602000000838 is located 0 bytes after 8-byte region [0x602000000830,0x602000000838)\nallocated by thread T0 here:\n    #0 0x000105ec1330 in malloc+0x78 (libclang_rt.asan_osx_dynamic.dylib:arm64e+0x3d330)\n    #1 0x0001044f8e28 in main poc_formadd_namelen_zero.c:10\n    #2 0x0001853b6b94  (<unknown module>)\n\nSUMMARY: AddressSanitizer: heap-buffer-overflow formdata.c:128 in forminfo_copyfield\nShadow bytes around the buggy address:\n  0x602000000580: fa fa fd fd fa fa fd fd fa fa fd fd fa fa fd fd\n  0x602000000600: fa fa fd fd fa fa fd fd fa fa fd fd fa fa fd fd\n  0x602000000680: fa fa fd fd fa fa fd fd fa fa fd fd fa fa fd fd\n  0x602000000700: fa fa fd fd fa fa fd fd fa fa fd fd fa fa fd fd\n  0x602000000780: fa fa fd fd fa fa fd fd fa fa fd fd fa fa 00 fa\n=>0x602000000800: fa fa 00 fa fa fa 00[fa]fa fa 00 00 fa fa 05 fa\n  0x602000000880: fa fa 00 00 fa fa 00 00 fa fa 00 00 fa fa 00 00\n  0x602000000900: fa fa 00 00 fa fa 00 fa fa fa 00 fa fa fa 00 00\n  0x602000000980: fa fa fd fa fa fa fd fa fa fa fd fa fa fa fd fa\n  0x602000000a00: fa fa fd fd fa fa fd fa fa fa fd fd fa fa fd fd\n  0x602000000a80: fa fa fd fd fa fa fd fd fa fa fd fd fa fa fd fd\nShadow byte legend (one shadow byte represents 8 application bytes):\n  Addressable:           00\n  Partially addressable: 01 02 03 04 05 06 07 \n  Heap left redzone:       fa\n  Freed heap region:       fd\n  Stack left redzone:      f1\n  Stack mid redzone:       f2\n  Stack right redzone:     f3\n  Stack after return:      f5\n  Stack use after scope:   f8\n  Global redzone:          f9\n  Global init order:       f6\n  Poisoned by user:        f7\n  Container overflow:      fc\n  Array cookie:            ac\n  Intra object redzone:    bb\n  ASan internal:           fe\n  Left alloca redzone:     ca\n  Right alloca redzone:    cb\n==71006==ABORTING\n```\n\n## Fix direction\n\nAdd a set of boolean flags to `struct FormInfo` to record whether each length field was explicitly provided by the caller (`namelength_set`, `contentslength_set`, `bufferlength_set`). Set the flag in the `formadd` switch when the option is seen, regardless of the value. In `forminfo_copyfield` (or in `formadd_check` before the call), only fall back to `strlen` when the flag is absent. When the flag is set and the length is 0, pass 0 directly and skip the `strlen` entirely. That's a zero-byte copy, which is the caller's intent.\n\nAn alternative is to use a sentinel (e.g., `SIZE_MAX` meaning \"not set\") and store the real value including 0 directly, but the boolean-flag approach is less likely to interact badly with the existing `CURL_FORMADD_OPTION_TWICE` checks.\n\nCheers,\nJosh\n\n## Impact\n\nOOB read",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

