@@ -1,0 +1,111 @@
+{
+  "id": 4057637,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDU3NjM3",
+  "url": "https://hackerone.com/reports/4057637",
+  "title": "[HIGH] CWE-22 — Path Traversal in FTP Wildcard Download via Unencoded `.` in Escaped Filenames",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "high",
+  "readable_substate": "Informative",
+  "created_at": "2026-09-24T21:11:41.747Z",
+  "submitted_at": "2026-09-24T21:11:41.917Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "mrtomato",
+    "url": "/mrtomato",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-09-26T08:35:51.703Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-24T22:08:24.949Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\nA malicious or MITM'd FTP server can cause a client using `CURLOPT_WILDCARDMATCH` to download files outside the intended remote directory, by returning a LIST response with a filename containing `..` path-traversal sequences.\n\n### Details\nIn the CURLWC_DOWNLOADING state (`lib/ftp.c:4079-4095`), each filename returned by the server's LIST response is escaped with `curl_easy_escape()` before being appended to the current wildcard path:\n\n    `char *enc = curl_easy_escape(NULL, finfo->filename, 0);`\n    ...\n    `tmp_path = curl_maprintf(\"%s%s\", wildcard->path, enc);`\n    ...\n    `ftp->pathalloc = ftp->path = tmp_path;`\n\n`curl_easy_escape()` percent-encodes everything except the RFC 3986 unreserved character set (A-Za-z0-9-._~), critically, `.` is NOT encoded. A filename of `../etc/passwd` therefore escapes to `..%2Fetc%2Fpasswd` (dots preserved literally, only the `/` gets encoded).\n\nImmediately afterward, `ftp_parse_url_path()` (`lib/ftp.c:207-227`) is called on this same path, and its very first step is:\n\n    `result = Curl_urldecode(ftp->path, 0, &ftpc->rawpath, &pathLen, REJECT_CTRL);`\n\nThis URL-decodes the path, reconstructing the literal `../etc/passwd` sequence. `REJECT_CTRL` only rejects control characters (confirmed by reading Curl_urldecode's REJECT_CTRL handling), there is no `..`-component filtering or path-normalization check anywhere in this flow before the resulting path is used to drive the subsequent CWD/RETR sequence.\n\n### PoC\n1. Attacker controls or MITMs an FTP server.\n2. The client application uses wildcard matching:\n   `curl_easy_setopt(curl, CURLOPT_WILDCARDMATCH, 1L)` against a URL like `ftp://server/pub/*.txt`\n3. The attacker's FTP LIST response includes a filename such as `\"../../etc/passwd\"` (or an absolute-looking component).\n4. `curl_easy_escape()` encodes it to `\"..%2F..%2Fetc%2Fpasswd\"` (dots preserved, slashes encoded).\n5. It is concatenated onto the current wildcard path.\n6. `ftp_parse_url_path()` -> `Curl_urldecode()` decodes it straight back to `\"../../etc/passwd\"` (or similar), with only control-character filtering.\n7. The resulting path drives the client's CWD/RETR sequence, traversing outside the directory the calling application intended to browse.\n\n**Suggested patch:**\n```diff\nAfter URL-decoding in ftp_parse_url_path(), validate that the resulting\npath does not contain \"..\" components that traverse outside the intended\ndirectory. Alternatively, validate finfo->filename in the\nCURLWC_DOWNLOADING state before it is ever escaped reject filenames\ncontaining \"/\", \"..\", or an absolute-path leading \"/\".\n```\n\n## Impact\n\n## Summary:\nAn application using CURLOPT_WILDCARDMATCH against an untrusted or compromised FTP server can be made to download files from arbitrary paths on that server, outside the directory the calling code intended, an information-disclosure / path-confinement bypass. Requires the calling application to have opted into wildcard matching; does not affect the default (non-wildcard) FTP/SFTP/HTTP transfer paths.",
+  "weakness": {
+    "id": 19,
+    "name": "Path Traversal"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
