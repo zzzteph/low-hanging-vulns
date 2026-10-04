@@ -1,0 +1,151 @@
+{
+  "id": 3766217,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzY2MjE3",
+  "url": "https://hackerone.com/reports/3766217",
+  "title": "libmariadb ( mariadb-connector-c ): stack overflow via server-controlled field->length in prepared-statement codec",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-28T06:26:51.976Z",
+  "submitted_at": "2026-05-28T06:26:52.752Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fg0x0",
+    "url": "/fg0x0",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/we9mo7ui49vl91bznzyid2bvt1lf/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-04T07:44:56.098Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-04T07:44:55.924Z",
+  "team_member_agreed_on_going_public_at": "2026-09-15T16:43:18.808Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "MariaDB Connector/C (libmariadb) calls `alloca()` with a length value read directly from the server's column-definition packet without any upper bound. A malicious MariaDB/MySQL server, or a MITM attacker on a non-TLS connection, can set `field->length` to a value exceeding the process stack size, causing an immediate stack overflow and process crash ( SIGSEGV ).\n\n## Vulnerable Code\n\n**File:** `libmariadb/ma_stmt_codec.c`, function `convert_from_long`, line 677\n\n```c\nstatic void convert_from_long(MYSQL_BIND *r_param, const MYSQL_FIELD *field,\n                               long long val)\n{\n  // ...\n  default:\n    {\n      char *buffer;\n      buffer = alloca(MAX(field->length, 22));  // <-- no upper bound\n      // ...\n    }\n}\n```\n\n**Source of `field->length`:** `libmariadb/mariadb_lib.c`, line 1171\n\n```c\nfield->length = (uint) uint4korr(p);  // 4-byte read from server packet, no clamp\n```\n\nThe server's column-definition packet contains a 4-byte `field->length` value that is read verbatim with `uint4korr()` and stored without any validation. When this value reaches `convert_from_long()` via the prepared-statement fetch path, `alloca()` attempts to reserve that many bytes on the stack. Any value exceeding the thread's stack limit (~8MB default) causes SIGSEGV.\n\n### Call Chain\n\n```bash\nmysql_stmt_fetch()\n  --> stmt_buffered_fetch() or ma_stmt_execute_packet_read()\n    --> madb_update_stmt_fields()\n      --> field->length = uint4korr(p)  // server-controlled, no clamp\n  --> ma_stmt_fetch_column_as_bind()\n    --> field->fetch_func() --> ps_fetch_long()\n      --> convert_from_long()\n        --> alloca(MAX(field->length, 22))  // BOOM if > stack size\n```\n\n## Steps to Reproduce\n\n### Prerequisites\n\n- GCC, libmariadb-dev (any version with prepared-statement support)\n- Python 3 (for the malicious server)\n\n### Step 1 - Build the C client\n\n```bash\nunzip mariadb-c.zip\ncd poc\ngcc -o client client.c $(mariadb_config --cflags --libs)\n```\n\n### Step 2 - Start the malicious server (field_length = 16MB)\n\n```bash\npython3 malicious_server.py 33995 &\n```\n\nThe server implements the minimum MariaDB wire protocol: handshake, auth OK, COM_STMT_PREPARE response with `field->length = 0x1000000` (16MB), and COM_STMT_EXECUTE response with a single integer row.\n\n### Step 3 - Run the client\n\n```bash\n./client 33995\n```\n\n### Step 4 - Observe the crash\n\n```bash\nSegmentation fault (core dumped)\nExit code: 139\n```\n\n### Step 5 - Control run (field_length = 100)\n\n```bash\n# Edit malicious_server.py: FIELD_LENGTH = 100\npython3 malicious_server.py 33996 &\n./client 33996\n```\n\n```bash\n[client] connecting to 127.0.0.1:33996\n[client] connected, server: 5.7.30-malicious\n[client] prepared\n[client] executed, fetching...\n[client] fetch returned 0, value='7' len=1\nExit code: 0\n```\n\nClean execution - confirms the threshold matches the stack size.\n\n**Exploitation conditions:**\n\n- The attacker controls or can impersonate the database server (malicious server, DNS poisoning, ARP spoofing, or MITM on non-TLS connections)\n- No authentication or credentials are required - the malicious field metadata is sent after the handshake in response to COM_STMT_PREPARE\n- No user interaction is required\n\n**Affected versions:**\n\n- libmariadb 11.8.6 (Debian/Kali system package) - confirmed\n- MariaDB Connector/C HEAD of 3.4 branch (6ffb335, version 3.4.10-dev) - same vulnerable code\n- MariaDB Connector/C v3.4.9 (64e9fe0) - same vulnerable code\n- All prior versions with prepared-statement support\n\n### Suggested Fix\n\nClamp `field->length` before it reaches `alloca()`:\n\n```c\n// Option 1: clamp at parse time (mariadb_lib.c:1171)\nfield->length = MIN((uint)uint4korr(p), MAX_FIELD_LENGTH);\n\n// Option 2: clamp at alloca site (ma_stmt_codec.c:677)\nsize_t buf_len = MAX(field->length, 22);\nif (buf_len > MAX_ALLOCA_SIZE)\n    buffer = malloc(buf_len);\nelse\n    buffer = alloca(buf_len);\n```\n\n## Environment\n\n- libmariadb 11.8.6 (Debian 1:11.8.6-2)\n- GCC 14.2.0, Linux x86_64\n- Stack limit: 8192 KB (default)\n- Reproduction: 2/2 successful\n\n## Impact\n\nA malicious MariaDB/MySQL server, or a network attacker performing MITM on a non-TLS database connection, can crash any application linked against libmariadb that uses prepared statements (`mysql_stmt_*` API). The crash occurs when the client fetches query results - after the connection is established and the query is executed.\n\n**Confirmed impact:**\n\n- **Denial of Service:** The client process crashes with SIGSEGV (exit 139). Any application using libmariadb prepared statements is terminated immediately.\n\n**Reach - affected downstream consumers:**\n\n- PHP `mysqli` in prepared-statement mode\n- Perl `DBD::MariaDB`\n- Ruby `mysql2` gem\n- Direct C/C++ applications using `mysql_stmt_fetch()`\n- MariaDB Connector/Python is NOT affected ( uses `STMT_ATTR_FIELD_FETCH_CALLBACK` override that bypasses this code path )",
+  "weakness": {
+    "id": 4,
+    "name": "Stack Overflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5999411,
+      "file_name": "client.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/306wphm215e5ksupg46nsn4t14y8?response-content-disposition=attachment%3B%20filename%3D%22client.c%22%3B%20filename%2A%3DUTF-8%27%27client.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ54IWYBV7%2F20261004%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261004T091408Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPj%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIAhA50GskTcXoAdbESlQncLfykZUa9GwtLL%2FSGmbLp3iAiA2NjVHDYhIEKBEX1Vj0OHWOwfPDYaBqFNe47K0yrarjCq6BQjB%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMlXwf9EbVUdTvvDloKo4FIO9TPFRYliLTM0ZGNcqDidDsNSoSa9UlvnooSR5ejCLkc7oXfAnIUE8CSbPyDxCEFbegoychSLtF59K2heGSbRfjUFJMOUG0M739fL3lOipN8wI6Wys4IS2mQhxzCtLfOs%2BJblsOHDqKc8Gz%2Ffg%2FKbSxEp6Ybe53%2BBCZ7qza2ch971EfyIEmUKNcSypnAqBXRFYXV%2BPBPgdNijNZ%2FcFmpI5uHdyvinnKNAWd%2Blv0%2BZfstKM0jy7xJdrMniOEOerFvRZMq43MGGHNXuqwGZJXnNo%2BsLsmM9qFW7yCIL%2BIp3JFoeoYlAj7OQeBnwS20f4lm2VAqGpTwgQc5zUg6%2FuA0MU2d6gIOoHcsUdD%2FHOszSWFJ%2Bp5ihnPcZxb4GnOcjzcvXwDcxhm4QiFT1qt%2Bn5AFh4oVbXyHvP1ekXjs%2FOdHyyQN2yBrpBQCzm8epF68QYZBMvCaxpJgPba4YPsjGmpUDe%2BkLjZSqyaNiBSAMuT04vQiXv0HSKnja7%2FkrkwOIGLnMLqcocEWqgP4ieq9KlyDHUOsVXhq73o6qisp3gSg%2FrJnrXRbYoT6WO66WKVwhr2thuhaaB5t3yYSUh3fH5GuBOe356qbO4tEZ8lwVVZlF66RILV7r54SP7VeMiAyiqUIzMf14S%2BUmmSgj%2Bs04RlSnppR1WqXcpHjh%2Bwvg55P2XYYzp85nwxSBvZO3eexKGSsfWp1U0LS2yUp5WGBpq4MaAJc4ONbj6j0LdFVtZCs6X8iCfGTH8hNNlA02%2FZ4bmTuQoXmPdwO264NIpqoBku5aSlTSg09ZBrNSHnAVDBelB04DPfbYNZzz1LwPrrDHMJzOr0bo0Ouh%2FsOxLEyTAmY8GazTZNgpDmWy74mBfLMJ6XiNYGOrIBZlpfJBuo%2FYDvl2lAbc3yc5xR5nAyKJNtxh8cX3rY5w46Jg%2BAyM9HLh52ilf4Jpij6AknPJBXFSaBRqkH7D%2BuB0BW%2BozcciaZL4g%2FRHxhsPjsRZ6rZAU5IbgA%2BDTiSBfRsmgMwuo7jl47l7Qv%2FimKUJo1%2FdhKvXoKsqYBCzo6167pP4U1RiXgdy0vEpsfKAZ1eJ%2Bw67UmCF2HzWCHX9o7b3oytEuaJusKZKPnCTV9eqdyxw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=5873f47158d8148d6450f8ae65390f5ad85828734706cdc93daa4362dfe3e61b",
+      "file_size": 1930,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 5999412,
+      "file_name": "malicious_server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/0915plihrvfjhmj85g5y3xv8s43r?response-content-disposition=attachment%3B%20filename%3D%22malicious_server.py%22%3B%20filename%2A%3DUTF-8%27%27malicious_server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ54IWYBV7%2F20261004%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261004T091408Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPj%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIAhA50GskTcXoAdbESlQncLfykZUa9GwtLL%2FSGmbLp3iAiA2NjVHDYhIEKBEX1Vj0OHWOwfPDYaBqFNe47K0yrarjCq6BQjB%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMlXwf9EbVUdTvvDloKo4FIO9TPFRYliLTM0ZGNcqDidDsNSoSa9UlvnooSR5ejCLkc7oXfAnIUE8CSbPyDxCEFbegoychSLtF59K2heGSbRfjUFJMOUG0M739fL3lOipN8wI6Wys4IS2mQhxzCtLfOs%2BJblsOHDqKc8Gz%2Ffg%2FKbSxEp6Ybe53%2BBCZ7qza2ch971EfyIEmUKNcSypnAqBXRFYXV%2BPBPgdNijNZ%2FcFmpI5uHdyvinnKNAWd%2Blv0%2BZfstKM0jy7xJdrMniOEOerFvRZMq43MGGHNXuqwGZJXnNo%2BsLsmM9qFW7yCIL%2BIp3JFoeoYlAj7OQeBnwS20f4lm2VAqGpTwgQc5zUg6%2FuA0MU2d6gIOoHcsUdD%2FHOszSWFJ%2Bp5ihnPcZxb4GnOcjzcvXwDcxhm4QiFT1qt%2Bn5AFh4oVbXyHvP1ekXjs%2FOdHyyQN2yBrpBQCzm8epF68QYZBMvCaxpJgPba4YPsjGmpUDe%2BkLjZSqyaNiBSAMuT04vQiXv0HSKnja7%2FkrkwOIGLnMLqcocEWqgP4ieq9KlyDHUOsVXhq73o6qisp3gSg%2FrJnrXRbYoT6WO66WKVwhr2thuhaaB5t3yYSUh3fH5GuBOe356qbO4tEZ8lwVVZlF66RILV7r54SP7VeMiAyiqUIzMf14S%2BUmmSgj%2Bs04RlSnppR1WqXcpHjh%2Bwvg55P2XYYzp85nwxSBvZO3eexKGSsfWp1U0LS2yUp5WGBpq4MaAJc4ONbj6j0LdFVtZCs6X8iCfGTH8hNNlA02%2FZ4bmTuQoXmPdwO264NIpqoBku5aSlTSg09ZBrNSHnAVDBelB04DPfbYNZzz1LwPrrDHMJzOr0bo0Ouh%2FsOxLEyTAmY8GazTZNgpDmWy74mBfLMJ6XiNYGOrIBZlpfJBuo%2FYDvl2lAbc3yc5xR5nAyKJNtxh8cX3rY5w46Jg%2BAyM9HLh52ilf4Jpij6AknPJBXFSaBRqkH7D%2BuB0BW%2BozcciaZL4g%2FRHxhsPjsRZ6rZAU5IbgA%2BDTiSBfRsmgMwuo7jl47l7Qv%2FimKUJo1%2FdhKvXoKsqYBCzo6167pP4U1RiXgdy0vEpsfKAZ1eJ%2Bw67UmCF2HzWCHX9o7b3oytEuaJusKZKPnCTV9eqdyxw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=8e7e33188e13df94bc8963340f690073873b4f4e2df11630740904f313493ba8",
+      "file_size": 6315,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 5999413,
+      "file_name": "poc_evidence.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/woc1g52g6q4uj1j9ncw9ejx9wl2n?response-content-disposition=attachment%3B%20filename%3D%22poc_evidence.txt%22%3B%20filename%2A%3DUTF-8%27%27poc_evidence.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ54IWYBV7%2F20261004%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261004T091408Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEPj%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIAhA50GskTcXoAdbESlQncLfykZUa9GwtLL%2FSGmbLp3iAiA2NjVHDYhIEKBEX1Vj0OHWOwfPDYaBqFNe47K0yrarjCq6BQjB%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMlXwf9EbVUdTvvDloKo4FIO9TPFRYliLTM0ZGNcqDidDsNSoSa9UlvnooSR5ejCLkc7oXfAnIUE8CSbPyDxCEFbegoychSLtF59K2heGSbRfjUFJMOUG0M739fL3lOipN8wI6Wys4IS2mQhxzCtLfOs%2BJblsOHDqKc8Gz%2Ffg%2FKbSxEp6Ybe53%2BBCZ7qza2ch971EfyIEmUKNcSypnAqBXRFYXV%2BPBPgdNijNZ%2FcFmpI5uHdyvinnKNAWd%2Blv0%2BZfstKM0jy7xJdrMniOEOerFvRZMq43MGGHNXuqwGZJXnNo%2BsLsmM9qFW7yCIL%2BIp3JFoeoYlAj7OQeBnwS20f4lm2VAqGpTwgQc5zUg6%2FuA0MU2d6gIOoHcsUdD%2FHOszSWFJ%2Bp5ihnPcZxb4GnOcjzcvXwDcxhm4QiFT1qt%2Bn5AFh4oVbXyHvP1ekXjs%2FOdHyyQN2yBrpBQCzm8epF68QYZBMvCaxpJgPba4YPsjGmpUDe%2BkLjZSqyaNiBSAMuT04vQiXv0HSKnja7%2FkrkwOIGLnMLqcocEWqgP4ieq9KlyDHUOsVXhq73o6qisp3gSg%2FrJnrXRbYoT6WO66WKVwhr2thuhaaB5t3yYSUh3fH5GuBOe356qbO4tEZ8lwVVZlF66RILV7r54SP7VeMiAyiqUIzMf14S%2BUmmSgj%2Bs04RlSnppR1WqXcpHjh%2Bwvg55P2XYYzp85nwxSBvZO3eexKGSsfWp1U0LS2yUp5WGBpq4MaAJc4ONbj6j0LdFVtZCs6X8iCfGTH8hNNlA02%2FZ4bmTuQoXmPdwO264NIpqoBku5aSlTSg09ZBrNSHnAVDBelB04DPfbYNZzz1LwPrrDHMJzOr0bo0Ouh%2FsOxLEyTAmY8GazTZNgpDmWy74mBfLMJ6XiNYGOrIBZlpfJBuo%2FYDvl2lAbc3yc5xR5nAyKJNtxh8cX3rY5w46Jg%2BAyM9HLh52ilf4Jpij6AknPJBXFSaBRqkH7D%2BuB0BW%2BozcciaZL4g%2FRHxhsPjsRZ6rZAU5IbgA%2BDTiSBfRsmgMwuo7jl47l7Qv%2FimKUJo1%2FdhKvXoKsqYBCzo6167pP4U1RiXgdy0vEpsfKAZ1eJ%2Bw67UmCF2HzWCHX9o7b3oytEuaJusKZKPnCTV9eqdyxw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=476a7eec53e32f6a8e68573f62ad0a7fbfea66649c96f3de698c18b291bddd7e",
+      "file_size": 605,
+      "type": "text/plain",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-15T16:43:19.239Z",
+  "allow_singular_disclosure_after": 977350.988127334,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "fg0x0"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.1,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "none",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10337,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors  - Denial of Service",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
