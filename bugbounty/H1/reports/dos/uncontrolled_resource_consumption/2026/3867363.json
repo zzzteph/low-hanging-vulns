@@ -1,0 +1,130 @@
+{
+  "id": 3867363,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODY3MzYz",
+  "url": "https://hackerone.com/reports/3867363",
+  "title": "MariaDB HandlerSocket Improper Request Field-Count Validation Causes Server Crash",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-16T07:07:54.302Z",
+  "submitted_at": "2026-07-16T07:07:54.541Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "xlabai",
+    "url": "/xlabai",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-07T20:03:17.302Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-07T20:03:08.335Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Product\n\nProduct name: MariaDB Server\n\nProduct link: https://github.com/MariaDB/server\n\nAffected versions: Reproduced in a locally built test environment based on the official MariaDB source code, running `13.1.0-MariaDB`. HandlerSocket is an optional MariaDB plugin. The final affected version range should be confirmed by the vendor.\n\n### Summary\n\nHandlerSocket is an optional MariaDB plugin that exposes a separate port for direct table index access similar to key-value queries, bypassing normal SQL parsing to improve performance for simple read/write operations.\n\nWhen HandlerSocket is enabled, MariaDB accepts client requests through the HandlerSocket port. The exec request contains a \"field count\" parameter. The code uses that count to allocate stack memory and write field records before checking whether the count is reasonable. An attacker can send an abnormally large field count, causing the `mariadbd` process to crash and making the database service unavailable.\n\nIf HandlerSocket is enabled and `handlersocket_plain_secret` / `handlersocket_plain_secret_wr` is not configured, the issue can be triggered by an unauthenticated attacker. If a secret is configured, the attacker must authenticate to HandlerSocket first. The current evidence only proves denial of service. It does not prove code execution or data theft.\n\n### Details\n\nA HandlerSocket exec request roughly contains a prepared statement number, operator, field count, and field values. After the affected code reads the client-controlled field count `fldnum`, it immediately executes logic similar to the following:\n\n```cpp\nfldnum = read_field_count_from_request();\nflds = alloca(fldnum * sizeof(string_ref));\nfor each field:\n    flds[i] = string_ref(field_pointer, field_length);\n```\n\nThe issue is the validation order. The program should first confirm that `fldnum` does not exceed the number of fields allowed by the index, and only then allocate memory. Instead, it allocates stack memory based on the client-supplied count and writes into it before the later field-count validation runs.\n\nWhen an attacker sets the field count to a very large value, the program attempts to allocate an abnormally large stack buffer. In verification, `1000000000` was used as the field count. `mariadbd` triggered SIGSEGV and exited while writing the first field record.\n\nThis is not a normal SQL-port vulnerability. Only deployments that enable the HandlerSocket plugin and expose a HandlerSocket listener are affected. The PoC directory provides a way to build a local test image from the official MariaDB source. The container loads the HandlerSocket plugin and exposes the listener port at startup.\n\n### PoC\n\nReproduction materials are in the `poc/` directory:\n\n- `poc/README.md`\n- `poc/Dockerfile.mariadb-source`\n- `poc/build-local-image.sh`\n- `poc/run-local-target.sh`\n- `poc/record-poc-demo.sh`\n- `poc/poc.py`\n- `poc/run-poc.sh`\n- `poc/poc.mp4`\n\nReproduction environment:\n\n```bash\ncd poc\nchmod +x *.sh docker-entrypoint-hs.sh\n./build-local-image.sh\n./run-local-target.sh\n```\n\nBy default, the image shallow-clones the official MariaDB repository `https://github.com/MariaDB/server.git` from the `preview-13.1-preview` branch and verifies that the current HEAD is fixed at commit `91f37a32f3ee463bdb8287ef951170b5f64201e0`. To reproduce against another official source tag or branch, use:\n\n```bash\ncd poc\nMARIADB_REF='<official-tag-or-branch>' MARIADB_EXPECTED_COMMIT='' ./build-local-image.sh\n./run-local-target.sh\n```\n\nAfter the target container starts, it satisfies the following conditions:\n\n1. MariaDB has loaded the HandlerSocket plugin.\n2. The HandlerSocket read or write listener port is reachable.\n3. Test table `hs_verify.t` exists, with `id` as the primary key.\n4. If HandlerSocket is configured with a secret, that secret must be passed to the PoC.\n\nTest table:\n\n```sql\nCREATE DATABASE hs_verify;\nCREATE TABLE hs_verify.t (id INT PRIMARY KEY, v VARCHAR(32));\nINSERT INTO hs_verify.t VALUES (1, 'one');\n```\n\nRun the PoC:\n\n```bash\ncd poc\n./run-poc.sh --host 127.0.0.1 --port 9998\n```\n\nIf HandlerSocket is configured with a secret:\n\n```bash\ncd poc\n./run-poc.sh --host 127.0.0.1 --port 9998 --secret '<secret>'\n```\n\nKey output example:\n\n```text\nopen response: 0\t1\nexec response: <empty>\nRESULT: VULNERABLE - listener is no longer reachable after trigger\n```\n\nExpected result: HandlerSocket should reject an excessive field count before allocating memory and should keep the MariaDB service running.\n\nActual result: HandlerSocket accepts the abnormally large field count, the `mariadbd` process crashes, and the database service becomes unavailable.\n\n`poc/poc.mp4` is an end-to-end screen recording. It shows local source-image startup, version and HandlerSocket plugin checks, PoC triggering, container `Exited (139)` / `Segmentation fault` crash evidence, and the HandlerSocket port becoming unreachable after the trigger. The recording runs `date -R` at the end to preserve the reproduction time.\n\n\n\n### Score\n\nCVSS 3.1 score: 7.5, High.\n\n```text\nCVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H\n```\n\nCVSS 3.1 scoring rationale:\n\n- AV:N: The attacker accesses the HandlerSocket listener over the network.\n- AC:L: Exploitation is fixed and only requires a normal open request and an abnormal exec request.\n- PR:N: When no HandlerSocket secret is configured, no authentication is required before the attack.\n- UI:N: No user interaction is required.\n- S:U: The impact is limited to the attacked MariaDB service process.\n- C:N / I:N: No data disclosure or data tampering has been proven.\n- A:H: The issue can crash the `mariadbd` process and make the database service unavailable.\n\nCWE: CWE-400 (Uncontrolled Resource Consumption)\n\n### Credit\n\nThis vulnerability was discovered by:\n\n- XlabAI Team of Tencent Xuanwu Lab (xlabai@tencent.com)\n- Atuin Automated Vulnerability Discovery Engine\n- Guannan Wang (wgnbuaa@gmail.com), Zhanpeng Liu (pkugenuine@gmail.com), Jiashuo Liang (761232680@qq.com), Guancheng Li (lgcpku@gmail.com)\n\nCVE and credits are preferred.\n\nIf you have any questions regarding the vulnerability details, please feel free to reach out to us for further discussion. Our email address is xlabai@tencent.com.\n\n### Note\n\nNote that we follow the security industry standard disclosure policy—the 90+30 policy (reference: https://googleprojectzero.blogspot.com/p/vulnerability-disclosure-policy.html). If the aforementioned vulnerabilities cannot be fixed within 90 days of submission, we reserve the right to publicly disclose all information about the issues after this timeframe.\n\n## Impact\n\nAn attacker who can access the HandlerSocket port can craft an abnormal request that crashes the MariaDB service process, causing database denial of service.\n\nImpact boundaries:\n\n- Without a HandlerSocket secret: an unauthenticated attacker can trigger the issue.\n- With a HandlerSocket secret: the attacker must authenticate to HandlerSocket first.\n- The normal SQL port is not affected.\n- The current evidence does not prove remote code execution, data disclosure, or data tampering.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6262790,
+      "file_name": "report.md",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fu1hdy48m9mtxcy9zn7o62uex2hw?response-content-disposition=attachment%3B%20filename%3D%22report.md%22%3B%20filename%2A%3DUTF-8%27%27report.md&response-content-type=text%2Fmarkdown&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ25WOUESA%2F20261007%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261007T210906Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEsaCXVzLXdlc3QtMiJHMEUCIA6B%2FX%2FUNdwxGdrYWBx1k9R9GdH4gq9v5qlfKWPvNfytAiEAvIpmtcC8OexEVPnsxxOrjNn%2FwLBuCFSaej8XZxJKexAqsQUIFBADGgwwMTM2MTkyNzQ4NDkiDCb3xq9l2JQVQlL4rSqOBUoMOwkTAVKWb5sefwZ27IvhEdUdPK4HMpgKpijpqlnqrHxg009%2BVJbTi3TfW37RRf6h3QTNb7aOoz6jduGpJDgRVfY7o%2BcP3ehT5iaSL64jpLhEp2ePRGckpB3ZaSfEbzkcP6c1WnT3GKLpD8HoQj%2BZQGaO%2Figrn6L869Tj3XVSUrQUglVdLXZdZ%2BhavDRFnb6r2Gbuk8mf%2Bmhkkb%2Fgb2GwIN3wxkavuX%2Bk7qfxTGLzUgow061gpSGfQlpzw%2B7mm7LQSuJguDnoIA3uWTBbjbIWIctJfIVhlF9AI%2BuV12j0jLAOP8t9qIyY%2F16pd%2FNrAIKJHDQF6ovNZG48%2Br%2BwomtgoIcCk7RIc8L6HqvrDiumclf5RLT2xIwDL%2FVau7OsIqxpRyua329ANI10d5iOOiPQ59Oj9TShB3fKu16LClGBzVFZO3uTJyUraRKcbb6TU4Br9WRYyBigMFFBoB%2BKloTs9y44BRcDYrro0qBt06b%2BBTRAF2CiCvIF4G%2Fxms1rFMGUmhsb%2BefxOFAZn5YVCEALhP5L6nhfaOrutNrprDWwKiuK86PEc9OD7K4YI5d%2Bytrhdh90jzvfh9mty128vLUiYDsxP7EoyqXOjJGkHps9wanXsKegHCHLuZFjaJSLywL37HrEhuSMAgPR2hN9UerEbSbYayN73KWYYfzoYF67%2BKf36gJPUhmzH8kd0Pv2RMpeZSLNzZNAcgFmewsnhntdbVHwTEfCqZLdCILwPbpLvVrSUjJRcpiMWxoVcRWZkGapFe7ccgiu1EaG2PJ7lG4kVF6gycDo6SWZ5FLm2D%2F4Zckql5ddx48OGTIZwhIH4cxZPjnyXh9QyC%2FQwxlLn%2FIa8PMt7kU0b6tbtpvGojDYrJrWBjqxAXtsI%2FD1AjlHFniF%2B51KQj2XkZcPBR5uUmaXkl%2Fklhs6%2BEZXUYJ3kWdneBYt85Oc8EIc1zdqQlGqB1kYz9itlZa6qAEOQOYw7IWibHluQ1lfv111O%2BDJsmi72fcPzEStVDWix89T2E%2FibxcZM0rDgWY2f%2BtJ0lah1%2FPMEqc1AL3bekBUiC7obUYtXpUxuHhAEJkNg2t%2BPR4mOgzCM56RZHvh%2FvVyDZFFwzNSL03dGbMvCQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f85137d84e001b8c8f4aabefe1508c6bb2eebc024e08d63244f455edc8e59ef4",
+      "file_size": 8264,
+      "type": "text/markdown",
+      "moderated": null
+    },
+    {
+      "id": 6262791,
+      "file_name": "poc.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/au8to7715jkjj4kgbnv425028idu?response-content-disposition=attachment%3B%20filename%3D%22poc.zip%22%3B%20filename%2A%3DUTF-8%27%27poc.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ25WOUESA%2F20261007%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261007T210906Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEsaCXVzLXdlc3QtMiJHMEUCIA6B%2FX%2FUNdwxGdrYWBx1k9R9GdH4gq9v5qlfKWPvNfytAiEAvIpmtcC8OexEVPnsxxOrjNn%2FwLBuCFSaej8XZxJKexAqsQUIFBADGgwwMTM2MTkyNzQ4NDkiDCb3xq9l2JQVQlL4rSqOBUoMOwkTAVKWb5sefwZ27IvhEdUdPK4HMpgKpijpqlnqrHxg009%2BVJbTi3TfW37RRf6h3QTNb7aOoz6jduGpJDgRVfY7o%2BcP3ehT5iaSL64jpLhEp2ePRGckpB3ZaSfEbzkcP6c1WnT3GKLpD8HoQj%2BZQGaO%2Figrn6L869Tj3XVSUrQUglVdLXZdZ%2BhavDRFnb6r2Gbuk8mf%2Bmhkkb%2Fgb2GwIN3wxkavuX%2Bk7qfxTGLzUgow061gpSGfQlpzw%2B7mm7LQSuJguDnoIA3uWTBbjbIWIctJfIVhlF9AI%2BuV12j0jLAOP8t9qIyY%2F16pd%2FNrAIKJHDQF6ovNZG48%2Br%2BwomtgoIcCk7RIc8L6HqvrDiumclf5RLT2xIwDL%2FVau7OsIqxpRyua329ANI10d5iOOiPQ59Oj9TShB3fKu16LClGBzVFZO3uTJyUraRKcbb6TU4Br9WRYyBigMFFBoB%2BKloTs9y44BRcDYrro0qBt06b%2BBTRAF2CiCvIF4G%2Fxms1rFMGUmhsb%2BefxOFAZn5YVCEALhP5L6nhfaOrutNrprDWwKiuK86PEc9OD7K4YI5d%2Bytrhdh90jzvfh9mty128vLUiYDsxP7EoyqXOjJGkHps9wanXsKegHCHLuZFjaJSLywL37HrEhuSMAgPR2hN9UerEbSbYayN73KWYYfzoYF67%2BKf36gJPUhmzH8kd0Pv2RMpeZSLNzZNAcgFmewsnhntdbVHwTEfCqZLdCILwPbpLvVrSUjJRcpiMWxoVcRWZkGapFe7ccgiu1EaG2PJ7lG4kVF6gycDo6SWZ5FLm2D%2F4Zckql5ddx48OGTIZwhIH4cxZPjnyXh9QyC%2FQwxlLn%2FIa8PMt7kU0b6tbtpvGojDYrJrWBjqxAXtsI%2FD1AjlHFniF%2B51KQj2XkZcPBR5uUmaXkl%2Fklhs6%2BEZXUYJ3kWdneBYt85Oc8EIc1zdqQlGqB1kYz9itlZa6qAEOQOYw7IWibHluQ1lfv111O%2BDJsmi72fcPzEStVDWix89T2E%2FibxcZM0rDgWY2f%2BtJ0lah1%2FPMEqc1AL3bekBUiC7obUYtXpUxuHhAEJkNg2t%2BPR4mOgzCM56RZHvh%2FvVyDZFFwzNSL03dGbMvCQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1df20a6453f2aad9486608d17c80243aa4b16687e0fb5e6d841820cf7676f04a",
+      "file_size": 211883,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-07T20:03:08.514Z",
+  "allow_singular_disclosure_after": -3957.544287236,
+  "singular_disclosure_allowed": true,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 10337,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors  - Denial of Service",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

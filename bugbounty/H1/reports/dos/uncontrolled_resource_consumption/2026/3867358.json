@@ -1,0 +1,130 @@
+{
+  "id": 3867358,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODY3MzU4",
+  "url": "https://hackerone.com/reports/3867358",
+  "title": "MariaDB Low-Privilege User Can Exhaust Memory Through a Formatting Function and Crash the Service",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-16T07:04:50.053Z",
+  "submitted_at": "2026-07-16T07:04:50.499Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "xlabai",
+    "url": "/xlabai",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-07T20:01:50.728Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-07T20:01:47.506Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Product\n\nProduct name: MariaDB Server\n\nProduct link: https://github.com/MariaDB/server\n\nAffected versions: Reproduced in a locally built test environment based on the official MariaDB source code, running `13.1.0-MariaDB`. `SFORMAT()` has been available since MariaDB 10.7. The final affected version range should be confirmed by the vendor.\n\n### Summary\n\nMariaDB's built-in `SFORMAT()` function supports string formatting. A low-privilege database user can pass an extremely large width parameter, causing the server to attempt to allocate very large memory before generating the return value.\n\nThe attacker does not need administrative privileges. The attacker only needs a database account that can log in and execute an ordinary `SELECT`. Multiple concurrent requests can cause `mariadbd` to be terminated by the system OOM mechanism, making the database service unavailable.\n\nThe current evidence only proves denial-of-service risk. It does not prove information disclosure, privilege escalation, or remote code execution.\n\n### Details\n\n`SFORMAT()` generates a result according to a format string. For example:\n\n```sql\nSELECT SFORMAT('{:10}', 'x');\n```\n\nNormally, this formats `x` using the specified width.\n\nThe issue is that the function allows users to specify a very large width, for example:\n\n```sql\nSELECT LENGTH(SFORMAT('{:2147483647}', 'x'));\n```\n\nEven when the call is wrapped in `LENGTH()`, the server still needs to generate the full formatted string before calculating its length. Therefore, before the result is returned to the client, `mariadbd` already attempts to allocate close to 2 GB of memory.\n\nMariaDB has a parsing limit for larger numbers. For example, a width greater than `2147483647` returns an error. However, `2147483647` itself is still accepted and is already enough to cause severe memory consumption. Network result-size limits such as `max_allowed_packet` do not prevent this because the memory allocation occurs before the result-size check.\n\n### Preconditions\n\nExploitation requires the following conditions:\n\n- The attacker has a low-privilege MariaDB account that can log in over TCP.\n- The account can execute ordinary `SELECT`.\n- The target version provides the `SFORMAT()` function.\n- The database process does not have enough available memory to withstand multiple oversized formatting requests.\n\nNo table privilege, file privilege, administrator privilege, or user interaction is required.\n\n### PoC\n\nReproduction materials are in the `poc/` directory:\n\n- `poc/README.md`\n- `poc/Dockerfile.mariadb-source`\n- `poc/build-local-image.sh`\n- `poc/run-local-target.sh`\n- `poc/run-poc.sh`\n- `poc/record-poc-demo.sh`\n- `poc/poc.mp4`\n\nThe reproduction environment uses a locally source-built image:\n\n```text\nmariadb-source-sformat:13.1-preview\n```\n\nRun:\n\n```bash\ncd poc\nchmod +x *.sh\n./build-local-image.sh\n./run-local-target.sh\n./run-poc.sh\n```\n\nThe PoC starts a temporary MariaDB container with a memory limit, creates a low-privilege account with only `USAGE`, and then executes `SFORMAT()` through an authenticated TCP connection.\n\nThe key trigger statement is:\n\n```sql\nSELECT LENGTH(SFORMAT('{:2147483647}', 'x'));\n```\n\nThe PoC sends multiple concurrent requests with the statement above. When the vulnerability exists, expected output includes:\n\n```text\nAUTHENTICATED_LOW_PRIVILEGE_TCP=ok\nSFORMAT_LOW_PRIVILEGE=ok\nSERVER_AFTER_STRESS=down\nRESULT: VULNERABLE_CONFIRMED\n```\n\n`poc/poc.mp4` is an end-to-end screen recording. It shows local source-image checks, low-privilege TCP authentication, concurrent service crash triggering, container recovery, and `date -R` time information at the end of the recording.\n\n### Score\n\nCVSS 3.1 score: 6.5, Medium.\n\n```text\nCVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H\n```\n\nCVSS 3.1 scoring rationale:\n\n- AV:N: The attacker sends SQL through a network database connection.\n- AC:L: Exploitation is fixed and does not require a race condition, memory layout control, or special timing.\n- PR:L: A low-privilege database account that can execute ordinary SQL expressions is required.\n- UI:N: No user interaction is required.\n- S:U: The impact is limited to the attacked MariaDB service process.\n- C:N / I:N: The current evidence does not prove data disclosure or data tampering.\n- A:H: Concurrent oversized formatting requests can cause `mariadbd` to be terminated by the OOM mechanism, making the database service unavailable.\n\nCWE: CWE-789 (Memory Allocation with Excessive Size Value)\n\n### Credit\n\nThis vulnerability was discovered by:\n\n- XlabAI Team of Tencent Xuanwu Lab (xlabai@tencent.com)\n- Atuin Automated Vulnerability Discovery Engine\n- Guannan Wang (wgnbuaa@gmail.com), Zhanpeng Liu (pkugenuine@gmail.com), Jiashuo Liang (761232680@qq.com), Guancheng Li (lgcpku@gmail.com)\n\nCVE and credits are preferred.\n\nIf you have any questions regarding the vulnerability details, please feel free to reach out to us for further discussion. Our email address is xlabai@tencent.com.\n\n### Note\n\nNote that we follow the security industry standard disclosure policy—the 90+30 policy (reference: https://googleprojectzero.blogspot.com/p/vulnerability-disclosure-policy.html). If the aforementioned vulnerabilities cannot be fixed within 90 days of submission, we reserve the right to publicly disclose all information about the issues after this timeframe.\n\n## Impact\n\nAn attacker with a low-privilege database account can use ordinary SQL requests to exhaust server-side memory, causing the database process to crash or be terminated by the system.\n\nImpact boundaries:\n\n- The issue can interrupt the database service.\n- It does not require access to any business table.\n- It does not require administrator privileges.\n- The current evidence does not prove sensitive data disclosure.\n- The current evidence does not prove remote code execution.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6262784,
+      "file_name": "report.md",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/a8bz49d89u0jz6xslon5ur0h90qk?response-content-disposition=attachment%3B%20filename%3D%22report.md%22%3B%20filename%2A%3DUTF-8%27%27report.md&response-content-type=text%2Fmarkdown&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTIFH6QRE%2F20261007%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261007T210907Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEsaCXVzLXdlc3QtMiJHMEUCIQD48MhHlqFM6v2x4lQ2DjKV4IaLhlJrBs43wtWtBlxQOAIgZJ0azXUz7PopT16UwwlhM0VkEbBCfvSw1GUXgub1IrUqsQUIFBADGgwwMTM2MTkyNzQ4NDkiDOgLmwNnk4uoD0K2syqOBQblaz2UTv2NXv8OepiQuIrEh%2F8F2ouz1CO7AhDOZeN%2BYaEpy907hNg4fhxf6opjS4GNK%2FzcSzKDelDWdzxP%2B6N%2FSbdK5Cx1iwxKZJw6VG6woy7mz4Ohg5OIZvzWOXnJFte8z6N8mn7P5KvqHi%2BC7wKFRT78DaN0f%2BnDjTY6Sr5qgVAYIIxD2pA0EGjaG64Sy973MLkFmy8IH3yVgBue0KLv%2BARHOIx38vQF5wb96kdwPbjYwsO57te8qjqOh3HciArCs7gV%2FtNiXX%2FtRB4MK522cKVXt5orP2n8%2BxZa9MEkDAiGhHV%2BD4K7m%2Fx3ofCEOK3RFQzy4hlMe56JcQZL14841WgJHAgJ%2FTdB7TZdMERbzdjmPo0xbJhLwozy9FaCUw0fvg236%2F69lgjjw2lQSfn7w5O4AU8CLRqtTqp9sEU5xkasVRVgyArZnhCNJSUeFqI4fke8muInBDvWdZ%2B9nGrFG7mm76bO1qWbOOpAE9OObG%2FE2FEmaXjUmWM4UCvcOyHywCa28xqY8Zb1GCqNt8z21OSRylhMjCKI2UY0LSu%2BEgU87dLpipI4xVV7KjfD%2FdSJoa4pYZjPzoFfB7SHyY%2BJVLH94XSprOFx27ubSyjVTJKZGjtnnQnBEtKyLtvNQKz5eURotR2J5fWGRra4fgnGdCVWvYMRLjpv1wQDdIC4I0xtJdMA5ZZgT7IAO%2FAPPf5Tv8QyoojxHNpWaf0UyGqHiT7NOYK2FsD1cVvfScTU9FNId%2FWsq60HxVHjwI6oW3TlxfW5sueBK0SqAR8yL5fxMVgPZZd6rtDIMdeogK1T%2FfSV1KuIyPRGD2r4PNWQWWiGzHq6UbiVwnYc69duluTClSTzybCqXc5hktVXljDTpJrWBjqxAY%2Fgz4Z3bst24lT3BaU8vlCbE%2BnF0Xx7gQRG7TharZtnWAZ3Z7Z5ilN1wdE186aq2JCKlaHhGJVKSQr3DsYJRpEs6fWSk5sfmImVkpCPUCE%2FRYUt6ruUjLzyXqkbArbV%2F6nDSkNrkDpEDvjhD7tHFYxaegf9KilXPr1Iq9pGXUe98y1glK%2FeFaiDnGikiT7MsYLclo0FTlCnavfh9pkkXyM233kChufUQWhHTnjsrxAn4A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6aaa9aa7f2099cdc20dd3bbc2726b16808c72c8c8429d3e7c41245b3b31fe172",
+      "file_size": 7027,
+      "type": "text/markdown",
+      "moderated": null
+    },
+    {
+      "id": 6262785,
+      "file_name": "poc.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/sx1wpa0rx64ov7tc21mw3tgo6wyg?response-content-disposition=attachment%3B%20filename%3D%22poc.zip%22%3B%20filename%2A%3DUTF-8%27%27poc.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTIFH6QRE%2F20261007%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261007T210907Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEsaCXVzLXdlc3QtMiJHMEUCIQD48MhHlqFM6v2x4lQ2DjKV4IaLhlJrBs43wtWtBlxQOAIgZJ0azXUz7PopT16UwwlhM0VkEbBCfvSw1GUXgub1IrUqsQUIFBADGgwwMTM2MTkyNzQ4NDkiDOgLmwNnk4uoD0K2syqOBQblaz2UTv2NXv8OepiQuIrEh%2F8F2ouz1CO7AhDOZeN%2BYaEpy907hNg4fhxf6opjS4GNK%2FzcSzKDelDWdzxP%2B6N%2FSbdK5Cx1iwxKZJw6VG6woy7mz4Ohg5OIZvzWOXnJFte8z6N8mn7P5KvqHi%2BC7wKFRT78DaN0f%2BnDjTY6Sr5qgVAYIIxD2pA0EGjaG64Sy973MLkFmy8IH3yVgBue0KLv%2BARHOIx38vQF5wb96kdwPbjYwsO57te8qjqOh3HciArCs7gV%2FtNiXX%2FtRB4MK522cKVXt5orP2n8%2BxZa9MEkDAiGhHV%2BD4K7m%2Fx3ofCEOK3RFQzy4hlMe56JcQZL14841WgJHAgJ%2FTdB7TZdMERbzdjmPo0xbJhLwozy9FaCUw0fvg236%2F69lgjjw2lQSfn7w5O4AU8CLRqtTqp9sEU5xkasVRVgyArZnhCNJSUeFqI4fke8muInBDvWdZ%2B9nGrFG7mm76bO1qWbOOpAE9OObG%2FE2FEmaXjUmWM4UCvcOyHywCa28xqY8Zb1GCqNt8z21OSRylhMjCKI2UY0LSu%2BEgU87dLpipI4xVV7KjfD%2FdSJoa4pYZjPzoFfB7SHyY%2BJVLH94XSprOFx27ubSyjVTJKZGjtnnQnBEtKyLtvNQKz5eURotR2J5fWGRra4fgnGdCVWvYMRLjpv1wQDdIC4I0xtJdMA5ZZgT7IAO%2FAPPf5Tv8QyoojxHNpWaf0UyGqHiT7NOYK2FsD1cVvfScTU9FNId%2FWsq60HxVHjwI6oW3TlxfW5sueBK0SqAR8yL5fxMVgPZZd6rtDIMdeogK1T%2FfSV1KuIyPRGD2r4PNWQWWiGzHq6UbiVwnYc69duluTClSTzybCqXc5hktVXljDTpJrWBjqxAY%2Fgz4Z3bst24lT3BaU8vlCbE%2BnF0Xx7gQRG7TharZtnWAZ3Z7Z5ilN1wdE186aq2JCKlaHhGJVKSQr3DsYJRpEs6fWSk5sfmImVkpCPUCE%2FRYUt6ruUjLzyXqkbArbV%2F6nDSkNrkDpEDvjhD7tHFYxaegf9KilXPr1Iq9pGXUe98y1glK%2FeFaiDnGikiT7MsYLclo0FTlCnavfh9pkkXyM233kChufUQWhHTnjsrxAn4A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1aaf5323be7e3194430b977eb88a15b398d0fc93c833c6abc4e58d201181031c",
+      "file_size": 204879,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-07T20:01:47.694Z",
+  "allow_singular_disclosure_after": -4039.455466657,
+  "singular_disclosure_allowed": true,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 10337,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors  - Denial of Service",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

