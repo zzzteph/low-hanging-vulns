@@ -1,0 +1,112 @@
+{
+  "id": 3896507,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODk2NTA3",
+  "url": "https://hackerone.com/reports/3896507",
+  "title": "Server crash (stack-overflow DoS) via unbounded recursion in MariaDB WKB GEOMETRYCOLLECTION parser",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-28T14:32:59.020Z",
+  "submitted_at": "2026-07-28T14:32:59.208Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "tsg1696",
+    "url": "/tsg1696",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-11T12:16:14.026Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-09-11T12:16:13.185Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Reported via email as per policy to security@mariadb.org on July 4 but received no response., hence reporting here.\n\n# Server crash (stack-overflow DoS) via unbounded recursion in MariaDB WKB GEOMETRYCOLLECTION parser\n\n**Target:** MariaDB Server 13.1.0-alpha, source rev `bd366d81b80aa65fc76ec570fa0bf218a996853b` (fresh, 2026-07-01)\n**Component:** spatial / GIS WKB parser — `sql/spatial.cc`\n**Class:** CWE-674 Uncontrolled Recursion → stack exhaustion → SIGSEGV (Denial of Service)\n**Status:** Confirmed end-to-end against a live ASan server (SIGSEGV reproduced; depth-differential proven).\n\n---\n\n## Summary\n\n`Gis_geometry_collection::init_from_wkb()` and `::get_data_size()` recurse once per nested\nchild geometry when parsing a WKB (Well-Known Binary) `GEOMETRYCOLLECTION`, with **no\nrecursion-depth limit and no `check_stack_overrun()` call**. A single crafted value with a\nfew thousand levels of nested `GEOMETRYCOLLECTION` exhausts the thread stack and crashes the\n**entire server** (all connections dropped). Reachable by any user who can call a spatial\nfunction or write a `GEOMETRY` value — i.e. a low-privileged authenticated attacker.\n\nNotably, MariaDB guards recursion everywhere else (`check_stack_overrun` is used in\n`item.cc`, `item_func.cc`, `item_cmpfunc.cc`, `item_subselect.cc`, `item_jsonfunc.cc`,\n`json_table.cc`, `json_schema.cc`, …). The geometry WKB parser is the outlier — it has **no\nsuch guard** (`grep -rn check_stack_overrun sql/spatial.cc sql/spatial.h sql/item_geofunc.cc`\n→ no matches). This is a cross-path asymmetry: the protection pattern exists project-wide but\nwas never applied to this parser.\n\n---\n\n## Root cause\n\n`sql/spatial.cc`:\n\n```\nuint Gis_geometry_collection::init_from_wkb(const char *wkb, uint len, ...) {   // :4414\n  ...\n  while (n_geom--) {                                                             // :4429 (attacker n_geom)\n    Geometry_buffer buffer;                                                      // :4431 stack frame per level\n    Geometry *geom = create_by_typeid(&buffer, wkb_type);\n    if (!(g_len = geom->init_from_wkb(wkb, len, bo, res)))                       // :4447 RECURSE\n      return 0;\n    ...\n  }\n}\nuint32 Gis_geometry_collection::get_data_size() const {                          // :4284\n  ...\n  while (n_objects--) {\n    if ((object_size = geom->get_data_size()) == GET_SIZE_ERROR) ...             // :4308 RECURSE\n  }\n}\n```\n\nEach nesting level consumes one C++ stack frame (holding a `Geometry_buffer`). With the\ndefault `thread_stack` (~292 KB), a few thousand levels overflow the stack → SIGSEGV inside\nthe recursion. There is no `check_stack_overrun()` and no depth cap on either path.\n\n**Reachable entry points (whole geometry front-end family — `check_stack_overrun` appears\nZERO times in `sql/spatial.cc` and `sql/item_geofunc.cc`):**\n- **WKB** — `Item_func_geometry_from_wkb::val_str` → `Geometry::create_from_wkb` →\n  `Gis_geometry_collection::init_from_wkb` (spatial.cc:4414, recurse :4447). `ST_GeomFromWKB`,\n  `ST_GeomCollFromWKB`.\n- **WKT (text)** — `Geometry::create_from_wkt` (spatial.cc:393) →\n  `Gis_geometry_collection::init_from_wkt` → recurses via `create_from_wkt` (spatial.cc:4342).\n  `ST_GeomFromText`, `ST_GeomCollFromText`.\n- **GeoJSON** — `Gis_geometry_collection::init_from_json` recurses via child `init_from_json`\n  (spatial.cc:767). `ST_GeomFromGeoJSON`.\n- **Stored value** — `Field_geom::store` → `is_binary_valid()` → `get_data_size()` (recursive\n  form) — `INSERT`/`UPDATE` of a crafted value into a `GEOMETRY` column.\n\nAll four share the single missing `check_stack_overrun` in the geometry-collection recursion.\n\n---\n\n## Evidence (live ASan server, MariaDB 13.1.0-alpha, `-DWITH_ASAN=ON`)\n\nMalicious WKB = little-endian nested GEOMETRYCOLLECTION (type 7):\n`0107000000` + `010000000107000000` × K + `00000000` (each 9-byte unit adds one nesting level).\n\nDepth differential on one server instance (`--thread-stack=299008`):\n\n| Test | K (nesting) | Result |\n|---|---|---|\n| Sanity: `ST_GeomFromWKB(<point>)` | 0 | returns normally |\n| Shallow: `SELECT ST_GeomFromWKB(0x…)` | 50 | `rc=0`, **server alive** |\n| Deep: `SELECT ST_GeomFromWKB(0x…)` | 120000 | client `rc=1`, **server DIED, exit/sig=139 (SIGSEGV)** |\n\nReproduced across two independent runs. A normal/shallow geometry parses fine; only the deep\nnesting crashes — conclusively a depth-dependent recursion (stack overflow), not a malformed-\nbyte parse bug.\n\n**WKT front-end (sibling entry point) — independently confirmed on the same server:**\n`SELECT ST_GeomFromText('GEOMETRYCOLLECTION(' ×K ... 'POINT(1 1)' ')' ×K)`: K=50 returns\nnormally (server alive); **K=100000 → server DIED, exit signal 139 (SIGSEGV)**. Same\ndepth-dependent stack overflow via the WKT `create_from_wkt` recursion (spatial.cc:4342).\nGeoJSON (`ST_GeomFromGeoJSON` → `init_from_json`, spatial.cc:767) recurses identically with no\nguard (code-confirmed). Reproducer: `reports/mariadb_poc/wkt_poc.sh`. (ASan emits no textual report here because the stack is exhausted before its\nhandler can run — the process takes a raw SIGSEGV, which is the stack-overflow signature.)\n\nReproducer scripts: `reports/mariadb_poc/wkb_poc.sh`, `wkb_diff.sh` (generate the WKB and\ndrive the server). Minimal manual repro:\n\n```sql\n-- build 0x0107000000 + 010000000107000000*120000 + 00000000 and:\nSELECT ST_GeomFromWKB(0x0107000000...00000000);   -- server crashes (SIGSEGV)\n```\n\n---\n\n## Impact\n\n| Aspect | Assessment |\n|---|---|\n| Effect | Full `mariadbd` crash (SIGSEGV) → all client connections dropped; repeatable = sustained DoS |\n| Privilege | Low — any account able to run a spatial function or write a GEOMETRY column |\n| Vector | `AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` → **CVSS 3.1 ≈ 6.5 (Medium)** |\n| RCE | No — stack exhaustion crash, not a controllable memory write |\n\n\n## Suggested fix\n\nCall `check_stack_overrun()` at the top of `Gis_geometry_collection::init_from_wkb` and\n`::get_data_size` (as done throughout the rest of the server), or enforce a maximum\nGEOMETRYCOLLECTION nesting depth, returning a clean parse error instead of recursing.\n\n## Impact\n\n| Aspect | Assessment |\n|---|---|\n| Effect | Full `mariadbd` crash (SIGSEGV) → all client connections dropped; repeatable = sustained DoS |\n| Privilege | Low — any account able to run a spatial function or write a GEOMETRY column |\n| Vector | `AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` → **CVSS 3.1 ≈ 6.5 (Medium)** |\n| RCE | No — stack exhaustion crash, not a controllable memory write |",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-11T12:16:13.518Z",
+  "allow_singular_disclosure_after": -10770.393204551,
+  "singular_disclosure_allowed": true,
+  "vote_count": 2,
+  "voters": [
+    "shadow043",
+    "pourquoipas"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 10337,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors  - Denial of Service",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
