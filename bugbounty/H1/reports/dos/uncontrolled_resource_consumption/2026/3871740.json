@@ -1,0 +1,151 @@
+{
+  "id": 3871740,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODcxNzQw",
+  "url": "https://hackerone.com/reports/3871740",
+  "title": "r2dbc-mariadb Parsec auth: server-controlled PBKDF2 iteration count causes CPU-exhaustion DoS ( regression from b7766de )",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-18T01:40:16.308Z",
+  "submitted_at": "2026-07-18T01:40:16.664Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fg0x0",
+    "url": "/fg0x0",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/we9mo7ui49vl91bznzyid2bvt1lf/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-12T09:06:59.295Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-12T09:06:59.140Z",
+  "team_member_agreed_on_going_public_at": "2026-10-12T09:01:31.475Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "In mariadb-connector-r2dbc 1.4.1 (HEAD a82d265, all released versions), the Parsec authentication plugin derives its key with PBKDF2 using an iteration count of `1024 << iterations`, where `iterations` is a single byte read directly from the server's ext-salt response and bounded only by the check `iterations > 20`. A malicious or man-in-the-middle MariaDB server that selects the `parsec` plugin can set `iterations = 20`, forcing `1024 << 20 = 1,073,741,824` (~1.07e9) rounds of PBKDF2-HMAC-SHA512 during the handshake, pinning a client CPU core for ~25 minutes per connection attempt before authentication completes. This is a regression introduced by commit b7766de, which loosened the cap from `> 3` (old maximum `1024 << 3 = 8192` rounds) to `> 20`.\n\n### Root cause\n\n`ParsecPasswordPlugin.java`:\n\n```java\n 64   if (buf.readableBytes() > 2) {\n 65     firstByte = buf.readByte();\n 66     iterations = buf.readByte();          // fully server-controlled\n 67   }\n 68\n 69   if (firstByte != 0x50 || iterations > 20) {   // only upper bound\n 70     throw new R2dbcNonTransientResourceException(...);\n 71   }\n ...\n104   PBEKeySpec spec = new PBEKeySpec(password, salt, 1024 << iterations, 256);\n105   SecretKey key = SecretKeyFactory.getInstance(\"PBKDF2WithHmacSHA512\").generateSecret(spec);\n```\n\n`iterations` is taken from the server's ext-salt reply (authMoreData) and is fully attacker-controlled. The `parsec` plugin is registered in `META-INF/services`, and the server chooses the authentication plugin during the handshake. `restrictedAuth` defaults to null (no client-side allow-list), so the driver runs `parsec` whenever the server asks. The exchange happens before authentication is established. The driver also defaults to `sslMode=DISABLE` (plaintext), exposing it to an active MITM.\n\n### Steps To Reproduce\n\nEnvironment: JDK 21, the project's own build (`mvn -o -DskipTests package` producing `r2dbc-mariadb-1.4.1.jar`).\n\n**Proof 1 - End-to-end rogue server** (`RogueParsecServer.java` attached):\n\nA rogue MariaDB server speaks the wire protocol through the parsec ext-salt exchange, then sends a malicious `iterations` byte. It measures server-side how long the real `MariadbConnectionFactory.create()` is stuck computing PBKDF2. The same server differs only in that one byte:\n\n1. Compile and run the rogue server:\n```bash\njavac -cp r2dbc-mariadb-1.4.1.jar:reactor-core.jar:r2dbc-spi.jar RogueParsecServer.java\njava -Djava.security.egd=file:/dev/urandom -cp .:r2dbc-mariadb-1.4.1.jar:reactor-core.jar:r2dbc-spi.jar:reactive-streams.jar:netty-*.jar RogueParsecServer\n```\n\n2. Observe the output:\n\n```\n[neg control] ext-salt iterations=3 (1024<<3 = 8192 rounds):\n    server saw client stuck 160 ms ; client create() returned in 1148 ms\n\n[attack] ext-salt iterations=15 (1024<<15 = 33554432 rounds):\n    server saw client stuck 47286 ms ; client create() returned in 47604 ms\n    at the maximum allowed iterations=20 this is 1024<<20 = 1073741824 rounds -> ~25 min.\n    (real driver logs \"Authentication success\" -- the full handshake completes after the delay)\n```\n\nA single attacker-chosen byte pinned the real driver's connect for ~47 seconds versus ~160 ms for the `iterations=3` control (296x).\n\n**Proof 2 - Direct scaling measurement** (`ParsecPoc.java` attached):\n\nMeasures the exact lines 104-105 computation across iteration exponents, confirming the 2x-per-increment law:\n\n```bash\niterations   rounds           wall_ms\n3            8192             231            <- negative control (old cap > 3)\n10           1048576          1518\n13           8388608          11745\n15           33554432         45113\nextrapolation to iterations=20 (rounds=1073741824): ~1503360 ms (~25.1 min)\n```\n\nReal `ParsecPasswordPlugin.next()` at iterations=13: 11753 ms (81x the iterations=3 control of 145 ms).\n\n### Supporting Material/References\n\n- Vulnerable file: `src/main/java/org/mariadb/r2dbc/authentication/standard/ParsecPasswordPlugin.java:104`\n- Regression commit: b7766de (loosened cap from `> 3` to `> 20`)\n- Accepted sibling: H1 #3835450 (mariadb-connector-nodejs DoS, Medium)\n- Attachments: `RogueParsecServer.java`, `ParsecPoc.java`, `poc_evidence.txt`\n\n## Impact\n\nA malicious or MITM MariaDB server pins a client CPU core for minutes per connection attempt, unauthenticated and repeatable. Behind a connection pool that retries failed connections, this becomes sustained whole-application CPU exhaustion and denial of service. The asymmetric amplification is extreme: a single attacker-chosen byte forces ~1.07 billion PBKDF2-HMAC-SHA512 rounds (~25 minutes of CPU). No valid credentials are needed, and the default `sslMode=DISABLE` exposes the handshake to network-level MITM. The fix is to restore a small hard cap on the iteration exponent (e.g. `iterations > 3`), matching the pre-b7766de behavior.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6274670,
+      "file_name": "RogueParsecServer.java",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/jhekkk6f1wth70v0q55c46nk2uk9?response-content-disposition=attachment%3B%20filename%3D%22RogueParsecServer.java%22%3B%20filename%2A%3DUTF-8%27%27RogueParsecServer.java&response-content-type=text%2Fx-java-source&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXNNJOZ5F%2F20261012%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261012T113358Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCdybx4jWvcMvYUQlInhG6O9XrQYuW50orPouu5vW9p1AIgQT4hMsCOOGHQNT%2BI3sKY6Awyg9UQGWGkwloAWqncTg4quwUIg%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDBLfiea8G%2BEM6R8oFiqPBT5f4SoN51cCDl71cLIBdO8Zifx176c8rfLW18iBAePGc%2FSjnlLuj3aSgFo30XdCIRFoTJ9%2F0RPa2otS407KsQAilBWrD1JU3nWfZRakScnoPBrt31cb23OIVoiaVNT7t7if7Op7h%2FilwHvPtHrvUFbSZ%2FBDGp8irSTv1suFe1usn5A77mI9KMwjFMld6lK9n3xovn%2FBc%2B%2FNqYCLsbm2RgbAuGnLjmOEpBLEJG9E1LHHChAI%2FdrJwTtLSwjsO2FgfqLu4hjFxYm2ZFtMwCCNNkw9gn9rZ6Gwtw%2FeTyjXiqZYR0GgnUDelmvK8T5c%2FPGYJvs%2Bbs6zW9Yi1P7P%2FVJY3TeQ97BNiwBCQVUwJ8OwZpnJnFrkDBSQ1sW0bMKKaDbWiK6i4iil8fz1yuRqPt4DzXlafNxqpYTUZmpX4eKU%2Fy5Qt6CzIxjYvyt54VF5ggF2p4W9djd3CTK8TrU%2BdfDuP5ET7h3CJSLq7hQeUCucY7sSXy2K19SlXspJisNma9AHqftEKBlzc7mrrV42x8Da55O%2FPqwTTDzzPAqcWO%2Fo79r2lrYgNNTYRdJA0sSM%2BCdpJe08p6zkRnppGn%2F4Ori41vTU9q2nECo7CQTLn6JeUMyPIDMYkO%2Fxvc3MWKvTkVzS%2FElMe8E8YAFeSDSedS19aTezBZXssqM49d%2B0uYu4nkcD%2BEsNF7YO7fJrPWdA2NX0Hgl5l6qsIrEvzHNZ2aprGLXwU0Co%2B3WgHZTk8wofCeQvhVO10SN0CqgwjaTL4SfMKPaDpOrSxkCXYjEjOs6d9TVk7mflg7qd9fIxle%2FkxpWmIL9RaOTdzb8hXWzkRSK1fXAzJo2bg5dfdx5ae9y2tAwS7WLkxY%2BHw6%2FAN6qBJ3Mw6%2B%2By1gY6sQE4mol87JFnyXjFT2vUjZ8gCioK3%2FhEQQipnc9k0ewDXPKIShRMvENJ80SNli4DsdDXOzkEK4O%2F3e8O4vox40%2FDGGoGGU6aarM0beipTbkko4w4yjUb4HaQKJlS6LhSUpe6DHFTFO1niEMhBEwDiyZ1AokaOw2XibZ9Em3cmqhufI1AStzkwvXnZcQKxNme5pmEHR%2BtbVv29VxeKOAGYQL%2Bs7uk83dMfwliwfl9rCfLxMo%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=7502f4a70a4b8567706db3f484ad2fae7c7e59799e0db079927684694d55b1ca",
+      "file_size": 8819,
+      "type": "text/x-java-source",
+      "moderated": null
+    },
+    {
+      "id": 6274672,
+      "file_name": "poc_evidence.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/20227qr5kgcr7vnak5dfjqbdn9se?response-content-disposition=attachment%3B%20filename%3D%22poc_evidence.txt%22%3B%20filename%2A%3DUTF-8%27%27poc_evidence.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXNNJOZ5F%2F20261012%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261012T113358Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCdybx4jWvcMvYUQlInhG6O9XrQYuW50orPouu5vW9p1AIgQT4hMsCOOGHQNT%2BI3sKY6Awyg9UQGWGkwloAWqncTg4quwUIg%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDBLfiea8G%2BEM6R8oFiqPBT5f4SoN51cCDl71cLIBdO8Zifx176c8rfLW18iBAePGc%2FSjnlLuj3aSgFo30XdCIRFoTJ9%2F0RPa2otS407KsQAilBWrD1JU3nWfZRakScnoPBrt31cb23OIVoiaVNT7t7if7Op7h%2FilwHvPtHrvUFbSZ%2FBDGp8irSTv1suFe1usn5A77mI9KMwjFMld6lK9n3xovn%2FBc%2B%2FNqYCLsbm2RgbAuGnLjmOEpBLEJG9E1LHHChAI%2FdrJwTtLSwjsO2FgfqLu4hjFxYm2ZFtMwCCNNkw9gn9rZ6Gwtw%2FeTyjXiqZYR0GgnUDelmvK8T5c%2FPGYJvs%2Bbs6zW9Yi1P7P%2FVJY3TeQ97BNiwBCQVUwJ8OwZpnJnFrkDBSQ1sW0bMKKaDbWiK6i4iil8fz1yuRqPt4DzXlafNxqpYTUZmpX4eKU%2Fy5Qt6CzIxjYvyt54VF5ggF2p4W9djd3CTK8TrU%2BdfDuP5ET7h3CJSLq7hQeUCucY7sSXy2K19SlXspJisNma9AHqftEKBlzc7mrrV42x8Da55O%2FPqwTTDzzPAqcWO%2Fo79r2lrYgNNTYRdJA0sSM%2BCdpJe08p6zkRnppGn%2F4Ori41vTU9q2nECo7CQTLn6JeUMyPIDMYkO%2Fxvc3MWKvTkVzS%2FElMe8E8YAFeSDSedS19aTezBZXssqM49d%2B0uYu4nkcD%2BEsNF7YO7fJrPWdA2NX0Hgl5l6qsIrEvzHNZ2aprGLXwU0Co%2B3WgHZTk8wofCeQvhVO10SN0CqgwjaTL4SfMKPaDpOrSxkCXYjEjOs6d9TVk7mflg7qd9fIxle%2FkxpWmIL9RaOTdzb8hXWzkRSK1fXAzJo2bg5dfdx5ae9y2tAwS7WLkxY%2BHw6%2FAN6qBJ3Mw6%2B%2By1gY6sQE4mol87JFnyXjFT2vUjZ8gCioK3%2FhEQQipnc9k0ewDXPKIShRMvENJ80SNli4DsdDXOzkEK4O%2F3e8O4vox40%2FDGGoGGU6aarM0beipTbkko4w4yjUb4HaQKJlS6LhSUpe6DHFTFO1niEMhBEwDiyZ1AokaOw2XibZ9Em3cmqhufI1AStzkwvXnZcQKxNme5pmEHR%2BtbVv29VxeKOAGYQL%2Bs7uk83dMfwliwfl9rCfLxMo%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=763a90320f14d67a1018e528e49f798dbc951da4374180a14d44da03ecd3efa4",
+      "file_size": 2945,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 6274673,
+      "file_name": "ParsecPoc.java",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/91xvpvqqc27n0vgkglthm42nwjii?response-content-disposition=attachment%3B%20filename%3D%22ParsecPoc.java%22%3B%20filename%2A%3DUTF-8%27%27ParsecPoc.java&response-content-type=text%2Fx-java-source&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXNNJOZ5F%2F20261012%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261012T113358Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCdybx4jWvcMvYUQlInhG6O9XrQYuW50orPouu5vW9p1AIgQT4hMsCOOGHQNT%2BI3sKY6Awyg9UQGWGkwloAWqncTg4quwUIg%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDBLfiea8G%2BEM6R8oFiqPBT5f4SoN51cCDl71cLIBdO8Zifx176c8rfLW18iBAePGc%2FSjnlLuj3aSgFo30XdCIRFoTJ9%2F0RPa2otS407KsQAilBWrD1JU3nWfZRakScnoPBrt31cb23OIVoiaVNT7t7if7Op7h%2FilwHvPtHrvUFbSZ%2FBDGp8irSTv1suFe1usn5A77mI9KMwjFMld6lK9n3xovn%2FBc%2B%2FNqYCLsbm2RgbAuGnLjmOEpBLEJG9E1LHHChAI%2FdrJwTtLSwjsO2FgfqLu4hjFxYm2ZFtMwCCNNkw9gn9rZ6Gwtw%2FeTyjXiqZYR0GgnUDelmvK8T5c%2FPGYJvs%2Bbs6zW9Yi1P7P%2FVJY3TeQ97BNiwBCQVUwJ8OwZpnJnFrkDBSQ1sW0bMKKaDbWiK6i4iil8fz1yuRqPt4DzXlafNxqpYTUZmpX4eKU%2Fy5Qt6CzIxjYvyt54VF5ggF2p4W9djd3CTK8TrU%2BdfDuP5ET7h3CJSLq7hQeUCucY7sSXy2K19SlXspJisNma9AHqftEKBlzc7mrrV42x8Da55O%2FPqwTTDzzPAqcWO%2Fo79r2lrYgNNTYRdJA0sSM%2BCdpJe08p6zkRnppGn%2F4Ori41vTU9q2nECo7CQTLn6JeUMyPIDMYkO%2Fxvc3MWKvTkVzS%2FElMe8E8YAFeSDSedS19aTezBZXssqM49d%2B0uYu4nkcD%2BEsNF7YO7fJrPWdA2NX0Hgl5l6qsIrEvzHNZ2aprGLXwU0Co%2B3WgHZTk8wofCeQvhVO10SN0CqgwjaTL4SfMKPaDpOrSxkCXYjEjOs6d9TVk7mflg7qd9fIxle%2FkxpWmIL9RaOTdzb8hXWzkRSK1fXAzJo2bg5dfdx5ae9y2tAwS7WLkxY%2BHw6%2FAN6qBJ3Mw6%2B%2By1gY6sQE4mol87JFnyXjFT2vUjZ8gCioK3%2FhEQQipnc9k0ewDXPKIShRMvENJ80SNli4DsdDXOzkEK4O%2F3e8O4vox40%2FDGGoGGU6aarM0beipTbkko4w4yjUb4HaQKJlS6LhSUpe6DHFTFO1niEMhBEwDiyZ1AokaOw2XibZ9Em3cmqhufI1AStzkwvXnZcQKxNme5pmEHR%2BtbVv29VxeKOAGYQL%2Bs7uk83dMfwliwfl9rCfLxMo%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=47ad866fc49cb06f31a90587b3a832393ca51f2d02b93473b2f037f5a58cd96a",
+      "file_size": 5332,
+      "type": "text/x-java-source",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-11-11T09:01:31.651Z",
+  "allow_singular_disclosure_after": 2582852.816231826,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "fg0x0"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "none",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10337,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors  - Denial of Service",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

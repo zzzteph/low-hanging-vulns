@@ -1,0 +1,175 @@
+{
+  "id": 3871977,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODcxOTc3",
+  "url": "https://hackerone.com/reports/3871977",
+  "title": "Connector/ODBC: malicious server's long version string wraps size_t PrefixLen via negative _snprintf return, causing heap out-of-bounds write",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-18T05:18:54.744Z",
+  "submitted_at": "2026-07-18T05:18:55.042Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fg0x0",
+    "url": "/fg0x0",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/we9mo7ui49vl91bznzyid2bvt1lf/72249f83db42955adfcb43c5cad84162ec49002aa21a79c3606f682c8e48f4e6"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/b8e19a7691128fca51630d7f5b14644b91b3b45324f6fd488e36244d744fe35b",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/89f037b490baf3dcca1b84283f4c85141b64c213252a9c79b56c62bf903ab542"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-12T09:27:31.316Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-12T09:27:31.122Z",
+  "team_member_agreed_on_going_public_at": "2026-10-12T09:27:06.697Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "MariaDB Connector/ODBC formats every diagnostic message with a prefix that embeds the server version string. The prefix is built in `MADB_PutErrorPrefix` (driver/ma_error.cpp:165) with the driver's custom `_snprintf`, which returns a NEGATIVE value when the output is truncated (driver/ma_platform_posix.cpp:41). The return value is added to `error->PrefixLen`, a `size_t` (unsigned, driver/ma_c_stuff.h:70). A malicious or MITM MariaDB server that sends a handshake `server_version` string longer than ~500 bytes causes `_snprintf` to truncate and return negative, wrapping `PrefixLen` to ~2^64. Every subsequent use of `PrefixLen` as an offset into the fixed 513-byte `SqlErrorMsg` buffer then writes out of bounds at a server-chosen backward offset.\n\nThis is an unauthenticated, remotely triggered client-side memory corruption that fires as soon as the application allocates a statement on the poisoned connection. Confirmed end-to-end with ASAN against the real driver built from HEAD 4e175d9 (v3.2.10).\n\n### Root cause\n\n1. Custom `_snprintf` returns negative on truncation (driver/ma_platform_posix.cpp:41):\n\n```c\nint _snprintf(char *buffer, size_t count, const char *format, ...) {\n    int result = vsnprintf(buffer, count, format, list);\n    if (result > count) { return count - result - 1; }   // NEGATIVE\n    return result;\n}\n```\n\n2. `MADB_PutErrorPrefix` adds the negative return to a `size_t` (driver/ma_error.cpp:155-170):\n\n```c\nerror->PrefixLen = strlen(MARIADB_ODBC_ERR_PREFIX);   // \"[ma-3.2.10]\" ~ 11\nstrcpy_s(error->SqlErrorMsg, SQL_MAX_MESSAGE_LENGTH + 1, MARIADB_ODBC_ERR_PREFIX);\nif (dbc != NULL && dbc->mariadb != NULL) {\n  error->PrefixLen += _snprintf(error->SqlErrorMsg + error->PrefixLen,\n    SQL_MAX_MESSAGE_LENGTH + 1 - error->PrefixLen,\n    \"[%s]\", mysql_get_server_info(dbc->mariadb));\n    // ^^ attacker-controlled, uncapped version string from handshake\n}\n```\n\nWith a version string of length L > ~500, the `_snprintf` return is negative, and `PrefixLen += <negative>` wraps to approximately `2^64 - (L - 510)`. The backward distance is chosen by the attacker via the version-string length.\n\n3. Two OOB write sinks use the corrupted `PrefixLen`:\n\n- `MADB_CLEAR_ERROR` / `MA_ClearError` (driver/ma_error.h:168, driver/ma_api_internal.cpp:58): `SqlErrorMsg[PrefixLen] = 0;` - one-byte OOB write\n- `MADB_SetNativeError` (driver/ma_error.cpp:231,235): `strcpy_s(SqlErrorMsg + PrefixLen, 513 - PrefixLen, msg)` - multi-byte OOB write with server-controlled error text\n\n### Steps To Reproduce\n\nEnvironment: Linux x86-64, unixODBC 2.3.14, driver built from HEAD 4e175d9 with AddressSanitizer (`cmake -DWITH_ASAN=ON`).\n\n**Step 0 - Confirm libmariadb exposes the long version** (`direct_version_check.c` attached):\n\n```bash\n$ ./direct_version_check 3402   # rogue server version_len=2000\nserver_info_len=2000  first16=AAAAAAAAAAAAAAAA\n```\n\n`mysql_get_server_info()` returns the full 2000-byte handshake version uncapped.\n\n**Step 1 - Start the rogue server** (`rogue_server.py` attached):\n\n```bash\npython3 rogue_server.py 3404 4000 &   # port 3404, version string = 4000 bytes\n```\n\nThe rogue server speaks enough MariaDB wire protocol for the connection to succeed and advertises a 4000-byte `server_version` in the handshake.\n\n**Step 2 - POSITIVE (attack)** - real ASAN-built driver + real unixODBC (`odbc_client.c` attached):\n\n```bash\n./odbc_client \"DRIVER=.../build_asan/driver/libmaodbc.so;SERVER=127.0.0.1;PORT=3404;UID=u;PWD=p;SSLVERIFY=0;\"\n```\n\nOutput:\n\n```bash\nSQLDriverConnect r=0                        <- connection SUCCEEDS\nallocating statement (MADB_StmtInit -> PutErrorPrefix)\n==ERROR: AddressSanitizer: heap-buffer-overflow ... WRITE of size 1\n    #0 MA_ClearError(short, void*)  driver/ma_api_internal.cpp:58\n    #1 SQLGetStmtAttr               driver/odbc_3_api.cpp:997\n    #2 libodbc.so.2                 (unixODBC Driver Manager)\n    #3 main                         odbc_client.c:32\n```\n\nThe OOB write fires at statement allocation. No application query needed.\n\n**Step 3 - NEGATIVE CONTROL** - identical path, normal version string (20 bytes):\n\n```bash\npython3 rogue_server.py 3405 20 &\n./odbc_client \"DRIVER=...;SERVER=127.0.0.1;PORT=3405;UID=u;PWD=p;SSLVERIFY=0;\"\n```\n\nOutput:\n\n```bash\nSQLDriverConnect r=0\nSQLAllocHandle(STMT) r=0\nSQLExecDirect r=0 (survived)\nclean exit    EXIT=0\n```\n\nNormal-length version string causes no corruption. The long version is the sole difference.\n\n**Automated reproduction**: `bash run_poc.sh` (attached) builds the driver with ASAN, starts the rogue server, runs both positive and negative cases.\n\n### Supporting Material/References\n\n- Vulnerable function: `MADB_PutErrorPrefix` at driver/ma_error.cpp:165\n- Negative-return source: `_snprintf` at driver/ma_platform_posix.cpp:41\n- `PrefixLen` type: `size_t` at driver/ma_c_stuff.h:70\n- OOB sink 1: `MA_ClearError` at driver/ma_api_internal.cpp:58\n- OOB sink 2: `MADB_SetNativeError` at driver/ma_error.cpp:231\n- Trigger path: `MADB_StmtInit` at driver/ma_statement.cpp:4113\n- The same `_snprintf` negative-return footgun exists in `MADB_DsnToString` (Windows prompt path) and catalog-query builders - should be reviewed as part of the same fix\n- Attachments: `rogue_server.py`, `odbc_client.c`, `direct_version_check.c`, `harness.cpp`, `run_poc.sh`, `poc_evidence.txt`\n\n## Impact\n\nA malicious or MITM MariaDB/MySQL server corrupts client-process memory (out-of-bounds write) in any application using MariaDB Connector/ODBC, the moment it opens a connection and allocates a statement. The demonstrated effect is a reliable crash (denial of service) via an AddressSanitizer-confirmed heap out-of-bounds write.\n\nThe write offset is chosen by the attacker through the version-string length, and the `strcpy_s` sink (`MADB_SetNativeError`) copies attacker-influenced content (server error text) to that attacker-chosen backward offset, so corruption of adjacent heap objects - and potentially impact beyond DoS - is plausible on non-hardened builds. Only the crash is demonstrated here.\n\nBlast radius: every application (BI tools, ETL jobs, application servers, `isql`, etc.) that connects through MariaDB Connector/ODBC. Preconditions: (a) client connects to a server the attacker controls or can MITM (driver default is plaintext - no TLS), and (b) the application allocates a statement, which every ODBC workflow does. No credentials, privileges, or human interaction beyond initiating the connection are required.",
+  "weakness": {
+    "id": 2,
+    "name": "Memory Corruption - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6275318,
+      "file_name": "harness.cpp",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/zxgvr2g1eb66h4jtde6szn3a10ve?response-content-disposition=attachment%3B%20filename%3D%22harness.cpp%22%3B%20filename%2A%3DUTF-8%27%27harness.cpp&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSYJDNPY3%2F20261012%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261012T113357Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDCSxseph6f8aFemSq2kF1ASsE1lePQbKRO38KBWHeVXQIgFrM%2Fle7XCu97E5KMz3qNKzHJktLJlsWeFwOexO9VyfQquwUIhf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDHdBMfQY7gyaA%2BUUUSqPBYAVHGbnWiR%2BJ4aXu5wvYTajb45uBjsrMfaOcHSjcoZGAa8zEMYkpEuWnWN8oh2oaljGy%2BCVrBlEB9YtRGe677oWsLJgxRko6KGBGwCZVlSmpLP1CB%2F%2FVKqONGv7hZasjORn8E%2B0kvKypfAvOxOrU10J9%2Fuam0KlVuirsQ8iVJH3HmoZZXbuRpggGEJZklHqeo7Lj2ZKF2O%2Ff1HO9Kx6tbjT%2Fu6RFLPh7ZFltS4CHgbbaV7ad3PvzuFPLpelsLW%2FGaETcS2vQSIU40X9ksHTnmeNcvSrpX2OwQzX7IOwlqMe%2BVuGIBXgpDkLgS6ZwvXC83jvTVdk%2FCQgx7W94E76U5TYYou4tVD8M8xJUKiVhv339XJOtW5sOIsnilrAyNdOIs2kUUDQnuT5xw2hsV%2FAf2xkf2cbl2Qk7UkwU7C32q1qMOmi5YPUehyYDvLILiYCQ9iKl%2FzychWMiB922b5aAXRDPdN2rLOlsq8NG%2FZ%2BC%2BBrDYJfcYKPI5mv%2B87VO7mj0fXKiMEzhPBLbrgZOsN2XOEygLJtQEHFkmA4ZD6OwTOaTSfv9NueUHIpLpN7q4kaioHVtvfjOwL%2FROvkRD2YQxlWKuMkwCbEBcmA7Gs98MddanhE5hNrIJ1m8hzfW97vSoXuXslOyCb9QfoenEjy3qDJYDRRIOF11IaRPYZCOz6%2FIUHPj4LgEifG2kejKQSdRktic0%2FTy8iwtRABV5g1Ub589%2BM7Wl1SaGhdIHB8y1WgFRzVg%2Fmr%2FI6JY9p8UxFRHsBrnIbLax8vUz0crdJw6cq77MLmsInt00L1FgXkgQDGKZam7i%2BDHjVdaJWsQXCqLNJbJUTJXGAEpNRYE5o5p6hFEFWhu3lVB8vdM1UajKkwj4ez1gY6sQFZ8MSFqyUy3560m%2Fw40f2U4H1OSe6KoiYZPINyQpTAksuFdbm6HpSRFh3Seiz3vyimUFG6%2B1pDzvUksTBPUdo7Jh1Bv4B1naT3AgaQFy6Be9Etn5p%2B651ijY2hwEookw7p8weiRP9EdHPGpS43q7FLId9OA8dOGytQGAzqMYVvj5Uctvutiuay3HPA6zN562FgQcBHWDykRCRHPlFyPhMZ1tCbmuUkF6xpeIcPssXWh98%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=53d0e9e3c9e9fdc98f5de9f32f3813f6758f9fa6659e37f67050b1f08339bb87",
+      "file_size": 5841,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6275319,
+      "file_name": "direct_version_check.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9xbhp50w2ekg3ec57prtam1ay64i?response-content-disposition=attachment%3B%20filename%3D%22direct_version_check.c%22%3B%20filename%2A%3DUTF-8%27%27direct_version_check.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSYJDNPY3%2F20261012%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261012T113357Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDCSxseph6f8aFemSq2kF1ASsE1lePQbKRO38KBWHeVXQIgFrM%2Fle7XCu97E5KMz3qNKzHJktLJlsWeFwOexO9VyfQquwUIhf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDHdBMfQY7gyaA%2BUUUSqPBYAVHGbnWiR%2BJ4aXu5wvYTajb45uBjsrMfaOcHSjcoZGAa8zEMYkpEuWnWN8oh2oaljGy%2BCVrBlEB9YtRGe677oWsLJgxRko6KGBGwCZVlSmpLP1CB%2F%2FVKqONGv7hZasjORn8E%2B0kvKypfAvOxOrU10J9%2Fuam0KlVuirsQ8iVJH3HmoZZXbuRpggGEJZklHqeo7Lj2ZKF2O%2Ff1HO9Kx6tbjT%2Fu6RFLPh7ZFltS4CHgbbaV7ad3PvzuFPLpelsLW%2FGaETcS2vQSIU40X9ksHTnmeNcvSrpX2OwQzX7IOwlqMe%2BVuGIBXgpDkLgS6ZwvXC83jvTVdk%2FCQgx7W94E76U5TYYou4tVD8M8xJUKiVhv339XJOtW5sOIsnilrAyNdOIs2kUUDQnuT5xw2hsV%2FAf2xkf2cbl2Qk7UkwU7C32q1qMOmi5YPUehyYDvLILiYCQ9iKl%2FzychWMiB922b5aAXRDPdN2rLOlsq8NG%2FZ%2BC%2BBrDYJfcYKPI5mv%2B87VO7mj0fXKiMEzhPBLbrgZOsN2XOEygLJtQEHFkmA4ZD6OwTOaTSfv9NueUHIpLpN7q4kaioHVtvfjOwL%2FROvkRD2YQxlWKuMkwCbEBcmA7Gs98MddanhE5hNrIJ1m8hzfW97vSoXuXslOyCb9QfoenEjy3qDJYDRRIOF11IaRPYZCOz6%2FIUHPj4LgEifG2kejKQSdRktic0%2FTy8iwtRABV5g1Ub589%2BM7Wl1SaGhdIHB8y1WgFRzVg%2Fmr%2FI6JY9p8UxFRHsBrnIbLax8vUz0crdJw6cq77MLmsInt00L1FgXkgQDGKZam7i%2BDHjVdaJWsQXCqLNJbJUTJXGAEpNRYE5o5p6hFEFWhu3lVB8vdM1UajKkwj4ez1gY6sQFZ8MSFqyUy3560m%2Fw40f2U4H1OSe6KoiYZPINyQpTAksuFdbm6HpSRFh3Seiz3vyimUFG6%2B1pDzvUksTBPUdo7Jh1Bv4B1naT3AgaQFy6Be9Etn5p%2B651ijY2hwEookw7p8weiRP9EdHPGpS43q7FLId9OA8dOGytQGAzqMYVvj5Uctvutiuay3HPA6zN562FgQcBHWDykRCRHPlFyPhMZ1tCbmuUkF6xpeIcPssXWh98%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=31821de932ca3fe8489c33e606a50996968cef417bdbdda5fd4e1e8b2297266b",
+      "file_size": 959,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6275320,
+      "file_name": "odbc_client.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/2em29o4cnj8wacv67tconkh7v19k?response-content-disposition=attachment%3B%20filename%3D%22odbc_client.c%22%3B%20filename%2A%3DUTF-8%27%27odbc_client.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSYJDNPY3%2F20261012%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261012T113357Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDCSxseph6f8aFemSq2kF1ASsE1lePQbKRO38KBWHeVXQIgFrM%2Fle7XCu97E5KMz3qNKzHJktLJlsWeFwOexO9VyfQquwUIhf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDHdBMfQY7gyaA%2BUUUSqPBYAVHGbnWiR%2BJ4aXu5wvYTajb45uBjsrMfaOcHSjcoZGAa8zEMYkpEuWnWN8oh2oaljGy%2BCVrBlEB9YtRGe677oWsLJgxRko6KGBGwCZVlSmpLP1CB%2F%2FVKqONGv7hZasjORn8E%2B0kvKypfAvOxOrU10J9%2Fuam0KlVuirsQ8iVJH3HmoZZXbuRpggGEJZklHqeo7Lj2ZKF2O%2Ff1HO9Kx6tbjT%2Fu6RFLPh7ZFltS4CHgbbaV7ad3PvzuFPLpelsLW%2FGaETcS2vQSIU40X9ksHTnmeNcvSrpX2OwQzX7IOwlqMe%2BVuGIBXgpDkLgS6ZwvXC83jvTVdk%2FCQgx7W94E76U5TYYou4tVD8M8xJUKiVhv339XJOtW5sOIsnilrAyNdOIs2kUUDQnuT5xw2hsV%2FAf2xkf2cbl2Qk7UkwU7C32q1qMOmi5YPUehyYDvLILiYCQ9iKl%2FzychWMiB922b5aAXRDPdN2rLOlsq8NG%2FZ%2BC%2BBrDYJfcYKPI5mv%2B87VO7mj0fXKiMEzhPBLbrgZOsN2XOEygLJtQEHFkmA4ZD6OwTOaTSfv9NueUHIpLpN7q4kaioHVtvfjOwL%2FROvkRD2YQxlWKuMkwCbEBcmA7Gs98MddanhE5hNrIJ1m8hzfW97vSoXuXslOyCb9QfoenEjy3qDJYDRRIOF11IaRPYZCOz6%2FIUHPj4LgEifG2kejKQSdRktic0%2FTy8iwtRABV5g1Ub589%2BM7Wl1SaGhdIHB8y1WgFRzVg%2Fmr%2FI6JY9p8UxFRHsBrnIbLax8vUz0crdJw6cq77MLmsInt00L1FgXkgQDGKZam7i%2BDHjVdaJWsQXCqLNJbJUTJXGAEpNRYE5o5p6hFEFWhu3lVB8vdM1UajKkwj4ez1gY6sQFZ8MSFqyUy3560m%2Fw40f2U4H1OSe6KoiYZPINyQpTAksuFdbm6HpSRFh3Seiz3vyimUFG6%2B1pDzvUksTBPUdo7Jh1Bv4B1naT3AgaQFy6Be9Etn5p%2B651ijY2hwEookw7p8weiRP9EdHPGpS43q7FLId9OA8dOGytQGAzqMYVvj5Uctvutiuay3HPA6zN562FgQcBHWDykRCRHPlFyPhMZ1tCbmuUkF6xpeIcPssXWh98%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6e944958e050f48083532bf869fbf89e3287e58ff7c10c8b579fdd11ef1117fd",
+      "file_size": 2239,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6275321,
+      "file_name": "poc_evidence.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/iuf2dkkafgzhmgllspsufdjfn7mm?response-content-disposition=attachment%3B%20filename%3D%22poc_evidence.txt%22%3B%20filename%2A%3DUTF-8%27%27poc_evidence.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSYJDNPY3%2F20261012%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261012T113357Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDCSxseph6f8aFemSq2kF1ASsE1lePQbKRO38KBWHeVXQIgFrM%2Fle7XCu97E5KMz3qNKzHJktLJlsWeFwOexO9VyfQquwUIhf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDHdBMfQY7gyaA%2BUUUSqPBYAVHGbnWiR%2BJ4aXu5wvYTajb45uBjsrMfaOcHSjcoZGAa8zEMYkpEuWnWN8oh2oaljGy%2BCVrBlEB9YtRGe677oWsLJgxRko6KGBGwCZVlSmpLP1CB%2F%2FVKqONGv7hZasjORn8E%2B0kvKypfAvOxOrU10J9%2Fuam0KlVuirsQ8iVJH3HmoZZXbuRpggGEJZklHqeo7Lj2ZKF2O%2Ff1HO9Kx6tbjT%2Fu6RFLPh7ZFltS4CHgbbaV7ad3PvzuFPLpelsLW%2FGaETcS2vQSIU40X9ksHTnmeNcvSrpX2OwQzX7IOwlqMe%2BVuGIBXgpDkLgS6ZwvXC83jvTVdk%2FCQgx7W94E76U5TYYou4tVD8M8xJUKiVhv339XJOtW5sOIsnilrAyNdOIs2kUUDQnuT5xw2hsV%2FAf2xkf2cbl2Qk7UkwU7C32q1qMOmi5YPUehyYDvLILiYCQ9iKl%2FzychWMiB922b5aAXRDPdN2rLOlsq8NG%2FZ%2BC%2BBrDYJfcYKPI5mv%2B87VO7mj0fXKiMEzhPBLbrgZOsN2XOEygLJtQEHFkmA4ZD6OwTOaTSfv9NueUHIpLpN7q4kaioHVtvfjOwL%2FROvkRD2YQxlWKuMkwCbEBcmA7Gs98MddanhE5hNrIJ1m8hzfW97vSoXuXslOyCb9QfoenEjy3qDJYDRRIOF11IaRPYZCOz6%2FIUHPj4LgEifG2kejKQSdRktic0%2FTy8iwtRABV5g1Ub589%2BM7Wl1SaGhdIHB8y1WgFRzVg%2Fmr%2FI6JY9p8UxFRHsBrnIbLax8vUz0crdJw6cq77MLmsInt00L1FgXkgQDGKZam7i%2BDHjVdaJWsQXCqLNJbJUTJXGAEpNRYE5o5p6hFEFWhu3lVB8vdM1UajKkwj4ez1gY6sQFZ8MSFqyUy3560m%2Fw40f2U4H1OSe6KoiYZPINyQpTAksuFdbm6HpSRFh3Seiz3vyimUFG6%2B1pDzvUksTBPUdo7Jh1Bv4B1naT3AgaQFy6Be9Etn5p%2B651ijY2hwEookw7p8weiRP9EdHPGpS43q7FLId9OA8dOGytQGAzqMYVvj5Uctvutiuay3HPA6zN562FgQcBHWDykRCRHPlFyPhMZ1tCbmuUkF6xpeIcPssXWh98%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f615a0ba1b4b0432eff2237357acb7e60272c46605e1076df6e13daa51319bef",
+      "file_size": 2683,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 6275322,
+      "file_name": "rogue_server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/b0nszr96q39tjenm33aompvuc4u4?response-content-disposition=attachment%3B%20filename%3D%22rogue_server.py%22%3B%20filename%2A%3DUTF-8%27%27rogue_server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSYJDNPY3%2F20261012%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261012T113357Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDCSxseph6f8aFemSq2kF1ASsE1lePQbKRO38KBWHeVXQIgFrM%2Fle7XCu97E5KMz3qNKzHJktLJlsWeFwOexO9VyfQquwUIhf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDHdBMfQY7gyaA%2BUUUSqPBYAVHGbnWiR%2BJ4aXu5wvYTajb45uBjsrMfaOcHSjcoZGAa8zEMYkpEuWnWN8oh2oaljGy%2BCVrBlEB9YtRGe677oWsLJgxRko6KGBGwCZVlSmpLP1CB%2F%2FVKqONGv7hZasjORn8E%2B0kvKypfAvOxOrU10J9%2Fuam0KlVuirsQ8iVJH3HmoZZXbuRpggGEJZklHqeo7Lj2ZKF2O%2Ff1HO9Kx6tbjT%2Fu6RFLPh7ZFltS4CHgbbaV7ad3PvzuFPLpelsLW%2FGaETcS2vQSIU40X9ksHTnmeNcvSrpX2OwQzX7IOwlqMe%2BVuGIBXgpDkLgS6ZwvXC83jvTVdk%2FCQgx7W94E76U5TYYou4tVD8M8xJUKiVhv339XJOtW5sOIsnilrAyNdOIs2kUUDQnuT5xw2hsV%2FAf2xkf2cbl2Qk7UkwU7C32q1qMOmi5YPUehyYDvLILiYCQ9iKl%2FzychWMiB922b5aAXRDPdN2rLOlsq8NG%2FZ%2BC%2BBrDYJfcYKPI5mv%2B87VO7mj0fXKiMEzhPBLbrgZOsN2XOEygLJtQEHFkmA4ZD6OwTOaTSfv9NueUHIpLpN7q4kaioHVtvfjOwL%2FROvkRD2YQxlWKuMkwCbEBcmA7Gs98MddanhE5hNrIJ1m8hzfW97vSoXuXslOyCb9QfoenEjy3qDJYDRRIOF11IaRPYZCOz6%2FIUHPj4LgEifG2kejKQSdRktic0%2FTy8iwtRABV5g1Ub589%2BM7Wl1SaGhdIHB8y1WgFRzVg%2Fmr%2FI6JY9p8UxFRHsBrnIbLax8vUz0crdJw6cq77MLmsInt00L1FgXkgQDGKZam7i%2BDHjVdaJWsQXCqLNJbJUTJXGAEpNRYE5o5p6hFEFWhu3lVB8vdM1UajKkwj4ez1gY6sQFZ8MSFqyUy3560m%2Fw40f2U4H1OSe6KoiYZPINyQpTAksuFdbm6HpSRFh3Seiz3vyimUFG6%2B1pDzvUksTBPUdo7Jh1Bv4B1naT3AgaQFy6Be9Etn5p%2B651ijY2hwEookw7p8weiRP9EdHPGpS43q7FLId9OA8dOGytQGAzqMYVvj5Uctvutiuay3HPA6zN562FgQcBHWDykRCRHPlFyPhMZ1tCbmuUkF6xpeIcPssXWh98%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=13d3c785702ddc09d50a004ed2a4fbe8e92ea5ece808bc57574f3ad96fe7cb49",
+      "file_size": 3663,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6275323,
+      "file_name": "run_poc.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/m5oxojzly4t4s921tar6gyclj68q?response-content-disposition=attachment%3B%20filename%3D%22run_poc.sh%22%3B%20filename%2A%3DUTF-8%27%27run_poc.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSYJDNPY3%2F20261012%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261012T113357Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQDCSxseph6f8aFemSq2kF1ASsE1lePQbKRO38KBWHeVXQIgFrM%2Fle7XCu97E5KMz3qNKzHJktLJlsWeFwOexO9VyfQquwUIhf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDHdBMfQY7gyaA%2BUUUSqPBYAVHGbnWiR%2BJ4aXu5wvYTajb45uBjsrMfaOcHSjcoZGAa8zEMYkpEuWnWN8oh2oaljGy%2BCVrBlEB9YtRGe677oWsLJgxRko6KGBGwCZVlSmpLP1CB%2F%2FVKqONGv7hZasjORn8E%2B0kvKypfAvOxOrU10J9%2Fuam0KlVuirsQ8iVJH3HmoZZXbuRpggGEJZklHqeo7Lj2ZKF2O%2Ff1HO9Kx6tbjT%2Fu6RFLPh7ZFltS4CHgbbaV7ad3PvzuFPLpelsLW%2FGaETcS2vQSIU40X9ksHTnmeNcvSrpX2OwQzX7IOwlqMe%2BVuGIBXgpDkLgS6ZwvXC83jvTVdk%2FCQgx7W94E76U5TYYou4tVD8M8xJUKiVhv339XJOtW5sOIsnilrAyNdOIs2kUUDQnuT5xw2hsV%2FAf2xkf2cbl2Qk7UkwU7C32q1qMOmi5YPUehyYDvLILiYCQ9iKl%2FzychWMiB922b5aAXRDPdN2rLOlsq8NG%2FZ%2BC%2BBrDYJfcYKPI5mv%2B87VO7mj0fXKiMEzhPBLbrgZOsN2XOEygLJtQEHFkmA4ZD6OwTOaTSfv9NueUHIpLpN7q4kaioHVtvfjOwL%2FROvkRD2YQxlWKuMkwCbEBcmA7Gs98MddanhE5hNrIJ1m8hzfW97vSoXuXslOyCb9QfoenEjy3qDJYDRRIOF11IaRPYZCOz6%2FIUHPj4LgEifG2kejKQSdRktic0%2FTy8iwtRABV5g1Ub589%2BM7Wl1SaGhdIHB8y1WgFRzVg%2Fmr%2FI6JY9p8UxFRHsBrnIbLax8vUz0crdJw6cq77MLmsInt00L1FgXkgQDGKZam7i%2BDHjVdaJWsQXCqLNJbJUTJXGAEpNRYE5o5p6hFEFWhu3lVB8vdM1UajKkwj4ez1gY6sQFZ8MSFqyUy3560m%2Fw40f2U4H1OSe6KoiYZPINyQpTAksuFdbm6HpSRFh3Seiz3vyimUFG6%2B1pDzvUksTBPUdo7Jh1Bv4B1naT3AgaQFy6Be9Etn5p%2B651ijY2hwEookw7p8weiRP9EdHPGpS43q7FLId9OA8dOGytQGAzqMYVvj5Uctvutiuay3HPA6zN562FgQcBHWDykRCRHPlFyPhMZ1tCbmuUkF6xpeIcPssXWh98%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=305295b608538b1b3917c2566b4e5aeedb0ffca17ae21246dbb8f98cee449012",
+      "file_size": 2678,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-11-11T09:27:06.898Z",
+  "allow_singular_disclosure_after": 2584389.158358076,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "fg0x0"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.6,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10337,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors  - Denial of Service",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
