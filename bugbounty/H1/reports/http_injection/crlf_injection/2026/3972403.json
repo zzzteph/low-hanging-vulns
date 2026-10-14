@@ -1,0 +1,141 @@
+{
+  "id": 3972403,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcyNDAz",
+  "url": "https://hackerone.com/reports/3972403",
+  "title": "CVE-2026-87864: IMAP APPEND plus CRLF conversion command injection",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-26T23:03:30.632Z",
+  "submitted_at": "2026-08-26T23:03:30.950Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-87864"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:35:51.349Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:35:49.502Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWhen `CURLOPT_CRLF` is enabled, `imap_perform_append()` advertises the **original** input file size in the IMAP `APPEND ... {N}` literal but then transmits the **expanded** body (bare LF → CRLF). The server consumes exactly N bytes as the literal, and the overflow bytes are parsed as new IMAP commands in the same authenticated session.\n\nThis is a protocol framing bug — curl tells the server \"here come N bytes,\" then sends more than N — not a case of the user injecting CRLFs into a protocol field. The bytes originate in the upload body, and curl's own conversion moves them across the literal boundary.\n\n## Affected versions\n\nTested and confirmed on commit `c2676bf9e639e31e44b12a2cc82cf2046231b056` (curl 8.22.0-DEV) and curl 8.6.0. The mismatch likely dates back to IMAP APPEND's introduction in 7.30.0.\n\n## Root cause\n\nIn `lib/imap.c`, `imap_perform_append()` sets up the upload reader with the original size and sends it in the IMAP literal:\n\n```c\nresult = Curl_creader_set_fread(data, data->state.infilesize);\n...\nresult = imap_sendf(data, imapc, \"APPEND %s%s {%\" FMT_OFF_T \"}\",\n                    mailbox, curlx_dyn_ptr(&flags), data->state.infilesize);\n```\n\nThe `cr-lineconv` reader (`lib/sendf.c`) converts each bare LF to CRLF and explicitly returns `-1` for its total length because the converted size is unknown. `Curl_req_send_more()` (`lib/request.c`) drains the reader until EOS — it does not stop at the IMAP-declared boundary.\n\nAn N-byte input containing k bare LFs produces N+k wire bytes while the server was told to consume only N.\n\n## Reproduction\n1. Build curl at commit c2676bf9e639e31e44b12a2cc82cf2046231b056 (or any version from 7.30.0 onward) on a Linux or macOS host, without TLS (plain IMAP is sufficient for reproduction).\n\n2. Create a 66-byte upload file consisting of A\\n repeated 22 times (44 bytes), followed by the 22-byte suffix \\nX CREATE \"Injected\"\\r\\n. The 22 bare LFs before the suffix are chosen so that CRLF expansion adds exactly 22 bytes — pushing the suffix past the declared literal boundary.\n\n3. Start a local IMAP server on port 11430 that implements standard IMAP framing: respond to CAPABILITY, LOGIN, and APPEND. On APPEND, parse the {N} literal size from the command, send + continue, then consume exactly N bytes from the socket as the literal body. After consuming the literal and its terminating CRLF, read and record the next line received (the first post-literal command).\n\n4. Run curl with CRLF conversion enabled, uploading the payload via IMAP APPEND:\n```\ncurl -sS --user user:pass --upload-file payload.bin --crlf \\\n  imap://127.0.0.1:11430/INBOX\n```\n\n5. Observe that curl exits with code 0 — it reports success.\n\n6. Check what the IMAP server received after the literal — it will have parsed X CREATE \"Injected\" as a standalone IMAP command, separate from the APPEND literal. This proves that bytes from the upload body escaped the declared literal boundary and were interpreted as IMAP protocol commands.\n\n7. Run a control case without --crlf using the same payload and an identical IMAP server on a different port. Without CRLF conversion, the entire 66-byte payload fits within the declared 66-byte literal. The first post-literal command will be curl's normal LOGOUT, and the X CREATE \"Injected\" text remains safely inside the message body.\n\n8. Compare the two cases — in both, curl declared a 66-byte literal in the APPEND command. With --crlf, the 22 bare LFs expanded to CRLFs, producing 88 wire bytes against a 66-byte declaration. The server consumed 66 bytes as the literal, and the remaining 22 bytes (\\r\\nX CREATE \"Injected\"\\r\\n) were parsed as protocol — the CRLF terminated the APPEND and X CREATE \"Injected\" executed as a new command.\n\n\n## Suggested fix\n\nReject the `CURLOPT_CRLF` / `CURLOPT_TRANSFERTEXT` + IMAP APPEND combination with an explicit error, or pre-compute the converted size before sending the APPEND literal declaration. Truncating output at the declared length would prevent command escape but silently corrupt the message — an explicit failure is preferable.\n\n## Impact\n\n## Summary:\n\nAn attacker who controls the content of an uploaded message can inject arbitrary IMAP commands when:\n\n- the application enables CRLF conversion (`CURLOPT_CRLF` / `--crlf`),\n- the upload has a known size (required by IMAP APPEND in curl),\n- curl performs an authenticated IMAP APPEND, and\n- the attacker can control the upload bytes with byte-level precision.\n\nThe injected commands execute with the authenticated IMAP user's full privileges (CREATE, DELETE, STORE, COPY, etc.). `CURLOPT_TRANSFERTEXT=1` on Unix reaches the same code path.\n\nConversion is disabled by default, which limits exposure, but the framing violation itself is unconditional whenever conversion is active.",
+  "weakness": {
+    "id": 69,
+    "name": "CRLF Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6560728,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/f3bkd3674org9yxjrw04cvrmaf5b?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSRSU4TPV%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124602Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIBlONjQmu4f0IFTweMg2OmCNdxDPXJhvsEbJXmDDI76QAiBHSURNTk3sA%2BBZGC7RsHcwVc9r7RPCJ8sn525tjrVduyq7BQiy%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMG7xBFtyPbTDnxAoOKo8FK7WTaH%2FbJeZQn1GdhAPRmUZ9ldwnOTUDVOAYdQ%2B49WVI88z88PWn%2F5MXotwSGXJlvm4fGnbiS0DRaO4ATrEE6gC1EKWm5G%2B834%2BnHREu2T5lRXvl8vKewJUJDc4uLAiX385mnRWlfG7mIUlTBo32eRad8uGghJcph6nbd9ezu1AoNGNAd4BS8Y1LcE%2BdoJbZCaF6RRPl1Ob2qY2oNXj7fdrfOlK39OdfkVnaulPkNOPyzNjJHL1lDeMZ17UPHh6GX1d5TZYjkUuSVLT0HDg%2F6vCJBPaXghUpgMGwufxmiCNkGRQT3%2Fm2bLlVAnylmGLd6PNfSFvc%2B%2Fp6O1X%2FteRBcnUm2CjW%2BH67VSViJKLrW2DUyPrJkGKaIWl9UTxhx0PGqIfkRkJ6JpII7nyVPbr3p9ggEgJbWAEiQ72qaOpzHNyni47SaB%2B2mV%2FMeU6D8nnFwkHDEftrnPylfTHMg%2BVBefOVtT7jicaiN3d%2BMjBV6j63UN6Iteeafhp49poeEHZBYmqzByooKBdkJ%2BNs3AffAiJ13gbckF%2B92btLtB3n2Dld71utz7NOz9G2bQTvnKLDbaC85T%2FR%2Bbmm07OrrSBH9cSzHbyeCh9YZHXIsZvBGw4MHsTJSAq48xplytK1%2Ft5u5VTWmmfKuAyWO8LCysr9hPo0cjwyH%2FuvCEteLupnaX0wslLHvnYDFZ9%2FZw5i3KPFm%2F9vF1Rd7ZOweAXGzA86j7dmj5ACNPac9qRdFM7dWsH13pE7BeVslE9bKTSQM3DVAxcIVQo8TPwSd1lVnT563T2iYQQksacuUL8t5y%2B1JZXQp3d%2BJr1awnX8m4EYhgaFZRQUA4aY2AETmimaN0H1YNT2K3uiGVOB7320t7u60DC0j73WBjqyAZTeGkyGEcYvWpqxk1skj6%2B7sqsHn%2F4LLPe4HBVZJ1BKWyu5uptpVol4MKzkBsvzMTDNSZECu5iQV%2Bi9E217xEYFneiB%2BrHtC47juIzqOq8cIXSHc4IVS2yGlzg%2BmLIHscHDSJvDXG9O2CLPjCK0QznyPmBd8fYoHt0GN%2BfPnmX%2FpF15EzOWD6%2F4WJvXqEcvx3QDhfxfMak6GVVyCtT%2F1T4hw%2FJWrIZIEHVfCf%2FnW1ilXkA%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d2c5ff64e2de5bbbf013daae31cfcc0da232673ad90b3b3c3c0ecc0675d3df05",
+      "file_size": 321,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6560729,
+      "file_name": "reproduce.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/f55okhr1h9wrbrhcflwspzedwbgd?response-content-disposition=attachment%3B%20filename%3D%22reproduce.sh%22%3B%20filename%2A%3DUTF-8%27%27reproduce.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSRSU4TPV%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124602Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIBlONjQmu4f0IFTweMg2OmCNdxDPXJhvsEbJXmDDI76QAiBHSURNTk3sA%2BBZGC7RsHcwVc9r7RPCJ8sn525tjrVduyq7BQiy%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMG7xBFtyPbTDnxAoOKo8FK7WTaH%2FbJeZQn1GdhAPRmUZ9ldwnOTUDVOAYdQ%2B49WVI88z88PWn%2F5MXotwSGXJlvm4fGnbiS0DRaO4ATrEE6gC1EKWm5G%2B834%2BnHREu2T5lRXvl8vKewJUJDc4uLAiX385mnRWlfG7mIUlTBo32eRad8uGghJcph6nbd9ezu1AoNGNAd4BS8Y1LcE%2BdoJbZCaF6RRPl1Ob2qY2oNXj7fdrfOlK39OdfkVnaulPkNOPyzNjJHL1lDeMZ17UPHh6GX1d5TZYjkUuSVLT0HDg%2F6vCJBPaXghUpgMGwufxmiCNkGRQT3%2Fm2bLlVAnylmGLd6PNfSFvc%2B%2Fp6O1X%2FteRBcnUm2CjW%2BH67VSViJKLrW2DUyPrJkGKaIWl9UTxhx0PGqIfkRkJ6JpII7nyVPbr3p9ggEgJbWAEiQ72qaOpzHNyni47SaB%2B2mV%2FMeU6D8nnFwkHDEftrnPylfTHMg%2BVBefOVtT7jicaiN3d%2BMjBV6j63UN6Iteeafhp49poeEHZBYmqzByooKBdkJ%2BNs3AffAiJ13gbckF%2B92btLtB3n2Dld71utz7NOz9G2bQTvnKLDbaC85T%2FR%2Bbmm07OrrSBH9cSzHbyeCh9YZHXIsZvBGw4MHsTJSAq48xplytK1%2Ft5u5VTWmmfKuAyWO8LCysr9hPo0cjwyH%2FuvCEteLupnaX0wslLHvnYDFZ9%2FZw5i3KPFm%2F9vF1Rd7ZOweAXGzA86j7dmj5ACNPac9qRdFM7dWsH13pE7BeVslE9bKTSQM3DVAxcIVQo8TPwSd1lVnT563T2iYQQksacuUL8t5y%2B1JZXQp3d%2BJr1awnX8m4EYhgaFZRQUA4aY2AETmimaN0H1YNT2K3uiGVOB7320t7u60DC0j73WBjqyAZTeGkyGEcYvWpqxk1skj6%2B7sqsHn%2F4LLPe4HBVZJ1BKWyu5uptpVol4MKzkBsvzMTDNSZECu5iQV%2Bi9E217xEYFneiB%2BrHtC47juIzqOq8cIXSHc4IVS2yGlzg%2BmLIHscHDSJvDXG9O2CLPjCK0QznyPmBd8fYoHt0GN%2BfPnmX%2FpF15EzOWD6%2F4WJvXqEcvx3QDhfxfMak6GVVyCtT%2F1T4hw%2FJWrIZIEHVfCf%2FnW1ilXkA%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6a4a6d363fe08feb09972673c00f820d819f2d503e0045e900b72bd599f7c353",
+      "file_size": 277,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6560730,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/7na8wq1bes02k6yqmiiayussol2u?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSRSU4TPV%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124602Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIBlONjQmu4f0IFTweMg2OmCNdxDPXJhvsEbJXmDDI76QAiBHSURNTk3sA%2BBZGC7RsHcwVc9r7RPCJ8sn525tjrVduyq7BQiy%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMG7xBFtyPbTDnxAoOKo8FK7WTaH%2FbJeZQn1GdhAPRmUZ9ldwnOTUDVOAYdQ%2B49WVI88z88PWn%2F5MXotwSGXJlvm4fGnbiS0DRaO4ATrEE6gC1EKWm5G%2B834%2BnHREu2T5lRXvl8vKewJUJDc4uLAiX385mnRWlfG7mIUlTBo32eRad8uGghJcph6nbd9ezu1AoNGNAd4BS8Y1LcE%2BdoJbZCaF6RRPl1Ob2qY2oNXj7fdrfOlK39OdfkVnaulPkNOPyzNjJHL1lDeMZ17UPHh6GX1d5TZYjkUuSVLT0HDg%2F6vCJBPaXghUpgMGwufxmiCNkGRQT3%2Fm2bLlVAnylmGLd6PNfSFvc%2B%2Fp6O1X%2FteRBcnUm2CjW%2BH67VSViJKLrW2DUyPrJkGKaIWl9UTxhx0PGqIfkRkJ6JpII7nyVPbr3p9ggEgJbWAEiQ72qaOpzHNyni47SaB%2B2mV%2FMeU6D8nnFwkHDEftrnPylfTHMg%2BVBefOVtT7jicaiN3d%2BMjBV6j63UN6Iteeafhp49poeEHZBYmqzByooKBdkJ%2BNs3AffAiJ13gbckF%2B92btLtB3n2Dld71utz7NOz9G2bQTvnKLDbaC85T%2FR%2Bbmm07OrrSBH9cSzHbyeCh9YZHXIsZvBGw4MHsTJSAq48xplytK1%2Ft5u5VTWmmfKuAyWO8LCysr9hPo0cjwyH%2FuvCEteLupnaX0wslLHvnYDFZ9%2FZw5i3KPFm%2F9vF1Rd7ZOweAXGzA86j7dmj5ACNPac9qRdFM7dWsH13pE7BeVslE9bKTSQM3DVAxcIVQo8TPwSd1lVnT563T2iYQQksacuUL8t5y%2B1JZXQp3d%2BJr1awnX8m4EYhgaFZRQUA4aY2AETmimaN0H1YNT2K3uiGVOB7320t7u60DC0j73WBjqyAZTeGkyGEcYvWpqxk1skj6%2B7sqsHn%2F4LLPe4HBVZJ1BKWyu5uptpVol4MKzkBsvzMTDNSZECu5iQV%2Bi9E217xEYFneiB%2BrHtC47juIzqOq8cIXSHc4IVS2yGlzg%2BmLIHscHDSJvDXG9O2CLPjCK0QznyPmBd8fYoHt0GN%2BfPnmX%2FpF15EzOWD6%2F4WJvXqEcvx3QDhfxfMak6GVVyCtT%2F1T4hw%2FJWrIZIEHVfCf%2FnW1ilXkA%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e1a9d92db07627cbdbc648eac794871bc1c84171dc82a407d048b1c312873a0d",
+      "file_size": 2282,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6560731,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/im6v7ho7ftta68a1bi19ykpvytou?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSRSU4TPV%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124602Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIBlONjQmu4f0IFTweMg2OmCNdxDPXJhvsEbJXmDDI76QAiBHSURNTk3sA%2BBZGC7RsHcwVc9r7RPCJ8sn525tjrVduyq7BQiy%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMG7xBFtyPbTDnxAoOKo8FK7WTaH%2FbJeZQn1GdhAPRmUZ9ldwnOTUDVOAYdQ%2B49WVI88z88PWn%2F5MXotwSGXJlvm4fGnbiS0DRaO4ATrEE6gC1EKWm5G%2B834%2BnHREu2T5lRXvl8vKewJUJDc4uLAiX385mnRWlfG7mIUlTBo32eRad8uGghJcph6nbd9ezu1AoNGNAd4BS8Y1LcE%2BdoJbZCaF6RRPl1Ob2qY2oNXj7fdrfOlK39OdfkVnaulPkNOPyzNjJHL1lDeMZ17UPHh6GX1d5TZYjkUuSVLT0HDg%2F6vCJBPaXghUpgMGwufxmiCNkGRQT3%2Fm2bLlVAnylmGLd6PNfSFvc%2B%2Fp6O1X%2FteRBcnUm2CjW%2BH67VSViJKLrW2DUyPrJkGKaIWl9UTxhx0PGqIfkRkJ6JpII7nyVPbr3p9ggEgJbWAEiQ72qaOpzHNyni47SaB%2B2mV%2FMeU6D8nnFwkHDEftrnPylfTHMg%2BVBefOVtT7jicaiN3d%2BMjBV6j63UN6Iteeafhp49poeEHZBYmqzByooKBdkJ%2BNs3AffAiJ13gbckF%2B92btLtB3n2Dld71utz7NOz9G2bQTvnKLDbaC85T%2FR%2Bbmm07OrrSBH9cSzHbyeCh9YZHXIsZvBGw4MHsTJSAq48xplytK1%2Ft5u5VTWmmfKuAyWO8LCysr9hPo0cjwyH%2FuvCEteLupnaX0wslLHvnYDFZ9%2FZw5i3KPFm%2F9vF1Rd7ZOweAXGzA86j7dmj5ACNPac9qRdFM7dWsH13pE7BeVslE9bKTSQM3DVAxcIVQo8TPwSd1lVnT563T2iYQQksacuUL8t5y%2B1JZXQp3d%2BJr1awnX8m4EYhgaFZRQUA4aY2AETmimaN0H1YNT2K3uiGVOB7320t7u60DC0j73WBjqyAZTeGkyGEcYvWpqxk1skj6%2B7sqsHn%2F4LLPe4HBVZJ1BKWyu5uptpVol4MKzkBsvzMTDNSZECu5iQV%2Bi9E217xEYFneiB%2BrHtC47juIzqOq8cIXSHc4IVS2yGlzg%2BmLIHscHDSJvDXG9O2CLPjCK0QznyPmBd8fYoHt0GN%2BfPnmX%2FpF15EzOWD6%2F4WJvXqEcvx3QDhfxfMak6GVVyCtT%2F1T4hw%2FJWrIZIEHVfCf%2FnW1ilXkA%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e82670278fbcfc7aff513489a34c8b4a48940ce291137fc39d68e67049d6158c",
+      "file_size": 2807,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

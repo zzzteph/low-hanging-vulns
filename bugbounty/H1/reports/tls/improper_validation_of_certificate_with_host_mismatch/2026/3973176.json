@@ -1,0 +1,142 @@
+{
+  "id": 3973176,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMTc2",
+  "url": "https://hackerone.com/reports/3973176",
+  "title": "CVE-2026-86410:  redirect to SFTP or SCP bypasses host verification",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-27T09:20:59.946Z",
+  "submitted_at": "2026-08-27T09:21:00.254Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-86410",
+    "CVE-2026-12064"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:34:01.925Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:37:11.670Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`ssh_setopts()` in `src/config2setopts.c` returns immediately when the initial URL is not SCP or SFTP. This means `--knownhosts`, `--hostpubsha256`, and `--hostpubmd5` are never installed on the easy handle when the initial URL is HTTPS. If `--location --proto-redir +sftp` is used and the server returns a `Location: sftp://…` redirect, the SFTP connection proceeds without any of the user's requested SSH host-key verification.\n\nCommit `ab3bb8cd8be8f9d4acb97da0418abc279182041e` fixed CVE-2026-12064 for `--proto-default` but did not touch the early-return guard that causes this redirect variant. The vulnerable guard is present in the released `curl-8_21_0` tag and at current HEAD.\n\n## Affected versions\n\nAffected versions: curl CLI 7.81.0 through 8.21.0, plus affected 8.22.0\n\n## Root cause\n\nIn `src/config2setopts.c`, `ssh_setopts()` (line 205) bails out early:\n\n```c\nif(use_proto != proto_scp && use_proto != proto_sftp)\n  return CURLE_OK;\n```\n\n`use_proto` is derived from the initial command-line URL in `config2setopts()`. When the initial URL is HTTPS, none of `CURLOPT_SSH_KNOWNHOSTS`, `CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256`, or `CURLOPT_SSH_HOST_PUBLIC_KEY_MD5` are set on the easy handle. Redirect handling occurs inside libcurl and does not rerun `config2setopts()`, so the SFTP connection has no host-key verification policy. Verbose output on the redirected connection explicitly reports `SSH: no knownhosts file configured`.\n\n## Security impact\n\nAn attacker who can impersonate the redirected SFTP endpoint can substitute downloaded content while curl reports success. The user's explicit `--knownhosts` or `--hostpubsha256` policy is silently ignored.\n\nPreconditions:\n\n1. SSH-enabled curl build (libssh2 or libssh).\n2. `--location --proto-redir +sftp` (user explicitly enables SFTP redirects).\n3. A trusted HTTPS origin that redirects to SFTP.\n4. Authentication credentials usable at the SFTP endpoint.\n5. An attacker able to impersonate the SSH endpoint.\n\nI expect Low severity given the narrow attack surface and leave classification to the security team.\n\n## Reproduction\n\n1. Build an affected curl command-line tool, starting with 7.81.0, with SFTP support through libssh2 or libssh and HTTPS support through a TLS backend.\n2. Start an SFTP server with a known SSH host key, valid test credentials, and a file containing recognizable test data.\n3. Create a `known_hosts` file for the SFTP hostname and port that deliberately contains a different SSH host key.\n4. Start an HTTPS server with a certificate that curl can validate normally.\n5. Configure the HTTPS server to return a redirect whose `Location` header points to the test file on the SFTP server.\n6. As a direct-transfer control, invoke curl against the SFTP URL with the mismatching `--knownhosts` file.\n7. Confirm that the direct transfer fails host-key verification and does not download the file. This demonstrates that the file is valid and enforced for an initially selected SFTP protocol.\n8. Invoke curl against the HTTPS URL with certificate verification enabled, redirect following enabled, SFTP explicitly permitted in `--proto-redir`, and the same mismatching `--knownhosts` file.\n9. Observe the vulnerable result: curl follows the redirect, authenticates to the SFTP server, downloads the file, and reports success despite the requested host-key policy mismatch.\n10. Enable verbose output and confirm that the redirected SFTP connection reports that no known-hosts file was configured.\n11. Repeat the redirected transfer using a deliberately incorrect `--hostpubsha256` value instead of, or in addition to, the mismatching `known_hosts` file.\n12. Confirm that the redirected transfer also omits that host-key pin while a direct SFTP request enforces it.\n13. As a protocol-policy control, remove SFTP from the redirect allowlist and repeat the HTTPS request.\n14. Confirm that curl refuses the redirect, demonstrating that exploitation still requires the user to permit the HTTP(S)-to-SFTP transition.\n15. Confirm a fix by installing SSH-specific easy-handle options independently of the initial URL protocol rather than returning early for an initial HTTP or HTTPS URL.\n16. Repeat the redirect case and verify that the SFTP connection enforces the supplied host-key policy and fails before authentication or file transfer.\n\n### Expected result\n\nSSH host-verification options supplied on the command line must apply whenever the transfer reaches SCP or SFTP, including through an allowed redirect.\n\n### Vulnerable result\n\nCurl configures SSH verification only when the initial URL is SSH-based. An HTTP or HTTPS easy handle redirected to SFTP therefore connects without the requested known-hosts file or host-key pin.\n\n\n## Suggested fix\n\nRemove the protocol guard in `ssh_setopts()` so that SSH options are always installed on the easy handle. The handle can later transition to SCP/SFTP via redirect, and unused SSH options on a non-SSH transfer are harmless. Add regression tests for an HTTPS-to-SFTP redirect with mismatching `--knownhosts` and `--hostpubsha256`.\n\n## Impact\n\n## Summary:\nAn attacker able to impersonate an SFTP endpoint referenced by a trusted HTTPS redirect can bypass the user’s requested known-hosts or host-key pin verification. Curl may authenticate to the attacker-controlled SSH server, potentially exposing SFTP credentials and allowing the attacker to substitute downloaded content while curl reports success.",
+  "weakness": {
+    "id": 555,
+    "name": "Improper Validation of Certificate with Host Mismatch"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6563116,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/f5zp1q5f20dhvr1htpta0938qax0?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ2QG65AY%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124607Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDrsc6CYKsS8Z82m9pppoTFJrgVlrisI1erpKxLKn%2BF6gIhAI5WvXlv6YkClv1D3YFll0lV1rH1TsvyH%2FkGhxLZXJ8LKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxXO5kEE8nxbi94AqsqjwVkwp6eMSyC%2BTilWMsixmHncO1JFsLfp98SvtoiYcrJosQDtyU7mscQbNDRsCwfqbOqRDJLB84iySe5tG2A6EkJNkBl2bHkxr2QFb9joLohYptnPBzA67vxPDcbjy0%2F3M38%2FNn3sQB1M5EhqHEBOvuJfVpZr9YTaHkECh5KWeVd77SPLl5QT9qfIfwh5T0hrvpn6RbfTUQyVEURKRVafe1bQuBkz4sU9kELTXXGARvCoysew6RsYuMXVEW62eX8nNNPhYDNKhbkwA0B3bT1MeBngrdszHop3Tz3OagB9jZDum%2F6qEUa1Ya1PLKzWEdA7QJXF3izKBe2ZbRfXmr3i1j4Hrhj0go%2BmsZPYrvlN0krqeE3J480nLExHlF%2B%2FDMjTqAVC6h%2BkH7eEy%2FaEcQkLdL75isQscq4VU4nnN%2Bys5DeWGWUvX0iZ5uAPHpSnPKPw4HIPukEZgVnvgcNmQ8iBfMOenaok2PTZ4nxmr9zKnUZfBt%2Bm72SrW6SaV9RDQiICxBvEhIVTNu%2FYaVNi%2BuLMF5MSEskfujKMvuc9S61v2Q%2FwZjFYgYUXYZsNMIZsWfJ4fpeET%2BLXn000HCZ6%2BQ%2BHmMFzHzo1PTAvc1nKHPSszEToVbHAYb%2BhizTcJyqXuePKGN7HiSFnJHH8MrgYoKZ1eeEHaTrow79sCfiKJVvtsSCzc%2Bw7jDdrrJLigfh3qqrgJoZuSFLKrL3iTRtu1DztqYY7hpEFFb337WGaPa045JkBvQnpV4Br%2FirNt9is1JOatrFtTuaD5hluYHs92on1wnz1ASCF4%2BDkScKOdgqSDYbtK8tcKAeSBUVrX7O8hNl2%2BoC4rGyQY2JZMwEzD7AgWgxpPte%2BtmxyRfH%2FeWwmdHEMJaMvdYGOrABPdg1D4nrHdtrzfqsx1qwInX83onn2D%2F9C5T7iymzheUR96PwydDkEzYt5TNE8funT4o2i4dAST2WWzYjQNnmb7qk34NaVHBd7NEjPAz5IAteNyYAEPECZNjA20ZHQll4Uhg7cOWHMTWGn0lqxpi%2FjI7CTSnopfeh3z5loaTfBs%2BvuPCWP893qbaHmhum6LrkfbyK5BmFdLujG8%2F9YRCPpFSqzir%2B3%2BzIR2TqCgkUSQE%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a866600edcc99c627c5d0c6dbd26c4fb9cbaa376ec0d7d75b019977d796edf1d",
+      "file_size": 711,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6563117,
+      "file_name": "run-container.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/e8uzuepuywok3ufhnaduw65w2qnd?response-content-disposition=attachment%3B%20filename%3D%22run-container.sh%22%3B%20filename%2A%3DUTF-8%27%27run-container.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ2QG65AY%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124607Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDrsc6CYKsS8Z82m9pppoTFJrgVlrisI1erpKxLKn%2BF6gIhAI5WvXlv6YkClv1D3YFll0lV1rH1TsvyH%2FkGhxLZXJ8LKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxXO5kEE8nxbi94AqsqjwVkwp6eMSyC%2BTilWMsixmHncO1JFsLfp98SvtoiYcrJosQDtyU7mscQbNDRsCwfqbOqRDJLB84iySe5tG2A6EkJNkBl2bHkxr2QFb9joLohYptnPBzA67vxPDcbjy0%2F3M38%2FNn3sQB1M5EhqHEBOvuJfVpZr9YTaHkECh5KWeVd77SPLl5QT9qfIfwh5T0hrvpn6RbfTUQyVEURKRVafe1bQuBkz4sU9kELTXXGARvCoysew6RsYuMXVEW62eX8nNNPhYDNKhbkwA0B3bT1MeBngrdszHop3Tz3OagB9jZDum%2F6qEUa1Ya1PLKzWEdA7QJXF3izKBe2ZbRfXmr3i1j4Hrhj0go%2BmsZPYrvlN0krqeE3J480nLExHlF%2B%2FDMjTqAVC6h%2BkH7eEy%2FaEcQkLdL75isQscq4VU4nnN%2Bys5DeWGWUvX0iZ5uAPHpSnPKPw4HIPukEZgVnvgcNmQ8iBfMOenaok2PTZ4nxmr9zKnUZfBt%2Bm72SrW6SaV9RDQiICxBvEhIVTNu%2FYaVNi%2BuLMF5MSEskfujKMvuc9S61v2Q%2FwZjFYgYUXYZsNMIZsWfJ4fpeET%2BLXn000HCZ6%2BQ%2BHmMFzHzo1PTAvc1nKHPSszEToVbHAYb%2BhizTcJyqXuePKGN7HiSFnJHH8MrgYoKZ1eeEHaTrow79sCfiKJVvtsSCzc%2Bw7jDdrrJLigfh3qqrgJoZuSFLKrL3iTRtu1DztqYY7hpEFFb337WGaPa045JkBvQnpV4Br%2FirNt9is1JOatrFtTuaD5hluYHs92on1wnz1ASCF4%2BDkScKOdgqSDYbtK8tcKAeSBUVrX7O8hNl2%2BoC4rGyQY2JZMwEzD7AgWgxpPte%2BtmxyRfH%2FeWwmdHEMJaMvdYGOrABPdg1D4nrHdtrzfqsx1qwInX83onn2D%2F9C5T7iymzheUR96PwydDkEzYt5TNE8funT4o2i4dAST2WWzYjQNnmb7qk34NaVHBd7NEjPAz5IAteNyYAEPECZNjA20ZHQll4Uhg7cOWHMTWGn0lqxpi%2FjI7CTSnopfeh3z5loaTfBs%2BvuPCWP893qbaHmhum6LrkfbyK5BmFdLujG8%2F9YRCPpFSqzir%2B3%2BzIR2TqCgkUSQE%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=57e758b5455af19efcd9ccd64bc51b5045cdc5787bac90fbaf8d1a8b6536d58f",
+      "file_size": 2511,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563118,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/0sqk3sop5pl8ksagino6lixdrzu5?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ2QG65AY%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124607Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDrsc6CYKsS8Z82m9pppoTFJrgVlrisI1erpKxLKn%2BF6gIhAI5WvXlv6YkClv1D3YFll0lV1rH1TsvyH%2FkGhxLZXJ8LKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxXO5kEE8nxbi94AqsqjwVkwp6eMSyC%2BTilWMsixmHncO1JFsLfp98SvtoiYcrJosQDtyU7mscQbNDRsCwfqbOqRDJLB84iySe5tG2A6EkJNkBl2bHkxr2QFb9joLohYptnPBzA67vxPDcbjy0%2F3M38%2FNn3sQB1M5EhqHEBOvuJfVpZr9YTaHkECh5KWeVd77SPLl5QT9qfIfwh5T0hrvpn6RbfTUQyVEURKRVafe1bQuBkz4sU9kELTXXGARvCoysew6RsYuMXVEW62eX8nNNPhYDNKhbkwA0B3bT1MeBngrdszHop3Tz3OagB9jZDum%2F6qEUa1Ya1PLKzWEdA7QJXF3izKBe2ZbRfXmr3i1j4Hrhj0go%2BmsZPYrvlN0krqeE3J480nLExHlF%2B%2FDMjTqAVC6h%2BkH7eEy%2FaEcQkLdL75isQscq4VU4nnN%2Bys5DeWGWUvX0iZ5uAPHpSnPKPw4HIPukEZgVnvgcNmQ8iBfMOenaok2PTZ4nxmr9zKnUZfBt%2Bm72SrW6SaV9RDQiICxBvEhIVTNu%2FYaVNi%2BuLMF5MSEskfujKMvuc9S61v2Q%2FwZjFYgYUXYZsNMIZsWfJ4fpeET%2BLXn000HCZ6%2BQ%2BHmMFzHzo1PTAvc1nKHPSszEToVbHAYb%2BhizTcJyqXuePKGN7HiSFnJHH8MrgYoKZ1eeEHaTrow79sCfiKJVvtsSCzc%2Bw7jDdrrJLigfh3qqrgJoZuSFLKrL3iTRtu1DztqYY7hpEFFb337WGaPa045JkBvQnpV4Br%2FirNt9is1JOatrFtTuaD5hluYHs92on1wnz1ASCF4%2BDkScKOdgqSDYbtK8tcKAeSBUVrX7O8hNl2%2BoC4rGyQY2JZMwEzD7AgWgxpPte%2BtmxyRfH%2FeWwmdHEMJaMvdYGOrABPdg1D4nrHdtrzfqsx1qwInX83onn2D%2F9C5T7iymzheUR96PwydDkEzYt5TNE8funT4o2i4dAST2WWzYjQNnmb7qk34NaVHBd7NEjPAz5IAteNyYAEPECZNjA20ZHQll4Uhg7cOWHMTWGn0lqxpi%2FjI7CTSnopfeh3z5loaTfBs%2BvuPCWP893qbaHmhum6LrkfbyK5BmFdLujG8%2F9YRCPpFSqzir%2B3%2BzIR2TqCgkUSQE%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=24251dc9ee186583932128331e9c7aae895d56bdfa81e0503fa1ca4e7367d078",
+      "file_size": 206,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6563119,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/uqm4qdb7eei81wkh8vy1c896icuj?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=text%2Fx-python-script&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ2QG65AY%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124607Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDrsc6CYKsS8Z82m9pppoTFJrgVlrisI1erpKxLKn%2BF6gIhAI5WvXlv6YkClv1D3YFll0lV1rH1TsvyH%2FkGhxLZXJ8LKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxXO5kEE8nxbi94AqsqjwVkwp6eMSyC%2BTilWMsixmHncO1JFsLfp98SvtoiYcrJosQDtyU7mscQbNDRsCwfqbOqRDJLB84iySe5tG2A6EkJNkBl2bHkxr2QFb9joLohYptnPBzA67vxPDcbjy0%2F3M38%2FNn3sQB1M5EhqHEBOvuJfVpZr9YTaHkECh5KWeVd77SPLl5QT9qfIfwh5T0hrvpn6RbfTUQyVEURKRVafe1bQuBkz4sU9kELTXXGARvCoysew6RsYuMXVEW62eX8nNNPhYDNKhbkwA0B3bT1MeBngrdszHop3Tz3OagB9jZDum%2F6qEUa1Ya1PLKzWEdA7QJXF3izKBe2ZbRfXmr3i1j4Hrhj0go%2BmsZPYrvlN0krqeE3J480nLExHlF%2B%2FDMjTqAVC6h%2BkH7eEy%2FaEcQkLdL75isQscq4VU4nnN%2Bys5DeWGWUvX0iZ5uAPHpSnPKPw4HIPukEZgVnvgcNmQ8iBfMOenaok2PTZ4nxmr9zKnUZfBt%2Bm72SrW6SaV9RDQiICxBvEhIVTNu%2FYaVNi%2BuLMF5MSEskfujKMvuc9S61v2Q%2FwZjFYgYUXYZsNMIZsWfJ4fpeET%2BLXn000HCZ6%2BQ%2BHmMFzHzo1PTAvc1nKHPSszEToVbHAYb%2BhizTcJyqXuePKGN7HiSFnJHH8MrgYoKZ1eeEHaTrow79sCfiKJVvtsSCzc%2Bw7jDdrrJLigfh3qqrgJoZuSFLKrL3iTRtu1DztqYY7hpEFFb337WGaPa045JkBvQnpV4Br%2FirNt9is1JOatrFtTuaD5hluYHs92on1wnz1ASCF4%2BDkScKOdgqSDYbtK8tcKAeSBUVrX7O8hNl2%2BoC4rGyQY2JZMwEzD7AgWgxpPte%2BtmxyRfH%2FeWwmdHEMJaMvdYGOrABPdg1D4nrHdtrzfqsx1qwInX83onn2D%2F9C5T7iymzheUR96PwydDkEzYt5TNE8funT4o2i4dAST2WWzYjQNnmb7qk34NaVHBd7NEjPAz5IAteNyYAEPECZNjA20ZHQll4Uhg7cOWHMTWGn0lqxpi%2FjI7CTSnopfeh3z5loaTfBs%2BvuPCWP893qbaHmhum6LrkfbyK5BmFdLujG8%2F9YRCPpFSqzir%2B3%2BzIR2TqCgkUSQE%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ab9343a8ba29a0c87dd2968c5fdc0d8ed3d052e30f9fa5ff3fbdb2a07806a2f2",
+      "file_size": 626,
+      "type": "text/x-python-script",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

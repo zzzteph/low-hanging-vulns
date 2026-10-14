@@ -1,0 +1,141 @@
+{
+  "id": 3972373,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcyMzcz",
+  "url": "https://hackerone.com/reports/3972373",
+  "title": "CVE-2026-87863: HSTS response erases persisted entries",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-26T22:43:59.260Z",
+  "submitted_at": "2026-08-26T22:43:59.584Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-87863"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:35:59.701Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:35:38.900Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nAn authenticated HTTPS origin can return a `Strict-Transport-Security: max-age` value that `Curl_hsts_parse()` accepts but `curlx_gmtime()` cannot later serialize. On 64-bit platforms, `max-age=67768036190000000` produces an absolute expiry within `time_t` range but outside `struct tm`'s representable range. During HSTS cache save, `Curl_fopen()` truncates the original cache file before writing a temporary replacement. When serialization fails, the temporary file is deleted, leaving the original cache empty. The save error is silently discarded by `Curl_close()`, so curl exits successfully.\n\nThe result is cross-origin persistent HSTS state loss: one HTTPS origin erases policies for all unrelated hosts sharing the same HSTS cache file.\n\n## Affected Versions\nThis is a remotely triggerable escalation of the truncation regression in [#21610](https://github.com/curl/curl/issues/21610), introduced by commit `0c667188e0` (\"fopen: optimize\") and shipped in curl 8.2.0. The `gmtime_r()` overflow gap was previously discussed in [#7720](https://github.com/curl/curl/issues/7720); that fix special-cased `TIME_T_MAX` but does not cover smaller accepted timestamps outside `struct tm`'s range.\n\nAll versions from 8.2.0 onward are affected, provided HSTS file-based persistence is enabled (--hsts <file> or CURLOPT_HSTS).\n\n## Root cause\n\n1. `Curl_hsts_parse()` (`lib/hsts.c:243`) parses `max-age` via `curlx_str_number()` with limit `TIME_T_MAX`. The value `67768036190000000` fits, so no overflow occurs. It is added to the current time (line 293) to form an absolute expiry.\n\n2. `Curl_hsts_save()` (`lib/hsts.c:387`) calls `Curl_fopen()`. On non-Windows, `Curl_fopen()` opens the destination with write/truncate mode (`lib/curl_fopen.c:98`) before checking whether it is a regular file (lines 101-104). The original cache is now zero bytes.\n\n3. `hsts_out()` (`lib/hsts.c:348-351`) calls `curlx_gmtime()` on the absolute expiry. It fails because the timestamp exceeds `struct tm`'s representable range. `Curl_hsts_save()` breaks out of the serialization loop, closes and deletes the temporary file (`lib/hsts.c:399-404`). Nothing replaces the truncated original.\n\n4. `Curl_close()` discards the return value of `Curl_hsts_save()` (`lib/url.c:260`). The transfer and process exit successfully.\n\nBefore commit `0c667188e0`, `Curl_fopen()` called `stat()` without opening the file, then conditionally opened it. The \"optimize\" commit switched to `fopen()` first (which truncates), then `fstat()` on the file descriptor — introducing the destructive side-effect.\n\n## Impact\n\nThe immediate impact is cross-origin persistent HSTS state loss. Plaintext exposure additionally requires:\n\n1. File-backed HSTS persistence (`--hsts <file>` or `CURLOPT_HSTS`).\n2. A later process or cache reload.\n3. An explicit `http://` URL for a host whose policy was erased.\n4. An on-path attacker able to intercept that later plaintext connection.\n\nThe triggering response must come from an HTTPS origin trusted by the client. The `--hsts` feature is opt-in.\n\n## Reproduction\n1. Build curl from commit c2676bf9e639e31e44b12a2cc82cf2046231b056 on a 64-bit Linux or macOS host with OpenSSL, using cmake with -DCURL_USE_OPENSSL=ON.\n\n2. Generate a self-signed TLS certificate for the hostname attacker.test (with a matching SAN), valid for at least one day.\n\n3. Create a seed HSTS cache file (test.cache) containing a pre-existing entry for an unrelated host, e.g.:\n\n# Your HSTS cache. https://curl.se/docs/hsts.html\n# This file was generated by libcurl! Edit at your own risk.\nunrelated.test \"20991231 23:59:59\"\n\n4. Start a local HTTPS server on 127.0.0.1:8443 using the generated certificate that responds to any GET request with a 200 OK and the header Strict-Transport-Security: max-age=67768036190000000.\n\n5. Run curl against the local HTTPS server, pointing at the seed cache:\n curl --silent --show-error --cacert server.pem --noproxy '*' \\\n  --resolve attacker.test:8443:127.0.0.1 --hsts test.cache \\\n  https://attacker.test:8443/\n\n6. Verify the exit code is 0 — curl reports success.\n\n7. Check the cache file size — it will be exactly 0 bytes. The pre-existing unrelated.test entry is gone.\n\n8. Confirm HSTS policy loss by loading the empty cache in a new curl process and requesting http://unrelated.test:8080/ with --write-out '%{url_effective}'. The URL will remain http:// (no HSTS upgrade), proving the policy was erased.\n\n9. As a control, repeat step 5 with an ordinary max-age=3600 instead. The cache file will retain the unrelated.test entry and add the attacker.test entry normally, confirming the issue is specific to the unserializable value.\n\n## Suggested fix\n\n1. In `Curl_fopen()`, do not open the destination in truncate mode to inspect it. `stat()` the existing path without modifying it, write the complete output to a temporary file, and atomically rename only after every entry is serialized successfully.\n\n2. In `Curl_hsts_parse()` or `hsts_out()`, reject or clamp accepted `max-age` values whose absolute expiry `curlx_gmtime()` cannot serialize, rather than silently failing at save time.\n\n3. Do not discard the `Curl_hsts_save()` result in `Curl_close()`.\n\n## Impact\n\n## Summary:\nThe immediate impact is cross-origin persistent HSTS state loss. Plaintext exposure additionally requires:\n\n1. File-backed HSTS persistence (`--hsts <file>` or `CURLOPT_HSTS`).\n2. A later process or cache reload.\n3. An explicit `http://` URL for a host whose policy was erased.\n4. An on-path attacker able to intercept that later plaintext connection.\n\nThe triggering response must come from an HTTPS origin trusted by the client. The `--hsts` feature is opt-in.\n\nThe attacker's goal is to strip HSTS protection from unrelated domains, enabling a classic SSL-stripping / protocol downgrade attack.",
+  "weakness": {
+    "id": 105,
+    "name": "Time-of-check Time-of-use (TOCTOU) Race Condition"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6560579,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/zagbb3ohgijqk435fdkpd8bf19ey?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ2QG65AY%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124602Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDrsc6CYKsS8Z82m9pppoTFJrgVlrisI1erpKxLKn%2BF6gIhAI5WvXlv6YkClv1D3YFll0lV1rH1TsvyH%2FkGhxLZXJ8LKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxXO5kEE8nxbi94AqsqjwVkwp6eMSyC%2BTilWMsixmHncO1JFsLfp98SvtoiYcrJosQDtyU7mscQbNDRsCwfqbOqRDJLB84iySe5tG2A6EkJNkBl2bHkxr2QFb9joLohYptnPBzA67vxPDcbjy0%2F3M38%2FNn3sQB1M5EhqHEBOvuJfVpZr9YTaHkECh5KWeVd77SPLl5QT9qfIfwh5T0hrvpn6RbfTUQyVEURKRVafe1bQuBkz4sU9kELTXXGARvCoysew6RsYuMXVEW62eX8nNNPhYDNKhbkwA0B3bT1MeBngrdszHop3Tz3OagB9jZDum%2F6qEUa1Ya1PLKzWEdA7QJXF3izKBe2ZbRfXmr3i1j4Hrhj0go%2BmsZPYrvlN0krqeE3J480nLExHlF%2B%2FDMjTqAVC6h%2BkH7eEy%2FaEcQkLdL75isQscq4VU4nnN%2Bys5DeWGWUvX0iZ5uAPHpSnPKPw4HIPukEZgVnvgcNmQ8iBfMOenaok2PTZ4nxmr9zKnUZfBt%2Bm72SrW6SaV9RDQiICxBvEhIVTNu%2FYaVNi%2BuLMF5MSEskfujKMvuc9S61v2Q%2FwZjFYgYUXYZsNMIZsWfJ4fpeET%2BLXn000HCZ6%2BQ%2BHmMFzHzo1PTAvc1nKHPSszEToVbHAYb%2BhizTcJyqXuePKGN7HiSFnJHH8MrgYoKZ1eeEHaTrow79sCfiKJVvtsSCzc%2Bw7jDdrrJLigfh3qqrgJoZuSFLKrL3iTRtu1DztqYY7hpEFFb337WGaPa045JkBvQnpV4Br%2FirNt9is1JOatrFtTuaD5hluYHs92on1wnz1ASCF4%2BDkScKOdgqSDYbtK8tcKAeSBUVrX7O8hNl2%2BoC4rGyQY2JZMwEzD7AgWgxpPte%2BtmxyRfH%2FeWwmdHEMJaMvdYGOrABPdg1D4nrHdtrzfqsx1qwInX83onn2D%2F9C5T7iymzheUR96PwydDkEzYt5TNE8funT4o2i4dAST2WWzYjQNnmb7qk34NaVHBd7NEjPAz5IAteNyYAEPECZNjA20ZHQll4Uhg7cOWHMTWGn0lqxpi%2FjI7CTSnopfeh3z5loaTfBs%2BvuPCWP893qbaHmhum6LrkfbyK5BmFdLujG8%2F9YRCPpFSqzir%2B3%2BzIR2TqCgkUSQE%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c11d94c0ce1f6e809d567e502bdce4454224e0e9c93b82a9bfed8edf61b0ea95",
+      "file_size": 1028,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6560580,
+      "file_name": "run-container.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ci0et198ysazhs3ccba07lrf5nez?response-content-disposition=attachment%3B%20filename%3D%22run-container.sh%22%3B%20filename%2A%3DUTF-8%27%27run-container.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ2QG65AY%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124602Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDrsc6CYKsS8Z82m9pppoTFJrgVlrisI1erpKxLKn%2BF6gIhAI5WvXlv6YkClv1D3YFll0lV1rH1TsvyH%2FkGhxLZXJ8LKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxXO5kEE8nxbi94AqsqjwVkwp6eMSyC%2BTilWMsixmHncO1JFsLfp98SvtoiYcrJosQDtyU7mscQbNDRsCwfqbOqRDJLB84iySe5tG2A6EkJNkBl2bHkxr2QFb9joLohYptnPBzA67vxPDcbjy0%2F3M38%2FNn3sQB1M5EhqHEBOvuJfVpZr9YTaHkECh5KWeVd77SPLl5QT9qfIfwh5T0hrvpn6RbfTUQyVEURKRVafe1bQuBkz4sU9kELTXXGARvCoysew6RsYuMXVEW62eX8nNNPhYDNKhbkwA0B3bT1MeBngrdszHop3Tz3OagB9jZDum%2F6qEUa1Ya1PLKzWEdA7QJXF3izKBe2ZbRfXmr3i1j4Hrhj0go%2BmsZPYrvlN0krqeE3J480nLExHlF%2B%2FDMjTqAVC6h%2BkH7eEy%2FaEcQkLdL75isQscq4VU4nnN%2Bys5DeWGWUvX0iZ5uAPHpSnPKPw4HIPukEZgVnvgcNmQ8iBfMOenaok2PTZ4nxmr9zKnUZfBt%2Bm72SrW6SaV9RDQiICxBvEhIVTNu%2FYaVNi%2BuLMF5MSEskfujKMvuc9S61v2Q%2FwZjFYgYUXYZsNMIZsWfJ4fpeET%2BLXn000HCZ6%2BQ%2BHmMFzHzo1PTAvc1nKHPSszEToVbHAYb%2BhizTcJyqXuePKGN7HiSFnJHH8MrgYoKZ1eeEHaTrow79sCfiKJVvtsSCzc%2Bw7jDdrrJLigfh3qqrgJoZuSFLKrL3iTRtu1DztqYY7hpEFFb337WGaPa045JkBvQnpV4Br%2FirNt9is1JOatrFtTuaD5hluYHs92on1wnz1ASCF4%2BDkScKOdgqSDYbtK8tcKAeSBUVrX7O8hNl2%2BoC4rGyQY2JZMwEzD7AgWgxpPte%2BtmxyRfH%2FeWwmdHEMJaMvdYGOrABPdg1D4nrHdtrzfqsx1qwInX83onn2D%2F9C5T7iymzheUR96PwydDkEzYt5TNE8funT4o2i4dAST2WWzYjQNnmb7qk34NaVHBd7NEjPAz5IAteNyYAEPECZNjA20ZHQll4Uhg7cOWHMTWGn0lqxpi%2FjI7CTSnopfeh3z5loaTfBs%2BvuPCWP893qbaHmhum6LrkfbyK5BmFdLujG8%2F9YRCPpFSqzir%2B3%2BzIR2TqCgkUSQE%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=66fbf3dc65b6eb317443433676a39b60b5e3231a1157d26c3523dcb3cee254bb",
+      "file_size": 2457,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6560581,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/l7br3brvsjtlqwl84jsjvlosi29n?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ2QG65AY%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124602Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDrsc6CYKsS8Z82m9pppoTFJrgVlrisI1erpKxLKn%2BF6gIhAI5WvXlv6YkClv1D3YFll0lV1rH1TsvyH%2FkGhxLZXJ8LKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxXO5kEE8nxbi94AqsqjwVkwp6eMSyC%2BTilWMsixmHncO1JFsLfp98SvtoiYcrJosQDtyU7mscQbNDRsCwfqbOqRDJLB84iySe5tG2A6EkJNkBl2bHkxr2QFb9joLohYptnPBzA67vxPDcbjy0%2F3M38%2FNn3sQB1M5EhqHEBOvuJfVpZr9YTaHkECh5KWeVd77SPLl5QT9qfIfwh5T0hrvpn6RbfTUQyVEURKRVafe1bQuBkz4sU9kELTXXGARvCoysew6RsYuMXVEW62eX8nNNPhYDNKhbkwA0B3bT1MeBngrdszHop3Tz3OagB9jZDum%2F6qEUa1Ya1PLKzWEdA7QJXF3izKBe2ZbRfXmr3i1j4Hrhj0go%2BmsZPYrvlN0krqeE3J480nLExHlF%2B%2FDMjTqAVC6h%2BkH7eEy%2FaEcQkLdL75isQscq4VU4nnN%2Bys5DeWGWUvX0iZ5uAPHpSnPKPw4HIPukEZgVnvgcNmQ8iBfMOenaok2PTZ4nxmr9zKnUZfBt%2Bm72SrW6SaV9RDQiICxBvEhIVTNu%2FYaVNi%2BuLMF5MSEskfujKMvuc9S61v2Q%2FwZjFYgYUXYZsNMIZsWfJ4fpeET%2BLXn000HCZ6%2BQ%2BHmMFzHzo1PTAvc1nKHPSszEToVbHAYb%2BhizTcJyqXuePKGN7HiSFnJHH8MrgYoKZ1eeEHaTrow79sCfiKJVvtsSCzc%2Bw7jDdrrJLigfh3qqrgJoZuSFLKrL3iTRtu1DztqYY7hpEFFb337WGaPa045JkBvQnpV4Br%2FirNt9is1JOatrFtTuaD5hluYHs92on1wnz1ASCF4%2BDkScKOdgqSDYbtK8tcKAeSBUVrX7O8hNl2%2BoC4rGyQY2JZMwEzD7AgWgxpPte%2BtmxyRfH%2FeWwmdHEMJaMvdYGOrABPdg1D4nrHdtrzfqsx1qwInX83onn2D%2F9C5T7iymzheUR96PwydDkEzYt5TNE8funT4o2i4dAST2WWzYjQNnmb7qk34NaVHBd7NEjPAz5IAteNyYAEPECZNjA20ZHQll4Uhg7cOWHMTWGn0lqxpi%2FjI7CTSnopfeh3z5loaTfBs%2BvuPCWP893qbaHmhum6LrkfbyK5BmFdLujG8%2F9YRCPpFSqzir%2B3%2BzIR2TqCgkUSQE%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=37b75809ca655015570e944358361acee4090a6bf101ee06cac6db843e52153f",
+      "file_size": 217,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6560582,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/jc68i6hspgava964nfr2oepplj4p?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=text%2Fx-python-script&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ2QG65AY%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124602Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDrsc6CYKsS8Z82m9pppoTFJrgVlrisI1erpKxLKn%2BF6gIhAI5WvXlv6YkClv1D3YFll0lV1rH1TsvyH%2FkGhxLZXJ8LKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxXO5kEE8nxbi94AqsqjwVkwp6eMSyC%2BTilWMsixmHncO1JFsLfp98SvtoiYcrJosQDtyU7mscQbNDRsCwfqbOqRDJLB84iySe5tG2A6EkJNkBl2bHkxr2QFb9joLohYptnPBzA67vxPDcbjy0%2F3M38%2FNn3sQB1M5EhqHEBOvuJfVpZr9YTaHkECh5KWeVd77SPLl5QT9qfIfwh5T0hrvpn6RbfTUQyVEURKRVafe1bQuBkz4sU9kELTXXGARvCoysew6RsYuMXVEW62eX8nNNPhYDNKhbkwA0B3bT1MeBngrdszHop3Tz3OagB9jZDum%2F6qEUa1Ya1PLKzWEdA7QJXF3izKBe2ZbRfXmr3i1j4Hrhj0go%2BmsZPYrvlN0krqeE3J480nLExHlF%2B%2FDMjTqAVC6h%2BkH7eEy%2FaEcQkLdL75isQscq4VU4nnN%2Bys5DeWGWUvX0iZ5uAPHpSnPKPw4HIPukEZgVnvgcNmQ8iBfMOenaok2PTZ4nxmr9zKnUZfBt%2Bm72SrW6SaV9RDQiICxBvEhIVTNu%2FYaVNi%2BuLMF5MSEskfujKMvuc9S61v2Q%2FwZjFYgYUXYZsNMIZsWfJ4fpeET%2BLXn000HCZ6%2BQ%2BHmMFzHzo1PTAvc1nKHPSszEToVbHAYb%2BhizTcJyqXuePKGN7HiSFnJHH8MrgYoKZ1eeEHaTrow79sCfiKJVvtsSCzc%2Bw7jDdrrJLigfh3qqrgJoZuSFLKrL3iTRtu1DztqYY7hpEFFb337WGaPa045JkBvQnpV4Br%2FirNt9is1JOatrFtTuaD5hluYHs92on1wnz1ASCF4%2BDkScKOdgqSDYbtK8tcKAeSBUVrX7O8hNl2%2BoC4rGyQY2JZMwEzD7AgWgxpPte%2BtmxyRfH%2FeWwmdHEMJaMvdYGOrABPdg1D4nrHdtrzfqsx1qwInX83onn2D%2F9C5T7iymzheUR96PwydDkEzYt5TNE8funT4o2i4dAST2WWzYjQNnmb7qk34NaVHBd7NEjPAz5IAteNyYAEPECZNjA20ZHQll4Uhg7cOWHMTWGn0lqxpi%2FjI7CTSnopfeh3z5loaTfBs%2BvuPCWP893qbaHmhum6LrkfbyK5BmFdLujG8%2F9YRCPpFSqzir%2B3%2BzIR2TqCgkUSQE%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a6fe5e1bd8a5b928bca59f3aff2a6ae24639a88c229433dfcdcdfe66908fd612",
+      "file_size": 796,
+      "type": "text/x-python-script",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

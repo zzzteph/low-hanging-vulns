@@ -1,0 +1,142 @@
+{
+  "id": 4022462,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDIyNDYy",
+  "url": "https://hackerone.com/reports/4022462",
+  "title": "Uncaught RecursionError crash in translation-finder (deep directory tree DoS)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-11T17:41:51.882Z",
+  "submitted_at": "2026-09-11T17:41:52.323Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "sumit-sabhaya",
+    "url": "/sumit-sabhaya",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/3qa7ji47fvzz8y3kgjp4jx63yeet/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19468,
+    "url": "https://hackerone.com/weblate",
+    "handle": "weblate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Weblate",
+      "twitter_handle": "WeblateOrg",
+      "website": "https://weblate.org/",
+      "about": "Weblate is a libre software web-based continuous localization system"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-14T11:53:42.000Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-14T11:53:34.273Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Type:** Denial of Service (Availability)\n**Severity:** Low-Medium (CVSS 3.7-5.5 depending on access)\n**Affected:** WeblateOrg/translation-finder v3.4.1, commit f5f8bb5 (current main)\n\n## TL;DR\n\n`translation-finder` scans repository content using recursion without any depth limit. A repository with ~1000 nested folders causes an uncaught `RecursionError` that crashes the entire discovery call. The error is not handled anywhere, so Weblate's import/update/hook processing fails repeatedly.\n\n## Tested environment\n\n- Python 3.13.9\n- charset-normalizer 3.5.1\n- ruamel.yaml 0.19.1\n- Linux x86_64\n\n## Where the bug is\n\n`translation_finder/finder.py`, lines 157–177:\n\n```python\ndef list_files(self, root: PurePath, files: PathListType, dirs: PathListType) -> None:\n    with scandir(root) as matches:\n        for match in matches:\n            if match.is_symlink():\n                continue\n            is_dir = match.is_dir()\n            path = Path(match.path)\n            if any(path.match(exclude) for exclude in EXCLUDES):\n                continue\n            if is_dir:\n                dirs.append(self.process_path(path))\n                try:\n                    self.list_files(path, files, dirs)  # <-- line 176: unbounded recursion\n                except OSError:\n                    continue\n            else:\n                files.append(self.process_path(path))\n```\n\nThe function calls itself recursively for every subdirectory. Only `OSError` is caught — `RecursionError` escapes and crashes `discover()` / `Finder()`.\n\n## Why it matters\n\nGit fully supports trees that are 1000+ levels deep. Any contributor can push such a tree to a repository. When Weblate scans that repo (import, update, webhook, PR), the discovery task crashes. Every retry also crashes, so the component's translation activity stops.\n\n## Steps to reproduce\n\n1. Run the PoC script:\n   ```bash\n   python3 poc_deepnest.py 1000\n   ```\n2. The script creates a tree with 1000 nested directories plus two tiny translation files.\n3. It calls `discover()` on the tree.\n\n## Result (measured, repeatable)\n\n| Depth | Result |\n|---|---|\n| 960 | pass — no crash |\n| 985 | pass — no crash |\n| **990** | **CRASH — RecursionError** |\n| 1000, 1050, 1100 | CRASH |\n\nThe exact boundary is ~960–1000 depending on Python version and stack. Below it works, above it always crashes.\n\n## Proof\n\n**Attachment:** `bug1_traceback.txt` — actual crash traceback from a real run.\n\nKey frames:\n```\nFile \"translation_finder/api.py\", line 54, in discover\n    finder = Finder(root, mock=mock)\nFile \"translation_finder/finder.py\", line 73, in __init__\n    self.list_files(root, files, dirs)\nFile \"translation_finder/finder.py\", line 176, in list_files\n    self.list_files(path, files, dirs)\n[Previous line repeated 984 more times]\nFile \"translation_finder/finder.py\", line 154, in process_path\n    relative = path.relative_to(self.root)\nRecursionError: maximum recursion depth exceeded\n```\n\n**Attachment:** `bug1_finder_frames.txt` — same crash with library frames extracted for readability.\n\n## CVSS 3.1\n\n- `AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` = **3.7 (Low)** — admin action required for import\n- `PR:N` in webhook / PR-driven setups = **5.5 (Medium)**\n\n## Weakness\n\n- CWE-674: Uncontrolled Recursion\n- CWE-400: Uncontrolled Resource Consumption (secondary)\n\n## Suggested fix\n\n**Best:** Replace recursion with an iterative walk (`os.walk()`), or add a depth cap (~256).\n\n**Minimum:** Catch `RecursionError` and skip that subtree:\n\n```python\ntry:\n    self.list_files(path, files, dirs)\nexcept (OSError, RecursionError):  # add RecursionError here\n    continue\n```\n\nThis is a one-line fix that turns the crash into a skip.\n\n## Attachments\n\n| File | What it is |\n|---|---|\n| `poc_deepnest.py` | PoC script — creates deep tree and crashes `discover()` |\n| `bug1_traceback.txt` | Real crash traceback (proof) |\n| `bug1_finder_frames.txt` | Same crash, library frames extracted (readable summary) |\n\n## Impact\n\n- **Availability:** uncaught exception kills Weblate's discovery task\n- **Repeated failures:** every retry crashes again\n- **Component stuck:** import/update/hook activity stops for affected component\n- **Aggregate CPU DoS:** possible with many nested repos",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6698232,
+      "file_name": "bug1_finder_frames.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bqatq09bix983kvnelcotnq513kp?response-content-disposition=attachment%3B%20filename%3D%22bug1_finder_frames.txt%22%3B%20filename%2A%3DUTF-8%27%27bug1_finder_frames.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ67ZGBGWJ%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124557Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCgHnK8SXtTZM5GQFTSDoJ1wQ2sm%2FHuS9cjM0s7%2BssgzwIhAN1V4XlKHJCCA%2FPFhVWRXwn%2Fs8MD19gZuh5UxeEVJGFUKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5Igx4ffU0jQzpHD8iMbMqjwWgqHA1SgtBixyuOiGSuyFmCNEU2fEoOibLDnSpVP8FWR%2BvcpNcLOviOTmYfAUIK%2FvLzoxe9tQMLXC%2BaH8W%2Ffq3GyKciC2pz%2Bu0umxsxiZV4qvPxK1NLKQGedCMFFY8RKEwP8XVUmy4Oi1LsO4OIR5OM4OivW0KyrMZsinQWUs28dG0O1GyecEo430kh7YI2NDizImxucnmfXgjYLsDg5oY1JlxQAlNfRYwobn%2B3akd4%2B%2Bi1yT20HIp8QE0VBfD0tlVn8ms89vb%2B2cpvMVjhF3hFxma9lbZsRZi8WN4YbCkfMVVC41TU%2FEqOp6ML00p5eC3dOa7MgvWOTQvmdn4G2qUyzonlv5JPg5%2FydHWiQNEPL92jbrTzTCrrK2LWRUXZ4MPWQaR86PxVCybeNGXCmxGZgddlSFr4MUcFYVSg1ZUdRMNpuZ6wJbaPEsuOBaYznjyT6WCyqNMWFwVzSxPZZWMo7KWWQN8Bo0cjgkdIp5P63HhGtwKly%2BsTLGYetxGjhQ8AP1fBG%2B6DjK%2BLRvaXVuFXIngZaTleCuR4JZNMRGspppsLDHQs%2BJDpdryueudhVX7EcYWFBcrv%2BKxGte%2BYDgroidYwSpL6Aocz6o6cr%2BkaPNbwAzOM0GqRDEk483jHV1EN46fQWie6ugwpDh%2Fmap7rpOd%2FMXqr3%2FbU2h9v9%2FDnmqNgKsfqcgtXEr2GzdCEAVRFkb8%2Btyi0JPqDgb6VB9KbAvpOH%2Fpbds55%2FMofVq0zFcPW2kb7LBhrGWnGS5EKZEYBWJYxrSUYLSkR6Y7gwJLu1U2qtfOUhpymHIB4DG38TuNFACahV%2Fe2GM%2BA3d8aWU5JKKnmtOtGuqPWPurR6PsQRAoF6q9cGyrgvO3%2Bu34MI%2BJvdYGOrABWDr3jQOXx0VBwNGR5vvzRjDrIMNj1rtlz802%2Bc1gALoAQzbaOt7yuty4%2BZsqkwb%2BwZoaJKekXtCoPxCDuW2s%2FNG06R%2Bzx46x44RortmbYW7dJOkOGzG432TOCsYWwAfYim9%2BmucCFQ2KEdsrO5Q%2FhLjVIWcRzZtgMaL1eJs8PiqpnltWvEYTtZiUDFqUw9aly6PNAXGE4XnwownTPOJZrORX2pJxoEjytkmH4x6KsW8%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e1b6518513372362ce83fc6b666a7473b96402ae6bf29f40df859aff1bb0f391",
+      "file_size": 1091,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 6698233,
+      "file_name": "bug1_traceback.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/1l46amrrnalchu8ft8ff665v1sf3?response-content-disposition=attachment%3B%20filename%3D%22bug1_traceback.txt%22%3B%20filename%2A%3DUTF-8%27%27bug1_traceback.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ67ZGBGWJ%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124557Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCgHnK8SXtTZM5GQFTSDoJ1wQ2sm%2FHuS9cjM0s7%2BssgzwIhAN1V4XlKHJCCA%2FPFhVWRXwn%2Fs8MD19gZuh5UxeEVJGFUKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5Igx4ffU0jQzpHD8iMbMqjwWgqHA1SgtBixyuOiGSuyFmCNEU2fEoOibLDnSpVP8FWR%2BvcpNcLOviOTmYfAUIK%2FvLzoxe9tQMLXC%2BaH8W%2Ffq3GyKciC2pz%2Bu0umxsxiZV4qvPxK1NLKQGedCMFFY8RKEwP8XVUmy4Oi1LsO4OIR5OM4OivW0KyrMZsinQWUs28dG0O1GyecEo430kh7YI2NDizImxucnmfXgjYLsDg5oY1JlxQAlNfRYwobn%2B3akd4%2B%2Bi1yT20HIp8QE0VBfD0tlVn8ms89vb%2B2cpvMVjhF3hFxma9lbZsRZi8WN4YbCkfMVVC41TU%2FEqOp6ML00p5eC3dOa7MgvWOTQvmdn4G2qUyzonlv5JPg5%2FydHWiQNEPL92jbrTzTCrrK2LWRUXZ4MPWQaR86PxVCybeNGXCmxGZgddlSFr4MUcFYVSg1ZUdRMNpuZ6wJbaPEsuOBaYznjyT6WCyqNMWFwVzSxPZZWMo7KWWQN8Bo0cjgkdIp5P63HhGtwKly%2BsTLGYetxGjhQ8AP1fBG%2B6DjK%2BLRvaXVuFXIngZaTleCuR4JZNMRGspppsLDHQs%2BJDpdryueudhVX7EcYWFBcrv%2BKxGte%2BYDgroidYwSpL6Aocz6o6cr%2BkaPNbwAzOM0GqRDEk483jHV1EN46fQWie6ugwpDh%2Fmap7rpOd%2FMXqr3%2FbU2h9v9%2FDnmqNgKsfqcgtXEr2GzdCEAVRFkb8%2Btyi0JPqDgb6VB9KbAvpOH%2Fpbds55%2FMofVq0zFcPW2kb7LBhrGWnGS5EKZEYBWJYxrSUYLSkR6Y7gwJLu1U2qtfOUhpymHIB4DG38TuNFACahV%2Fe2GM%2BA3d8aWU5JKKnmtOtGuqPWPurR6PsQRAoF6q9cGyrgvO3%2Bu34MI%2BJvdYGOrABWDr3jQOXx0VBwNGR5vvzRjDrIMNj1rtlz802%2Bc1gALoAQzbaOt7yuty4%2BZsqkwb%2BwZoaJKekXtCoPxCDuW2s%2FNG06R%2Bzx46x44RortmbYW7dJOkOGzG432TOCsYWwAfYim9%2BmucCFQ2KEdsrO5Q%2FhLjVIWcRzZtgMaL1eJs8PiqpnltWvEYTtZiUDFqUw9aly6PNAXGE4XnwownTPOJZrORX2pJxoEjytkmH4x6KsW8%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a5ba367a536df0e84dcf934ac66788eb203ade93ba8f5cbf65a47d26ccb285fb",
+      "file_size": 2470,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 6698234,
+      "file_name": "poc_deepnest.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/eaar3j84zyqjk47k2pk2u735hyqw?response-content-disposition=attachment%3B%20filename%3D%22poc_deepnest.py%22%3B%20filename%2A%3DUTF-8%27%27poc_deepnest.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ67ZGBGWJ%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124557Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCgHnK8SXtTZM5GQFTSDoJ1wQ2sm%2FHuS9cjM0s7%2BssgzwIhAN1V4XlKHJCCA%2FPFhVWRXwn%2Fs8MD19gZuh5UxeEVJGFUKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5Igx4ffU0jQzpHD8iMbMqjwWgqHA1SgtBixyuOiGSuyFmCNEU2fEoOibLDnSpVP8FWR%2BvcpNcLOviOTmYfAUIK%2FvLzoxe9tQMLXC%2BaH8W%2Ffq3GyKciC2pz%2Bu0umxsxiZV4qvPxK1NLKQGedCMFFY8RKEwP8XVUmy4Oi1LsO4OIR5OM4OivW0KyrMZsinQWUs28dG0O1GyecEo430kh7YI2NDizImxucnmfXgjYLsDg5oY1JlxQAlNfRYwobn%2B3akd4%2B%2Bi1yT20HIp8QE0VBfD0tlVn8ms89vb%2B2cpvMVjhF3hFxma9lbZsRZi8WN4YbCkfMVVC41TU%2FEqOp6ML00p5eC3dOa7MgvWOTQvmdn4G2qUyzonlv5JPg5%2FydHWiQNEPL92jbrTzTCrrK2LWRUXZ4MPWQaR86PxVCybeNGXCmxGZgddlSFr4MUcFYVSg1ZUdRMNpuZ6wJbaPEsuOBaYznjyT6WCyqNMWFwVzSxPZZWMo7KWWQN8Bo0cjgkdIp5P63HhGtwKly%2BsTLGYetxGjhQ8AP1fBG%2B6DjK%2BLRvaXVuFXIngZaTleCuR4JZNMRGspppsLDHQs%2BJDpdryueudhVX7EcYWFBcrv%2BKxGte%2BYDgroidYwSpL6Aocz6o6cr%2BkaPNbwAzOM0GqRDEk483jHV1EN46fQWie6ugwpDh%2Fmap7rpOd%2FMXqr3%2FbU2h9v9%2FDnmqNgKsfqcgtXEr2GzdCEAVRFkb8%2Btyi0JPqDgb6VB9KbAvpOH%2Fpbds55%2FMofVq0zFcPW2kb7LBhrGWnGS5EKZEYBWJYxrSUYLSkR6Y7gwJLu1U2qtfOUhpymHIB4DG38TuNFACahV%2Fe2GM%2BA3d8aWU5JKKnmtOtGuqPWPurR6PsQRAoF6q9cGyrgvO3%2Bu34MI%2BJvdYGOrABWDr3jQOXx0VBwNGR5vvzRjDrIMNj1rtlz802%2Bc1gALoAQzbaOt7yuty4%2BZsqkwb%2BwZoaJKekXtCoPxCDuW2s%2FNG06R%2Bzx46x44RortmbYW7dJOkOGzG432TOCsYWwAfYim9%2BmucCFQ2KEdsrO5Q%2FhLjVIWcRzZtgMaL1eJs8PiqpnltWvEYTtZiUDFqUw9aly6PNAXGE4XnwownTPOJZrORX2pJxoEjytkmH4x6KsW8%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=08ec83b8f315f00a43f3277aa65fa1633ca2d073cfb0e6c03bcb1d1d0f7bf3fb",
+      "file_size": 1545,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-14T11:53:34.482Z",
+  "allow_singular_disclosure_after": -3143.351743991,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "2026",
+    "sumit-sabhaya",
+    "robin-sabhaya"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 31977,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/WeblateOrg/translation-finder",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

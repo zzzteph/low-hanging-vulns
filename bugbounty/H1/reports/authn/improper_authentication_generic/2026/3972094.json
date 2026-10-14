@@ -1,0 +1,119 @@
+{
+  "id": 3972094,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcyMDk0",
+  "url": "https://hackerone.com/reports/3972094",
+  "title": "CVE-2026-87861: cross-origin reuse of a Negotiate connection",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-26T20:23:40.391Z",
+  "submitted_at": "2026-08-26T20:26:20.053Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "hadd0ck",
+    "url": "/hadd0ck",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ma8xd84lhxs6byi0qd3ve5c1t1mq/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-87861"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:19:13.205Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:38:15.511Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nI found a cross-origin connection reuse flaw in `lib/url.c`, introduced by [bd10924b4](https://github.com/curl/curl/commit/bd10924b4) as part of the recently announced \"Patch the Planet\" initiative. It causes a request for one origin to be sent on a connection that was authenticated with Negotiate for a different origin, while the requesting transfer's own credentials go unused.\n\nMy research looked at the reuse matchers that [bd10924b4](https://github.com/curl/curl/commit/bd10924b4) rewrote. The commit closed [#22040](https://github.com/curl/curl/pull/22040) by adding `conn->creds_origin` and comparing it against `data->state.origin`. This activity is correct, but the issue is in the branch the commit replaced. At the parent [c2b050e4e496](https://github.com/curl/curl/commit/c2b050e4e496), the credential mismatch branch of `url_match_auth_ntlm` recorded a connection as a reuse candidate only when both auth states were idle:\n\n```c\n#ifdef USE_SPNEGO\n      if((conn->http_ntlm_state == NTLMSTATE_NONE) &&\n         (conn->http_negotiate_state == GSS_AUTHNONE)) {\n#else\n      if(conn->http_ntlm_state == NTLMSTATE_NONE) {\n#endif\n        m->found = conn;\n      }\n```\n\n[bd10924b4](https://github.com/curl/curl/commit/bd10924b4) replaced that entire branch with a single early return gated on `conn->creds`, so the `GSS_AUTHNONE` condition is gone. That gate does not fire in the ordinary Kerberos SSO case. `Curl_http_output_auth` exempts Negotiate from the no-credentials early out, so `--negotiate` with no `-u` runs from the ticket cache with `data->state.creds` `NULL`, and `Curl_input_negotiate` links `conn->creds_origin` to the origin while `Curl_creds_link(&conn->creds, NULL)` leaves `conn->creds` `NULL`. A later transfer whose wanted auth includes `NTLM` (`CURLAUTH_ANY` masks off only `CURLAUTH_DIGEST_IE` and `CURLAUTH_HTTPSIG`, so `--anyauth` qualifies) then passes `url_match_auth`, because `needle->creds` is `NULL` for HTTP and `Curl_creds_same(NULL, NULL)` is `TRUE`. \n\nIt reaches the state-NONE branch at `url.c:937`, where the origin comparison is gated on `conn->creds` and does not run. Control falls through to `url.c:962`, which sets `m->found = conn` and returns `FALSE` because the NTLM state is idle. `url_match_conn` returns `FALSE` on that, so `url_match_auth_nego`, the only matcher that compares the two origins, never runs, and `url_match_result` attaches `match->found` when no better candidate was found. Both origins need to sit behind one forwarding proxy, which `lib/proxy.c` arranges by setting `conn->origin` to the proxy peer, putting every origin behind that proxy in a single cpool bundle.\n\n## Affected version\ncurl 8.21.0-DEV (Darwin) libcurl/8.21.0-DEV OpenSSL/3.6.3 mit-krb5/1.7-prerelease OpenLDAP/2.4.28/Apple\nRelease-Date: [unreleased]\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns ldap ldaps mqtt mqtts pop3 pop3s rtsp smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS GSS-API HSTS HTTPS-proxy IPv6 Kerberos Largefile NTLM SPNEGO SSL threadsafe TLS-SRP UnixSockets\n\n## Steps To Reproduce:\nRequires git, cmake, a C compiler, OpenSSL, MIT Kerberos and uv.\n\n1. Build curl at the affected commit.\n\n```bash\ngit clone https://github.com/curl/curl.git curl-src\ncd curl-src && git checkout bd10924b47c8bf94127eaee8c56e7b5e5418da46\ncmake -S . -B bld \\\n  -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_CURL_EXE=ON \\\n  -DCURL_USE_OPENSSL=ON -DCURL_USE_GSSAPI=ON -DCURL_ENABLE_NTLM=ON \\\n  -DCURL_USE_LIBPSL=OFF -DUSE_LIBIDN2=OFF -DUSE_NGHTTP2=OFF \\\n  -DCURL_ZLIB=OFF -DCURL_BROTLI=OFF -DCURL_ZSTD=OFF -DENABLE_CURL_MANUAL=OFF\ncmake --build bld -j8 --target curl\n\n./bld/src/curl -V must list SPNEGO and NTLM in Features.\n```\n\n2. Unpack the archive and point it at that binary.\n\n```bash\nunzip curl-22040-ntlm-connection-reuse.zip\ncd curl-22040-ntlm-connection-reuse/pocs/ntlm-cross-origin-reuse\nexport CURL_BIN=/path/to/curl-src/bld/src/curl\n./run.sh\n\nResult at bd10924b4:\n\n  conn  origin        Authorization       status\n  1     a.internal    NTLM type1          401\n  1     b.internal    NTLM type3          200\n\nRESULT: REUSED ACROSS ORIGINS\n```\n\nOne connection sends the type1 for a.internal, takes that origin's challenge, then sends the type3 on a request for b.internal.\n\n## Impact\n\n## Summary:\nA request for one origin is sent on a connection that was already authenticated with Negotiate for a different origin, so the second host sees the first host's authenticated session and the requesting transfer's own credentials go unused. Both origins have to sit behind one forwarding proxy, which is what places them in a single connection bundle, so the realistic setting is an application doing Kerberos SSO across internal hosts through a corporate proxy. The result is that a request meant for host B is attributed to the caller's identity on host A, with no credential check having run on the reuse path.",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6559781,
+      "file_name": "curl-22040-ntlm-connection-reuse.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/sm63gcme4htly6a8onkyh2ako2pn?response-content-disposition=attachment%3B%20filename%3D%22curl-22040-ntlm-connection-reuse.zip%22%3B%20filename%2A%3DUTF-8%27%27curl-22040-ntlm-connection-reuse.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVLAGWO3V%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124612Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIEAkPfnADyOWhQXExTJwgPpBLJ60%2B74fdb23hmxOJVfyAiBddxO4cCT58%2FpsJzjRSADUzbuOxMhASC6HG232NLzaHiq6BQiy%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIM02XoCY3V%2Bz%2F0bEjOKo4FBvW7%2F0c6QLI94LMKRK3dyFiWU%2BkzbDNI%2B257USRco8S87hBRKpLWCoR6%2BKkZEwyIGvHIHnrvqkPInMHJsXySB%2FBXz0jqtdyYJ03%2Fs%2B6%2BmtVO6WySvQKGGQFkiWucX4evzJLBf2cqIvztmuDxBPPCiKB06YgOKrHelb3Seu5pWSwZJA4w6f202cksjnWkX4PMjsAY%2Bw7CGwxzi9fGKokS7h2jR2xsbevoVrc4%2BjOkB46KFoMGDMFsjs%2FNJZs2wCGAUWxTgq3588jWOjmlpZCBahKXPjpMG9a9L09%2Bok4GeHeRHouxvNA34aRMNGeYp690LtB4qtOkcyF59kYC86ZHrurw57flPSxqSZ2csHWlc6c2B7N6By4jb%2FN2k%2BYKP6JtJjG68OPLgOJf7ZbjsbQrpqkYWk%2FaaHjCap2t7KCAQwLIsXe0RZIc%2FFDWI6wr9bUw6sb%2BY1Ld5etwzr3W9uEw3Lh23elsQv1aLX83YQ4LnRi3MiJJchdqGDyeJsN%2FhL%2FH1BBwCWWxSaLnf679pwEFwb%2BQ1%2F8WWFieay%2Brfstx9ZbsGwHL2x0%2BmvPVGAHmTCoZDOIUei%2BPwPpor3948%2FtZDyfNJlaCn2myHLKg3IzR1%2FzehiR%2Fo3%2B1C%2FSLThDZj3lnbTJC9zfCqfb1KupoRvXnDzbQzZm3kK%2B9WK8lmAZnnDtiFLrTUWQwz3GBJ4SBTeOmr%2BtIbazWJTbIvyc7OgxA8bREbn%2Bn8pEutt8lmmPsqGDDqIsKb2c0iYFgKIdE7qUttfxhskDN%2FQLlnsGTpkxdNqykqd1TCQltUb93Tn1ArW4xJRGnXqiFbvsl%2B%2Fhgw3zhco07fG%2FmPCLQjmJ2cgpPHqMnJ95J%2BKV5bw8Hy7kcMNL9vNYGOrIBC7VnI0feBB3o1zFMm9iN9sc6eIBNnVKc7UafgO9bHD1GjD35NJCfG1FX8wkX6CgPop%2Ftoyrj6SUb0Iwtjk7lcy%2BOb2eSyhpYhZbC0kYFLGvOxd8iUF8QRqoqFN4j4TqTaQaeR%2BHFjBwaqefaL1zW%2BRCLh9F9fTdJL%2FO29ppTmabGq2187JIZz0XjSysoJQn9RmkP8EfuOatEj7CRSvcqRG7kgGSG7AAnJcd01dgmKS7HGA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=69c8d9e18c7948fad0618f44b9f50dac21b82122f081be02098c13fe8f0653bc",
+      "file_size": 29926,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "nahidwin0x"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "Team"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

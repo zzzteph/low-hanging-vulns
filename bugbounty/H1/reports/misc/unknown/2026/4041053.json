@@ -1,0 +1,106 @@
+{
+  "id": 4041053,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDQxMDUz",
+  "url": "https://hackerone.com/reports/4041053",
+  "title": "CVE-2026-94266: password leak in CURLINFO_EFFECTIVE_URL",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "none",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-18T19:55:50.637Z",
+  "submitted_at": "2026-09-18T19:55:50.861Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-94266"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:19:30.551Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:37:56.075Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "A `.netrc`-sourced password, injected into the live URL handle at login time, survives an ordinary same-host relative `Location:` redirect and ends up verbatim in `data->state.url`, so it is exposed via `CURLINFO_EFFECTIVE_URL`, `curl -w '%{url_effective}'`, and verbose (`-v`) output.\n\n## Affected code\n\nhttps://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/url.c#L1325-L1332\n\n```c\n      result = Curl_creds_merge(ncreds_out->user, ncreds_out->passwd,\n                                *pcreds, CREDS_NETRC, pcreds);\n      if(result)\n        goto out;\n      /* for updated strings, we update them in the URL */\n      uc = curl_url_set(data->state.uh, CURLUPART_USER,\n                        Curl_creds_user(*pcreds), CURLU_URLENCODE);\n      if(!uc)\n        uc = curl_url_set(data->state.uh, CURLUPART_PASSWORD,\n                          Curl_creds_passwd(*pcreds),\n                          CURLU_URLENCODE);\n```\n\nhttps://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/http.c#L1244\n\nhttps://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/http.c#L1298-L1306\n\nhttps://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/urlapi.c#L1334-L1401\n\nhttps://github.com/curl/curl/blob/d1823ebc17e5778c30f8a6b2221a057ec607a9b7/lib/getinfo.c#L83-L86\n\n## Details\n\n1. `url_set_data_creds_netrc()` (lib/url.c:1325-1332) writes the `.netrc` user/password directly into `data->state.uh`, the handle later reused to compute the effective URL. It is never cleared.\n2. On a redirect, `Curl_http_follow()` calls `curl_url_set(data->state.uh, CURLUPART_URL, newurl, ...)` (http.c:1244), reparsing the same, already-dirty handle with the `Location:` value.\n3. For a relative `Location: /path`, `redirect_url()` (urlapi.c:1334) computes `cutoff = strchr(protsep, '/')` and copies `base[0..cutoff)`, i.e. `scheme://user:pass@host:port`, verbatim into the new URL before appending the new path (urlapi.c:1355-1362, 1391-1397). `CURLU_URLENCODE` only percent-escapes non-unreserved bytes, so a plain alphanumeric password passes through unchanged.\n4. The result is read back and stored: `Curl_bufref_set(&data->state.url, follow_url, ...)` (http.c:1298) and `infof(data, \"Issue another request to this URL: '%s'\", follow_url)` (http.c:1306).\n5. `CURLINFO_EFFECTIVE_URL` returns `Curl_bufref_ptr(&data->state.url)` unsanitized (getinfo.c:84).\n\nAn *absolute* `Location:` does not leak: `set_url()` fully resets the handle before parsing, so no stale userinfo carries forward. Only the relative-reference path is affected. The first-hop effective URL is also clean, since `data->state.url` is populated (url.c) before the netrc injection runs; the leak appears starting from the first redirect.\n\n## Reproducer\n\n`.netrc`:\n```\nmachine 127.0.0.1\nlogin netrcuser\npassword netrcSECRET123\n```\n\nServer: answers `/first` with `302 Found` + `Location: /newpath`.\n\n```\ncurl -v -L --netrc-file netrc_test --netrc-optional \\\n  -w '\\nEFFECTIVE_URL=%{url_effective}\\n' http://127.0.0.1:25036/first\n```\n\nCaptured output (built from clean upstream commit d1823ebc17):\n```\n* Issue another request to this URL: 'http://netrcuser:netrcSECRET123@127.0.0.1:25036/newpath'\n...\nEFFECTIVE_URL=http://netrcuser:netrcSECRET123@127.0.0.1:25036/newpath\n```\n\nConfirmed identically via direct libcurl API (`CURLOPT_NETRC=CURL_NETRC_OPTIONAL`, `CURLOPT_FOLLOWLOCATION=1`, then `curl_easy_getinfo(CURLINFO_EFFECTIVE_URL)`):\n```\nCURLINFO_EFFECTIVE_URL = http://netrcuser:netrcSECRET123@127.0.0.1:25036/newpath\nRESULT: netrc password LEAKED into CURLINFO_EFFECTIVE_URL\n```\n\n## Suggested fix\n\nStrip userinfo from `data->state.uh` before it is used to compute the redirect follow-URL / effective URL, the same way the Referer builder already does (`curl_url_set(u, CURLUPART_USER/PASSWORD, NULL, 0)`, http.c:1219-1221) and the non-tunnelling proxy request-target builder does (http.c:2161-2173). This needs to happen without disturbing the credentials curl still needs to send the actual `Authorization` header on the next hop.\n\n## Impact\n\nThe impact is disclosure of `.netrc` usernames and passwords into places that applications commonly treat as safe URL metadata:\n\n* `CURLINFO_EFFECTIVE_URL`\n* `CURLINFO_REDIRECT_URL`, even without following the redirect\n* `%{url_effective}` and `%{redirect_url}`\n* verbose/debug output\n\nA server can trigger this by returning a relative `Location:`. If the application records, displays, returns, or forwards these values to logs, monitoring systems, users, or another service, the netrc password can escape its intended credential store.\n\nThe server does not directly receive the password, and absolute cross-origin redirects do not carry it. Exploitation therefore needs a secondary observer of the URL metadata or logs. That makes it a real confidentiality flaw, but likely low severity rather than direct remote credential theft.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "nahidwin0x"
+  ],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

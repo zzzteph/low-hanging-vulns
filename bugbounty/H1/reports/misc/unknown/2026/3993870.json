@@ -1,0 +1,109 @@
+{
+  "id": 3993870,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTkzODcw",
+  "url": "https://hackerone.com/reports/3993870",
+  "title": "CVE-2026-86415: auto client cert connection reuse mixup",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-03T15:37:27.061Z",
+  "submitted_at": "2026-09-03T15:37:41.244Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-86415"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:35:37.531Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:35:58.338Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Howdy,\n\nlibcurl's connection-cache matcher never checks `auto_client_cert`, so a cached, already-authenticated Schannel connection can be handed to a transfer that just got redirected to a different origin, even though the code explicitly computed `auto_client_cert = FALSE` for that transfer to prevent exactly this.\n\n## The bug\n\n`Curl_ssl_easy_config_complete()` recomputes the effective SSL config for every request, including a request that is the result of following a `Location:` redirect. Part of that is deciding whether the automatically-selected client certificate applies:\n\n```c\n// lib/vtls/vtls_config.c:236-238\nsslc->auto_client_cert = Curl_peer_equal(origin, initial_origin) &&\n                         !!(options & CURLSSLOPT_AUTO_CLIENT_CERT);\n```\n\n`initial_origin` is the origin of the very first URL of the `curl_easy_perform()`, set once and kept for the whole redirect chain. So the moment a redirect takes the transfer to a different host, `auto_client_cert` is correctly forced to `FALSE` — the client shouldn't auto-present a certificate to a host it wasn't explicitly pointed at.\n\nThe problem is that this flag lives in `struct ssl_config_data`, not in `struct ssl_primary_config`:\n\n```c\n// lib/vtls/vtls_config.h:74-75\nBIT(auto_client_cert);   /* automatically locate and use a client\n                            certificate for authentication (Schannel) */\n```\n\nand connections in the pool only ever retain the primary struct:\n\n```c\n// lib/urldata.h:322\nstruct ssl_primary_config ssl_config;\n```\n\nConnection reuse is decided by `match_ssl_primary_config()`, which takes two `ssl_primary_config *` and therefore has no way to see `auto_client_cert` even in principle:\n\n```c\n// lib/vtls/vtls_config.c:136-146\nstatic bool match_ssl_primary_config(struct Curl_easy *data,\n                                     struct ssl_primary_config *c1,\n                                     struct ssl_primary_config *c2)\n{\n  (void)data;\n  if((c1->version == c2->version) &&\n     (c1->version_max == c2->version_max) &&\n     (c1->ssl_options == c2->ssl_options) &&\n     (c1->native_ca_store == c2->native_ca_store) &&\n     (c1->verifypeer == c2->verifypeer) &&\n     (c1->verifyhost == c2->verifyhost) &&\n```\n\n`ssl_options` (the raw `CURLOPT_SSL_OPTIONS` bitmask, including the `CURLSSLOPT_AUTO_CLIENT_CERT` bit) is identical on every request from the same easy handle, so it always matches. The derived, per-request `auto_client_cert` boolean that actually encodes \"is this okay for the current origin\" is simply never consulted during cache lookup.\n\nSo: if the connection pool already holds a live connection to host B that was established directly (B == that transfer's initial origin, `auto_client_cert` was `TRUE`, client cert was presented at handshake time), and a later request to attacker-controlled host A gets redirected to B, the redirected request reuses that cached, already-authenticated connection instead of opening a fresh one. No new handshake happens, so the `auto_client_cert = FALSE` just computed for the redirected request never gets a chance to matter — the request rides straight over on B's existing authenticated session, on a path chosen by A's `Location:` header:\n\n```c\n// lib/http.c:3414-3439 (http_header_l)\nif(HD_IS(hd, hdlen, \"Location:\")) {\n    ...\n    data->req.location = location;\n    if((k->httpcode >= 300 && k->httpcode < 400) &&\n       data->set.http_follow_mode) {\n      ...\n      data->req.newurl = curlx_strdup(data->req.location); /* clone */\n```\n\nThis is Schannel-specific: `auto_client_cert` is read in exactly one place outside `vtls_config.c`:\n\n```c\n// lib/vtls/schannel.c:783-786\nif(!ssl_config->auto_client_cert) {\n    flags &= ~(DWORD)SCH_CRED_USE_DEFAULT_CREDS;\n    flags |= SCH_CRED_NO_DEFAULT_CREDS;\n    infof(data, \"schannel: disabled automatic use of client certificate\");\n```\n\n(also used to set `ISC_REQ_USE_SUPPLIED_CREDS` at `lib/vtls/schannel.c:981`). No other TLS backend reads the field, so on OpenSSL/GnuTLS/etc. `CURLSSLOPT_AUTO_CLIENT_CERT` has no effect at all and this bug is inert there.\n\n## Where it came from\n\nIntroduced by [`d69bfad3fa3daf5e72331f6870667607828d5891`](https://github.com/curl/curl/commit/d69bfad3fa3daf5e72331f6870667607828d5891) — \"ssl native_ca_store: always reinit\" (2026-06-08). Before this commit, `auto_client_cert` was set once, unconditionally, from the raw `CURLOPT_SSL_OPTIONS` bit (in `setopt.c`) — there was no origin-scoping at all. This commit added the `ssl_easy_config_compl_options()` helper and, with it, the `Curl_peer_equal(origin, initial_origin)` gate that first made `auto_client_cert` redirect-aware — but never touched `match_ssl_primary_config()`, so the new protection was incomplete from the moment it was introduced. Still present at current `main` ([`38703fe2`](https://github.com/curl/curl/commit/38703fe2610bf6e79390bfc93a8558ffc0e2b02c), 2026-09-02).\n\n## Suggested direction\n\nEither fold `auto_client_cert` into `ssl_primary_config` so `match_ssl_primary_config()` can compare it directly, or have `Curl_ssl_conn_config_match()` reject the match when the needle's `auto_client_cert` is `FALSE` but the candidate connection was established with it `TRUE`.\n\nCheers,\nJosh\n\n## Impact\n\nA remote server (A) that a libcurl-based client follows redirects from can cause an existing, auto-authenticated (client-certificate) Schannel connection to a second host (B) to be reused for a request whose path/target A controls, provided the client already holds a live connection to B that it opened directly (not via redirect) with `CURLSSLOPT_AUTO_CLIENT_CERT` set. The client certificate is never sent to A — it stays with B, which already had it — but A gets to steer an authenticated request against B's endpoints without B (or the application) ever intending that redirect chain to be authenticated. This is exactly the scenario the `auto_client_cert`/`initial_origin` check was written to prevent.\n\nPreconditions: Windows/Schannel backend, `CURLSSLOPT_AUTO_CLIENT_CERT` set via `CURLOPT_SSL_OPTIONS`, redirects followed, and a connection pool that still holds a live, directly-established connection to the redirect target.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

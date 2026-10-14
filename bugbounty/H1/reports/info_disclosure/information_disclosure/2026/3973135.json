@@ -1,0 +1,149 @@
+{
+  "id": 3973135,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTczMTM1",
+  "url": "https://hackerone.com/reports/3973135",
+  "title": "CVE-2026-86409: stale SigV4 headers sent unintended",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-27T09:03:09.766Z",
+  "submitted_at": "2026-08-27T09:03:10.226Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-86409"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:34:11.510Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:37:02.568Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nSetting `CURLOPT_AWS_SIGV4` to `NULL` returns `CURLE_OK` but does not disable SigV4 authentication. The handler in `lib/setopt.c` clears the parameter string (`STRING_AWS_SIGV4`) but never removes the `CURLAUTH_AWS_SIGV4` bit from `data->set.httpauth`. A subsequent `curl_easy_perform()` on the same handle still sends an `Authorization: AWS4-HMAC-SHA256` header to whatever URL is set next.\n\nThis contradicts the documentation in `docs/libcurl/opts/CURLOPT_AWS_SIGV4.md`:\n\n> Using this option multiple times makes the last set string override the previous ones. Set it to NULL to disable its use again.\n\nTested at commit `c2676bf9e639e31e44b12a2cc82cf2046231b056`.\n\n## Root cause\n\n`lib/setopt.c`, lines 2061-2072:\n\n```c\ncase CURLOPT_AWS_SIGV4:\n    result = Curl_setstropt(data, STRING_AWS_SIGV4, ptr);\n    if(CURL_EASY_STR(data, STRING_AWS_SIGV4))\n      s->httpauth = CURLAUTH_AWS_SIGV4;\n    break;\n```\n\nWhen `ptr` is `NULL`, `Curl_setstropt` clears `STRING_AWS_SIGV4`, but the conditional only handles the non-NULL case. There is no `else` branch to clear `CURLAUTH_AWS_SIGV4` from `s->httpauth`.\n\nFor comparison, `CURLOPT_HTTPSIG` in the same file handles this correctly:\n\n```c\nif(arg)\n  s->httpauth = (uint32_t)CURLAUTH_HTTPSIG;\nelse\n  s->httpauth &= ~(uint32_t)CURLAUTH_HTTPSIG;\n```\n\nOn the next `curl_easy_perform()`, `lib/transfer.c:505` copies the stale `data->set.httpauth` (still containing `CURLAUTH_AWS_SIGV4`) into `data->state.authhost.want`. The authentication path in `lib/http.c` selects SigV4, and `Curl_output_aws_sigv4()` proceeds. Because the parameter string is now empty, `parse_sigv4_params()` in `lib/http_aws_sigv4.c:820` silently falls back to `\"aws:amz\"` and derives region/service from the hostname.\n\n## Impact\n\nAn application that reuses an easy handle, retains `CURLOPT_USERPWD` credentials, relies on the documented `NULL` reset, and then performs a request to an attacker-influenced URL will unintentionally send a signed SigV4 `Authorization` header to that destination. The header exposes the access-key identifier and a request-bound signature. The secret key is not transmitted and the signature is bound to method, host, path, headers, payload, and timestamp, which constrains replay.\n\n## Affected versions\ncurl 7.75.0 through 8.21.0, plus 8.22.0 prereleases before c3c70440e8.\n\n## Reproduction\n\n1. Build an affected curl release, starting with 7.75.0, with AWS SigV4 authentication support enabled.\n2. Start an HTTP recording server that logs the request path and complete `Authorization` header for several requests.\n3. Create one libcurl easy handle and configure a write callback so response data does not affect the test.\n4. Set test credentials through `CURLOPT_USERPWD`. Nonproduction values are sufficient because the receiving server only records the generated header.\n5. Enable SigV4 by setting `CURLOPT_AWS_SIGV4` to an explicit provider, region, and service string.\n6. Point the handle at the recording server and perform a first request.\n7. Confirm that the first request contains an `Authorization: AWS4-HMAC-SHA256` header with the configured access-key identifier and credential scope.\n8. Set `CURLOPT_AWS_SIGV4` to `NULL` on the same easy handle and confirm that `curl_easy_setopt()` returns `CURLE_OK`.\n9. Change the handle's URL to a second path or destination while retaining the existing `CURLOPT_USERPWD` value.\n10. Perform a second request with the same easy handle and inspect the recorded headers.\n11. Observe the vulnerable result: the second request still contains an AWS SigV4 `Authorization` header even though SigV4 was disabled according to the documented API.\n12. Confirm that the parameter string itself was cleared by checking that the second signature uses curl's fallback provider or derives its region and service from the new hostname rather than using the original explicit values.\n13. As a control, set `CURLOPT_HTTPAUTH` to `CURLAUTH_NONE` and perform a third request.\n14. Confirm that the control request contains no `Authorization` header, demonstrating that stale authentication selection caused the second header.\n15. Confirm a fix by testing a revision containing commit `c3c70440e8`, or by clearing the `CURLAUTH_AWS_SIGV4` bit when `CURLOPT_AWS_SIGV4` receives `NULL`.\n16. Repeat the sequence and verify that the first request is signed while both requests made after the `NULL` reset contain no SigV4 authorization header.\n\n### Expected result\n\nSetting `CURLOPT_AWS_SIGV4` to `NULL` must disable SigV4 authentication. No subsequent request should contain a SigV4 `Authorization` header unless the application enables it again.\n\n### Vulnerable result\n\nCurl clears the SigV4 parameter string but retains the authentication-selection bit. Reusing the easy handle therefore signs later requests with the retained credentials and fallback parameters.\n\n## Suggested fix\n\nAdd an `else` branch to clear the authentication bit when the parameter becomes `NULL`:\n\n```c\ncase CURLOPT_AWS_SIGV4:\n    result = Curl_setstropt(data, STRING_AWS_SIGV4, ptr);\n    if(CURL_EASY_STR(data, STRING_AWS_SIGV4))\n      s->httpauth = CURLAUTH_AWS_SIGV4;\n    else\n      s->httpauth &= ~CURLAUTH_AWS_SIGV4;\n    break;\n```\n\nA regression test should enable SigV4, reset the option to `NULL`, reuse the handle, and verify that no `Authorization` header is sent on the subsequent request.\n\n## Impact\n\n## Summary:\nAn attacker who can influence a request made after the documented SigV4 reset may cause the application to sign an unintended request with retained AWS credentials. This exposes the access-key identifier and request-bound signature and, for a compatible service and operation, could authorize unintended actions. The secret key itself is not disclosed, and replay is constrained by the signed request details and timestamp.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6562952,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/75vj9kx4yam02nkdku48x3ihw692?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ4TWNOAZ%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124606Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCN9JcjybTrMnV8Xarg6fdIRzDbXdLVEQ0iY%2BfzOCe9lwIhAKuogmlmO7KWGRjoBnWia5YC9%2FS245XlxTKfqnWxrENtKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwAlJWdN5rlSY2bwHgqjwW%2FrtRwv6YO%2Fwqt180zkO3Mv1yCImINJ1HjosnDQtUUT3UmGk42Uh5NiLI3j5l49YP7FemG1BEL7zO3%2BlTRKnJ5XoQjhEICiKSPvvnTR9EeW%2F5CShTZHbo7YvYIbXhF7Rj7pdabSldYZFiDl11j4VpFcjIikp%2BJaKkybsqiskvp4mgx%2BJe5jgCcHSqtEKyFLUlR8aaJysCedGlhHAkDaB2keCt45ceEkWE3GV8aFWvqkXwQbU2ZTEnKc7GLs7nHEbW%2FEKkjOpe65Ndbeuoappsnjl6ucvF%2Bf0zTZjY7Iua2H%2BcMJRkk72SnjV5CwG%2FKAZPnc0CO%2F1a%2BLmG2PqQlevEWkjFg9cInPVb9xrPRpeHbq77PiEoAHNUTThabBuswb%2Bp18lNC9I5um7fJR6qxbjVGp9H6hFYzbLtL145%2F%2Fo0mqLIuajc7eXp%2F6Y4LWRbabkaG%2F1MwprhK5yqMSabMvVGNEcUT0QkCgezc2Yo%2FHaASnkCKkpn8V9ucrz%2FxEDE3UKYJrankO0YWpxbYc8gq1PUI%2FyVgUK8SZHWkAhybFm71ktqQaemJju6rYzedCi5oiAQrgrStqhaw4fQnygEx7grejFDgfSzrULvL2h%2FpMGgcXQMR9kZC8Gg3KjfWdILsGpo914AmMuwcGAasoWfBWP1ziUfh5govYhKP8RFp2UA54I1zfyZZA56upCjco46b%2Ftxf4tnrkFqTgGPIe6k7MWxwwDmU1W6nb5pps%2B34WSusxxz4jsdAdGBPb6xWhrA7H2C2bjMtmvfevjyJSMs1kSGWJHLV3U%2BkY91oXeWeEzCiqV5V3NDMicXwb%2Fkb%2Bd9Y9Gr1uYZrXow7UC5BfZHpaN5WL%2F5XZJAVSB9s3OYXSrg7MOqDvdYGOrAB9%2F5MXRVWPl8yawIbGROw7YqfP5sUHSu9d6TV%2F0rwd%2FNIEBiEBiauzdkyp%2BDhgs06fGCbVwOlutU6sI%2F8lNCO0Iq%2FH23zAe5GAmqd2gWLadNsRmVSf0b1kUzMsgac53zs0neHAGVNKwzrE8EGyrJ7UOSDizD3jzla0wzYr%2B28lUNUErMXLFiOilgFIAcOhCFakQ8vHrEbBHAbFMA0PDMAKngs%2FN9uIB2yC8id90aYVGk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=407deb8957c095a148be305ae290b1d17dc92969e0cf942e3acbff6284a9a916",
+      "file_size": 300,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6562953,
+      "file_name": "client.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/d61di4x759micbj4wb7wti7d7uid?response-content-disposition=attachment%3B%20filename%3D%22client.c%22%3B%20filename%2A%3DUTF-8%27%27client.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ4TWNOAZ%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124606Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCN9JcjybTrMnV8Xarg6fdIRzDbXdLVEQ0iY%2BfzOCe9lwIhAKuogmlmO7KWGRjoBnWia5YC9%2FS245XlxTKfqnWxrENtKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwAlJWdN5rlSY2bwHgqjwW%2FrtRwv6YO%2Fwqt180zkO3Mv1yCImINJ1HjosnDQtUUT3UmGk42Uh5NiLI3j5l49YP7FemG1BEL7zO3%2BlTRKnJ5XoQjhEICiKSPvvnTR9EeW%2F5CShTZHbo7YvYIbXhF7Rj7pdabSldYZFiDl11j4VpFcjIikp%2BJaKkybsqiskvp4mgx%2BJe5jgCcHSqtEKyFLUlR8aaJysCedGlhHAkDaB2keCt45ceEkWE3GV8aFWvqkXwQbU2ZTEnKc7GLs7nHEbW%2FEKkjOpe65Ndbeuoappsnjl6ucvF%2Bf0zTZjY7Iua2H%2BcMJRkk72SnjV5CwG%2FKAZPnc0CO%2F1a%2BLmG2PqQlevEWkjFg9cInPVb9xrPRpeHbq77PiEoAHNUTThabBuswb%2Bp18lNC9I5um7fJR6qxbjVGp9H6hFYzbLtL145%2F%2Fo0mqLIuajc7eXp%2F6Y4LWRbabkaG%2F1MwprhK5yqMSabMvVGNEcUT0QkCgezc2Yo%2FHaASnkCKkpn8V9ucrz%2FxEDE3UKYJrankO0YWpxbYc8gq1PUI%2FyVgUK8SZHWkAhybFm71ktqQaemJju6rYzedCi5oiAQrgrStqhaw4fQnygEx7grejFDgfSzrULvL2h%2FpMGgcXQMR9kZC8Gg3KjfWdILsGpo914AmMuwcGAasoWfBWP1ziUfh5govYhKP8RFp2UA54I1zfyZZA56upCjco46b%2Ftxf4tnrkFqTgGPIe6k7MWxwwDmU1W6nb5pps%2B34WSusxxz4jsdAdGBPb6xWhrA7H2C2bjMtmvfevjyJSMs1kSGWJHLV3U%2BkY91oXeWeEzCiqV5V3NDMicXwb%2Fkb%2Bd9Y9Gr1uYZrXow7UC5BfZHpaN5WL%2F5XZJAVSB9s3OYXSrg7MOqDvdYGOrAB9%2F5MXRVWPl8yawIbGROw7YqfP5sUHSu9d6TV%2F0rwd%2FNIEBiEBiauzdkyp%2BDhgs06fGCbVwOlutU6sI%2F8lNCO0Iq%2FH23zAe5GAmqd2gWLadNsRmVSf0b1kUzMsgac53zs0neHAGVNKwzrE8EGyrJ7UOSDizD3jzla0wzYr%2B28lUNUErMXLFiOilgFIAcOhCFakQ8vHrEbBHAbFMA0PDMAKngs%2FN9uIB2yC8id90aYVGk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f617331d577197dafe3ca8a30022e9d85c0f8d11bab57621f36b44bdb8f9615c",
+      "file_size": 1819,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6562954,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/hpem5b06x2j0mtt207xeilabvz70?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ4TWNOAZ%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124606Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCN9JcjybTrMnV8Xarg6fdIRzDbXdLVEQ0iY%2BfzOCe9lwIhAKuogmlmO7KWGRjoBnWia5YC9%2FS245XlxTKfqnWxrENtKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwAlJWdN5rlSY2bwHgqjwW%2FrtRwv6YO%2Fwqt180zkO3Mv1yCImINJ1HjosnDQtUUT3UmGk42Uh5NiLI3j5l49YP7FemG1BEL7zO3%2BlTRKnJ5XoQjhEICiKSPvvnTR9EeW%2F5CShTZHbo7YvYIbXhF7Rj7pdabSldYZFiDl11j4VpFcjIikp%2BJaKkybsqiskvp4mgx%2BJe5jgCcHSqtEKyFLUlR8aaJysCedGlhHAkDaB2keCt45ceEkWE3GV8aFWvqkXwQbU2ZTEnKc7GLs7nHEbW%2FEKkjOpe65Ndbeuoappsnjl6ucvF%2Bf0zTZjY7Iua2H%2BcMJRkk72SnjV5CwG%2FKAZPnc0CO%2F1a%2BLmG2PqQlevEWkjFg9cInPVb9xrPRpeHbq77PiEoAHNUTThabBuswb%2Bp18lNC9I5um7fJR6qxbjVGp9H6hFYzbLtL145%2F%2Fo0mqLIuajc7eXp%2F6Y4LWRbabkaG%2F1MwprhK5yqMSabMvVGNEcUT0QkCgezc2Yo%2FHaASnkCKkpn8V9ucrz%2FxEDE3UKYJrankO0YWpxbYc8gq1PUI%2FyVgUK8SZHWkAhybFm71ktqQaemJju6rYzedCi5oiAQrgrStqhaw4fQnygEx7grejFDgfSzrULvL2h%2FpMGgcXQMR9kZC8Gg3KjfWdILsGpo914AmMuwcGAasoWfBWP1ziUfh5govYhKP8RFp2UA54I1zfyZZA56upCjco46b%2Ftxf4tnrkFqTgGPIe6k7MWxwwDmU1W6nb5pps%2B34WSusxxz4jsdAdGBPb6xWhrA7H2C2bjMtmvfevjyJSMs1kSGWJHLV3U%2BkY91oXeWeEzCiqV5V3NDMicXwb%2Fkb%2Bd9Y9Gr1uYZrXow7UC5BfZHpaN5WL%2F5XZJAVSB9s3OYXSrg7MOqDvdYGOrAB9%2F5MXRVWPl8yawIbGROw7YqfP5sUHSu9d6TV%2F0rwd%2FNIEBiEBiauzdkyp%2BDhgs06fGCbVwOlutU6sI%2F8lNCO0Iq%2FH23zAe5GAmqd2gWLadNsRmVSf0b1kUzMsgac53zs0neHAGVNKwzrE8EGyrJ7UOSDizD3jzla0wzYr%2B28lUNUErMXLFiOilgFIAcOhCFakQ8vHrEbBHAbFMA0PDMAKngs%2FN9uIB2yC8id90aYVGk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2d12ec52548fd89538ea962ecfbfd1859927892200bd32590e365809f1e24fee",
+      "file_size": 1045,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6562955,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/kwf78235whmmid74r14dca1g70ti?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ4TWNOAZ%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124606Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCN9JcjybTrMnV8Xarg6fdIRzDbXdLVEQ0iY%2BfzOCe9lwIhAKuogmlmO7KWGRjoBnWia5YC9%2FS245XlxTKfqnWxrENtKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwAlJWdN5rlSY2bwHgqjwW%2FrtRwv6YO%2Fwqt180zkO3Mv1yCImINJ1HjosnDQtUUT3UmGk42Uh5NiLI3j5l49YP7FemG1BEL7zO3%2BlTRKnJ5XoQjhEICiKSPvvnTR9EeW%2F5CShTZHbo7YvYIbXhF7Rj7pdabSldYZFiDl11j4VpFcjIikp%2BJaKkybsqiskvp4mgx%2BJe5jgCcHSqtEKyFLUlR8aaJysCedGlhHAkDaB2keCt45ceEkWE3GV8aFWvqkXwQbU2ZTEnKc7GLs7nHEbW%2FEKkjOpe65Ndbeuoappsnjl6ucvF%2Bf0zTZjY7Iua2H%2BcMJRkk72SnjV5CwG%2FKAZPnc0CO%2F1a%2BLmG2PqQlevEWkjFg9cInPVb9xrPRpeHbq77PiEoAHNUTThabBuswb%2Bp18lNC9I5um7fJR6qxbjVGp9H6hFYzbLtL145%2F%2Fo0mqLIuajc7eXp%2F6Y4LWRbabkaG%2F1MwprhK5yqMSabMvVGNEcUT0QkCgezc2Yo%2FHaASnkCKkpn8V9ucrz%2FxEDE3UKYJrankO0YWpxbYc8gq1PUI%2FyVgUK8SZHWkAhybFm71ktqQaemJju6rYzedCi5oiAQrgrStqhaw4fQnygEx7grejFDgfSzrULvL2h%2FpMGgcXQMR9kZC8Gg3KjfWdILsGpo914AmMuwcGAasoWfBWP1ziUfh5govYhKP8RFp2UA54I1zfyZZA56upCjco46b%2Ftxf4tnrkFqTgGPIe6k7MWxwwDmU1W6nb5pps%2B34WSusxxz4jsdAdGBPb6xWhrA7H2C2bjMtmvfevjyJSMs1kSGWJHLV3U%2BkY91oXeWeEzCiqV5V3NDMicXwb%2Fkb%2Bd9Y9Gr1uYZrXow7UC5BfZHpaN5WL%2F5XZJAVSB9s3OYXSrg7MOqDvdYGOrAB9%2F5MXRVWPl8yawIbGROw7YqfP5sUHSu9d6TV%2F0rwd%2FNIEBiEBiauzdkyp%2BDhgs06fGCbVwOlutU6sI%2F8lNCO0Iq%2FH23zAe5GAmqd2gWLadNsRmVSf0b1kUzMsgac53zs0neHAGVNKwzrE8EGyrJ7UOSDizD3jzla0wzYr%2B28lUNUErMXLFiOilgFIAcOhCFakQ8vHrEbBHAbFMA0PDMAKngs%2FN9uIB2yC8id90aYVGk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1d103ed9209b52c75cf003260e49ac5cb8d994cd00d365b6b89cb56069880af2",
+      "file_size": 995,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6562956,
+      "file_name": "reproduce.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9is7hhlrmky9lgradhvmszbzuhbf?response-content-disposition=attachment%3B%20filename%3D%22reproduce.sh%22%3B%20filename%2A%3DUTF-8%27%27reproduce.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZ4TWNOAZ%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124606Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCN9JcjybTrMnV8Xarg6fdIRzDbXdLVEQ0iY%2BfzOCe9lwIhAKuogmlmO7KWGRjoBnWia5YC9%2FS245XlxTKfqnWxrENtKrsFCLL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwAlJWdN5rlSY2bwHgqjwW%2FrtRwv6YO%2Fwqt180zkO3Mv1yCImINJ1HjosnDQtUUT3UmGk42Uh5NiLI3j5l49YP7FemG1BEL7zO3%2BlTRKnJ5XoQjhEICiKSPvvnTR9EeW%2F5CShTZHbo7YvYIbXhF7Rj7pdabSldYZFiDl11j4VpFcjIikp%2BJaKkybsqiskvp4mgx%2BJe5jgCcHSqtEKyFLUlR8aaJysCedGlhHAkDaB2keCt45ceEkWE3GV8aFWvqkXwQbU2ZTEnKc7GLs7nHEbW%2FEKkjOpe65Ndbeuoappsnjl6ucvF%2Bf0zTZjY7Iua2H%2BcMJRkk72SnjV5CwG%2FKAZPnc0CO%2F1a%2BLmG2PqQlevEWkjFg9cInPVb9xrPRpeHbq77PiEoAHNUTThabBuswb%2Bp18lNC9I5um7fJR6qxbjVGp9H6hFYzbLtL145%2F%2Fo0mqLIuajc7eXp%2F6Y4LWRbabkaG%2F1MwprhK5yqMSabMvVGNEcUT0QkCgezc2Yo%2FHaASnkCKkpn8V9ucrz%2FxEDE3UKYJrankO0YWpxbYc8gq1PUI%2FyVgUK8SZHWkAhybFm71ktqQaemJju6rYzedCi5oiAQrgrStqhaw4fQnygEx7grejFDgfSzrULvL2h%2FpMGgcXQMR9kZC8Gg3KjfWdILsGpo914AmMuwcGAasoWfBWP1ziUfh5govYhKP8RFp2UA54I1zfyZZA56upCjco46b%2Ftxf4tnrkFqTgGPIe6k7MWxwwDmU1W6nb5pps%2B34WSusxxz4jsdAdGBPb6xWhrA7H2C2bjMtmvfevjyJSMs1kSGWJHLV3U%2BkY91oXeWeEzCiqV5V3NDMicXwb%2Fkb%2Bd9Y9Gr1uYZrXow7UC5BfZHpaN5WL%2F5XZJAVSB9s3OYXSrg7MOqDvdYGOrAB9%2F5MXRVWPl8yawIbGROw7YqfP5sUHSu9d6TV%2F0rwd%2FNIEBiEBiauzdkyp%2BDhgs06fGCbVwOlutU6sI%2F8lNCO0Iq%2FH23zAe5GAmqd2gWLadNsRmVSf0b1kUzMsgac53zs0neHAGVNKwzrE8EGyrJ7UOSDizD3jzla0wzYr%2B28lUNUErMXLFiOilgFIAcOhCFakQ8vHrEbBHAbFMA0PDMAKngs%2FN9uIB2yC8id90aYVGk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=22deddcd8281c3f469b992ec1321a3624946fcc131368a60bb8c6d2b29287f65",
+      "file_size": 277,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

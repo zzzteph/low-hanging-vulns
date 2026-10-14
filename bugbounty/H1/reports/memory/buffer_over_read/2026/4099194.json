@@ -1,0 +1,132 @@
+{
+  "id": 4099194,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDk5MTk0",
+  "url": "https://hackerone.com/reports/4099194",
+  "title": "CVE-2026-107928: info leak uploading over WebSockets with GnuTLS",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-09T00:11:23.091Z",
+  "submitted_at": "2026-10-09T00:11:24.059Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "onn4a",
+    "url": "/onn4a",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-107928"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:37:38.772Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:34:19.606Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nWhen curl is built with GnuTLS, a malicious WebSocket server can make `curl -T <file> wss://...` send memory past curl's WebSocket send buffer. This is due to an out of bounds read in `gtls_send()`, which doesn't handle if `gnutls_record_send()` returns a number of bytes sent greater than the number of bytes it was given to send. GnuTLS does that after a blocked send. It takes two sends from different buffers to trigger, so I added an ASCII illustration of the control flow in the appendix to make it easier to follow.\n\nGnuTLS is required for this bug, It doesn't work on OpenSSL. It also requires an upload of a few MB or more to a `wss://` URL on the attacker's server. So I'm submitting this as a Low.\n\nAs for how it happens, the server first stops reading, so curl's upload blocks on a full socket. The last `gnutls_record_send()` has by then encrypted a 16384 byte record that the socket doesn't take. GnuTLS keeps it and returns `GNUTLS_E_AGAIN`, and those bytes stay in curl's request buffer to be passed in again. The next `gnutls_record_send()` call sends the kept record and returns its length (16384) whatever buffer and length it was given. Normally that call is for the same bytes so it's ok. But if the server sends a WebSocket PING, curl answers with a PONG and `ws_flush()` sends it straight from the WebSocket send buffer, ahead of the request buffer. So the next call is `gnutls_record_send(PONG, 10)` and it returns 16384. There is a check here in `gtls_send()` but it's only a `DEBUGASSERT`. On a release build it just adds 16384 to the buffer pointer, subtracts it from the 10 bytes left, which wraps around and keeps looping. So then `gnutls_record_send()` encrypts and sends the next 16384 bytes of memory after the PONG until the socket is full again. The server can control how much it reads based on how much it reads before the PING. If the read gets to the end of the heap, curl segfaults.\n\nFor applications using curl as a library, if they call `curl_easy_send()` with a shorter buffer after `CURLE_AGAIN`, the same thing can happen. For example `curl_easy_send(buf, 5, &n)` can return `CURLE_OK` with `n` getting 131072.\n\n## Affected version\n8.22.0\n\n## Steps To Reproduce:\nThe attached `evil-server.py` is a malicious server that triggers the bug. The script below should also reproduce the bug\n\n```bash\nwget 'https://curl.se/download/curl-8.22.0.tar.gz'\nsha1sum curl-8.22.0.tar.gz # should be 284e444b67f676a281906cfc86e9672780555cd4\ntar xf curl-8.22.0.tar.gz\nmkdir build ; cd build\n# build with GnuTLS instead of OpenSSL\nCC=clang CFLAGS=\"-O2 -g\" LDFLAGS=\"-Wl,-rpath,/opt/curl-gnutls/lib\" \\\n    ../curl-8.22.0/configure --prefix=/opt/curl-gnutls \\\n      --enable-static --enable-shared --disable-docs --disable-manual \\\n      --with-gnutls --without-openssl --with-zlib --with-brotli --with-zstd --with-libidn2 \\\n      --with-nghttp2 --with-libpsl --with-libssh2 --with-gssapi \\\n      --enable-ldap --enable-ldaps --enable-websockets --enable-mqtt --enable-ipfs \\\n      --enable-ntlm --enable-smb --enable-httpsig --enable-httpsrr --enable-ssls-export \\\n    && make -j\"$(nproc)\"\n# a 32 MB file of one repeated byte, so that anything else the server receives is easy to spot\nhead -c 33554432 /dev/zero | tr '\\0' A > As.bin\n# start the malicious server, see attached evil-server.py (put it in this directory)\npython3 evil-server.py & sleep 1\n# we use --insecure because the server's cert is self signed, and -sS to keep the progress meter out of\n# the server's output. Neither is necessary to trigger the bug.\n./src/curl --insecure -sS -T As.bin wss://127.0.0.1:19239/\n```\n\nThe PoC server looks at what it receives and if it prints if it gets something it wasn't supposed to (not part of the uploaded file).\n\n```\n[srv] upgraded to WebSocket, not reading, so that curl's send blocks\n[srv] reading 131072 bytes, then sending PING number 151\n[srv] PING number 151: 2359296 bytes into the upload the stream stops being WebSocket frames of 0x41\n[srv] LEAK: at least 65536 bytes of curl's memory arrived instead\n[srv] it starts with old data from curl's WebSocket send buffer; 49152 bytes further on comes this:\n  +00c000  00 00 00 00 00 00 00 31 00 01 00 00 00 00 00 00  .......1........\n  +00c010  00 00 00 00 00 00 00 ff ff 00 00 00 00 00 00 00  ................\n  +00c020  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 89  ................\n  +00c030  04 70 69 6e 67 00 00 00 00 00 00 00 00 00 00 00  .ping...........\n  ...\ncurl: (56) Recv failure: Connection reset by peer\n```\n\n(Here the send buffer's 64 KB heap chunk ends at +00c000. So after that we can see the leaked malloc header and the `struct buf_chunk` of the next allocation, which holds the PING the server sent. With `-v --trace-config ssl`, curl shows the send as `gtls_send(len=1304) -> 0, 114688`)\n\nI also attached a .tar.gz with a Dockerfile that builds a reproducer container.\n\n## Appendix\n\n```\nPHASE 1: upload runs, server isn't reading\nCurl_sendrecv()                                        transfer.c:354\n└─ sendrecv_ul() -> Curl_req_send_more()               transfer.c:375 -> request.c:458\n   ├─ add_from_client() -> ... -> cr_ws_read()         request.c:351 -> ws.c:1202    next 64 KB of the file\n   │  ├─ ws_enc_write_head(), ws_enc_write_payload()   ws.c:1259, 1265  -> ws->sendbuf, as one masked BINARY frame\n   │  └─ Curl_bufq_cread(&ws->sendbuf, buf, blen)      ws.c:1274        frame bytes -> req.sendbuf (65536 bytes)\n   └─ req_flush() -> req_send_buffer_flush()           request.c:298 -> request.c:243\n      ├─ xfer_send() -> Curl_xfer_send()               request.c:251 -> transfer.c:806\n      │  └─ ... ssl_cf_send()                          vtls.c:1113\n      │     └─ gtls_send(buf=req.sendbuf, blen=65536)  vtls.c:1156 -> gtls.c:2072\n      │        ├─ gnutls_record_send(buf, 65536)       gtls.c:2090      = 16384, record 1 sent\n      │        ├─ gnutls_record_send(buf+16384, 49152)                  = 16384, record 2 sent\n      │        ├─ gnutls_record_send(buf+32768, 32768)                  encrypts record 3 (16384 bytes)\n      │        │  └─ gtls_push() -> send()             gtls.c:85        EAGAIN, the socket is full\n      │        │  = GNUTLS_E_AGAIN                                      <- record 3 stays queued inside GnuTLS\n      │        └─ return CURLE_OK, *pnwritten = 32768  gtls.c:2099      record 3's bytes are not counted\n      └─ Curl_bufq_skip(&req.sendbuf, 32768)           request.c:255    so they stay in req.sendbuf for the retry\n\nPHASE 2: server sends a PING\nCurl_sendrecv()                                        transfer.c:354\n└─ sendrecv_dl() -> Curl_xfer_write_resp()             transfer.c:368 -> transfer.c:297\n   └─ ... ws_cw_write()                                ws.c:709\n      ├─ ws_dec_pass() -> ws_cw_dec_next()             ws.c:747 -> ws.c:662   a PING\n      │  └─ ws_enc_add_cntrl(CURLWS_PONG)              ws.c:689         PONG -> ws->pending\n      └─ ws_flush()                                    ws.c:770 -> ws.c:1701\n         ├─ ws_enc_add_pending()                       ws.c:1708        PONG (10 bytes) -> ws->sendbuf   <- the short buffer\n         ├─ Curl_bufq_peek(&ws->sendbuf, &out, &outlen)  ws.c:1728      outlen = 1304 (the PONGs that queued up while the socket was full)\n         └─ Curl_xfer_send(data, out, outlen)          ws.c:1744        straight to the connection, req.sendbuf has to wait\n            └─ ... gtls_send(buf=out, blen=1304)       gtls.c:2072      remain = 1304\n               ├─ gnutls_record_send(out, 1304)        gtls.c:2090      sends the queued record 3, doesn't look at out\n               │  = 16384                                               <- more than remain\n               ├─ DEBUGASSERT(nwritten <= remain)      gtls.c:2094      (not in release builds)\n               ├─ buf = out + 16384                    gtls.c:2095      <- past the end of what is in ws->sendbuf\n               ├─ remain = 1304 - 16384                gtls.c:2096      <- wraps to 0xffffffffffffc518\n               ├─ gnutls_record_send(out+16384, remain)  gtls.c:2090    = 16384   <- OUT OF BOUNDS READ, encrypted and sent\n               ├─ gnutls_record_send(out+32768, remain)                 = 16384   (the chunk out is in ends before out+65536)\n               ├─ ...\n               ├─ gnutls_record_send(out+114688, remain)                = GNUTLS_E_AGAIN, the socket is full again\n               └─ return CURLE_OK, *pnwritten = 114688 gtls.c:2099\n```\n\nRecord 3's bytes are given to GnuTLS in phase 1 and are meant to be offered again, from `req.sendbuf`, by the next call. In phase 2 the PONG gets there first, GnuTLS answers for record 3, and `gtls_send()` applies that answer to the PONG's buffer.\n\nThanks for taking the time to read this report.\n\n## Impact\n\nDisclosure of client process memory to a malicious `wss://` server, for libcurl built with GnuTLS (default on Debian and Ubuntu?), while uploading a file to that server. The server can control how much to read",
+  "weakness": {
+    "id": 9,
+    "name": "Buffer Over-read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6944075,
+      "file_name": "curl-gnutls-send-overread.tar.gz",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/alpoy00om7kmu38atyenyrgan7jl?response-content-disposition=attachment%3B%20filename%3D%22curl-gnutls-send-overread.tar.gz%22%3B%20filename%2A%3DUTF-8%27%27curl-gnutls-send-overread.tar.gz&response-content-type=application%2Fgzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQS6CKGPOS%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124558Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIEv7Avo9Ndo6TyRp39W%2BtD%2FMyTIhKDo9%2BLSulm2yJidnAiEA8kboI7s9xbRdjvipe2%2FuNNBqDAZQVtxlDXqgt68GBxYquwUIsv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDA8MHJ%2BY929l9qVR9iqPBUGFRsl7ax8u3eHVW5FocnaY2dydSSy9WTEU4XPAmdIxtOLiX84i9iq%2B7PrhLIabmLuNWV5hV4E4YJJ9lhOrWRF5bUeoILuF%2B8qKSn9s1PFkpYBiC3Mfzq2ZxbxQ%2B9ZH4SawHP45oEimvEKulIpGWbRxz6XxDH49D7iAjuor2cnwY8EaZ8UtpEtoQkoFF1VsMhUz0bA%2BQjVr8jTOsgfO4F4dAQElVIuEuLuiQJRf6EJr%2BzYmXVQZf7BuB947m8EQnjK2%2FcMqbjnz3s%2BdpiQVq83dPXX68uOi%2FWVXwIwRt%2B1ao0%2Fq0qNq5A%2B2UfV%2BT2PFtcZ5D86JzdSdx80ko311U6j9FU5a6P9Y9asncYljyyblxszfcU%2B6sbIUn3gfnkirqgBFtAe5hSjNk3c6%2FGJbIJhuuu8XyqkCG2v8bYl9LJiTTedDtuZ%2F4%2Frj4eXmzhtlKU6haIjJvYKUcD2n2MLpjrFp8I6Y1tk1vWwZCVqPgoMhPpuf5x2Oq3z00wfWZET8jklzhZwHYZxhA%2BUI63qJz6mTtTgfMMnH2FZDX473d7D%2BbKmFU5qmd%2BqGPOyJKhw47jxa%2BOyepe7VbaWSchBoy5F0pw%2B%2BbBVEVOkb1b1uyRICdPkyIZb%2BWB0rozteK4Wxc7uOe%2F7JKBy%2FnK9ROfxKDk80oeaePmOYU9aenPJCmbFrdC%2BRMBEF2GMHqZDsaVsb%2F3rgSEAEYkD4%2FRU5JQfwt7RV8pek0DkACMmlWgRV5u8AAoWj%2BkUS2QpgqwkcXnxnaRhciERtah%2Bs5otiAp7Irm1AA4Hydgr4y9KAbrVrZkuHbwwp9j%2F3HGeqj3VqGuibjQFMtU05%2FbTpY%2FP3X%2BxQ5DKYTQSXzpta6bCDS7Oy5X8whoq91gY6sQEYuYyr0eh8kG8tLqFo2F1z3Y4ulIA9wQJ%2Bf2v8UHq7YjvsqpSeWMnQ4FjBTLcjVfTJhVSI8%2B51Oxa3V2vlc0hVG0q%2FOzh%2BCITlB3kT9Mm449%2Fq6tEGju72g6BigpJnnIxwrqZND2jUyLhHhuDoxawrl0zkzqpF88aH%2FgI%2FInd27dwQeC2xT%2FxGyEGHRCuWcOz66%2FgucOZAvzS88fAzcbFid3ESFA6eTHydgeZ1ZlREzG4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=22dc84c8ca8ff87c80d1f942f8bcb4597a36b0f6761e603d7233834dd8b14164",
+      "file_size": 8300,
+      "type": "application/gzip",
+      "moderated": null
+    },
+    {
+      "id": 6944131,
+      "file_name": "evil-server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/gu1uoowtj4ismy8f5tfbjn2l72c7?response-content-disposition=attachment%3B%20filename%3D%22evil-server.py%22%3B%20filename%2A%3DUTF-8%27%27evil-server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQS6CKGPOS%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T124558Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIEv7Avo9Ndo6TyRp39W%2BtD%2FMyTIhKDo9%2BLSulm2yJidnAiEA8kboI7s9xbRdjvipe2%2FuNNBqDAZQVtxlDXqgt68GBxYquwUIsv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDA8MHJ%2BY929l9qVR9iqPBUGFRsl7ax8u3eHVW5FocnaY2dydSSy9WTEU4XPAmdIxtOLiX84i9iq%2B7PrhLIabmLuNWV5hV4E4YJJ9lhOrWRF5bUeoILuF%2B8qKSn9s1PFkpYBiC3Mfzq2ZxbxQ%2B9ZH4SawHP45oEimvEKulIpGWbRxz6XxDH49D7iAjuor2cnwY8EaZ8UtpEtoQkoFF1VsMhUz0bA%2BQjVr8jTOsgfO4F4dAQElVIuEuLuiQJRf6EJr%2BzYmXVQZf7BuB947m8EQnjK2%2FcMqbjnz3s%2BdpiQVq83dPXX68uOi%2FWVXwIwRt%2B1ao0%2Fq0qNq5A%2B2UfV%2BT2PFtcZ5D86JzdSdx80ko311U6j9FU5a6P9Y9asncYljyyblxszfcU%2B6sbIUn3gfnkirqgBFtAe5hSjNk3c6%2FGJbIJhuuu8XyqkCG2v8bYl9LJiTTedDtuZ%2F4%2Frj4eXmzhtlKU6haIjJvYKUcD2n2MLpjrFp8I6Y1tk1vWwZCVqPgoMhPpuf5x2Oq3z00wfWZET8jklzhZwHYZxhA%2BUI63qJz6mTtTgfMMnH2FZDX473d7D%2BbKmFU5qmd%2BqGPOyJKhw47jxa%2BOyepe7VbaWSchBoy5F0pw%2B%2BbBVEVOkb1b1uyRICdPkyIZb%2BWB0rozteK4Wxc7uOe%2F7JKBy%2FnK9ROfxKDk80oeaePmOYU9aenPJCmbFrdC%2BRMBEF2GMHqZDsaVsb%2F3rgSEAEYkD4%2FRU5JQfwt7RV8pek0DkACMmlWgRV5u8AAoWj%2BkUS2QpgqwkcXnxnaRhciERtah%2Bs5otiAp7Irm1AA4Hydgr4y9KAbrVrZkuHbwwp9j%2F3HGeqj3VqGuibjQFMtU05%2FbTpY%2FP3X%2BxQ5DKYTQSXzpta6bCDS7Oy5X8whoq91gY6sQEYuYyr0eh8kG8tLqFo2F1z3Y4ulIA9wQJ%2Bf2v8UHq7YjvsqpSeWMnQ4FjBTLcjVfTJhVSI8%2B51Oxa3V2vlc0hVG0q%2FOzh%2BCITlB3kT9Mm449%2Fq6tEGju72g6BigpJnnIxwrqZND2jUyLhHhuDoxawrl0zkzqpF88aH%2FgI%2FInd27dwQeC2xT%2FxGyEGHRCuWcOz66%2FgucOZAvzS88fAzcbFid3ESFA6eTHydgeZ1ZlREzG4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ff5a14f42fe433a7a948311209c16d72922cba0b588d2fb0b983a7336da6825b",
+      "file_size": 12827,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "zsphantom"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

