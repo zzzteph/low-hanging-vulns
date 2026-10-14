@@ -1,0 +1,138 @@
+{
+  "id": 4030333,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDMwMzMz",
+  "url": "https://hackerone.com/reports/4030333",
+  "title": "CVE-2026-92392: HTTP/2 upload Use-After-Free",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-15T01:21:40.543Z",
+  "submitted_at": "2026-09-15T18:30:57.477Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "onn4a",
+    "url": "/onn4a",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-92392"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-14T06:40:28.244Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-14T06:34:41.244Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nDuring a file upload, curl mishandles HTTP/2 RST_STREAM received from the server (with reason HTTP_1_1_REQUIRED or REFUSED_STREAM) leading to a use after free of a `struct Curl_easy` object. The control flow is a bit complicated, so I've produced an ASCII tree of the control flow to highlight the object lifetime issue in the Appendix below.\n\nPreconditions for this are `curl -T <file>`, where `<file>` contains anywhere \"<word> <word> <any>\\n\\n\" and exceeds ~135KB. Our PoC exploit also requires `-Z`/`--parallel` when PIE/ASLR is enabled, but this is not necessary to trigger the memory corruption, only for exploitation.\n\nAs for how the UAF happens, after receiving the reset, multi.c converts the reset into a retry and calls `multi_done()`. In `multi_done()`, it calls `Curl_conn_ev_data_done()` which makes curl forget about the transfer, then it calls `Curl_req_done()`. Then `Curl_req_done()` flushes the buffered unsent remainder of the upload body into the connection. Since curl no longer knows about the transfer, it treats those bytes as a new request.  If they look like a request line, `h2_submit()` opens a new stream that stores a pointer to the `Curl_easy` object. This is the pointer that will be UAFed. After the retry completes, the application frees the `Curl_easy` object, but the connection still holds the pointer. It is dereferenced when the server sends a frame on that stream which can happen at exit, when the connection pool is destroyed.\n\n## Affected version\n8.22.0\n\n## Steps To Reproduce:\nI've attached a malicious server that triggers the bug (`evil-server.py`)\n\n```bash\nwget 'https://curl.se/download/curl-8.22.0.tar.gz'\nsha1sum curl-8.22.0.tar.gz # should be 284e444b67f676a281906cfc86e9672780555cd4\ntar xf curl-8.22.0.tar.gz\nmkdir build ; cd build\n# build with ASAN enabled\nCC=clang CFLAGS=\"-O2 -g -fsanitize=address\"\" LDFLAGS=\"-Wl,-rpath,/opt/curl-release/lib\" \\\n    ../curl-8.22.0/configure --prefix=/opt/curl-release \\\n      --enable-static --enable-shared --disable-docs --disable-manual \\\n      --with-openssl --with-zlib --with-brotli --with-zstd --with-libidn2 \\\n      --with-nghttp2 --with-libpsl --with-libssh2 --with-gssapi \\\n      --enable-ldap --enable-ldaps --enable-websockets --enable-mqtt --enable-ipfs \\\n      --enable-ntlm --enable-smb --enable-httpsig --enable-httpsrr --enable-ssls-export \\\n    && make -j\"$(nproc)\"\n# make an example file for uploading that satisfies the conditions for the UAF\ncat ../docs/*.md > sample_docs.md\n# start the malicious server, see attached evil-server.py\n python3 evil-server.py &\n# we use --insecure because the server's cert is self signed, not necessary to trigger the bug.\n# This should result in an ASAN UAF crash\n./src/curl --insecure -T ./sample_docs.md https://127.0.0.1:19170/x\n```\n\nI've also attached a .tar.gz that contains scripts to build a Docker container where you can reproduce the RCE.\n\nIt also contains a suggested patch (basically, call `Curl_req_abort_sending()` when retrying the connection to discard unsent request content).\n\n## Appendix\n\n```\nPHASE 1: upload starts\nCurl_req_send()                                 request.c:380    request head + first body bytes -> req.sendbuf\n└─ req_flush() -> ... -> cf_h2_send()           http2.c:2197     no stream yet\n   └─ h2_submit()                               http2.c:2062\n      ├─ http2_data_setup()                     http2.c:361      streams[mid] created\n      └─ nghttp2_submit_request(..., data)      http2.c:2133     stream 1 -> data      <- pointer #1 stored\n\nPHASE 2: upload stalls (server can do this by not granting flow-control window)\nmultistate_performing() -> Curl_sendrecv()      multi.c:2029 -> transfer.c:354\n└─ sendrecv_ul() -> Curl_req_send_more()        transfer.c:340 -> request.c:458\n   ├─ add_from_client()                         request.c:351    read file -> req.sendbuf (64 KB)\n   └─ req_flush() -> ... -> cf_h2_send()        http2.c:2197\n      └─ cf_h2_body_send()                                       -> stream->sendbuf\n         └─ req_body_read_callback()            http2.c:1577     window is 0 -> NGHTTP2_ERR_DEFERRED (:1625)\n   => stream->sendbuf full, req.sendbuf full, nothing moves      <- leftover bytes now parked in req.sendbuf\n\nPHASE 3: server sends HEADERS(200) + RST_STREAM(HTTP_1_1_REQUIRED)\nmultistate_performing()                         multi.c:2029\n├─ result = Curl_sendrecv()                     multi.c:2043 -> transfer.c:354\n│  └─ sendrecv_dl()                             transfer.c:220\n│     ├─ result = xfer_recv_resp()              transfer.c:269\n│     │  └─ ... cf_h2_recv()                    http2.c:1941\n│     │     ├─ result = stream_recv()           http2.c:1967     nothing yet -> AGAIN\n│     │     ├─ h2_progress_ingress()            http2.c:1972 -> 1865\n│     │     │  └─ h2_process_pending_input()    http2.c:487\n│     │     │     └─ nghttp2_session_mem_recv()                  parses RST_STREAM\n│     │     │        └─ on_stream_close()       http2.c:1298\n│     │     │           ├─ stream->closed = TRUE      http2.c:1333   error=0xd, reset=TRUE\n│     │     │           └─ set_stream_user_data(0)    http2.c:1346   stream 1 pointer cleared\n│     │     └─ result = stream_recv()           http2.c:1976\n│     │        └─ result = http2_handle_stream_close()   http2.c:1850 -> 1683   = CURLE_HTTP2_STREAM\n│     ├─ if(result != CURLE_AGAIN) goto out;    transfer.c:272   <- error exit\n│     │     ...skipped...\n│     │     Curl_req_abort_sending(data)        transfer.c:327   never reached -> req.sendbuf NOT emptied\n│     └─ out: return result                     transfer.c:330   = CURLE_HTTP2_STREAM\n│\n├─ if(result == CURLE_HTTP2_STREAM && Curl_h2_http_1_1_error())   multi.c:2064\n│     retry = TRUE; result = CURLE_OK           multi.c:2087-2088\n├─ follow = FOLLOW_RETRY                        multi.c:2129\n│\n│  PHASE 4: wrap-up\n├─ multi_done(data, CURLE_OK, premature=FALSE)  multi.c:2130\n│  ├─ Curl_http_done()\n│  ├─ Curl_conn_ev_data_done()                  multi.c:749 -> cfilters.c:982 --- **for maintainers: should this happen after Curl_req_done?**\n│  │  └─ cf_cntrl_all(CF_CTRL_DATA_DONE)        cfilters.c:448\n│  │     └─ cf_h2_cntrl()                       http2.c:2642\n│  │        └─ http2_data_done()                http2.c:416\n│  │           ├─ set_stream_user_data(NULL)    http2.c:428\n│  │           └─ hash_remove(streams, mid)     http2.c:447      <- filter forgets this transfer\n│  ├─ result = Curl_req_done(aborted=FALSE)     multi.c:754 -> request.c:102\n│  │  └─ req_flush()                            request.c:298    req.sendbuf not empty\n│  │     └─ req_send_buffer_flush()             request.c:243\n│  │        └─ xfer_send()                      request.c:186\n│  │           └─ Curl_xfer_send()              transfer.c:806\n│  │              └─ Curl_conn_send()           cfilters.c:1073\n│  │                 └─ cf_h2_send()            http2.c:2197     stream == NULL -> \"new request\"\n│  │                    └─ h2_submit()          http2.c:2062\n│  │                       ├─ http2_data_setup()          http2.c:361    streams[mid] re-created\n│  │                       ├─ Curl_h1_req_parse_read()    http1.c:262    planted bytes parse as \"T /path x\"\n│  │                       └─ stream_id = nghttp2_submit_request(..., data)  http2.c:2133   stream 3 -> data   <- pointer #2 stored\n│  └─ multi_done_locked()                       multi.c:756 -> 632\n│     ├─ Curl_detach_connection()                                data->conn = NULL, state.done = TRUE\n│     └─ Curl_cpool_conn_now_idle()                              conn back in pool, stream 3 still -> data\n└─ result = multi_follow(FOLLOW_RETRY)          multi.c:2132     retry on a new HTTP/1.1 connection\n\nPHASE 5: retry finishes, handle freed\ndel_per_transfer()                              src/tool_operate.c:240\n└─ curl_easy_cleanup() -> Curl_close()          url.c:197\n   └─ free(data)                                url.c:303        <- stream 3 pointer now dangling\n\nPHASE 6: process exit, connection pool shutdown causes one last read which triggers the UAF\ncurl_share_cleanup()                            curl_share.c:370\n└─ Curl_cpool_destroy()                         conncache.c:247\n   └─ ... Curl_conn_shutdown()                  cfilters.c:225\n      └─ cf_h2_shutdown()                       http2.c:2559\n         └─ h2_progress_ingress()               http2.c:1865\n            └─ h2_process_pending_input()       http2.c:487\n               └─ nghttp2_session_mem_recv()                     server's HEADERS for stream 3\n                  └─ on_begin_headers()         http2.c:1355\n                     ├─ data_s = get_stream_user_data(3)   http2.c:1364   returns freed pointer\n                     └─ H2_STREAM_CTX(ctx, data_s)         http2.c:1373   reads data_s->mid  <- USE AFTER FREE\n```\nPointer #1 is stored in phase 1 and properly cleared in phases 3 and 4. Pointer #2 is stored in phase 4, after the clearing. Nothing clears it again before the free in phase 5.\n\nThank you for taking the time to read this report.\n\n## Impact\n\nRemote code execution on a victim client uploading a text file.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6723859,
+      "file_name": "curl_rce.mov",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/dbanzgcv9eykkjsy47m1bb4klkls?response-content-disposition=attachment%3B%20filename%3D%22curl_rce.mov%22%3B%20filename%2A%3DUTF-8%27%27curl_rce.mov&response-content-type=video%2Fquicktime&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ73YPFXXK%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T065934Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIHDzsRth63labfd3s6stKLnIgRxWXJq%2FjbYK2nnRxMWBAiEAkPXEJJeCc9h71bLn6k51Ai%2BlgqiWlFsI%2FdlErKqZu8cqugUIsP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDNcfQzH5mISTD0nsPSqOBYDGgOODcMxXv9EHgYDE7V%2BjeHcsO%2BIqocXQqL97o1WHxEnlrzZ7CK3Ah5Qa%2BpjGfZ1qydJhNvzrETy7w5ahBgIY7JLyD1uJIyMqz8pOdY6zquMuk89eXJKyRIth3R0zv%2FGjHIG%2FlNc1iWjfBNkLlteJfXDtGvAyqQ%2F1FDUgpnx8%2BK9npnBLtZTf5817sqX%2FNWhu3OWiRbbBbv%2FtbFkwE69KzOtUC7tnZqcjDRKiwsFUEPcAL5CoRcuYvHnZ6CIIBakwmR1ywUlOlG7rDqUSqw4YSqNQqiUBJNiFvObbHzuRxzuGPoGOkS3u5x0oioyEEyioPl%2Fm%2F64fnyGCEmTtD%2BPk%2Bjw88GcucCQHjxRCJdQny%2FbJLK2dln0thaPG4dl8gbdTbSp4bp3bh2cG0ijK%2FWpK1yxyKy3xMvDx0upoO%2B1gX7XfR%2B0KRfN2Ob7KqUojWl%2B45DQusSAhFXsNPcynzaY9%2BcdZuGLPZ5JUHO9xzqwLSwqsTOYtocQP9vIZffgWvyEkgAZ7nNUG%2Fzp19UxCh4h6tU7jEpGXAGVfsWP3eGvqmZAfkwvCBbbEA1pITBiFUw2FIkzlMn6w5RWGTEpp%2BqX27aaReuyG8Ti1w%2FYm%2BKoroQvdKlObKHoNBkv%2B4eAAvBmkxGciUPUh4EkIssrE%2BRQP9LKKMKLRsdfYhlDvRL8k4f0dBU%2F24rX0gM51O5DhhHxcRNKvbpUdgJ3mXg%2B8qTUgJpp4ptZvUxu93tUogQHKGjXqvpm6Jqk%2Bh6XEaPhn5t%2B34F7ZfXvLHAUVBzB8rKkCIE1q0CSn%2BidRlxnguEkWPkDmj1jHUsbmG1%2BTmnC0Xdjeri4VJnV%2ByrEhbbwJDNvCwkDse5mAzkA7FJbBUDC5wLzWBjqxAZ6aNyQuCNvYlnedCuVb1D0npWZ0zG0YhHuKdfmnh39i52AMLI7uXlCJTzEk4S4cO7BrGS3VFEbQU1XmXjS9DIxjZUqCIR5%2FtVG3Dv9EvoQfB4FyLWYqqir3qviJsNxcufFJLL4Q%2FNnZaCifI%2BS34NlgCl%2BvNhQED1xpXcl1e6%2B79fb4cQ%2F8oG3X%2FvFdy681UKYAXUYQ8oG9j2WRhXcInlnzqhSJxijJVzBcs%2F8dchCvdA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d03ce4fd240ddc3e0f672abbc438f24f4963ac325c36319d727cb14d0e6141df",
+      "file_size": 22905037,
+      "type": "video/quicktime",
+      "moderated": null
+    },
+    {
+      "id": 6724099,
+      "file_name": "evil-server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/goj89mrhmj8kgibvu6ie3feotjec?response-content-disposition=attachment%3B%20filename%3D%22evil-server.py%22%3B%20filename%2A%3DUTF-8%27%27evil-server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ73YPFXXK%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T065934Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIHDzsRth63labfd3s6stKLnIgRxWXJq%2FjbYK2nnRxMWBAiEAkPXEJJeCc9h71bLn6k51Ai%2BlgqiWlFsI%2FdlErKqZu8cqugUIsP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDNcfQzH5mISTD0nsPSqOBYDGgOODcMxXv9EHgYDE7V%2BjeHcsO%2BIqocXQqL97o1WHxEnlrzZ7CK3Ah5Qa%2BpjGfZ1qydJhNvzrETy7w5ahBgIY7JLyD1uJIyMqz8pOdY6zquMuk89eXJKyRIth3R0zv%2FGjHIG%2FlNc1iWjfBNkLlteJfXDtGvAyqQ%2F1FDUgpnx8%2BK9npnBLtZTf5817sqX%2FNWhu3OWiRbbBbv%2FtbFkwE69KzOtUC7tnZqcjDRKiwsFUEPcAL5CoRcuYvHnZ6CIIBakwmR1ywUlOlG7rDqUSqw4YSqNQqiUBJNiFvObbHzuRxzuGPoGOkS3u5x0oioyEEyioPl%2Fm%2F64fnyGCEmTtD%2BPk%2Bjw88GcucCQHjxRCJdQny%2FbJLK2dln0thaPG4dl8gbdTbSp4bp3bh2cG0ijK%2FWpK1yxyKy3xMvDx0upoO%2B1gX7XfR%2B0KRfN2Ob7KqUojWl%2B45DQusSAhFXsNPcynzaY9%2BcdZuGLPZ5JUHO9xzqwLSwqsTOYtocQP9vIZffgWvyEkgAZ7nNUG%2Fzp19UxCh4h6tU7jEpGXAGVfsWP3eGvqmZAfkwvCBbbEA1pITBiFUw2FIkzlMn6w5RWGTEpp%2BqX27aaReuyG8Ti1w%2FYm%2BKoroQvdKlObKHoNBkv%2B4eAAvBmkxGciUPUh4EkIssrE%2BRQP9LKKMKLRsdfYhlDvRL8k4f0dBU%2F24rX0gM51O5DhhHxcRNKvbpUdgJ3mXg%2B8qTUgJpp4ptZvUxu93tUogQHKGjXqvpm6Jqk%2Bh6XEaPhn5t%2B34F7ZfXvLHAUVBzB8rKkCIE1q0CSn%2BidRlxnguEkWPkDmj1jHUsbmG1%2BTmnC0Xdjeri4VJnV%2ByrEhbbwJDNvCwkDse5mAzkA7FJbBUDC5wLzWBjqxAZ6aNyQuCNvYlnedCuVb1D0npWZ0zG0YhHuKdfmnh39i52AMLI7uXlCJTzEk4S4cO7BrGS3VFEbQU1XmXjS9DIxjZUqCIR5%2FtVG3Dv9EvoQfB4FyLWYqqir3qviJsNxcufFJLL4Q%2FNnZaCifI%2BS34NlgCl%2BvNhQED1xpXcl1e6%2B79fb4cQ%2F8oG3X%2FvFdy681UKYAXUYQ8oG9j2WRhXcInlnzqhSJxijJVzBcs%2F8dchCvdA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=926aca928a55f2399ae78a11aebef92fb8f6d51b36c1be5c91bc4f5932993033",
+      "file_size": 31427,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6724176,
+      "file_name": "curl-h2-uaf.tar.gz",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/myq707ue4jo4pa3d8315uvk0e5zj?response-content-disposition=attachment%3B%20filename%3D%22curl-h2-uaf.tar.gz%22%3B%20filename%2A%3DUTF-8%27%27curl-h2-uaf.tar.gz&response-content-type=application%2Fgzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ73YPFXXK%2F20261014%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261014T065934Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIHDzsRth63labfd3s6stKLnIgRxWXJq%2FjbYK2nnRxMWBAiEAkPXEJJeCc9h71bLn6k51Ai%2BlgqiWlFsI%2FdlErKqZu8cqugUIsP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDNcfQzH5mISTD0nsPSqOBYDGgOODcMxXv9EHgYDE7V%2BjeHcsO%2BIqocXQqL97o1WHxEnlrzZ7CK3Ah5Qa%2BpjGfZ1qydJhNvzrETy7w5ahBgIY7JLyD1uJIyMqz8pOdY6zquMuk89eXJKyRIth3R0zv%2FGjHIG%2FlNc1iWjfBNkLlteJfXDtGvAyqQ%2F1FDUgpnx8%2BK9npnBLtZTf5817sqX%2FNWhu3OWiRbbBbv%2FtbFkwE69KzOtUC7tnZqcjDRKiwsFUEPcAL5CoRcuYvHnZ6CIIBakwmR1ywUlOlG7rDqUSqw4YSqNQqiUBJNiFvObbHzuRxzuGPoGOkS3u5x0oioyEEyioPl%2Fm%2F64fnyGCEmTtD%2BPk%2Bjw88GcucCQHjxRCJdQny%2FbJLK2dln0thaPG4dl8gbdTbSp4bp3bh2cG0ijK%2FWpK1yxyKy3xMvDx0upoO%2B1gX7XfR%2B0KRfN2Ob7KqUojWl%2B45DQusSAhFXsNPcynzaY9%2BcdZuGLPZ5JUHO9xzqwLSwqsTOYtocQP9vIZffgWvyEkgAZ7nNUG%2Fzp19UxCh4h6tU7jEpGXAGVfsWP3eGvqmZAfkwvCBbbEA1pITBiFUw2FIkzlMn6w5RWGTEpp%2BqX27aaReuyG8Ti1w%2FYm%2BKoroQvdKlObKHoNBkv%2B4eAAvBmkxGciUPUh4EkIssrE%2BRQP9LKKMKLRsdfYhlDvRL8k4f0dBU%2F24rX0gM51O5DhhHxcRNKvbpUdgJ3mXg%2B8qTUgJpp4ptZvUxu93tUogQHKGjXqvpm6Jqk%2Bh6XEaPhn5t%2B34F7ZfXvLHAUVBzB8rKkCIE1q0CSn%2BidRlxnguEkWPkDmj1jHUsbmG1%2BTmnC0Xdjeri4VJnV%2ByrEhbbwJDNvCwkDse5mAzkA7FJbBUDC5wLzWBjqxAZ6aNyQuCNvYlnedCuVb1D0npWZ0zG0YhHuKdfmnh39i52AMLI7uXlCJTzEk4S4cO7BrGS3VFEbQU1XmXjS9DIxjZUqCIR5%2FtVG3Dv9EvoQfB4FyLWYqqir3qviJsNxcufFJLL4Q%2FNnZaCifI%2BS34NlgCl%2BvNhQED1xpXcl1e6%2B79fb4cQ%2F8oG3X%2FvFdy681UKYAXUYQ8oG9j2WRhXcInlnzqhSJxijJVzBcs%2F8dchCvdA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6c2ccfebb6be3bddf4de404f796c937abd7b253ef13c5cdfbbe9407d76b06867",
+      "file_size": 4637579,
+      "type": "application/gzip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
