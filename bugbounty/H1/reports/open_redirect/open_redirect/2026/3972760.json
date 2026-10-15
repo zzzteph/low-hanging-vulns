@@ -1,0 +1,130 @@
+{
+  "id": 3972760,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcyNzYw",
+  "url": "https://hackerone.com/reports/3972760",
+  "title": "Open redirect on app.hey.com bypasses HEY desktop's internal-origin allowlist and loads attacker content inside a HEY BrowserWindow",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-27T03:58:32.904Z",
+  "submitted_at": "2026-08-27T03:58:33.090Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "nasrysami",
+    "url": "/nasrysami",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/7nda9p3iy8d719j49py30j0t0rv0/f4770e29726b679d8210b3bcebb50139392345e8ead50e7d67de79a93076e327"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 67,
+    "url": "https://hackerone.com/basecamp",
+    "handle": "basecamp",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/STtZ2opgRsHdKby72xs56KhB/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/STtZ2opgRsHdKby72xs56KhB/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Basecamp",
+      "twitter_handle": "basecamp",
+      "website": "https://37signals.com/policies/security/response",
+      "about": "Basecamp is the leading online project manager and the birthplace of Ruby on Rails. Created by 37signals."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-15T18:00:06.635Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-15T18:00:03.608Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`app.hey.com/proxy_image` compares the URL scheme case-sensitively. `https://` gets signed and proxied correctly. `HTTPS://` isn't recognised, so instead of proxying it, the endpoint 302s the visitor to the raw URL. No authentication needed.\n\nThat alone is an open redirect. It matters because the HEY desktop app uses \"is this URL on app.hey.com?\" as its test for \"is this HEY's own content, safe to load in an app window.\"\n\nA URL that genuinely is on app.hey.com passes that test, then redirects somewhere else.\n\n## Proof of concept\n\n**1. The redirect:**\n\n```\ncurl -sI \"https://app.hey.com/proxy_image/HTTPS%3A%2F%2Fexample.com%2F\"\n\nHTTP/2 302\nlocation: HTTPS://example.com/\n```\n\nSame URL in lowercase behaves correctly:\n\n```\ncurl -sI \"https://app.hey.com/proxy_image/https%3A%2F%2Fexample.com%2F\"\n\nHTTP/2 302\nlocation: https://gopher.hey.com/sNnTdUWAvh27xF-f273gMtyxvGbOnLHSflbedosO23Ns=/https://example.com/\n```\n\nOne capital letter apart. `javascript:` is still correctly rejected (403), so this is the scheme comparison, not a missing filter. Schemes are case-insensitive per RFC 3986 section 3.1, so `HTTPS://` is a valid URL, not a malformed edge case.\n\n**2. The full attack:**\n\nEmail a HEY user this link:\n\n```\nhttps://app.hey.com/proxy_image/HTTPS%3A%2F%2Fexample.com%2F?x=/print\n```\n\nOpen the message in the HEY desktop app and click it. A HEY window opens showing example.com, a site with nothing to do with HEY. Swap example.com for any host you control and it renders that instead.\n\nTwo details, both required:\n\n* Percent-encode the inner URL. Unencoded, Rails collapses the `//` and returns `Location: HTTPS:/example.com/`, which browsers resolve relative to app.hey.com.\n* The URL must end in `/print` or `.text`, which is what the desktop window allowlist checks. `?x=/print` satisfies it without touching the destination.\n\n**Confirmed on HEY for Linux 1.3.6 (Electron 40.9.3):** the attacker page renders inside a HEY application window, and the destination server logged the fetch from `HEY/1.3.6 Chrome/144.0.7559.236 Electron/40.9.3`, so the app itself loaded it. macOS and Windows share this code path. HEY for Android 1.31.0 hands the link to the external browser and is not affected. A plain external link in the same message correctly opened in the external browser, which is what proves the app does route external links outward and that the redirect is what makes an attacker destination look internal.\n\n## Why this isn't just an open redirect\n\nThree checks run, each correct on its own, and the URL passes all three because it really is on app.hey.com.\n\n**1. The mail sanitizer keeps the link.** It's an http-family URL, nothing to strip.\n\n**2. HEY's client-side external-link proxy skips it.** `hey-message-content` only intercepts links whose origin differs from the page:\n\n```js\nif (element && element.origin != location.origin && element.protocol.startsWith(\"http\")) {\n    return element;   // routed out to the OS browser\n}\n```\n\nThe link's origin is app.hey.com, so it's treated as internal and handed to the app.\n\n**3. Electron's window allowlist accepts it** (`dist-js/index.js:72-74`):\n\n```js\nelse if (Stage.current.locationIsInternal(url) && (url.endsWith(\".text\") || url.endsWith(\"/print\"))) {\n    createWindow(url);          // new HEY BrowserWindow, window.loadURL(url)\n}\n```\n\nSame origin passes, ends in `/print` passes, HEY opens a window, app.hey.com 302s, and the window is now on my origin.\n\nA second path reaches the same place. `Stage.isInternalAttachmentLink` (`dist-js/stage.js:47-52`) lets same-origin URLs carrying `?disposition=attachment` through with no external-link guard at all. Your own comment on that method reads:\n\n> \"We must match the query parameter on an *internal* URL, not the raw substring anywhere in an arbitrary URL — otherwise any external link that merely contains `disposition=attachment` (in its query, fragment, or path) would skip the external-link guard below and load an attacker page inside the chromeless app window.\"\n\nThat is exactly the outcome here, reached through a URL that genuinely is internal, which is the case the check wasn't written to catch.\n## Same root cause, second location (no impact found)\n\nThe identical case-sensitive scheme comparison exists in the inbound mail image rewriter. An `<img src=\"HTTPS://host/pixel.png\">` in an email is not rewritten to `gopher.hey.com`. The stored message keeps the sender's raw URL, so the image proxy is silently skipped for that class of URL. Ten variants were tested and every other unusual form (`//host`, `https:/host`, `https:host`, `:443`, leading whitespace, query plus fragment) is proxied correctly. Only the scheme case escapes.\n\nI could not turn this into a leak. CSP `img-src` blocks the load, verified on the web app, the Linux desktop app, and by opening such a message on an Android phone where the unproxied images fetched zero times while the lowercase control in the same message was fetched by HEY's proxy. Reported only as evidence that the scheme comparison is systemic rather than a single endpoint bug.\n\n## Fix\n\nParse the URL and compare the normalised scheme before deciding whether to proxy, in `/proxy_image` and in the inbound mail image rewriter. Fail closed: if a value isn't a recognisable proxyable http(s) URL, return an error rather than redirecting the client to it.\n\nSeparately, stop treating \"same origin\" as \"safe to load in an app window.\" Any open redirect on app.hey.com re-opens both desktop guards.\n\n## Impact\n\nA remote attacker who knows nothing but the target's email address can send an ordinary message containing a link that points to `https://app.hey.com`, the user's own mail provider. One click renders the attacker's page inside a HEY application window. That window has no address bar and no origin indicator, so once the redirect fires there is nothing on screen that distinguishes the attacker's content from HEY's own interface. This inverts the one defence users are actually taught. \"Check the URL before you type your password\" is not just unavailable here, it was already satisfied, because the link genuinely was HEY's. The natural payload is a HEY sign-in or re-authentication prompt, which is especially credible because HEY already shows a password prompt inside the app before sensitive actions like mailbox export (`/accounts/:id/exports`). A user who has seen that flow has been trained to expect exactly this screen. Successful credential capture yields the victim's full mailbox. Severity is scoped as Changed because the defect lives in the web asset (app.hey.com) while the control it defeats lives in a separate asset, the desktop app's rule that same-origin URLs are safe to load in an app window.",
+  "weakness": {
+    "id": 53,
+    "name": "Open Redirect"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-15T18:00:03.865Z",
+  "allow_singular_disclosure_after": -5878.39657027,
+  "singular_disclosure_allowed": true,
+  "vote_count": 5,
+  "voters": [
+    "2026",
+    "nexus0ps",
+    "nasrysami",
+    "sottam",
+    "fearhunt"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.1,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "changed",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 53959,
+    "asset_type": "WILDCARD",
+    "asset_identifier": "*.hey.com",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
