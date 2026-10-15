@@ -1,0 +1,152 @@
+{
+  "id": 3938927,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTM4OTI3",
+  "url": "https://hackerone.com/reports/3938927",
+  "title": "An organization admin can create an attacker-controlled organization owner via the gem transfer flow ",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-14T03:59:20.040Z",
+  "submitted_at": "2026-08-14T03:59:20.330Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "timhaines",
+    "url": "/timhaines",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/004/192/42ee31899b28ae7260fda25e45c9f81ec8d3fd02_original.jpg/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8212,
+    "url": "https://hackerone.com/rubygems",
+    "handle": "rubygems",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/212/e65eca09896d23bc029c08d3147a79a48ec1ee2f_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/212/e65eca09896d23bc029c08d3147a79a48ec1ee2f_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "RubyGems",
+      "twitter_handle": "rubygems_status",
+      "website": "https://rubygems.org",
+      "about": "RubyGems.org is the Ruby community’s gem hosting service."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-15T07:09:18.496Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-15T07:09:16.963Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\nAn organization admin on RubyGems.org can create an attacker-controlled organization owner through the gem transfer flow, then use it to evict the organization's legitimate owners and members and remove the publishing rights their memberships carried. The normal membership route prevents an admin from inviting an owner.\n\nThis is the RubyGems.org service, reviewed at `4e36c18deef651564e7029ad8c00594f7e207d1b` (`master`, 2026-07-30). I rechecked it on 2026-08-14 against `origin/master` at `257b9c548449fe35c398421e160c472483e151a7`, 33 commits later: every controller, model and policy cited below is unchanged, the line numbers still match, and no advisory or merged private fork covers it.\n\n### Steps to reproduce\n\n**Setup.** Three accounts:\n\n- `founder` is Acme's legitimate organization owner. Acme owns `organization_gem`, and that membership is `founder`'s only route to publishing it.\n- `attacker_admin_account` is a confirmed Acme organization admin and the direct owner of `transfer_gem`, a gem belonging to no organization. That ownership is what lets it start a transfer.\n- `second_attacker_account` is a second account held by the same attacker. It holds no Acme membership and is a direct maintainer of `transfer_gem`.\n- Each account holds a `push_rubygem` API key. Both attacker keys also carry `add_owner` and `remove_owner`, so the 403 in step 2 is the policy refusing and not a missing scope.\n\n1. As `attacker_admin_account`, invite `second_attacker_account` as **Owner** at `/organizations/acme/memberships/new`. Returns **404**, and the members page does not list them.\n\n2. As the same admin, add `second_attacker_account` as a direct owner of `organization_gem`. Returns **403**.\n\n```sh\ncurl -i -X POST -H 'Authorization: attacker-admin-key' \\\n  --data-urlencode 'email=second_attacker_account' \\\n  --data-urlencode 'role=owner' \\\n  http://localhost:3000/api/v1/gems/organization_gem/owners\n```\n\n3. As the same admin, open `/gems/transfer`. Choose Acme, select `transfer_gem`, and on the **Owners** step set `second_attacker_account` to **Owner**. Finalize. Acme's members page now lists `second_attacker_account` as a pending **Owner**, the grant that was refused in step 1.\n\n4. As `second_attacker_account`, accept at `/organizations/acme/invitation`. It is now a confirmed Acme owner.\n\n5. Push `organization_gem` with `founder`'s key. Returns **200**.\n\n6. As `second_attacker_account`, add itself as a direct Owner of `organization_gem` at `/gems/organization_gem/owners` and confirm the ownership through the emailed token.\n\n7. As `second_attacker_account`, delete `founder` from Acme's members page. Only the two attacker-controlled accounts remain.\n\n8. Re-push `organization_gem` with `founder`'s key from step 5. Returns **403**.\n\n9. Push `organization_gem` with `second_attacker_account`'s key. Returns **200**.\n\nThe attached test walks the same sequence against a fuller organization: a second owner holding both a membership and direct gem ownership, an admin and a maintainer, all four evicted, and their direct roles on `organization_gem` removed.\n\n### Where the check is missing\n\n`app/policies/membership_policy.rb:10-13` is the intended boundary. It requires an existing organization owner when the role being granted is owner:\n\n```ruby\ndef create?\n  minimum_required_role = membership.owner? ? :owner : :admin\n  organization_member_with_role?(user, minimum_required_role) || deny(t(:forbidden))\nend\n```\n\nThe transfer path authorizes `OrganizationPolicy#add_gem?` instead, which requires only admin, and then never consults `MembershipPolicy`. `app/controllers/rubygems/transfer/confirmations_controller.rb:8-14` runs that organization check and calls `transfer!`. `app/controllers/rubygems/transfer/users_controller.rb:26-28` permits `invites_attributes[id, role]`. `app/models/organization_invite.rb:12-20` copies the selected role into a new `Membership`, and `app/models/rubygem_transfer.rb:18-21` appends it to the organization.\n\nCommit `0f40f5cb` (2026-05-22) added this authorization to the direct members controller, with regression tests for both routes, including `POST /organizations/:organization_handle/members as an admin inviting an owner is forbidden`. The transfer controller was not covered by that fix.\n\nAt review time the [transfer guide](https://guides.rubygems.org/organizations/transferring-gems/) allowed admins to initiate a transfer and assign the owner role, while the [member-management guide](https://guides.rubygems.org/organizations/managing-members/), `MembershipPolicy` and those May tests all reserved owner grants for owners.\n\n### Demonstrated result\n\n| Check | Before | After |\n|---|---:|---:|\n| Admin creates an organization Owner directly | 404 | created through transfer instead |\n| Admin adds a direct owner to `organization_gem` | 403 | new Owner adds it |\n| `founder` publishes `organization_gem` | 200 | 403 |\n| `second_attacker_account` publishes `organization_gem` | no membership or gem role | 200 |\n\nThe attached integration test runs this sequence against a clean local test database at the reviewed commit: 1 test, 55 assertions, 0 failures, 0 errors, 0 skips, through the real router, controllers, policies and database state. The complete numbered manual walkthrough follows as the first comment.\n\nI reproduced this against a local instance at `4e36c18d` and did not test RubyGems.org production; the reviewed transfer routes are not feature-gated. Every account, gem, API key and address in the run is synthetic and local.\n\n### Credit\n\nIf this leads to a fix, I would appreciate a published GitHub advisory that credits `timhaines`. I have no objection to disclosure of this report on HackerOne whenever suits you.\n\n## Impact\n\nThis is an admin-to-owner privilege escalation, organization takeover and targeted publisher lockout. An organization admin can use gem transfer to create an organization owner, although `MembershipPolicy#create?` and the direct membership endpoint require an existing owner for that grant. Via their added account, the attacker can remove every legitimate owner, admin and maintainer. On the demonstrated organization gem, it can add attacker direct ownership and remove the legitimate direct roles.\n\nThe founder's push key returns 200 before its membership is removed and 403 afterward, and the attacker owner then publishes with 200. The attached integration test extends the same sequence to a fuller organization: a second owner holding both a membership and a direct gem ownership also goes from 200 to 403 once both grants are removed, and an untouched direct ownership on the transferred gem still returns 200. Lockout is limited to organization membership and the direct grants the attacker removes. The initial admin could already publish and yank organization gems; the added effect is excluding legitimate publishers and their owner-level recovery paths.",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6463942,
+      "file_name": "poc-output.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ehxl3fu3zua6u429kgu645y1pxy8?response-content-disposition=attachment%3B%20filename%3D%22poc-output.txt%22%3B%20filename%2A%3DUTF-8%27%27poc-output.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3NKBJVSW%2F20261015%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261015T104225Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEAEaCXVzLXdlc3QtMiJHMEUCIBnfTi1STXgqCbg%2B7b86g6XHlgqx1RTz97pX8aWguES%2FAiEA09Amog6t8F3%2BmWn0tuIMzFTMAKQj54Eacc6MfJ9zR%2F4qugUIyv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDFezBtd2eMs8TJWtQyqOBcwAwoWhri0eERdGMFnpEowJLQCnXlaRiSVTVv8%2FRJwv5vS0do9elPUc1SvRBuYktXWSXKFHa3UuRyPC%2FXuqF4nAhxzMHNqb%2BWDPXB3hM4BSfqe5cyjXmSK8SpsidpioPbJMXjd4jbJJFmwEGfQIoxmaiZ9pGr8ObMQTgThXSCrETjOQ4JiLQvY%2FUZ2DCEb4GnnqHTlw3zWAw946yRTEoUh7LAYHkPPxDpDgvZLFI%2Bv3JH%2BHW8QoAKHnfWDNzp%2FVvx9zqc8YBZE%2BxqQ4jy0u3aAXUbF1sYlkpdG%2FqbQhqTAv4yYkoCYj3npYKiPYIXx5Pwe0rIucZQAPaBSgS2drim0Z4ERaConOfYh75bJq6d4rKG7NoJ5%2FGUIIj5WzQnPs9x7cmBfNNmWLljO41OaKGIIvSd8W8AiJrndB0bOz42L1ngKwLRlTv%2FNKKsPWwV54jJa5akmO6P%2F2nHtF70R19VBaKuN0OzsjA05IeY4MKtp970AireT4KOGKp%2F73Ss5GH2X6QO0W9uut84ErrjmeutAcfC1%2FwkKBWq%2B7Cy8ZZkBbY68Ej8MvUI3fEETr0y7D%2FAYAOKvx1EMF29lnaTpYwt7yZyKalmuUJggIs5A2j%2Ft4RmqLnlCWGwd4B4n9LS7sMFvh0fWqXWcX1dNVgAjvIogy0Q7iOFWfrxTlAWd3CbD8xt0CDxSRNGSWW2IQ3zlnQP4vn94ICt%2FEYpEK%2BxTDi2zScdBt0qcvOJFNhWGg%2FYQR072oA9m4VXQBlKTo%2Bhdk7kdquf5SNM44Iy2R0lsI8AdEgO8JMcSxPurfbOkURmpZV8qcR43C90Aiv08NBtIIZZwhe8tn9bRR1wCQNrnkzSzk812oZVCk0bB2Iq4lNDDTmsLWBjqxAQvy0vetrda2MLqJkHpHmpieSjmLbUpFILUxJ27o7lYq5O%2BLbhGirti1cszBVD0Kh7UaxhiZ5X8FCOfgLi20W5OXBua4a67mSRwyCsZxfSMNGhx%2B2ofMeUmVCjnLRVHnTja9Feul%2FnUdGubH1e2LDaUFBct7QLy5Gc0Awfn8zCRv1%2BlrSV5zhAFMkKvR8t0SvXuigrfBYSojhaXHFJYDFEbURju3TD60syedsFIgP853qQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=827af708e5670d2d7938bf43c32245516d6f38651f5bd045832e9b8c61227b4f",
+      "file_size": 3837,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 6463943,
+      "file_name": "run-poc.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/qy9c6aesp05gm5wuurl91chy8urm?response-content-disposition=attachment%3B%20filename%3D%22run-poc.sh%22%3B%20filename%2A%3DUTF-8%27%27run-poc.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3NKBJVSW%2F20261015%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261015T104225Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEAEaCXVzLXdlc3QtMiJHMEUCIBnfTi1STXgqCbg%2B7b86g6XHlgqx1RTz97pX8aWguES%2FAiEA09Amog6t8F3%2BmWn0tuIMzFTMAKQj54Eacc6MfJ9zR%2F4qugUIyv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDFezBtd2eMs8TJWtQyqOBcwAwoWhri0eERdGMFnpEowJLQCnXlaRiSVTVv8%2FRJwv5vS0do9elPUc1SvRBuYktXWSXKFHa3UuRyPC%2FXuqF4nAhxzMHNqb%2BWDPXB3hM4BSfqe5cyjXmSK8SpsidpioPbJMXjd4jbJJFmwEGfQIoxmaiZ9pGr8ObMQTgThXSCrETjOQ4JiLQvY%2FUZ2DCEb4GnnqHTlw3zWAw946yRTEoUh7LAYHkPPxDpDgvZLFI%2Bv3JH%2BHW8QoAKHnfWDNzp%2FVvx9zqc8YBZE%2BxqQ4jy0u3aAXUbF1sYlkpdG%2FqbQhqTAv4yYkoCYj3npYKiPYIXx5Pwe0rIucZQAPaBSgS2drim0Z4ERaConOfYh75bJq6d4rKG7NoJ5%2FGUIIj5WzQnPs9x7cmBfNNmWLljO41OaKGIIvSd8W8AiJrndB0bOz42L1ngKwLRlTv%2FNKKsPWwV54jJa5akmO6P%2F2nHtF70R19VBaKuN0OzsjA05IeY4MKtp970AireT4KOGKp%2F73Ss5GH2X6QO0W9uut84ErrjmeutAcfC1%2FwkKBWq%2B7Cy8ZZkBbY68Ej8MvUI3fEETr0y7D%2FAYAOKvx1EMF29lnaTpYwt7yZyKalmuUJggIs5A2j%2Ft4RmqLnlCWGwd4B4n9LS7sMFvh0fWqXWcX1dNVgAjvIogy0Q7iOFWfrxTlAWd3CbD8xt0CDxSRNGSWW2IQ3zlnQP4vn94ICt%2FEYpEK%2BxTDi2zScdBt0qcvOJFNhWGg%2FYQR072oA9m4VXQBlKTo%2Bhdk7kdquf5SNM44Iy2R0lsI8AdEgO8JMcSxPurfbOkURmpZV8qcR43C90Aiv08NBtIIZZwhe8tn9bRR1wCQNrnkzSzk812oZVCk0bB2Iq4lNDDTmsLWBjqxAQvy0vetrda2MLqJkHpHmpieSjmLbUpFILUxJ27o7lYq5O%2BLbhGirti1cszBVD0Kh7UaxhiZ5X8FCOfgLi20W5OXBua4a67mSRwyCsZxfSMNGhx%2B2ofMeUmVCjnLRVHnTja9Feul%2FnUdGubH1e2LDaUFBct7QLy5Gc0Awfn8zCRv1%2BlrSV5zhAFMkKvR8t0SvXuigrfBYSojhaXHFJYDFEbURju3TD60syedsFIgP853qQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3f9cf8a41d2634cee44eb49d6a61201001bc94ecc78f9b3ec9e969f0c51a6824",
+      "file_size": 2842,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6463944,
+      "file_name": "org_admin_grants_owner_via_transfer_test.rb",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9nmlcvc6nwyixza0wipdf1c4xjx6?response-content-disposition=attachment%3B%20filename%3D%22org_admin_grants_owner_via_transfer_test.rb%22%3B%20filename%2A%3DUTF-8%27%27org_admin_grants_owner_via_transfer_test.rb&response-content-type=text%2Fx-ruby-script&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3NKBJVSW%2F20261015%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261015T104225Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEAEaCXVzLXdlc3QtMiJHMEUCIBnfTi1STXgqCbg%2B7b86g6XHlgqx1RTz97pX8aWguES%2FAiEA09Amog6t8F3%2BmWn0tuIMzFTMAKQj54Eacc6MfJ9zR%2F4qugUIyv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDFezBtd2eMs8TJWtQyqOBcwAwoWhri0eERdGMFnpEowJLQCnXlaRiSVTVv8%2FRJwv5vS0do9elPUc1SvRBuYktXWSXKFHa3UuRyPC%2FXuqF4nAhxzMHNqb%2BWDPXB3hM4BSfqe5cyjXmSK8SpsidpioPbJMXjd4jbJJFmwEGfQIoxmaiZ9pGr8ObMQTgThXSCrETjOQ4JiLQvY%2FUZ2DCEb4GnnqHTlw3zWAw946yRTEoUh7LAYHkPPxDpDgvZLFI%2Bv3JH%2BHW8QoAKHnfWDNzp%2FVvx9zqc8YBZE%2BxqQ4jy0u3aAXUbF1sYlkpdG%2FqbQhqTAv4yYkoCYj3npYKiPYIXx5Pwe0rIucZQAPaBSgS2drim0Z4ERaConOfYh75bJq6d4rKG7NoJ5%2FGUIIj5WzQnPs9x7cmBfNNmWLljO41OaKGIIvSd8W8AiJrndB0bOz42L1ngKwLRlTv%2FNKKsPWwV54jJa5akmO6P%2F2nHtF70R19VBaKuN0OzsjA05IeY4MKtp970AireT4KOGKp%2F73Ss5GH2X6QO0W9uut84ErrjmeutAcfC1%2FwkKBWq%2B7Cy8ZZkBbY68Ej8MvUI3fEETr0y7D%2FAYAOKvx1EMF29lnaTpYwt7yZyKalmuUJggIs5A2j%2Ft4RmqLnlCWGwd4B4n9LS7sMFvh0fWqXWcX1dNVgAjvIogy0Q7iOFWfrxTlAWd3CbD8xt0CDxSRNGSWW2IQ3zlnQP4vn94ICt%2FEYpEK%2BxTDi2zScdBt0qcvOJFNhWGg%2FYQR072oA9m4VXQBlKTo%2Bhdk7kdquf5SNM44Iy2R0lsI8AdEgO8JMcSxPurfbOkURmpZV8qcR43C90Aiv08NBtIIZZwhe8tn9bRR1wCQNrnkzSzk812oZVCk0bB2Iq4lNDDTmsLWBjqxAQvy0vetrda2MLqJkHpHmpieSjmLbUpFILUxJ27o7lYq5O%2BLbhGirti1cszBVD0Kh7UaxhiZ5X8FCOfgLi20W5OXBua4a67mSRwyCsZxfSMNGhx%2B2ofMeUmVCjnLRVHnTja9Feul%2FnUdGubH1e2LDaUFBct7QLy5Gc0Awfn8zCRv1%2BlrSV5zhAFMkKvR8t0SvXuigrfBYSojhaXHFJYDFEbURju3TD60syedsFIgP853qQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=dda10618c0391b310b656c259089819e839af764d267dd71c69987382f25d60d",
+      "file_size": 14508,
+      "type": "text/x-ruby-script",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-15T07:09:17.186Z",
+  "allow_singular_disclosure_after": -12788.663400352,
+  "singular_disclosure_allowed": true,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "score": 7.0,
+    "author_type": "Team",
+    "cvss_4_point_0_metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "attack_requirements": "none",
+      "privileges_required": "high",
+      "user_interaction": "none",
+      "vulnerable_confidentiality": "none",
+      "vulnerable_integrity": "high",
+      "vulnerable_availability": "high",
+      "subsequent_confidentiality": "none",
+      "subsequent_integrity": "none",
+      "subsequent_availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 2042,
+    "asset_type": "URL",
+    "asset_identifier": "rubygems.org",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

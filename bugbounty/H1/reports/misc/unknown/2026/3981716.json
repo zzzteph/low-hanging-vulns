@@ -1,0 +1,109 @@
+{
+  "id": 3981716,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTgxNzE2",
+  "url": "https://hackerone.com/reports/3981716",
+  "title": "Cross-origin redirect reuses a pooled Negotiate-authenticated connection from an unrelated transfer",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-08-31T03:51:18.995Z",
+  "submitted_at": "2026-08-31T03:51:19.354Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "silentsobs_",
+    "url": "/silentsobs_",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-1965"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-15T07:19:15.463Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-15T06:04:44.265Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "AI Disclosure: AI tools were used to assist with code analysis and drafting this report. All findings were independently investigated, verified against the source, and reproduced manually by me before submission.\n\n## Summary\n\ncurl withholds a fresh `Authorization` header when a redirect crosses origins. That protection doesn't extend to connection reuse. If an application shares a connection cache across transfers, and one transfer already completed connection-bound Negotiate auth to a trusted host, a later transfer can hit an attacker-controlled origin, get redirected back to the trusted host, and reuse the already-authenticated pooled connection for the final request. No `Authorization` header goes out. Since Negotiate binds auth to the connection rather than the request, the server treats it as coming from the previously authenticated principal anyway.\n\nIn our lab, Apache with mod_auth_gssapi executed a state-changing request as `alice@EXAMPLE.COM` with no `Authorization` header present at all. This isn't a header leak; that path is already covered. It's a mismatch between `data->state.initial_origin`, which the header-generation check uses, and `data->state.origin`, which `url_match_auth_nego()` in `lib/url.c` uses for the connection-reuse check.\n\n\n\n## Affected version\n\nReproduced on curl/libcurl git master, commit `aab0518d04`, reporting as `8.22.0-DEV`.\n\n```\n$ curl -V\ncurl 8.22.0-DEV (x86_64-pc-linux-gnu) libcurl/8.22.0-DEV OpenSSL/\n```\n\nThis isn't a regression with a fix already staged. I diffed `url_match_auth_nego()` between the latest stable release (curl-8_21_0) and master to check. There's a diff in that function, but it's unrelated: it's the fix for GitHub issue #21307, the follow-up to CVE-2026-1965, which addressed the original fix being too strict about upgrading a connection from no credentials to with credentials before Negotiate starts. That change reordered the if/else if branches, added `url_allow_sspi_empty_creds()` calls, and changed how the NULL-credential-upgrade case is handled. None of that touches this bug.\n\nThe line that matters is identical in both versions:\n\n```c\n!Curl_peer_equal(conn->creds_origin, m->data->state.origin)\n```\n\nThe issue is live in both the current stable release and git master.\n\n## Steps to reproduce\n\nYou need a curl build with GSS-API/Negotiate support, a shared connection cache (one `CURLM*`/easy handle reused across transfers, or the share interface), and a test server doing connection-bound Negotiate auth (Apache + mod_auth_gssapi with `GssapiConnectionBound On` works).\n\n1. Set up two hosts (`CURLOPT_RESOLVE` to localhost works fine):\n   - `trusted.example:8081`: Apache with mod_auth_gssapi, `GssapiConnectionBound On`, an authenticated `/legit` endpoint, and a state-changing `/admin/action` endpoint.\n   - `attacker.example:8082`: any server that answers `/hook` with:\n     ```\n     HTTP/1.1 302 Found\n     Location: http://trusted.example:8081/admin/action\n     ```\n\n2. On one curl handle, with `CURLOPT_HTTPAUTH = CURLAUTH_NEGOTIATE`, `CURLOPT_FOLLOWLOCATION = 1L`, and a Kerberos ticket available for a principal (say `alice`):\n\n   ```c\n   /* Transfer 1: authenticate to the trusted host; connection stays pooled */\n   curl_easy_setopt(h, CURLOPT_URL, \"http://trusted.example:8081/legit\");\n   curl_easy_perform(h);\n\n   /* Transfer 2: visit the unrelated attacker host, which redirects back */\n   curl_easy_setopt(h, CURLOPT_URL, \"http://attacker.example:8082/hook\");\n   curl_easy_perform(h);\n   ```\n\n3. Check the server side (access log, plus a CGI/script at `/admin/action` logging incoming headers and `REMOTE_USER`):\n   - The final request to `/admin/action` carries no `Authorization` header.\n   - The response is `200 OK`, not `401`.\n   - The log records the authenticated principal as `alice@EXAMPLE.COM`. The state-changing action ran under a Kerberos identity via a request that carried no credentials of its own.\n\n4. Two controls confirm the mechanism:\n   - **Fresh connection**: repeat step 2's second transfer on a handle that never ran step 2's first transfer. Result: `401 Unauthorized`, no side effect. So the `200` depends on reused connection state, not independent authorization.\n   - **Single-transfer redirect**: one transfer following `trusted → attacker → trusted` in a single `curl_easy_perform()` doesn't reproduce it. curl sends a fresh `Authorization: Negotiate` header and does a normal exchange back at `trusted.example`. So the existing single-transfer redirect protection is intact. The gap is specific to reuse across separate transfers.\n\nReproduced twice independently, with different Kerberos realms, hostnames, credentials, and containers both times. Same result each time.\n\n## Impact\n\n## ---- ##",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

