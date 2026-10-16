@@ -1,0 +1,128 @@
+{
+  "id": 4028616,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDI4NjE2",
+  "url": "https://hackerone.com/reports/4028616",
+  "title": "Memory exhaustion (DoS) via unbounded file read in `EncodingDiscovery.detect_encoding()`",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-14T11:42:59.495Z",
+  "submitted_at": "2026-09-14T11:42:59.813Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "sumit-sabhaya",
+    "url": "/sumit-sabhaya",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/3qa7ji47fvzz8y3kgjp4jx63yeet/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19468,
+    "url": "https://hackerone.com/weblate",
+    "handle": "weblate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Weblate",
+      "twitter_handle": "WeblateOrg",
+      "website": "https://weblate.org/",
+      "about": "Weblate is a libre software web-based continuous localization system"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-16T10:08:54.470Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-16T10:08:53.905Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`EncodingDiscovery.detect_encoding()` in `translation_finder/discovery/base.py` passes the raw file handle to `charset_normalizer.from_fp()`, which internally does `from_bytes(fp.read())` — the **entire file is loaded into memory**, with no size cap. Every other sniffing path in this codebase is bounded at 1 MiB (`FORMAT_SNIFF_MAX_BYTES` in `discovery/files.py`); this one is not.\n\nResult: a single oversized translation file (e.g. a 128 MiB `cs.properties`) makes a `discover()` run's peak RSS grow to **~3× the file size (~403 MiB)**, which deterministically OOM-kills a discovery worker on constrained containers. Repro and evidence below.\n\n## Vulnerability Details\n\n- **Weakness:** CWE-770 (Allocation of Resources Without Limits or Throttling)\n- **Product:** `WeblateOrg/translation-finder` 3.4.1 — also present on current `main` (`e94e820`)\n- **Environment:** Python ≥ 3.11, Linux x86_64, charset-normalizer 3.4.3/3.5.1\n- **Reachable from:** Weblate component discovery addon, Add Component flow, Transifex config import; runs after every VCS update\n\n### Root cause\n\n`translation_finder/discovery/base.py` (`detect_encoding`, v3.4.1):\n\n```python\n446  for path in chain(*matches):\n447      if not isinstance(path, Path):\n448          continue\n449      with self.finder.open(path, \"rb\") as handle:\n451          detection_result = from_fp(handle).best()   # <-- fp.read() whole file\n```\n\n`charset_normalizer/api.py`:\n\n```python\n826  return from_bytes(\n827      fp.read(),          # <-- no limit\n```\n\n### Trigger conditions\n\nA single matched file is enough, fully read in one call:\n\n- **Normal mode:** any language-named file (`locale/cs.properties`) — and, as traced, plain filenames like `data.properties` are also fully read whenever a `.properties` component exists (`detect_encoding()` iterates all mask matches).\n- **Eager mode:** every known-format file.\n- Cost scales with file size (~3× RSS) and with the number of directories/files (`from_fp` is called once per match: 3 dirs with the same 16 MiB file = 48 MiB read).\n\n## Steps To Reproduce\n\n## Step 1. Setup\n```bash\npython3 -m venv tfenv && source tfenv/bin/activate\npip install \"translation-finder==3.4.1\"\n```\n\n## Step 2. Repo with one large translation file (128 MiB)\n```bash\nmkdir -p /tmp/encpoc/locale\nprintf 'greeting=Hello\\n' > /tmp/encpoc/locale/en.properties\npython3 -c \"open('/tmp/encpoc/locale/cs.properties','wb').write(b's=' * 67108864)\"\n```\n\n## Step 3. Watch memory\n```bash\n/usr/bin/time -v python3 -c \"from translation_finder.api import discover; discover('/tmp/encpoc')\" 2>&1 | grep \"Maximum resident\"\n```\nExpect ~400 MB peak for 128 MiB file (baseline ~12 MB)\n\n## Step 4. Worker-OOM proof (use a 32 MiB file for speed: b's=' * 16777216)\n```bash\nbash -c 'ulimit -v 90000; python3 -c \"from translation_finder.api import discover; discover(\\\"/tmp/encpoc\\\")\"' 2>&1 | tail -2\n```\nExpect: MemoryError at charset_normalizer/api.py   (cap 130000 -> completes fine)\n\n## Remediation\n\nRead a bounded sample, same as the other sniffers:\n\n```python\nSNIFF_LIMIT = 1024 * 1024  # same as FORMAT_SNIFF_MAX_BYTES\nwith self.finder.open(path, \"rb\") as handle:\n    sample = handle.read(SNIFF_LIMIT)\n    detection_result = from_bytes(sample).best()\n```\n\nOr reuse `_read_binary_sniff_content()` / `_is_sniff_content_over_limit()` and skip oversized files entirely. The unbounded `fp.read()` in `charset_normalizer.from_fp()` is upstream behavior; the fix belongs in translation-finder.\n\n## Supporting Material\n\nReporter measurements (subprocess-isolated `ru_maxrss`, baseline ~11.8 MiB):\n\n| File | Peak RSS | Δ RSS | Ratio |\n|---|---|---|---|\n| 32 MiB `cs.properties` | 117 MiB | +105 MiB | 3.28× |\n| 64 MiB `cs.properties` | 211 MiB | +199 MiB | 3.11× |\n| 128 MiB `cs.properties` | 403 MiB | +391 MiB | 3.06× |\n\nIndependent re-verification (`main@e94e820`, charset-normalizer 3.5.1): 32 MiB file → peak 116.5 MiB (+103.3 MiB, 3.23×); instrumented `from_fp`: 1 call, exact file size read; cap test `ulimit -v 90000` → `MemoryError`, `130000` → OK. Control: a 100 MiB `cs.json` through the capped path (`_read_binary_sniff_content`) adds only ~2 MiB RSS.\n\nAttachments: `poc_encoding_mem2.py`, `poc_oom_child.py`, `poc_aggregate_eager.py`, `poc_bytes_aggregate.py`, `results_measurements.txt`.\n\n## Impact\n\nAvailability only. A 100 MiB blob (within GitHub's push limit) already costs ~300 MiB RSS per scan — enough to OOM a 512 MiB container; self-hosted forges allow much larger blobs. Triggered automatically on VCS updates, so no extra action needed beyond pushing to a watched repository.\nCVSS 3.1: `AV:N/AC:L/PR:L/UI:N/S:U/C:N/I:N/A:H` = **3.7** (admin/import flows) or **5.5** with `PR:N` where webhooks/PR-driven scans make it reachable by unprivileged contributors.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6718513,
+      "file_name": "Memory-spike-when-encoding-sniffing-reads-the-whol.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/z8a1r5h9zk2iwfs5iyw3b0zpwkjl?response-content-disposition=attachment%3B%20filename%3D%22Memory-spike-when-encoding-sniffing-reads-the-whol.zip%22%3B%20filename%2A%3DUTF-8%27%27Memory-spike-when-encoding-sniffing-reads-the-whol.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQX7B2MKPU%2F20261016%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261016T102928Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBkaCXVzLXdlc3QtMiJHMEUCIG%2FnaEhCj3lXjpej4D1fpbHJwRBgdKvzz8Bsq6axKTA0AiEA8gfmUWYyR7DUnEBmeOOC2wul8hbuSZ9ZeyDplzvX%2BVAquwUI4v%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDOuu%2FzdXZtXl5WC%2BvCqPBSKTSPKwBditV408sznewgIGN3q1m74hA8dCC5swiCoJfKb2yEIoOttA6E1hAWW2g9gjvTTfJby3aNP%2Fjzi6Spo2ueEzn9%2Ft4c7HdshEqhy%2BchWFblbV7mZKUAqVTI59EUHJPbJ1JGsoa5t3to6yS487vXGBQaE%2F45vm%2FFuei2wdfo%2BI3E0IVN8ZjdxAxY8J71s4vxAqHet56qe%2FmxxIRcbOZkDEPCROz14s6EezBAnP%2BslWVzD2P8f1X1ccbck1KhKO0BPGV75Ho3d2Y0RPQYWuU9F%2FV1w%2FbfEhw1JhJM6uwC92QqMRkdrl%2BfXeE65UlBFT8fZidw1z7eaNcb0pM2rAjY1oRrTxsbn31bS4rm%2F%2FcC4d4B5G%2Bs%2FmG9Qn%2BHm6jHHHIkrcW69BzSUhVLnXa0tSh3dXhuz9n2%2BcmEKBzgmJEN%2B105bAVTSTS5HH4%2FvPQLRaMsuZ6vWK2095iuBH4cWMXwegVy2Noos2nbjkb%2FZBN2PC9%2B%2BZ0H7D1cNeS9xWATl0S0lZVZtFFrjMDkqGo3Gk6vRUKeFt2YnupB2jgoP%2FXYG6SFyhpljYzkBkS06fAg209b7hxVdo4GvsQSSA%2BUYtuauRsq6UnD2z3iywc07wBtJtdJzcsQnllCUDaFjOF1yLm4o2rbdcjBDu2ZxzbpoOPyyfUC3jb%2Bxz8lGDYpom39vN%2FtVPf0f5xZr7R6v%2FKmZE0r5NfzqlyfnGCMUMR1VKcKurYgugzvMQ0mVX1nZDIBVxkWcuQQg%2FnQ7dhWPowd2vRvVXmYblJkvY0HSnjqAhtL%2BClxQOQ8rMWcLPovsIOktsFbCdDW6q%2Bz2r0wxOWMXDbqT%2F47coZYhgVZJnXYNXovMO3ITxG3YQ88C2F0Uwu8DH1gY6sQFoKV5huBiTGr07iK13KdKZK6HUluExPpG0UUkvxQq9rSlt1ZKIyF3BycueVgAi4Kl8oVWunF85DGlAFdoWt5tK9j8arlOMN3mMd1KKflwmxSngD7MwrjpsPFNdFYrwxiSSR0ZDrA7iZ6StNCRmigZbMDjkLGCQC5PefoOtQnINvGDRrPZydQ8zbGj4TU%2FdRndAZ3djUS9zOW7L7TBmBc0o%2BtHAblHmtUudWfpRfOFmVCw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d2b2d1501def037d53573a12c7bcbbed8821963a2638eef793936f008bbbd7ab",
+      "file_size": 9897,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-16T10:08:54.379Z",
+  "allow_singular_disclosure_after": -1234.21365673,
+  "singular_disclosure_allowed": true,
+  "vote_count": 5,
+  "voters": [
+    "xlsize0bruh",
+    "2026",
+    "sumit-sabhaya",
+    "yuvi-bounty",
+    "robin-sabhaya"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 31977,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/WeblateOrg/translation-finder",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

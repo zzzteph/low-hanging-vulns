@@ -1,0 +1,139 @@
+{
+  "id": 4103651,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTAzNjUx",
+  "url": "https://hackerone.com/reports/4103651",
+  "title": "TFTP accepts a first response from an IP other than the requested server",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "low",
+  "readable_substate": "N/A",
+  "created_at": "2026-10-10T19:27:33.212Z",
+  "submitted_at": "2026-10-10T20:24:39.144Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "sushiikan",
+    "url": "/sushiikan",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-16T07:25:36.541Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-15T14:46:54.408Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary:\nWhen curl sends a TFTP request to the IP in the URL, it accepts the first valid response from any source IP and pins that sender as the transfer peer. A host that can get UDP packets to the client's ephemeral port and win this first-response race can receive bytes from a TFTP upload or provide the contents of a download\n\n### Affected version\nTested with curl 8.22.0 and master commit `098d3a0d4044d8a3f0a8617a5a5a30cde90fba26`, on Linux in isolated network namespaces, with TFTP enabled. The release test recorded 5/5 synthetic uploads reaching the competing responder and 3/5 downloads returning its data, these are results from this isolated environment setup, not a general success rate. \n\n### Steps To Reproduce:\n1. Build curl 8.22.0 with TFTP support on Linux\n2. In an isolated Linux environment that supports unprivileged user and network namespaces, place `tftp-test.py` and `tftp-test-spray.c` from the attachments in the same directory.\n3. Run `python3 tftp-test.py /path/to/curl-8.22.0/curl --seconds 2 --trials 5 --start-delays-ms 0,250,500,750,1000`.\n4. Review the harness output and `ftft-testing.log`\n5. For the control, repeat the run with `--drop-attacker`, the competing responder should no longer win.\n\n## Root cause\n\nThe initial RRQ/WRQ is sent to the URL-selected address obtained from `Curl_conn_get_remote_addr()` (`lib/tftp.c:754-761`). On receive, `recvfrom()` supplies a sender address. The current logic checks it only after a peer has already been pinned; the first sender is copied directly into `state->remote_addr`. This simplified excerpt is from `tftp_receive_packet()` (`lib/tftp.c:1057-1071`):\n\n```c\nif(state->remote_pinned) {\n  if((state->remote_addrlen != fromlen) ||\n     memcmp(&remote_addr, &state->remote_addr, fromlen))\n    return CURLE_RECV_ERROR;\n}\nelse {\n  state->remote_pinned = TRUE;\n  state->remote_addrlen = fromlen;\n  memcpy(&state->remote_addr, &remote_addr, fromlen);\n}\n```\n\nThis pins the first packet's complete endpoint, including its source IP and UDP port, but does not compare that IP with the address used for the request. The later comparison only ensures subsequent packets match the first responder; it cannot reject a different host that wins the first-response race. TFTP servers use a new UDP transfer port, so curl should allow that port change while requiring the first response's address family and IP (and IPv6 scope, where applicable) to match the URL selected endpoint. It can then pin the accepted transfer port and validate later packets against that transfer endpoint.\n\n## Limitations\n\nThe attack requires unsolicited UDP packets to reach curl's ephemeral TFTP port and the competing response to arrive before the selected server's response. Stateful firewalls and NAT can prevent that reachability.\n\n## Impact\n\nIf an application relies on the TFTP URL's IP to select a trusted endpoint, an attacker able to reach the client's ephemeral UDP port and win the race can read the file being uploaded or make the application consume attacker-chosen download data as a successful transfer.",
+  "weakness": {
+    "id": 30,
+    "name": "Man-in-the-Middle"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6957744,
+      "file_name": "ftft-testing.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9l8vb9uj5tuvlbc9ks9x9tgs8iab?response-content-disposition=attachment%3B%20filename%3D%22ftft-testing.py%22%3B%20filename%2A%3DUTF-8%27%27ftft-testing.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2PQNA3XU%2F20261016%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261016T102929Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBkaCXVzLXdlc3QtMiJIMEYCIQDOGeJ7zICqaUzV6JyIMwcA9jErK8gJkbwlb7C4VtbbEwIhAPSjGEp9ZrWUPdhXEqaVQJoEc0VW10cDqt1FSIf8MskvKroFCOH%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxPDirzoozaz2VHzbAqjgX8TT%2FOhDRARzxB35%2FfeItayDTfQsUTjQeyFF9J1jZXyy91UQRqLCBxdRf80BR8J64RxHMkof4%2BMLUGfkj2KKn4ci0Lv9jg9rwhGqpaYcHwUQVMAGMDPOA1SGd5tTJyG27YZEoNNPPX5ze%2F5pTF4ebFwaLulQrvSxjfiObcLeGg8ryt68z1GEzefN2rzhhghj0EXNIjr0Lsym2uPOt5tvCBorxxQtzs3phMPAVREv41EslGJ9mi%2BD2oTcNoKPSyum4y1rbJVsIFkxyEH2jMHstIIrWGoOiPwTtxzGyOhbQgtwSb1ZMINCChbtfLKWlp91F%2F61jPXTOYFQVV5Kk%2BWRaIkhekeBg%2Fb8SAeDKDGfo8Tud6hYuVP%2FZdHfFKskdTeh4P7brNMZzntUmyNJqzXAFCrVwEk0QxM6AI3sH9zePDTHmQbz7ArCMqS46LlpW5QbmNCdquMnjBzX5vUig3R%2FKpkjiVg9%2BCZW85MgfqEjedIcaRMqCyVlOBjM8EzY3ZNytnkN%2BC%2FceyNJA8TV1zRZGGdSbxPGovI1RDwoMTGpTPRKRgt229Qv3hFJFZiIp2lLwLCm1A%2BRS7L1KTbplvsyRToqXAQct1VZJL7gyNa%2FNlKsExujLgtq%2B1GSf4NfTBdfpgCfDRc0ePCFtaWAA%2FY7I4FwKOSg1oR21XB9u5alXMKc5LZROmdQnoEYYA22g5TK0m5Yr2uwu0Xmd4i8%2F%2B0zzNIqnt7%2FX%2FzarcekgaDL8CdaCDKMRmaaKj5dQx4w2mV51Yeot6NzdgkiW857E4Q4Muzhcl%2BImTcdw%2BGl5LcOVc0IRIc4cGiI52L2gn8Pzs%2B55JRQNPp2UjcIckvXB%2BvaNWqkHlxEiM3qfNsU0ymbUw77zH1gY6sAHPrtTUfc76UmIteIrbNaU2I1UhUdJNuYliq4ZFq45mVLCpZW%2FGN570%2Fjb6LOfh9%2BH3N57a%2F%2FxDbA7CxL%2Bd%2BMykw7SWcakSJwyrbZm4p%2BSYzZ4aGHMLZGUOlbK1v8zWVOjlO%2BtLo0OlF5INa06WT6%2BQ4us5Q5XozzJD4q4T%2FTQoA9hlAInVRXDrHww5zIw7LdB9hJR%2Bfa5e%2BA%2Ffheuvrqsn1LmHdBy9WCOwPDd50H7Z9A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2853993a6d343c5a38b61dbfde8fe9b1104f8b19e6d57d5f989e97f1ada201d3",
+      "file_size": 12250,
+      "type": "text/x-python",
+      "moderated": null
+    },
+    {
+      "id": 6957749,
+      "file_name": "ftft-testing-spray.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/2sc0bodspa4gbqza1tolib5phndg?response-content-disposition=attachment%3B%20filename%3D%22ftft-testing-spray.c%22%3B%20filename%2A%3DUTF-8%27%27ftft-testing-spray.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2PQNA3XU%2F20261016%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261016T102929Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBkaCXVzLXdlc3QtMiJIMEYCIQDOGeJ7zICqaUzV6JyIMwcA9jErK8gJkbwlb7C4VtbbEwIhAPSjGEp9ZrWUPdhXEqaVQJoEc0VW10cDqt1FSIf8MskvKroFCOH%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxPDirzoozaz2VHzbAqjgX8TT%2FOhDRARzxB35%2FfeItayDTfQsUTjQeyFF9J1jZXyy91UQRqLCBxdRf80BR8J64RxHMkof4%2BMLUGfkj2KKn4ci0Lv9jg9rwhGqpaYcHwUQVMAGMDPOA1SGd5tTJyG27YZEoNNPPX5ze%2F5pTF4ebFwaLulQrvSxjfiObcLeGg8ryt68z1GEzefN2rzhhghj0EXNIjr0Lsym2uPOt5tvCBorxxQtzs3phMPAVREv41EslGJ9mi%2BD2oTcNoKPSyum4y1rbJVsIFkxyEH2jMHstIIrWGoOiPwTtxzGyOhbQgtwSb1ZMINCChbtfLKWlp91F%2F61jPXTOYFQVV5Kk%2BWRaIkhekeBg%2Fb8SAeDKDGfo8Tud6hYuVP%2FZdHfFKskdTeh4P7brNMZzntUmyNJqzXAFCrVwEk0QxM6AI3sH9zePDTHmQbz7ArCMqS46LlpW5QbmNCdquMnjBzX5vUig3R%2FKpkjiVg9%2BCZW85MgfqEjedIcaRMqCyVlOBjM8EzY3ZNytnkN%2BC%2FceyNJA8TV1zRZGGdSbxPGovI1RDwoMTGpTPRKRgt229Qv3hFJFZiIp2lLwLCm1A%2BRS7L1KTbplvsyRToqXAQct1VZJL7gyNa%2FNlKsExujLgtq%2B1GSf4NfTBdfpgCfDRc0ePCFtaWAA%2FY7I4FwKOSg1oR21XB9u5alXMKc5LZROmdQnoEYYA22g5TK0m5Yr2uwu0Xmd4i8%2F%2B0zzNIqnt7%2FX%2FzarcekgaDL8CdaCDKMRmaaKj5dQx4w2mV51Yeot6NzdgkiW857E4Q4Muzhcl%2BImTcdw%2BGl5LcOVc0IRIc4cGiI52L2gn8Pzs%2B55JRQNPp2UjcIckvXB%2BvaNWqkHlxEiM3qfNsU0ymbUw77zH1gY6sAHPrtTUfc76UmIteIrbNaU2I1UhUdJNuYliq4ZFq45mVLCpZW%2FGN570%2Fjb6LOfh9%2BH3N57a%2F%2FxDbA7CxL%2Bd%2BMykw7SWcakSJwyrbZm4p%2BSYzZ4aGHMLZGUOlbK1v8zWVOjlO%2BtLo0OlF5INa06WT6%2BQ4us5Q5XozzJD4q4T%2FTQoA9hlAInVRXDrHww5zIw7LdB9hJR%2Bfa5e%2BA%2Ffheuvrqsn1LmHdBy9WCOwPDd50H7Z9A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2b823ce36bfb1041c99afc080d20b254d56b9762b0884db24c04328298176f81",
+      "file_size": 5602,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6957752,
+      "file_name": "tftp-result.pcap",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/20ek2st1a1sirp5xloi7d0lns429?response-content-disposition=attachment%3B%20filename%3D%22tftp-result.pcap%22%3B%20filename%2A%3DUTF-8%27%27tftp-result.pcap&response-content-type=application%2Fvnd.tcpdump.pcap&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2PQNA3XU%2F20261016%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261016T102929Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEBkaCXVzLXdlc3QtMiJIMEYCIQDOGeJ7zICqaUzV6JyIMwcA9jErK8gJkbwlb7C4VtbbEwIhAPSjGEp9ZrWUPdhXEqaVQJoEc0VW10cDqt1FSIf8MskvKroFCOH%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxPDirzoozaz2VHzbAqjgX8TT%2FOhDRARzxB35%2FfeItayDTfQsUTjQeyFF9J1jZXyy91UQRqLCBxdRf80BR8J64RxHMkof4%2BMLUGfkj2KKn4ci0Lv9jg9rwhGqpaYcHwUQVMAGMDPOA1SGd5tTJyG27YZEoNNPPX5ze%2F5pTF4ebFwaLulQrvSxjfiObcLeGg8ryt68z1GEzefN2rzhhghj0EXNIjr0Lsym2uPOt5tvCBorxxQtzs3phMPAVREv41EslGJ9mi%2BD2oTcNoKPSyum4y1rbJVsIFkxyEH2jMHstIIrWGoOiPwTtxzGyOhbQgtwSb1ZMINCChbtfLKWlp91F%2F61jPXTOYFQVV5Kk%2BWRaIkhekeBg%2Fb8SAeDKDGfo8Tud6hYuVP%2FZdHfFKskdTeh4P7brNMZzntUmyNJqzXAFCrVwEk0QxM6AI3sH9zePDTHmQbz7ArCMqS46LlpW5QbmNCdquMnjBzX5vUig3R%2FKpkjiVg9%2BCZW85MgfqEjedIcaRMqCyVlOBjM8EzY3ZNytnkN%2BC%2FceyNJA8TV1zRZGGdSbxPGovI1RDwoMTGpTPRKRgt229Qv3hFJFZiIp2lLwLCm1A%2BRS7L1KTbplvsyRToqXAQct1VZJL7gyNa%2FNlKsExujLgtq%2B1GSf4NfTBdfpgCfDRc0ePCFtaWAA%2FY7I4FwKOSg1oR21XB9u5alXMKc5LZROmdQnoEYYA22g5TK0m5Yr2uwu0Xmd4i8%2F%2B0zzNIqnt7%2FX%2FzarcekgaDL8CdaCDKMRmaaKj5dQx4w2mV51Yeot6NzdgkiW857E4Q4Muzhcl%2BImTcdw%2BGl5LcOVc0IRIc4cGiI52L2gn8Pzs%2B55JRQNPp2UjcIckvXB%2BvaNWqkHlxEiM3qfNsU0ymbUw77zH1gY6sAHPrtTUfc76UmIteIrbNaU2I1UhUdJNuYliq4ZFq45mVLCpZW%2FGN570%2Fjb6LOfh9%2BH3N57a%2F%2FxDbA7CxL%2Bd%2BMykw7SWcakSJwyrbZm4p%2BSYzZ4aGHMLZGUOlbK1v8zWVOjlO%2BtLo0OlF5INa06WT6%2BQ4us5Q5XozzJD4q4T%2FTQoA9hlAInVRXDrHww5zIw7LdB9hJR%2Bfa5e%2BA%2Ffheuvrqsn1LmHdBy9WCOwPDd50H7Z9A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=dfa2f32bdcaaed1a5214b310dc24bf14d4093bb39e0d61334ad95d0bfef54a1d",
+      "file_size": 4553,
+      "type": "application/vnd.tcpdump.pcap",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 2,
+  "voters": [
+    "yuvi-bounty",
+    "vermouths"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
