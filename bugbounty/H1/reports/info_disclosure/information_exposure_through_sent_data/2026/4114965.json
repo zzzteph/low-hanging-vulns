@@ -1,0 +1,120 @@
+{
+  "id": 4114965,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTE0OTY1",
+  "url": "https://hackerone.com/reports/4114965",
+  "title": "Explicit NO_PROXY /0 CIDR rules fail to bypass HTTP proxy for IP-literal requests",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-10-14T21:53:32.195Z",
+  "submitted_at": "2026-10-14T21:53:32.512Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "bootherr",
+    "url": "/bootherr",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-17T09:44:04.431Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-16T09:55:58.783Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\nWith an HTTP proxy configured, I found that curl sends IPv4 address-literal requests through it with `NO_PROXY=0.0.0.0/0`, and IPv6 address-literal requests through it with `NO_PROXY=::/0`. A zero-bit CIDR prefix should match every address in its family, so those requests should bypass the proxy. A mixed rule such as `NO_PROXY=0.0.0.0/0,::/0` lets a caller keep numeric destinations direct while continuing to proxy named hosts. In my local proof of concept, the proxy received an absolute-form HTTP request target including the `/private` path and a synthetic origin `Authorization` header, while `/1` controls connected directly to the origins. I used AI assistance during the investigation and drafting, then reviewed the attached PoC and evidence myself.\n\n## Affected version\n\nReproduced with curl source tag `curl-8_23_0` (commit `3163ec065643ba20709f190111f42c3e1fe95273`) on macOS, Darwin 25.5.0, arm64. The local CMake build reports `8.23.0-DEV` in its version banner; the checkout is the exact `curl-8_23_0` tag.\n\n```text\n$ /path/to/built/curl -V\ncurl 8.23.0-DEV (Darwin) libcurl/8.23.0-DEV OpenSSL/4.0.3 nghttp2/1.70.0\n```\n\n## Steps To Reproduce:\n\n1. Build curl from tag `curl-8_23_0`, or use a curl 8.23.0 executable. Extract the attached `curl-no-proxy-zero.zip` with `unzip curl-no-proxy-zero.zip` and enter `package-no-proxy`.\n2. From the extracted `package-no-proxy` directory, run the Python 3 standard-library PoC with the path to that curl executable:\n\n   ```sh\n   python3 poc_no_proxy_zero.py /absolute/path/to/built/curl\n   ```\n\n3. The script starts only local loopback origin and proxy listeners. It compares `NO_PROXY=0.0.0.0/0` with `NO_PROXY=0.0.0.0/1`, `NO_PROXY=::/0` with `NO_PROXY=::/1` when IPv6 loopback is available, and the mixed `0.0.0.0/0,::/0` rule with a named-host control. It uses only the synthetic credential `demo:secret` and makes no external network request.\n4. Expected: the `/0` rules send IP-literal requests directly to their origins, while the mixed rule still proxies the named host. Observed: both `/0` IP-literal requests reach the proxy with an absolute-form request target and origin Basic credentials; the `/1` controls reach their origins directly and the named host remains proxied. One local run included:\n\n   ```text\n   NO_PROXY=0.0.0.0/0: reached proxy, including origin Basic credentials\n   GET http://127.0.0.1:58653/private HTTP/1.1\n   Authorization: Basic ZGVtbzpzZWNyZXQ=\n   NO_PROXY=0.0.0.0/1: reached origin directly (control)\n   NO_PROXY=::/0: reached proxy, including origin Basic credentials\n   NO_PROXY=::/1: reached IPv6 origin directly (control)\n   ```\n\nThe source explains the result: `lib/proxy.c:166,175-189` gives a bare address and an explicit `/0` the same `bits = 0` value; `cidr4_match()` at lines 72-86 treats zero as an exact-address comparison, and `cidr6_match()` at lines 101-103 changes zero to 128 bits. The ZIP includes the complete PoC, line-numbered source and documentation excerpts, and the captured local run.\n\n## Impact\n\n## Summary:\nWhen a caller uses `/0` to keep IP-literal destinations off a configured HTTP proxy while still proxying named hosts, curl can instead send the proxy an absolute-form HTTP request target including its path, plus origin `Authorization` credentials supplied with `--user`. The proxy or its logs can therefore receive paths and credentials intended only for the origin. This requires an explicit `/0` rule, a configured proxy, and a sensitive plain-HTTP request; a conventional HTTPS CONNECT proxy does not see origin headers inside TLS without interception. Suggested severity: Low.\n{F6991259}",
+  "weakness": {
+    "id": 113,
+    "name": "Information Exposure Through Sent Data"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6991277,
+      "file_name": "curl-no-proxy-zero.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/7sj9mqo99ke07zn9dy8ub0l8qan8?response-content-disposition=attachment%3B%20filename%3D%22curl-no-proxy-zero.zip%22%3B%20filename%2A%3DUTF-8%27%27curl-no-proxy-zero.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQUJEVLRLP%2F20261017%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261017T100014Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEDEaCXVzLXdlc3QtMiJHMEUCIGs4VMc1tWzj3398ibFArvK%2FPUt494eYfyOE00TMr16aAiEAkVg5OSRFc0c0UX4IS07QxaDPm9gLvk2H7NR%2FLrX%2FjK0quwUI%2Bv%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDLvgHLjATNAc%2FQpSECqPBbq6g3vNABrnwO9U6hskpFLoQFSra7cpFKF%2BlfzFaGa3rSbCl2jydqbzhTOK935Vo%2FSG3RIfu9d0kYsTxerWwp%2BLpnkQZn%2FNcLBkSAVwBnuBOAujoFruqhF9jVfCpmPUWbBM%2BFtet%2FFqloBmTGD4SOaiFVSOwH4o0UOvtrKefcSOj7gSpQbMA2tfSuEj87o0wSTOhiah5d%2BKCrxJ6jFX%2ByOsx3gCebhz7%2Bxi7Ncxd4fokn%2BmMVaK6ukW6JytB5ZN%2BduOl4CvoKE39TMBSYreu1qPT4fzR0Oe3hSssIgPCgaQ4bHp6dcSUX9%2FEpn7KOyK7OxNkAyBWL0Snt44dj7DOqzL3QxfLH9RSbt5DQDqFd%2BGnKUIWi7sMS6EgGG%2FW7ze7qJEha1yNR0B83UiSHnux5ZIuSyvSOG5g5SKNTOpU6ZwIT5rw822cCHUdLe5Z4lHjz2jMzODfavCrAWcRhrCmjy4tcNBwiPRID79oNBu1UM5RXiXjEE4Qrtxa9oQcF77rN1Aqm50RJsmm7qPPIbdgwBTDqPFrZfaMoQUnnDgbv2b0EleCb8lIkBemgYk5XQq26gR4s%2BDsgGIMrQiQclC8JkzWTFKfMbx%2FuOmUOkxxdITL%2B3hClLRvbXVs7zPALbMjIw4uzMqB8dzLKsNYyKcjCs1ClPaq%2B02POt5Kug6Jx2U9BXc%2FIyzoUcTKpbWhhY%2B%2FYhBF2bmdDKrQSX69qYqcpY4dgJ8Wv7%2FbeQ5Q7SuxjPiy3x%2F0hbMDYuKImlYLRysg2HixuK7or3Lnw76VyT2zGZZ%2BGAziRbYDALC12KmKxCSEvWKeBlBOUOkUuPxEzsOsNTzZpYgRN49GNywxl%2BgIWq839JRDNLZN6AK7XrmEeww0PDM1gY6sQHP3Ki0nCvTvGHCunZth71NGLDA%2BtW%2FiUMY3k974Wb7Q8qE5VMwrQ7e1T4Nq87bCvgMLNLbqlCTcodc2GhqeJ4IbBBNpUusMCDimkvWN3T59Ot1xzK8%2FrvQAFqZGQfPzCNaj4eRVm7tSWuegWgSGs%2FhdL6t1%2FfCaCpi%2FyfViz1owuQf3gGtCfRBD5nSVB8C0MMvFulZroQkqoSWGPu3PeShM3PFsDmbZg0MD%2BmG3MyAmAA%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=394a5be44700edcf46baf60b454a78317c68c0f3c8bef0f91814e3c7b0d6b5a4",
+      "file_size": 6948,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

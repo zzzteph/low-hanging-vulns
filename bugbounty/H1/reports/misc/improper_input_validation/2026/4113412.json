@@ -1,0 +1,130 @@
+{
+  "id": 4113412,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTEzNDEy",
+  "url": "https://hackerone.com/reports/4113412",
+  "title": "libcurl RTSP `CURLOPT_CRLF` conversion allows a request body to become a second RTSP request",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-10-14T10:43:39.342Z",
+  "submitted_at": "2026-10-14T10:43:39.607Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "revolik",
+    "url": "/revolik",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-87864"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-17T09:44:22.100Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-16T07:26:52.997Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "# AI WAS USED IN THE PROCESS OF IDENTIFYING THIS VULNERABILITY.\n## The vulnerability was tested manually and the report was carefully read.\n\n# Suggested severity\n\nLow\n\n# Affected version\n\ncurl 8.23.0, tag `curl-8_23_0`, commit\n`3163ec065643ba20709f190111f42c3e1fe95273`.\n\n# Affected interface\n\nThe issue is reachable through the libcurl API. It is not directly reachable\nthrough the curl command-line frontend because the tool does not expose\n`CURLOPT_RTSP_REQUEST`. In particular, `-X ANNOUNCE` sets\n`CURLOPT_CUSTOMREQUEST`; it does not select `CURL_RTSPREQ_ANNOUNCE`.\n\n# Summary\n\nFor RTSP ANNOUNCE, SET_PARAMETER, and GET_PARAMETER uploads, libcurl sends a\n`Content-Length` based on the raw input size. If `CURLOPT_CRLF` is enabled,\nlibcurl then expands bare LF bytes while transmitting the body but does not\nupdate or reject the now-unknown length.\n\nThe server reads only the declared body length. The remaining bytes can form a\nsecond RTSP request on the same connection.\n\nThis appears to be the RTSP sibling of CVE-2026-87864. Its fix changed IMAP\nAPPEND to consult `Curl_creader_total_length()` after the reader stack was\ncreated and reject CRLF conversion when the final size is unknown. The RTSP\npath still uses its pre-conversion `req_clen`.\n\n# Root cause\n\nIn `lib/rtsp.c`, `rtsp_setup_body()` does the following:\n\n```c\nreq_clen = data->state.infilesize;\nresult = Curl_creader_set_fread(data, req_clen);\n...\ncurlx_dyn_addf(reqp, \"Content-Length: %\" FMT_OFF_T \"\\r\\n\", req_clen);\n```\n\n`Curl_creader_set_fread()` installs the generic CRLF conversion reader when\n`data->set.crlf` is true. That reader's `cr_lc_total_length()` correctly\nreturns `-1`, but RTSP does not query it after reader construction.\n\n# Reproduction\n\nI used the attached `rtsp-crlf-framing.c` with a one-shot loopback RTSP\nlistener. The client constructs a body containing `K` bare LF bytes followed\nby a `K`-byte RTSP OPTIONS request. CRLF conversion expands the prefix from\n`K` to `2K` bytes. The advertised raw body length is also `2K`, so the body\nboundary lands exactly before the complete injected request.\n\nBuild the client against curl 8.23.0:\n\n```sh\ncc -O2 -DCURL_STATICLIB -I/path/to/curl/include \\\n  rtsp-crlf-framing.c /path/to/libcurl.a -o rtsp-crlf-framing \\\n  [the normal static libcurl dependency flags]\n```\n\nIn terminal 1:\n\n```sh\npython3 rtsp_capture_server.py\n```\n\nIn terminal 2:\n\n```sh\n./rtsp-crlf-framing rtsp://127.0.0.1:21031/test\n```\n\nObserved client result:\n\n```text\nraw_body=126 injected=63 result=0 (No error)\n```\n\nObserved by the server:\n\n```text\nContent-Length: 126\nadvertised=126\nactual_body=189\noverflow=63\noverflow_bytes=b'OPTIONS rtsp://127.0.0.1:21031/injected RTSP/1.0\\r\\nCSeq: 999\\r\\n\\r\\n'\n```\n\nThe overflow is an intact second request, and curl reports success.\n\n\n# Public disclosure\n\nI have not opened a public issue or otherwise disclosed this report.\n\n## Impact\n\n# Impact\n\nIf an application enables `CURLOPT_CRLF` and sends attacker-influenced RTSP\nbody content, the attacker can escape the declared body and append RTSP\nmethods on the application's persistent connection. Depending on the server's\nconnection, authentication, and session behavior, this can allow actions under\nthe application's RTSP context.\n\nThis is not ordinary user-selected CRLF header injection: these bytes are\nprovided as framed body content, and curl's conversion moves them outside that\nboundary. That is the same distinction as CVE-2026-87864.\n\nThe prerequisites are uncommon, so I suggest Low severity.\n\n# Suggested fix\n\nAfter installing the RTSP body reader, use `Curl_creader_total_length(data)`\nfor `Content-Length`. If it returns a negative value, reject the upload with\n`CURLE_UPLOAD_FAILED`, as RTSP cannot switch these requests to chunked framing.\n\nA regression test can extend RTSP test568 with a known-size ANNOUNCE body that\ncontains bare LF bytes and enables `CURLOPT_CRLF`. It should assert\n`CURLE_UPLOAD_FAILED` and no transmitted overflow.",
+  "weakness": {
+    "id": 107,
+    "name": "Improper Input Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6985917,
+      "file_name": "rtsp-crlf-framing.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/3md2atc9biz9ivkkm5gopp6aeuct?response-content-disposition=attachment%3B%20filename%3D%22rtsp-crlf-framing.c%22%3B%20filename%2A%3DUTF-8%27%27rtsp-crlf-framing.c&response-content-type=text%2Fx-csrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQS5UCJJV%2F20261017%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261017T100013Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEDIaCXVzLXdlc3QtMiJIMEYCIQCPup7cVIBzrpnHrsM2UcfyAPXltPORPGIvBjprnc6DtgIhANXTwkIJK22DpM0St3xjC3YKcMPhmggM7YoGrJaHh%2FV7KroFCPr%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwgsQNBhg7GvSZeo%2FUqjgUJb6pe2vx%2Fq%2BkWN2dNSkDYn1dfSnuXDB7eIfbgjs7l%2BU1lEf70LPkHv6cCJfkEeoSbBs1jUxtwGH5N1hA%2B5hOYQBDLY00XJV76YgxCGnzkF8SkDqVrhrPw4WPDdA79mbOpLplSPsQQqrIU1VPQs4ORs78gfDkymOi2VS%2BLYJB3S3%2B81MGZPASNDfpRlmO8m4ki%2BAOGcJKy%2Bwfin8vSFFHuYMKRXs%2BvlWfyaVCHZHUzYNFlBTXFjBZ%2FT7qhP1hdEN%2BcXMybzzWdWRW7zfpuqn%2FmbhgBxPoNyuTaWD0PF8dcj0Tknh%2FgNvYb0Eze0dk732sR6mPbopulDYEVJYvXIBiO%2BC%2F4scoGPW1vywSRDXED%2Bk82LFadREswyzIOhvb2bWQ2sF8DS95X7pFHn30uRK1hPn4e0wa%2FBKD4uTGuJSfuy2GHc7emusRemioePkNEyIUYyzdPsGn47Hu5w0LpfsYJqhzEVTc7tohMdxgIpDqjaTExlcBsfYVx%2FZEd5IsGYq%2BhYvYgkFPqfRYrXy1%2BrPhXd8AzDwcN6F8i69CtXi%2BrKyDaFH%2Fp7EbBjTMZZ8J85To9UYf0N5ObDNlsUZkeOTrsUpo%2FURp%2B4JzDYLldZxoDO%2FjosPCL%2FPTZeQ%2BiNgKCvnYYWJioMQ5xMJmbyT48q66bE81t6bZZui5ZJCqq3HMRFcmyP30NWwHpBcznLmNMwdfS6b0A9xNX9VBx1gQe811Sksow%2B8z%2B9Gd2ABFz7r8Yhub6LYgXzEnoaFgc74fTh6wVODmoFOnRPRizI3NTO4qHG9vbZvNVVA8Rz8s6wXThotb%2FKhJeXbbKe%2FNGXsAN3nFBC3DiK3ZuYwVpTNC0Q27aeSGKXz6zv08mc%2BQUzOQw1PrM1gY6sAH3rMl7rQATnQqFpunC7gRTpG01kSx%2FFw0ArHnPt3GGV%2FtGy5BwMNYpDzDd840He3mkXnHns9siMJIFnA1AcP4EUj7vGcSdO%2B4MCKizWeNCiyKwiTCJY8QRCEpq6mWyAvDKOIxj6CBLdkULc0TbX%2BYhShlT78R0uCL3%2FNoZ1Ag7xbz%2FopMKRKzBox1DZpEoorKH4j%2B2WxqqynvzTaPr6p1G6qLcqpehnLeMx5PNdxecAg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=200ca9ece8d085c9b0a292a6e66312491a831e06a533a6516e3706753b387e38",
+      "file_size": 1736,
+      "type": "text/x-csrc",
+      "moderated": null
+    },
+    {
+      "id": 6985918,
+      "file_name": "rtsp_capture_server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/i3jptzla902fyqur8a2dv7m2acbi?response-content-disposition=attachment%3B%20filename%3D%22rtsp_capture_server.py%22%3B%20filename%2A%3DUTF-8%27%27rtsp_capture_server.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQS5UCJJV%2F20261017%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261017T100013Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEDIaCXVzLXdlc3QtMiJIMEYCIQCPup7cVIBzrpnHrsM2UcfyAPXltPORPGIvBjprnc6DtgIhANXTwkIJK22DpM0St3xjC3YKcMPhmggM7YoGrJaHh%2FV7KroFCPr%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwgsQNBhg7GvSZeo%2FUqjgUJb6pe2vx%2Fq%2BkWN2dNSkDYn1dfSnuXDB7eIfbgjs7l%2BU1lEf70LPkHv6cCJfkEeoSbBs1jUxtwGH5N1hA%2B5hOYQBDLY00XJV76YgxCGnzkF8SkDqVrhrPw4WPDdA79mbOpLplSPsQQqrIU1VPQs4ORs78gfDkymOi2VS%2BLYJB3S3%2B81MGZPASNDfpRlmO8m4ki%2BAOGcJKy%2Bwfin8vSFFHuYMKRXs%2BvlWfyaVCHZHUzYNFlBTXFjBZ%2FT7qhP1hdEN%2BcXMybzzWdWRW7zfpuqn%2FmbhgBxPoNyuTaWD0PF8dcj0Tknh%2FgNvYb0Eze0dk732sR6mPbopulDYEVJYvXIBiO%2BC%2F4scoGPW1vywSRDXED%2Bk82LFadREswyzIOhvb2bWQ2sF8DS95X7pFHn30uRK1hPn4e0wa%2FBKD4uTGuJSfuy2GHc7emusRemioePkNEyIUYyzdPsGn47Hu5w0LpfsYJqhzEVTc7tohMdxgIpDqjaTExlcBsfYVx%2FZEd5IsGYq%2BhYvYgkFPqfRYrXy1%2BrPhXd8AzDwcN6F8i69CtXi%2BrKyDaFH%2Fp7EbBjTMZZ8J85To9UYf0N5ObDNlsUZkeOTrsUpo%2FURp%2B4JzDYLldZxoDO%2FjosPCL%2FPTZeQ%2BiNgKCvnYYWJioMQ5xMJmbyT48q66bE81t6bZZui5ZJCqq3HMRFcmyP30NWwHpBcznLmNMwdfS6b0A9xNX9VBx1gQe811Sksow%2B8z%2B9Gd2ABFz7r8Yhub6LYgXzEnoaFgc74fTh6wVODmoFOnRPRizI3NTO4qHG9vbZvNVVA8Rz8s6wXThotb%2FKhJeXbbKe%2FNGXsAN3nFBC3DiK3ZuYwVpTNC0Q27aeSGKXz6zv08mc%2BQUzOQw1PrM1gY6sAH3rMl7rQATnQqFpunC7gRTpG01kSx%2FFw0ArHnPt3GGV%2FtGy5BwMNYpDzDd840He3mkXnHns9siMJIFnA1AcP4EUj7vGcSdO%2B4MCKizWeNCiyKwiTCJY8QRCEpq6mWyAvDKOIxj6CBLdkULc0TbX%2BYhShlT78R0uCL3%2FNoZ1Ag7xbz%2FopMKRKzBox1DZpEoorKH4j%2B2WxqqynvzTaPr6p1G6qLcqpehnLeMx5PNdxecAg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=41ee5225539b80851fe7580c34f12b02cb0b5e66ef7e02ddc187fc37af6bfc9e",
+      "file_size": 1272,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
