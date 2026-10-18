@@ -1,0 +1,111 @@
+{
+  "id": 4121675,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTIxNjc1",
+  "url": "https://hackerone.com/reports/4121675",
+  "title": "CRLF injection in the RTSP request-line and Transport header via `CURLOPT_RTSP_STREAM_URI` and `CURLOPT_RTSP_TRANSPORT`",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "high",
+  "readable_substate": "N/A",
+  "created_at": "2026-10-17T06:12:22.062Z",
+  "submitted_at": "2026-10-17T06:12:22.278Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "noraqiu",
+    "url": "/noraqiu",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-18T10:54:35.547Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-17T08:52:48.472Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nTwo RTSP option strings reach the wire with no CR/LF neutralization, even though each is formatted directly into an RTSP request-line or header field that is terminated by CRLF. `Curl_setstropt()` (`lib/setopt.c`) stores each option string after checking only the 8 MB length cap (`CURL_MAX_INPUT_LENGTH`) — it never inspects for `\\r` or `\\n` — and both construction sites inside `rtsp_do()` (`lib/rtsp.c`) then splice the stored value verbatim into the request buffer, using `curlx_dyn_addf(\"%s …\")` for the request-line and `curl_maprintf(\"…: %s\\r\\n\")` for the Transport header, neither of which filters control characters. An embedded `\\r\\n` therefore terminates the current request-line/header early and lets the caller write arbitrary additional request-lines or headers into the same TCP stream, enabling header injection and RTSP request smuggling.\n\nThe two injection points share one construction function (`rtsp_do()`) and one missing-validation pattern:\n\n| Variant | Source option (entry) | Sink (wire construction) | Injected frame position | What the RTSP server receives |\n| --- | --- | --- | --- | --- |\n| V1. RTSP request-line | `CURLOPT_RTSP_STREAM_URI` | `rtsp_do()` → `curlx_dyn_addf(\"%s %s RTSP/1.0\\r\\n\", p_request, p_stream_uri)` | RTSP request-line (stream URI) | `DESCRIBE rtsp://foo/\\r\\nTEARDOWN rtsp://victim/ RTSP/1.0\\r\\n…` — a complete smuggled second RTSP request (e.g. `TEARDOWN`) |\n| V2. RTSP Transport header | `CURLOPT_RTSP_TRANSPORT` | `rtsp_do()` → `curl_maprintf(\"Transport: %s\\r\\n\", STRING_RTSP_TRANSPORT)` | RTSP Transport header value | `Transport: RTP/AVP;unicast\\r\\nSession: fake-session-id\\r\\n\\r\\nTEARDOWN rtsp://victim/ RTSP/1.0\\r\\n…` — forged `Session` header plus, via double CRLF, a complete smuggled second request |\n\nA related CRLF-injection issue in the HTTP request-line (`CURLOPT_REQUEST_TARGET`, `lib/http.c`) is reported separately.\n\n## Affected versions\n\n- curl 8.21.0-DEV (debug build, mbedTLS 3.6.5) — both variants reproduced.\n- curl master `9b2caf3` (8.22.0-DEV, verified 2026-08-31) — **still affected**; both variants re-run against a master build and reproduce byte-for-byte.\n- Source-verified still present on current master as of 2026-10-16: `rtsp_do()` still splices both option strings with no CRLF filtering (the Transport value goes straight into `curl_maprintf(\"…: %s\\r\\n\")`, the stream URI straight into the `\"%s %s RTSP/1.0\\r\\n\"` request-line format), and neither the 8.22.0 nor the 8.23.0 changelog contains a relevant fix.\n- Both variants affect every curl version since the RTSP options were introduced (7.20.0).\n\n## Root cause\n\n`Curl_setstropt()` is the common store for both options. It only enforces the length cap and never looks at byte content:\n\n```c\n// lib/setopt.c:88-96  (Curl_setstropt)\nif(strlen(s) > CURL_MAX_INPUT_LENGTH)\n    /* …too long… */;\nelse\n    dest = curlx_strdup(s);   // no CR/LF (or control-char) check; CRLF preserved verbatim\n```\n\nEach option is then written into a CRLF-delimited frame with no additional filtering:\n\n**V1 — RTSP request-line (`CURLOPT_RTSP_STREAM_URI`):**\n\n```c\n// lib/rtsp.c:373-374  (rtsp_do)\nif(data->set.str[STRING_RTSP_STREAM_URI])\n    p_stream_uri = data->set.str[STRING_RTSP_STREAM_URI];   // CRLF intact\n// lib/rtsp.c:490-493\ncurlx_dyn_addf(&req_buffer, \"%s %s RTSP/1.0\\r\\n\" \"CSeq: %u\\r\\n\",\n               p_request, p_stream_uri, rtsp->CSeq_sent);   // %s does not filter \\r\\n\n```\n\n**V2 — RTSP Transport header (`CURLOPT_RTSP_TRANSPORT`):**\n\n```c\n// lib/rtsp.c:381-388  (rtsp_do, SETUP request, no custom Transport header set)\np_transport = Curl_checkheaders(data, STRCONST(\"Transport\"));\nif(rtspreq == RTSPREQ_SETUP && !p_transport) {\n    if(data->set.str[STRING_RTSP_TRANSPORT])\n        data->state.aptr.rtsp_transport =\n            curl_maprintf(\"Transport: %s\\r\\n\",\n                          data->set.str[STRING_RTSP_TRANSPORT]);   // %s does not filter \\r\\n\n}\n// lib/rtsp.c:510-520  then curlx_dyn_addf() splices this header into req_buffer;\n// lib/rtsp.c:554  Curl_req_send() flushes req_buffer to the socket.\n```\n\nBecause the injected CRLF lands inside the request-line (V1) or the Transport header value (V2), the attacker controls framing, not just a single header field: a single `\\r\\n` ends the current line and starts a new header, and a `\\r\\n\\r\\n` ends the current request's header section and starts a new request.\n\n## PoC\n\nA mock RTSP server is run on loopback to capture the raw bytes curl writes. Both variants are driven the way a real application would drive them — a small C harness linked against the static libcurl build, calling `curl_easy_setopt()`:\n\n**V1 — RTSP request-line.** The harness sets `CURLOPT_RTSP_REQUEST` to `CURL_RTSPREQ_DESCRIBE`, `CURLOPT_RTSP_STREAM_URI` to `\"rtsp://foo/\\r\\nTEARDOWN rtsp://victim/ RTSP/1.0\\r\\n\"`, and performs the transfer against the mock RTSP server.\n- Negative control: `CURLOPT_RTSP_STREAM_URI` set to `\"rtsp://foo/test\"` (no CRLF).\n\n**V2 — RTSP Transport header.** The harness sets `CURLOPT_RTSP_REQUEST` to `CURL_RTSPREQ_SETUP`, `CURLOPT_RTSP_TRANSPORT` to `\"RTP/AVP;unicast\\r\\nSession: fake-session-id\\r\\n\\r\\nTEARDOWN rtsp://victim/ RTSP/1.0\\r\\n\"`, and performs the transfer.\n- Negative control: `CURLOPT_RTSP_TRANSPORT` set to `\"RTP/AVP;unicast\"` (no CRLF).\n\nBoth variants were re-run against a curl master `9b2caf3` build with the same harnesses; the behavior is identical to 8.21.0-DEV.\n\n## Reproduction output\n\n**V1 — raw bytes captured by the mock RTSP server** (`CURLOPT_RTSP_STREAM_URI` payload, `curl_easy_perform` returns `CURLE_OK`):\n\n```\nDESCRIBE rtsp://foo/\\r\\n\nTEARDOWN rtsp://victim/ RTSP/1.0\\r\\n\n… RTSP/1.0\\r\\n\nCSeq: 1\\r\\n\n```\n\nHex dump shows `0d 0a` at offset `0x16` terminating the `DESCRIBE rtsp://foo/` request-line, immediately followed by `TEARDOWN rtsp://victim/ RTSP/1.0` as an independent second RTSP request-line. Negative control: a clean stream URI produces a single-line `DESCRIBE rtsp://foo/test RTSP/1.0` request.\n\n**V2 — raw bytes captured by the mock RTSP server** (`CURLOPT_RTSP_TRANSPORT` payload, `curl_easy_perform` returns `CURLE_OK`):\n\n```\nSETUP rtsp://foo/ RTSP/1.0\\r\\n\n…\\r\\n\nTransport: RTP/AVP;unicast\\r\\n\nSession: fake-session-id\\r\\n\n\\r\\n\nTEARDOWN rtsp://victim/ RTSP/1.0\\r\\n\n…\\r\\n\n```\n\nHex dump shows `0d 0a` at offset `0x62` terminating the `Transport:` header value, followed by the forged `Session: fake-session-id` header line, then a double CRLF (`0d 0a 0d 0a`) ending the first request's header section, then a complete `TEARDOWN rtsp://victim/ RTSP/1.0` second request smuggled onto the same connection. Negative control: a clean transport value produces a single `Transport: RTP/AVP;unicast\\r\\n` header with no injection.\n\n## Impact\n\n- **CVSS 3.1: 7.5 (High)** — `AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N`, scored on the most reliable vector across the two variants (header injection → authentication bypass → read of protected data, achievable in a single request). The request-smuggling variants additionally raise integrity and availability impact (injected `TEARDOWN`/`SETUP` reaching the RTSP server) — e.g. session disruption or session hijacking on the RTSP server; the smuggled request's response is not returned to the caller.\n- **Trigger conditions:** an application forwards attacker-controlled data into one of the two `CURLOPT_RTSP_*` options without filtering CR/LF first. Realistic settings include RTSP client/gateway code that lets a user or upstream component choose the stream URI or transport parameters.\n- **Severity bound:** exploitation is gated on an application forwarding user input into these setopt options without CRLF filtering, and on the RTSP server honoring injected headers or disagreeing on request boundaries. Neither the libcurl security page's \"CRLF in Headers\" section nor the option documentation mentions any CRLF risk for `CURLOPT_RTSP_STREAM_URI` or `CURLOPT_RTSP_TRANSPORT`, so application authors are not signposted toward filtering.",
+  "weakness": {
+    "id": 69,
+    "name": "CRLF Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
