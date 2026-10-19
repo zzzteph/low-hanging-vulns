@@ -1,0 +1,154 @@
+{
+  "id": 4124486,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI0NDg2",
+  "url": "https://hackerone.com/reports/4124486",
+  "title": "RTSP ANNOUNCE/SET_PARAMETER upload with --use-ascii / CURLOPT_TRANSFERTEXT sends more body bytes than the declared Content-Length (incomplete fix of e",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-10-18T08:46:33.945Z",
+  "submitted_at": "2026-10-18T08:46:34.393Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "joumaaa",
+    "url": "/joumaaa",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/7jb8m1fd01xv19xi8qz0dhb844he/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-87864"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-19T09:13:51.754Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-18T10:39:30.506Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\ncurl refuses RTSP uploads that combine a body with `--crlf` / `CURLOPT_CRLF`, because the\nLF→CRLF conversion makes the number of bytes actually sent differ from the `Content-Length`\ncurl declares to the server. That guard was added as a security fix:\n\n- RTSP: commit `e84f95a` \"rtsp: refuse doing uploads with CRLF conversions\", `lib/rtsp.c:235`:\n  ```c\n  if(data->set.crlf) {\n    failf(data, \"Cannot do CRLF conversions on upload with RTSP\");\n    return CURLE_BAD_FUNCTION_ARGUMENT;\n  }\n  ```\n- The sibling IMAP case is CVE-2026-87864 (`lib/imap.c` now re-reads the reader-stack total\n  length and aborts when it is unknown).\n\n**The RTSP guard is too narrow.** The same LF→CRLF converter (`cr_lc`) is inserted whenever\n`data->set.crlf` **OR** `data->state.prefer_ascii` is set:\n\n`lib/sendf.c:1137-1147` (`do_init_reader_stack`), guarded by\n```c\n#ifdef CURL_PREFER_LF_LINEENDS\n  if(data->set.crlf || data->state.prefer_ascii)\n    result = cr_lc_add(data);   /* LF -> CRLF converter */\n#endif\n```\nand `CURL_PREFER_LF_LINEENDS` is defined on every non-Windows/non-MSDOS platform\n(`lib/urldata.h:32-36`). `prefer_ascii` is turned on by `--use-ascii` /\n`CURLOPT_TRANSFERTEXT` (`src/config2setopts.c:995`, `lib/setopt.c` → `data->set.prefer_ascii`\n→ `lib/transfer.c:484` `data->state.prefer_ascii`).\n\nRTSP computes `Content-Length` from the **raw** declared size and never re-reads the converted\ntotal:\n- `lib/rtsp.c:203-246`: `req_clen = data->state.infilesize;` (raw) and the header\n  `Content-Length: <req_clen>` is emitted — but the `cr_lc` converter grows the body by the\n  number of bare LFs. The guard at `rtsp.c:235` checks only `set.crlf`, so with `--use-ascii`\n  (`prefer_ascii == TRUE`, `crlf == FALSE`) it does not fire.\n\nContrast — the codebase already knows the correct, wider condition:\n- FTP accounts for **both** flags: `lib/ftp.c:3803-3806` uses `(data->set.crlf || data->state.prefer_ascii)`.\n- IMAP re-reads `Curl_creader_total_length()` after building the stack and aborts on -1\n  (`lib/imap.c:883-890`).\n- RTSP checks only `data->set.crlf` — this is the omission / incomplete fix.\n\n## Root cause\n\nDeclared size (`Content-Length`) is taken from the un-converted `infilesize`, while the body is\nsent through a reader stack that includes the LF→CRLF converter under `prefer_ascii`. The RTSP\nsize-safety guard was written against `set.crlf` only and does not cover the `prefer_ascii`\ntrigger of the very same converter.\n\n## Attacker model / reachability\n\nAn application (or the curl CLI) performing an RTSP `ANNOUNCE` or `SET_PARAMETER` upload with\n`CURLOPT_TRANSFERTEXT`/`--use-ascii`, where the uploaded body contains attacker-influenced\ncontent with bare `\\n` bytes. Realistic case: a service embedding libcurl that relays\nuser-supplied SDP/parameter data into an RTSP ANNOUNCE body in text mode. On a persistent\nRTSP/TCP connection, the bytes sent past the declared `Content-Length` are parsed by the origin\nRTSP server as the start of the next RTSP request → RTSP request injection / smuggling.\n\n## PoC (live, with controls)\n\nTwo PoCs are attached: `poc_rtsp_ascii.py` proves the Content-Length/on-wire desync with three\ncases; `poc_rtsp_smuggle.py` proves a full second RTSP request is smuggled past the body and\nparsed by the server (see \"Demonstrated request smuggling\" below).\n\n`attachments/rtsp_client.c` is a minimal libcurl program that sets\n`CURLOPT_RTSP_REQUEST = CURL_RTSPREQ_ANNOUNCE`, `CURLOPT_UPLOAD`, `CURLOPT_TRANSFERTEXT`, and\n`CURLOPT_INFILESIZE_LARGE = <raw file size>`, then uploads a body file. It is linked against the\nlibcurl built from this commit. `attachments/poc_rtsp_ascii.py` starts a local RTSP listener that\nrecords the declared `Content-Length` and counts the body bytes actually received, then runs three\ncases. Captured output (`attachments/rtsp_transcript.txt`):\n\n```\n=== CASE: EXPLOIT  --use-ascii + bare-LF body ===\n    raw body length    : 58\n    bare LF count       : 4\n    method seen         : ANNOUNCE\n    declared C-L        : 58\n    actual body bytes   : 62\n    >>> DESYNC: 4 extra bytes sent past declared Content-Length\n\n=== CASE: NEGATIVE no --use-ascii + bare-LF body ===\n    declared C-L        : 58\n    actual body bytes   : 58\n    OK: actual == declared (no desync)\n\n=== CASE: NEGATIVE --use-ascii + all-CRLF body ===\n    declared C-L        : 62\n    actual body bytes   : 62\n    OK: actual == declared (no desync)\n\nCONFIRMED: --use-ascii makes curl send MORE RTSP body bytes than the\nContent-Length it declared; both negative controls stay in sync.\n```\n\nThe exploit case declares `Content-Length: 58` but writes 62 bytes on the wire; the 4 extra\nbytes are exactly the CRs inserted for the 4 bare LFs. Both negative controls (no `--use-ascii`;\nand `--use-ascii` with an all-CRLF body that has nothing to expand) stay perfectly in sync,\nisolating the cause to the `prefer_ascii` LF→CRLF path that the RTSP guard misses.\n\n### Demonstrated request smuggling (second PoC)\n\n`attachments/poc_rtsp_smuggle.py` goes further and proves the primitive is a true request\ninjection, not just a byte-count mismatch. It crafts the ANNOUNCE body so that the bytes which\nfall past the declared `Content-Length` form a **complete, well-formed second RTSP request**.\nThe crafting relies only on the LF→CRLF arithmetic (each bare LF adds one byte): with\n`raw = P + S_raw`, padding `P` so it contains exactly `len(S_raw)` bare LFs makes the post-body\nremainder equal to `expand(S_raw)` — the smuggled request, correctly CRLF-terminated.\n\nCaptured output (`attachments/rtsp_smuggle_transcript.txt`):\n\n```\n  first request method           : ANNOUNCE\n  declared Content-Length        : 223 (== raw body len 223 )\n  bytes server reads as body     : 223\n  bytes PAST Content-Length      : 94\n  smuggled bytes (repr)          :\n      b'TEARDOWN rtsp://victim.example/stream RTSP/1.0'\n      b'CSeq: 99'\n      b'X-Smuggled: injected-by-attacker'\n  >>> SERVER-SIDE PARSE of the post-body bytes:\n        method  : TEARDOWN\n        uri     : rtsp://victim.example/stream\n        version : RTSP/1.0\n        headers : {'CSeq': '99', 'X-Smuggled': 'injected-by-attacker'}\n\n######## NEGATIVE CONTROL: same body, NO --use-ascii ########\n  bytes PAST Content-Length      : 0\n  smuggled request present?      : NO (in sync)\n```\n\nThe server reads 223 bytes as the ANNOUNCE body (exactly the declared `Content-Length`) and the\nremaining 94 bytes parse as a full `TEARDOWN rtsp://victim.example/stream RTSP/1.0` request with\nits own `CSeq` and headers — a request the attacker never sent as a request of their own. Without\n`--use-ascii`, zero bytes are smuggled.\n\n## Steps to reproduce\n\n```\n# build curl from this commit (./configure --with-openssl && make)\ngcc -I include attachments/rtsp_client.c lib/.libs/libcurl.a \\\n    -lssl -lcrypto -lbrotlidec -lbrotlicommon -lz -o rtsp_client\npython3 -I attachments/poc_rtsp_ascii.py   # edit paths at top if needed\n```\n\n## Suggested fix\n\nWiden the RTSP guard at `lib/rtsp.c:235` to the same condition the converter uses, i.e.\n`if(data->set.crlf || data->state.prefer_ascii)`, or (better, matching IMAP) re-read\n`Curl_creader_total_length()` after the reader stack is built and refuse / switch to an unknown\nlength when it no longer equals the declared size.\n\n## Impact\n\n## Impact\n\nOn an RTSP `ANNOUNCE` / `SET_PARAMETER` upload with `--use-ascii` / `CURLOPT_TRANSFERTEXT`,\ncurl declares a `Content-Length` that is smaller than the body it actually transmits. The\nsurplus bytes (one CR per bare LF in the body) fall outside the declared message body, so a\nserver reading the kept-alive RTSP/TCP connection treats them as the beginning of the next RTSP\nrequest.\n\nWhen the body content is attacker-influenced — e.g. a service embedding libcurl that relays\nuser-supplied SDP or parameter data into an RTSP ANNOUNCE in text mode — the attacker can push\nchosen bytes past the body boundary and smuggle a crafted continuation. This is demonstrated\nend-to-end in the second PoC: the bytes past the declared `Content-Length` form a complete,\nwell-formed `TEARDOWN rtsp://victim.example/stream RTSP/1.0` request (with its own `CSeq` and\nheaders) that the receiving server parses as the next request on the connection. This is the\nRTSP sibling of the upload size-desync class curl already closed for `--crlf` on RTSP (commit\ne84f95a) and for IMAP (CVE-2026-87864); the `prefer_ascii` trigger of the same converter was\nleft uncovered, so the earlier fix is incomplete.\n\n## What it is / is not\n\n- It **is** a declared-size-vs-on-wire-size desync, confirmed live end-to-end against a local\n  RTSP listener, with a positive control and two negative controls isolating the cause; and the\n  smuggling of a complete second RTSP request past the body is demonstrated, not merely asserted.\n- It **is** an incomplete fix: FTP checks both `crlf` and `prefer_ascii`, IMAP re-reads the\n  total length, RTSP checks only `crlf`.\n- It is **not** a default-configuration issue: it requires the caller to enable\n  `--use-ascii` / `CURLOPT_TRANSFERTEXT`, and the body must contain bare LF bytes. An all-CRLF\n  body or binary mode is unaffected.\n- It is **not** memory-unsafe and leaks no local data.\n\n## Honest severity\n\nLow. It depends on a non-default option and on RTSP upload (a niche protocol path), which is why\nI rate it Low rather than higher. I am reporting it because it is the same security class curl\nchose to fix with an explicit refusal for `--crlf`, the fix demonstrably does not cover the\n`prefer_ascii` path that drives the identical converter, and the result is a reproducible\nrequest-smuggling primitive rather than a cosmetic mismatch. Triage may reasonably rate it\nLow/Medium; I defer to the curl security team on the final rating.",
+  "weakness": {
+    "id": 69,
+    "name": "CRLF Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7022218,
+      "file_name": "rtsp_smuggle_transcript.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/e992wjuauqztghwsrl5a3gc1lwkg?response-content-disposition=attachment%3B%20filename%3D%22rtsp_smuggle_transcript.txt%22%3B%20filename%2A%3DUTF-8%27%27rtsp_smuggle_transcript.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU2OC5W6Z%2F20261019%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261019T114957Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGAaCXVzLXdlc3QtMiJIMEYCIQCp3lhgRjsW3McrWgBZW%2B4XBL1NjqZWxUk6L7B64YA4RAIhAJXx178Dgvt8C43DQbK3PsT54jHZfIcIcrCV68bvitPmKrEFCCgQAxoMMDEzNjE5Mjc0ODQ5Igye9BLD1EI9DGmFkcMqjgXlSF%2FoAo52XpToXr7IWxVm%2B9KclcQhBm0N5xb4nZrNR0CfCH2yJfbzpWAauKBCdrhEJUQv8wXx0FpyZtN9h1KMtZRl5Mt6sk2VrosOg5cvk%2FhQH1zRxZYYRu60t2vncGUDtJ7TI3H4kXDS%2BigBsywrBweyS7q2vKTwR0k21iSZbW9SEu%2BFSVAcMazzjd8bqSbz7k2%2FKgcMsMusqVComHK9BacvCwfxbJsOzR0dfK3EcTauWmrVYpcWJQFqb%2FvZhOJ6yv2gy5IGJh7%2FvEclru8RhgfUCffmWss8u%2FQweBRUJbj86XSFB6ImAcG4TKOIg7NGzodTg4jwxy46nHSH5%2Bun7pjV7TkklKZPykVVlxKcCNWBMWyV5dKXYdiYH8b%2Bm5ezWBN6v5%2BSgZ68BPDmHoWF7Uftl3%2BX4HBPtEFSISLRrNc%2FmeCXk36GLGPrAEqiBSxgsyooYNaOvWsHc1oGflYsQmSNK%2Bxz%2F2lpZuFumFhPCCLUd52jpNd9aYG5Y2L3qyiGwC%2BJM%2BdrrXK4cMtYRM9lrwUrCHzUpBIfjdo77Cs0sgzrirOPMn%2FXnd7Lru%2B5s4L4ERn7Uk4x9EvC0fJzp5E8nhC3kPGZenB3SbyTXuyHJoN0GvVKJDSpowOPmiCJ%2BFh%2BgXaBn04c6H1xVPP7CWIOKw8DbOyxk5c2UNu7ZG%2BvvyakXekHCcEN58DYzMx8Lxyd6JKp9ag78OuPByDpkG3rtU%2Bn7SxKp0Vnb1mN3tHcap7OKnD%2FodREgeACLHTG02%2F7dRDRtfm%2Fox3bVLprrEklzi4c7IQqI08NhisuX%2F3lM0Q9a9HZFyfvxqKwrkKpO1VLOiI%2BzQ6kZPNAOBsPhe6%2BTplW%2FHfiKa%2FJuSCXaR0w5I7X1gY6sAGh71xynnCSYzRp%2Fb7vr5LF5dQNiceBD38P4zQGhY1Q0US8oXDaAtmZ61%2BEpNB1b5uyOYNB0PKWqdUS65TGtfA58zpe63RsdGU8rtHupXB3w4DbIoVX2p6H6SUtJj4SUzTR3vwF4pPk%2FxKkDL1c%2B76YHhIm%2FFUtYJ%2BRUJg3GeGkAc8etfLqZD1r%2BFoipwxAwjNmV%2BXGGFoFW%2B07pBi8aG14KACxe5FzPCmInbQxthjRLQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1fba8ec0c3a2dd837eebe813361377d09621853125ce2ea5d4b2187b3ed091aa",
+      "file_size": 1286,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 7022219,
+      "file_name": "rtsp_transcript.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fc0lskrpu8ptxfajokq3290pcs5u?response-content-disposition=attachment%3B%20filename%3D%22rtsp_transcript.txt%22%3B%20filename%2A%3DUTF-8%27%27rtsp_transcript.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU2OC5W6Z%2F20261019%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261019T114957Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGAaCXVzLXdlc3QtMiJIMEYCIQCp3lhgRjsW3McrWgBZW%2B4XBL1NjqZWxUk6L7B64YA4RAIhAJXx178Dgvt8C43DQbK3PsT54jHZfIcIcrCV68bvitPmKrEFCCgQAxoMMDEzNjE5Mjc0ODQ5Igye9BLD1EI9DGmFkcMqjgXlSF%2FoAo52XpToXr7IWxVm%2B9KclcQhBm0N5xb4nZrNR0CfCH2yJfbzpWAauKBCdrhEJUQv8wXx0FpyZtN9h1KMtZRl5Mt6sk2VrosOg5cvk%2FhQH1zRxZYYRu60t2vncGUDtJ7TI3H4kXDS%2BigBsywrBweyS7q2vKTwR0k21iSZbW9SEu%2BFSVAcMazzjd8bqSbz7k2%2FKgcMsMusqVComHK9BacvCwfxbJsOzR0dfK3EcTauWmrVYpcWJQFqb%2FvZhOJ6yv2gy5IGJh7%2FvEclru8RhgfUCffmWss8u%2FQweBRUJbj86XSFB6ImAcG4TKOIg7NGzodTg4jwxy46nHSH5%2Bun7pjV7TkklKZPykVVlxKcCNWBMWyV5dKXYdiYH8b%2Bm5ezWBN6v5%2BSgZ68BPDmHoWF7Uftl3%2BX4HBPtEFSISLRrNc%2FmeCXk36GLGPrAEqiBSxgsyooYNaOvWsHc1oGflYsQmSNK%2Bxz%2F2lpZuFumFhPCCLUd52jpNd9aYG5Y2L3qyiGwC%2BJM%2BdrrXK4cMtYRM9lrwUrCHzUpBIfjdo77Cs0sgzrirOPMn%2FXnd7Lru%2B5s4L4ERn7Uk4x9EvC0fJzp5E8nhC3kPGZenB3SbyTXuyHJoN0GvVKJDSpowOPmiCJ%2BFh%2BgXaBn04c6H1xVPP7CWIOKw8DbOyxk5c2UNu7ZG%2BvvyakXekHCcEN58DYzMx8Lxyd6JKp9ag78OuPByDpkG3rtU%2Bn7SxKp0Vnb1mN3tHcap7OKnD%2FodREgeACLHTG02%2F7dRDRtfm%2Fox3bVLprrEklzi4c7IQqI08NhisuX%2F3lM0Q9a9HZFyfvxqKwrkKpO1VLOiI%2BzQ6kZPNAOBsPhe6%2BTplW%2FHfiKa%2FJuSCXaR0w5I7X1gY6sAGh71xynnCSYzRp%2Fb7vr5LF5dQNiceBD38P4zQGhY1Q0US8oXDaAtmZ61%2BEpNB1b5uyOYNB0PKWqdUS65TGtfA58zpe63RsdGU8rtHupXB3w4DbIoVX2p6H6SUtJj4SUzTR3vwF4pPk%2FxKkDL1c%2B76YHhIm%2FFUtYJ%2BRUJg3GeGkAc8etfLqZD1r%2BFoipwxAwjNmV%2BXGGFoFW%2B07pBi8aG14KACxe5FzPCmInbQxthjRLQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=cacb6fe773a3871170b3061572eca9766231e151d685332f2bf13f6388c36ab7",
+      "file_size": 1666,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 7022220,
+      "file_name": "poc_rtsp_smuggle.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/u5twxedhjfmkg2iz94u8bhrdxa74?response-content-disposition=attachment%3B%20filename%3D%22poc_rtsp_smuggle.py%22%3B%20filename%2A%3DUTF-8%27%27poc_rtsp_smuggle.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU2OC5W6Z%2F20261019%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261019T114957Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGAaCXVzLXdlc3QtMiJIMEYCIQCp3lhgRjsW3McrWgBZW%2B4XBL1NjqZWxUk6L7B64YA4RAIhAJXx178Dgvt8C43DQbK3PsT54jHZfIcIcrCV68bvitPmKrEFCCgQAxoMMDEzNjE5Mjc0ODQ5Igye9BLD1EI9DGmFkcMqjgXlSF%2FoAo52XpToXr7IWxVm%2B9KclcQhBm0N5xb4nZrNR0CfCH2yJfbzpWAauKBCdrhEJUQv8wXx0FpyZtN9h1KMtZRl5Mt6sk2VrosOg5cvk%2FhQH1zRxZYYRu60t2vncGUDtJ7TI3H4kXDS%2BigBsywrBweyS7q2vKTwR0k21iSZbW9SEu%2BFSVAcMazzjd8bqSbz7k2%2FKgcMsMusqVComHK9BacvCwfxbJsOzR0dfK3EcTauWmrVYpcWJQFqb%2FvZhOJ6yv2gy5IGJh7%2FvEclru8RhgfUCffmWss8u%2FQweBRUJbj86XSFB6ImAcG4TKOIg7NGzodTg4jwxy46nHSH5%2Bun7pjV7TkklKZPykVVlxKcCNWBMWyV5dKXYdiYH8b%2Bm5ezWBN6v5%2BSgZ68BPDmHoWF7Uftl3%2BX4HBPtEFSISLRrNc%2FmeCXk36GLGPrAEqiBSxgsyooYNaOvWsHc1oGflYsQmSNK%2Bxz%2F2lpZuFumFhPCCLUd52jpNd9aYG5Y2L3qyiGwC%2BJM%2BdrrXK4cMtYRM9lrwUrCHzUpBIfjdo77Cs0sgzrirOPMn%2FXnd7Lru%2B5s4L4ERn7Uk4x9EvC0fJzp5E8nhC3kPGZenB3SbyTXuyHJoN0GvVKJDSpowOPmiCJ%2BFh%2BgXaBn04c6H1xVPP7CWIOKw8DbOyxk5c2UNu7ZG%2BvvyakXekHCcEN58DYzMx8Lxyd6JKp9ag78OuPByDpkG3rtU%2Bn7SxKp0Vnb1mN3tHcap7OKnD%2FodREgeACLHTG02%2F7dRDRtfm%2Fox3bVLprrEklzi4c7IQqI08NhisuX%2F3lM0Q9a9HZFyfvxqKwrkKpO1VLOiI%2BzQ6kZPNAOBsPhe6%2BTplW%2FHfiKa%2FJuSCXaR0w5I7X1gY6sAGh71xynnCSYzRp%2Fb7vr5LF5dQNiceBD38P4zQGhY1Q0US8oXDaAtmZ61%2BEpNB1b5uyOYNB0PKWqdUS65TGtfA58zpe63RsdGU8rtHupXB3w4DbIoVX2p6H6SUtJj4SUzTR3vwF4pPk%2FxKkDL1c%2B76YHhIm%2FFUtYJ%2BRUJg3GeGkAc8etfLqZD1r%2BFoipwxAwjNmV%2BXGGFoFW%2B07pBi8aG14KACxe5FzPCmInbQxthjRLQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1dc03f8f54ed5d24dac99bded9bd61aeebe8c061f4c8ca0cc8658189a0c029c6",
+      "file_size": 6977,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 7022221,
+      "file_name": "poc_rtsp_ascii.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/o1whdelt2ah9hlk88tqac3mjf8jq?response-content-disposition=attachment%3B%20filename%3D%22poc_rtsp_ascii.py%22%3B%20filename%2A%3DUTF-8%27%27poc_rtsp_ascii.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU2OC5W6Z%2F20261019%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261019T114957Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGAaCXVzLXdlc3QtMiJIMEYCIQCp3lhgRjsW3McrWgBZW%2B4XBL1NjqZWxUk6L7B64YA4RAIhAJXx178Dgvt8C43DQbK3PsT54jHZfIcIcrCV68bvitPmKrEFCCgQAxoMMDEzNjE5Mjc0ODQ5Igye9BLD1EI9DGmFkcMqjgXlSF%2FoAo52XpToXr7IWxVm%2B9KclcQhBm0N5xb4nZrNR0CfCH2yJfbzpWAauKBCdrhEJUQv8wXx0FpyZtN9h1KMtZRl5Mt6sk2VrosOg5cvk%2FhQH1zRxZYYRu60t2vncGUDtJ7TI3H4kXDS%2BigBsywrBweyS7q2vKTwR0k21iSZbW9SEu%2BFSVAcMazzjd8bqSbz7k2%2FKgcMsMusqVComHK9BacvCwfxbJsOzR0dfK3EcTauWmrVYpcWJQFqb%2FvZhOJ6yv2gy5IGJh7%2FvEclru8RhgfUCffmWss8u%2FQweBRUJbj86XSFB6ImAcG4TKOIg7NGzodTg4jwxy46nHSH5%2Bun7pjV7TkklKZPykVVlxKcCNWBMWyV5dKXYdiYH8b%2Bm5ezWBN6v5%2BSgZ68BPDmHoWF7Uftl3%2BX4HBPtEFSISLRrNc%2FmeCXk36GLGPrAEqiBSxgsyooYNaOvWsHc1oGflYsQmSNK%2Bxz%2F2lpZuFumFhPCCLUd52jpNd9aYG5Y2L3qyiGwC%2BJM%2BdrrXK4cMtYRM9lrwUrCHzUpBIfjdo77Cs0sgzrirOPMn%2FXnd7Lru%2B5s4L4ERn7Uk4x9EvC0fJzp5E8nhC3kPGZenB3SbyTXuyHJoN0GvVKJDSpowOPmiCJ%2BFh%2BgXaBn04c6H1xVPP7CWIOKw8DbOyxk5c2UNu7ZG%2BvvyakXekHCcEN58DYzMx8Lxyd6JKp9ag78OuPByDpkG3rtU%2Bn7SxKp0Vnb1mN3tHcap7OKnD%2FodREgeACLHTG02%2F7dRDRtfm%2Fox3bVLprrEklzi4c7IQqI08NhisuX%2F3lM0Q9a9HZFyfvxqKwrkKpO1VLOiI%2BzQ6kZPNAOBsPhe6%2BTplW%2FHfiKa%2FJuSCXaR0w5I7X1gY6sAGh71xynnCSYzRp%2Fb7vr5LF5dQNiceBD38P4zQGhY1Q0US8oXDaAtmZ61%2BEpNB1b5uyOYNB0PKWqdUS65TGtfA58zpe63RsdGU8rtHupXB3w4DbIoVX2p6H6SUtJj4SUzTR3vwF4pPk%2FxKkDL1c%2B76YHhIm%2FFUtYJ%2BRUJg3GeGkAc8etfLqZD1r%2BFoipwxAwjNmV%2BXGGFoFW%2B07pBi8aG14KACxe5FzPCmInbQxthjRLQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=674a6520f90a4d1e8eafbea07e81c6e71a852a3705dba6d32c33129fc5a42fc8",
+      "file_size": 6064,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 7022222,
+      "file_name": "rtsp_client.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/vych0lw13koohw64dins0ajcrxme?response-content-disposition=attachment%3B%20filename%3D%22rtsp_client.c%22%3B%20filename%2A%3DUTF-8%27%27rtsp_client.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQU2OC5W6Z%2F20261019%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261019T114957Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGAaCXVzLXdlc3QtMiJIMEYCIQCp3lhgRjsW3McrWgBZW%2B4XBL1NjqZWxUk6L7B64YA4RAIhAJXx178Dgvt8C43DQbK3PsT54jHZfIcIcrCV68bvitPmKrEFCCgQAxoMMDEzNjE5Mjc0ODQ5Igye9BLD1EI9DGmFkcMqjgXlSF%2FoAo52XpToXr7IWxVm%2B9KclcQhBm0N5xb4nZrNR0CfCH2yJfbzpWAauKBCdrhEJUQv8wXx0FpyZtN9h1KMtZRl5Mt6sk2VrosOg5cvk%2FhQH1zRxZYYRu60t2vncGUDtJ7TI3H4kXDS%2BigBsywrBweyS7q2vKTwR0k21iSZbW9SEu%2BFSVAcMazzjd8bqSbz7k2%2FKgcMsMusqVComHK9BacvCwfxbJsOzR0dfK3EcTauWmrVYpcWJQFqb%2FvZhOJ6yv2gy5IGJh7%2FvEclru8RhgfUCffmWss8u%2FQweBRUJbj86XSFB6ImAcG4TKOIg7NGzodTg4jwxy46nHSH5%2Bun7pjV7TkklKZPykVVlxKcCNWBMWyV5dKXYdiYH8b%2Bm5ezWBN6v5%2BSgZ68BPDmHoWF7Uftl3%2BX4HBPtEFSISLRrNc%2FmeCXk36GLGPrAEqiBSxgsyooYNaOvWsHc1oGflYsQmSNK%2Bxz%2F2lpZuFumFhPCCLUd52jpNd9aYG5Y2L3qyiGwC%2BJM%2BdrrXK4cMtYRM9lrwUrCHzUpBIfjdo77Cs0sgzrirOPMn%2FXnd7Lru%2B5s4L4ERn7Uk4x9EvC0fJzp5E8nhC3kPGZenB3SbyTXuyHJoN0GvVKJDSpowOPmiCJ%2BFh%2BgXaBn04c6H1xVPP7CWIOKw8DbOyxk5c2UNu7ZG%2BvvyakXekHCcEN58DYzMx8Lxyd6JKp9ag78OuPByDpkG3rtU%2Bn7SxKp0Vnb1mN3tHcap7OKnD%2FodREgeACLHTG02%2F7dRDRtfm%2Fox3bVLprrEklzi4c7IQqI08NhisuX%2F3lM0Q9a9HZFyfvxqKwrkKpO1VLOiI%2BzQ6kZPNAOBsPhe6%2BTplW%2FHfiKa%2FJuSCXaR0w5I7X1gY6sAGh71xynnCSYzRp%2Fb7vr5LF5dQNiceBD38P4zQGhY1Q0US8oXDaAtmZ61%2BEpNB1b5uyOYNB0PKWqdUS65TGtfA58zpe63RsdGU8rtHupXB3w4DbIoVX2p6H6SUtJj4SUzTR3vwF4pPk%2FxKkDL1c%2B76YHhIm%2FFUtYJ%2BRUJg3GeGkAc8etfLqZD1r%2BFoipwxAwjNmV%2BXGGFoFW%2B07pBi8aG14KACxe5FzPCmInbQxthjRLQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=5fa3a0675225a68b14ee03d1da791725fc0fd07692ff368255c3f3e949b109da",
+      "file_size": 2118,
+      "type": "text/x-c++src",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
