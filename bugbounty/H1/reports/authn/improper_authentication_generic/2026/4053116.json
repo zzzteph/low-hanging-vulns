@@ -1,0 +1,113 @@
+{
+  "id": 4053116,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDUzMTE2",
+  "url": "https://hackerone.com/reports/4053116",
+  "title": "curl CONNECT response header colon-check bypass in cf-h1-proxy single_header — proxy authentication bypass via injected HTTP/1.x status line",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "high",
+  "readable_substate": "N/A",
+  "created_at": "2026-09-23T09:30:38.230Z",
+  "submitted_at": "2026-10-17T05:15:14.036Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "noraqiu",
+    "url": "/noraqiu",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-19T14:16:13.444Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-18T10:54:11.705Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nIn the HTTP/1.1 proxy-CONNECT response parser (`lib/cf-h1-proxy.c`, `single_header()`), the per-line counter `data->req.headerline` (a.k.a. `k->headerline`) is never incremented — only the tunnel-local `ts->headerlines` is. `Curl_req_soft_reset()` resets `k->headerline` to 0 before the CONNECT exchange begins, and it stays 0 for the entire CONNECT response. `Curl_verify_header()` (`lib/http.c`) treats `k->headerline < 2` as \"this is a status line\" and returns `CURLE_OK` without performing its colon-presence check, so that colon check — which exists precisely to reject garbage/injected lines in the header area — is dead code on the CONNECT path. The normal HTTP response path (`http_rw_hd`) increments `k->headerline` (`if(!k->headerline++)`), so the guard works there and only there.\n\nBecause the colon check is inert on the CONNECT path, a malicious proxy can inject a line shaped like an HTTP/1.x status line into the header area of a `407 Proxy Authentication Required` response. `on_resp_header()` matches any line beginning with `HTTP/1.` (without checking whether it is the first/status line, and without requiring a colon) and overwrites `k->httpcode` and `data->info.httpproxycode` with the parsed status code. Injecting `HTTP/1.1 200 OK: x` overwrites the `407` with `200`. The end-of-headers empty-line handler then sees `httpcode == 200` (not `407`) and proceeds to `KEEPON_DONE`; `recv_CONNECT_resp()` sees `httpproxycode/100 == 2` and skips `Curl_http_auth_act()`; `H1_CONNECT()` sees the same `2xx` and marks the tunnel `H1_TUNNEL_ESTABLISHED`. The client believes the tunnel is up, never retries with proxy authentication, and sends the real request — `Cookie`, `Authorization`, POST bodies, and the `Proxy-Authorization` header from the CONNECT request — over the attacker's connection.\n\nThe injected line must carry a colon (e.g. `HTTP/1.1 200 OK: x`) to satisfy the secondary colon check in `Curl_headers_push()` → `namevalue()`. This does not change the root cause; it only shapes the payload.\n\n| Impact variant (all verified end-to-end) | Target scheme | What the attacker captures / controls |\n| --- | --- | --- |\n| Plaintext request leak | `http://` target | Full request: method, Host, `Cookie`, `Authorization`, POST body; attacker can also return a forged response (integrity) |\n| TLS ClientHello intercept | `https://` target | TLS ClientHello incl. SNI and connection metadata; TLS content stays encrypted; attacker may send a TLS alert to kill the connection (availability) |\n| Proxy-credential capture | any CONNECT | `Proxy-Authorization: Basic` from the CONNECT request, base64-decoded to `user:password` |\n| No-auth-configured hijack | any target, no `--proxy-user` | Tunnel still marked established; plaintext HTTP request captured |\n\n## Affected versions\n\n- curl 8.21.0-DEV (mbedTLS 3.6.5 debug build).\n- Current master `9b2caf3` (8.22.0-DEV, verified 2026-08-31). **Still affected.** all five verification checks pass; verbose output is byte-for-byte identical to 8.21.0-DEV: the `407` is overwritten to `200` by the injected line, `* CONNECT tunnel established, response 200` is printed, and the tunneled request carrying `Cookie: secret=session123` + `Authorization: Bearer sensitive_token` is captured (`curl/8.22.0-DEV` User-Agent).\n- `lib/cf-h1-proxy.c` `single_header()` (master line 474) still only does `ts->headerlines++`; `data->req.headerline` is never incremented, and `k` is a `const` pointer (line 470) so the existing code cannot mutate it. No fix has landed.\n\n## PoC\n\nThe attacker operates a malicious HTTP proxy (or is a man-in-the-middle between the curl client and the legitimate proxy — curl's documented attacker capability \"B\"). The client uses curl with `--proxy-tunnel` (`-p`) or simply requests an `https://` target through the proxy (which forces a CONNECT), and has proxy authentication configured (`--proxy-user` / `CURLOPT_PROXYUSERPWD`). The client's request also carries sensitive headers (`Cookie`, `Authorization`).\n\n1. The client sends `CONNECT <host>:<port> HTTP/1.1` to the attacker's proxy, including a `Proxy-Authorization: Basic <base64(user:pass)>` header.\n2. The attacker responds with a `407` challenge and, in the header area, an injected line:\n   ```\n   HTTP/1.1 407 Proxy Authentication Required\\r\\n\n   Proxy-Authenticate: Basic realm=\"proxy\"\\r\\n\n   HTTP/1.1 200 OK: x\\r\\n\n   Content-Length: 0\\r\\n\n   \\r\\n\n   ```\n   The injected `HTTP/1.1 200 OK: x` carries a colon (required to pass the secondary `namevalue()` colon check) while still matching the `HTTP/1.` prefix pattern in `on_resp_header()`.\n3. `Curl_verify_header()` returns `CURLE_OK` for the injected line (`headerline == 0 < 2`, colon check skipped).\n4. `Curl_headers_push()` → `namevalue()` accepts the line (it contains a colon).\n5. `on_resp_header()` matches the `HTTP/1.x` pattern and overwrites `k->httpcode` / `data->info.httpproxycode` from `407` to `200`.\n6. At the empty line, `httpcode` is `200`, so the handler takes the `KEEPON_DONE` branch instead of `KEEPON_IGNORE`.\n7. `recv_CONNECT_resp()` sees `httpproxycode/100 == 2` and does not call `Curl_http_auth_act()` — no authentication retry, `data->req.newurl` is not set.\n8. `H1_CONNECT()` sees `2xx` and marks the tunnel `H1_TUNNEL_ESTABLISHED`; `cf_h1_proxy_connect` sets `cf->connected = TRUE`.\n9. The client, believing the tunnel is established, sends the real request over the attacker's connection. For an `http://` target this is the full plaintext request (`Cookie`, `Authorization`, POST body); for an `https://` target it is the TLS ClientHello (SNI exposed, TLS content encrypted).\n\nThe negative control — the same injection without `-p` (normal HTTP proxy path through `http_rw_hd`, where `k->headerline` is incremented) — does not overwrite `httpcode`, does not establish a tunnel, and does not bypass authentication, confirming the bug is specific to the CONNECT response path. The full proof-of-concept script (malicious proxy) is available on request.\n\n## Impact\n\n- **CVSS 3.1: 9.6 (Critical)** — `AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N`.\n- **Trigger conditions:** The attacker must operate a malicious HTTP proxy or be positioned as a MITM between the client and the legitimate proxy (curl's documented attacker capability \"B\"). No privileges on the client host are required. The client must use CONNECT tunnelling (`-p` / `--proxy-tunnel`, or any `https://` request through a proxy). The injected line must carry a colon to pass the secondary `namevalue()` check.\n- **Realized impact:**\n  - `http://` targets: full plaintext request captured — `Cookie`, `Authorization`, POST bodies, and all custom headers; the attacker can also return a forged HTTP response (integrity). Session hijacking and API-key/credential disclosure.\n  - Proxy authentication is fully bypassed — even with `CURLOPT_PROXYUSERPWD` set, the auth retry never fires.\n  - The `Proxy-Authorization: Basic` header from the CONNECT request is captured and base64-decoded to plaintext proxy credentials.\n  - `https://` targets: TLS ClientHello (incl. SNI) is intercepted; TLS-encrypted content is not exposed. The attacker may send a TLS alert to terminate the connection (availability), or complete a MITM if the client has disabled TLS verification (`-k`).\n- **Severity bound:** The C:H/I:H is fully realized for plaintext HTTP targets and for proxy-credential capture. For HTTPS targets the confidentiality impact is bounded to SNI/connection-metadata exposure (TLS content remains encrypted), and the availability impact is limited to connection termination. The attack requires the attacker to control the proxy or be a MITM; it does not grant the attacker any new network position they did not already hold, but it defeats proxy authentication — the mechanism intended to gate access to the proxy and to the upstream — and turns a proxy that would have rejected the unauthenticated CONNECT into one that silently exfiltrates the client's request and credentials.",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "remembertheprice"
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

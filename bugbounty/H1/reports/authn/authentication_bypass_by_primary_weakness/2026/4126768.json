@@ -1,0 +1,124 @@
+{
+  "id": 4126768,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI2NzY4",
+  "url": "https://hackerone.com/reports/4126768",
+  "title": "SSH host-key policy is missing from the connection-reuse tuple: strict pins and knownhosts are silently skipped on reused SFTP/SCP connections",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "low",
+  "readable_substate": "N/A",
+  "created_at": "2026-10-19T05:44:01.625Z",
+  "submitted_at": "2026-10-19T05:44:01.844Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "cyrax21_",
+    "url": "/cyrax21_",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/gzinoyxgs9pzo1xxf5001ti9ufq8/f4770e29726b679d8210b3bcebb50139392345e8ead50e7d67de79a93076e327"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2022-27782"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-19T19:45:20.980Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-19T09:12:50.738Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "(The core effect is a silent host-authentication bypass: a transfer whose\nconfigured SSH host-key policy would reject the server is served anyway, with\nexit code 0 and no warning, because it reuses a pooled connection established\nunder a weaker or absent policy. curl may assess this lower because it\nrequires two SSH transfers on one connection pool with differing policies —\nbut that is exactly what `--next` and every multi-transfer libcurl application\ndo.)\n\n## Affected version\n\ncurl 8.23.0, tag curl-8_23_0, commit 3163ec065643ba20709f190111f42c3e1fe95273.\n\nThe gap is also present in current master, 7ab9cad703 (8.23.1-DEV), and is\nold: `ssh_config_matches()` has compared only the client key-pair paths since\nit was introduced by the CVE-2022-27782 fix (1645e9b445, released 7.82.0),\nand no host-key policy parameter has ever been part of the SSH reuse\nidentity. The host-key pin/knownhosts options themselves are much older\n(`CURLOPT_SSH_KNOWNHOSTS` 7.19.6, `CURLOPT_SSH_HOST_PUBLIC_KEY_MD5` 7.16.4,\n`CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256` 7.79.0, `CURLOPT_SSH_HOSTKEYFUNCTION`\n7.79.0), so the md5/knownhosts variants of this report predate 7.82.0.\n\n## Affected interface\n\nBoth the libcurl API and the curl command-line frontend.\n\n- **CLI**: all transfers of one `curl` invocation share one multi handle and\n  therefore one connection pool. `curl sftp://host/a [policy A] --next\n  sftp://host/b [policy B]` reproduces the bypass with no unusual options.\n- **API**: two easy handles on one multi handle, or one easy handle reused\n  across `curl_easy_perform()` calls (connection cache is retained when\n  `CURLOPT_FRESH_CONNECT`/`FORBID_REUSE` are not set).\n\nSilently skipped on reuse: `CURLOPT_SSH_KNOWNHOSTS`,\n`CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256`, `CURLOPT_SSH_HOST_PUBLIC_KEY_MD5`,\n`CURLOPT_SSH_HOSTKEYFUNCTION` (CLI: `--knownhosts`, `--hostpubsha256`,\n`--hostpubmd5`, and a `-k` first transfer). Protocols: `sftp://` and\n`scp://`. The matcher lives in protocol-agnostic code (`lib/url.c`), so both\nSSH backends (libssh2 and libssh) are affected; the PoC below uses libssh2\n1.11.1.\n\n## Summary\n\nFor SFTP and SCP, libcurl verifies the server host key only inside the SSH\nconnect state machine. When a transfer reuses an existing pooled connection,\nthat state machine never runs — and the connection-reuse matcher for SSH\n(`ssh_config_matches()`) compares only the client private/public key paths.\nNone of the host-key policy options (knownhosts file, SHA256 pin, MD5 pin,\nhost-key callback) participate in the reuse decision.\n\nThe result: if transfer A on a pool accepts the host under a lax policy (an\naccepting knownhosts file, `-k`, or — in the API — no policy at all, which the\nlibssh2 backend documents as accepted: \"SSH: no knownhosts file configured\"),\nand transfer B to the same `host:port` with the same credentials and the same\nclient key configures a strict policy that would reject that same host key,\nB silently rides A's connection. B's pin/knownhosts check is never evaluated,\nthe transfer succeeds, and curl exits 0.\n\nThis is the host-key half of the tuple that CVE-2022-27782 started fixing in\n7.82.0; that fix covered only the client key pair (`priv_key`/`pub_key`).\n\n## Root cause\n\n`lib/url.c:569-579` — the entire SSH identity comparison applied when\ndeciding whether a pooled connection can be reused:\n\n```c\nstatic bool ssh_config_matches(struct connectdata *one,\n                               struct connectdata *two)\n{\n  struct ssh_conn *sshc1, *sshc2;\n\n  sshc1 = Curl_conn_meta_get(one, CURL_META_SSH_CONN);\n  sshc2 = Curl_conn_meta_get(two, CURL_META_SSH_CONN);\n  return sshc1 && sshc2 && Curl_safecmp(sshc1->priv_key, sshc2->priv_key) &&\n         Curl_safecmp(sshc1->pub_key, sshc2->pub_key);\n}\n```\n\nIt is consumed by the reuse matcher at `lib/url.c:853-859`\n(`url_match_proto_config()`), which calls it for every SSH-family needle and\notherwise only checks the HTTP version. The host-key policy options live on\nthe easy handle (`data->set.*`) and are consumed exclusively inside the\nconnect state machines:\n\n- `libssh2.c:481-589` `ssh_check_fingerprint()` — SHA256/MD5 pin comparison,\n  `CURLOPT_SSH_HOSTKEYFUNCTION` callback;\n- `libssh2.c:306-` `ssh_knownhost()` — knownhosts file comparison\n  (and at `libssh2.c:319-322`: with no knownhosts configured, the libssh2\n  backend accepts any host key by default);\n- `libssh.c` `myssh_is_known()` — the libssh equivalents.\n\nOn reuse these never execute: `Curl_connect()` sets `conn->bits.reuse`\n(`lib/url.c:2358`) and then skips `Curl_conn_setup()` — which owns the SSH\nfilter chain and its state machine — for reused connections\n(`lib/url.c:2508-2518`). SFTP/SCP connections are pooled in the first place\nbecause `Curl_scheme_sftp`/`Curl_scheme_scp` carry `PROTOPT_CONN_REUSE`\n(`lib/protocol.c`).\n\nThe asymmetry with TLS is by design, not by accident: on TLS connections the\nreuse matcher compares `pinned_key`, `CAfile`, `CApath`, `ca_info_blob`,\n`verifypeer`, `verifyhost`, `verifystatus`, and more\n(`match_ssl_primary_config()`, `lib/vtls/vtls_config.c`) — every parameter\nthat changes how the peer is authenticated. SSH compares none of its\nequivalents. Function history: 1645e9b445 (CVE-2022-27782, client keys only)\n→ removal in 3e9817cd1b → reinstated unchanged in 0618ffe50d (June 2026);\nthe 2026 connection-matching hardening commits (7c11f1a1bd, d37d79df1e,\nc5f9b8b405, 7541ae569d, 72352daba0) each added a parameter to the\nTLS/FTP/generic tuples and left `ssh_config_matches()` untouched.\n\n## Reproduction\n\nI used an attached pair of harnesses with a one-shot loopback SFTP listener:\n`t1_sftp_server.py` (a paramiko-based SFTP server with a fixed ed25519 host\nkey, public-key-only client auth, serving `/a.txt` and `/b.txt`, logging every\nSSH session establishment) and `t1_matrix.sh` (the 8-mode matrix, one\ncommand, full rerun), plus `t1_api_reuse.c` for the libcurl API leg.\n`t1_gen_keys.py` creates the key material: a client key pair, a second client\nkey pair, a knownhosts file containing the real host key (`kh_lax`), one\ncontaining a different key (`kh_wrong`), and the SHA256/MD5 pins of the real\nand of the wrong key.\n\nBuild the client against curl 8.23.0 with an SSH backend:\n\n```\ngit worktree add curl-8230 curl-8_23_0\ncmake -S curl-8230 -B curl-8230/build -G Ninja \\\n  -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCURL_USE_OPENSSL=ON \\\n  -DCURL_USE_LIBSSH2=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF\ncmake --build curl-8230/build -j\n```\n\nIn terminal 1:\n\n```\npython3 t1_sftp_server.py\n```\n\nIn terminal 2, the core exploit — transfer A verifies against a knownhosts\nfile containing the real host key, then transfer B in the same invocation\ncarries a SHA256 pin of a *different* key (guaranteed mismatch on a fresh\nconnection):\n\n```\n./curl-8230/build/src/curl -v \\\n  sftp://alice@127.0.0.1:21032/a.txt \\\n  --key t1keys/client_key --pubkey t1keys/client_key.pub \\\n  --knownhosts t1keys/kh_lax -o /dev/null \\\n  --next \\\n  sftp://alice@127.0.0.1:21032/b.txt \\\n  --key t1keys/client_key --pubkey t1keys/client_key.pub \\\n  --hostpubsha256 U1eyPFUfFCiydwk06rrVV0fzJZt+NFnxgMBFKM3LGHc=\n```\n\nObserved (verbose output, abridged):\n\n```\n* SSH: found host '127.0.0.1' in '.../kh_lax'\n* SSH: knownhost entry matches host key\n* SSH: authenticated via publickey\n* Connection #0 to host 127.0.0.1:21032 left intact\n* SSH: public key file '.../client_key.pub'\n* SSH: private key file '.../client_key'\n* Reusing existing sftp: connection with host 127.0.0.1\nB-file: contents of b.txt\n```\n\nExit code 0. Note what is *absent* from the second transfer's log: the lines\n`SSH: SHA256 public key '...'` / fingerprint comparison that\n`ssh_check_fingerprint()` always prints when it runs. B's pin was never even\nlooked at.\n\nControl — the identical strict transfer on a fresh connection (same command\nwithout the `--next` part):\n\n```\ncurl: (60) Denied establishing ssh session: mismatch SHA256 fingerprint. Remote +GYld9L+5Tx7MghowSBPRGosG2dbWbNZb62imlzhUjs= is not equal to U1eyPFUfFCiydwk06rrVV0fzJZt+NFnxgMBFKM3LGHc=\n```\n\nFull 8-mode matrix (`./t1_matrix.sh`, one command):\n\n```\nM1-reuse-wrongSHA256            rc=0   reuse=1   A:knownhosts(real)  B:--hostpubsha256 WRONG\nM2-reuse-wrongMD5               rc=0   reuse=1   A:knownhosts(real)  B:--hostpubmd5 WRONG\nM3-reuse-wrongknownhosts        rc=0   reuse=1   A:knownhosts(real)  B:--knownhosts WRONG-key\nM4-reuse-A-insecure             rc=0   reuse=1   A:-k                B:--hostpubsha256 WRONG\n--- controls ---\nM5-fresh-wrongSHA256            rc=60  reuse=0   single transfer, wrong pin\nM6-fresh-wrongknownhosts        rc=60  reuse=0   single transfer, wrong knownhosts\nM7-fresh-correctSHA256          rc=0   reuse=0   single transfer, correct pin (sanity)\nM8-reuse-diffclientkey          rc=60  reuse=0   A lax, B wrong pin AND different client key\n```\n\nM1-M4 all print `* Reusing existing sftp: connection with host 127.0.0.1`\nand deliver `B-file: contents of b.txt` with exit 0: every strict policy is\nsilently skipped on reuse. M5-M7 prove the same policies reject/accept\ncorrectly on fresh connections. M8 proves the CVE-2022-27782 client-key\ncomparison still works (a different client key blocks reuse, forcing a fresh\nconnection, on which the pin then correctly fails the transfer) — isolating\nthe host-key policy gap as the only missing tuple element.\n\nlibcurl API leg (`t1_api_reuse`, two easy handles on one multi handle; A\nsets no host-key policy at all, B sets the wrong SHA256 pin):\n\n```\nE2 fresh wrong-pin control: result=60 (peer verification) -- expect 60\nE1 transfer A (no host-key policy): result=0 newconn=1\nE1 transfer B (wrong sha256 pin):  result=0 newconn=0 -- pin silently skipped\n```\n\n`CURLINFO_NUM_CONNECTS == 0` for B is the reuse proof at API level; the\nwrong pin returns success.\n\n## Suggested fix\n\nExtend the SSH reuse identity with the host-key policy parameters, mirroring\nwhat `match_ssl_primary_config()` does for TLS. In practice: store the\nresolved policy on `struct ssh_conn` when `ssh_setup_connection()` builds the\nconnection metadata (it already stores `priv_key`/`pub_key` there), and\ncompare in `ssh_config_matches()`:\n\n- `CURLOPT_SSH_KNOWNHOSTS` (path string, safecmp),\n- `CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256` and `CURLOPT_SSH_HOST_PUBLIC_KEY_MD5`\n  (presence and value),\n- presence of `CURLOPT_SSH_HOSTKEYFUNCTION` (callback identity if\n  practical),\n- optionally `CURLOPT_SSH_AUTH_TYPES` and `CURLOPT_SSH_COMPRESSION` for\n  completeness.\n\nA mismatch should simply prevent reuse (the strict transfer then opens its\nown connection and runs its own verification), which is the same outcome the\nclient-key comparison already produces.\n\nA regression test can extend the existing SFTP pool-reuse coverage in the\npython test suite (`tests/http/test_51*`, the suite that already asserts\n`total_connects == 1` for SFTP reuse): transfer A with an accepting policy,\ntransfer B with a mismatching `CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256`; assert\nthat B fails with `CURLE_PEER_FAILED_VERIFICATION` (and that a new connection\nwas made), matching the M1-vs-M5 contrast of the matrix above.\n\n## Impact\n\nAny application that performs more than one SSH transfer per process (or per\nconnection pool) where the host-key policy differs between transfers gets the\nweaker policy for all of them: the first transfer's policy decision is\nirreversibly attached to the pooled connection, and later transfers'\n`CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256`/`_MD5`, `CURLOPT_SSH_KNOWNHOSTS` and\n`CURLOPT_SSH_HOSTKEYFUNCTION` settings are silently ignored. Concretely, an\nattacker who controls the channel during transfer A (which may have run with\nno verification, `-k`, an accept-all callback, or a knownhosts entry the\nattacker satisfied) keeps that channel for transfer B even though B pinned\nthe genuine host key: B's uploads, downloads and any credentials B applies\nflow over the attacker's connection, with curl reporting complete success.\n\nDeployments that use SSH host-key pinning for compliance or because they\nassume hostile networks are the ones relying on exactly the guarantee that\nis skipped. The failure is silent on both ends: no log line, no error, exit.\ncode 0.",
+  "weakness": {
+    "id": 184,
+    "name": "Authentication Bypass by Primary Weakness"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7030324,
+      "file_name": "t1-ssh-reuse-poc.tar.gz",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/a0ntuoijxjo3wt0jyxt7uncg4e7i?response-content-disposition=attachment%3B%20filename%3D%22t1-ssh-reuse-poc.tar.gz%22%3B%20filename%2A%3DUTF-8%27%27t1-ssh-reuse-poc.tar.gz&response-content-type=application%2Fgzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4JRU4YSH%2F20261019%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261019T224514Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEG4aCXVzLXdlc3QtMiJHMEUCIQDebriweNpLRTuy3SuwX6GLSwYExF8sb1HQboYet%2F9CRwIgakYnj%2FQt3G4Xtht7%2FBFisNV%2FKxsUtWfNMWnRYP2fZ3UqsQUINxADGgwwMTM2MTkyNzQ4NDkiDGrl3mzwOaWqm9oPfiqOBdukx1XO8G08%2Bh%2F9%2BU4lJnB2Tn294nncGeuA88SjbVkqLOTymMMKFmjlr9O5S88A3sM%2FLd8%2FB7pOCVP4iY1BMU0uhFNzpku057gYBnxADiD42ObggazbKrbM4sB9L3vqOQ34sdoeTYBFkTqcWk0T0N9Mk4jNqMdfc1BHStUhcs9ZL%2B3gUFXg4c9pPnkLSCk0UhVrB9l3%2BeUyRkqO7VekDNh13kDsa5TiZUGU%2BrsQyFAkwgK1JznLTm%2BeGLDcfsJzuwBXDQ%2FnmphcVVj%2F9m4v74RAmClQbhf96rzjOfKR8S7vTJHwcuC%2FfqPwYgSh%2FmklQ1fDMGJ2ufG%2B25gyVbm2DQ%2Fz2AUNqGYDB%2FSPEcJaGhN2fpBYgLTBrPwzGVMyCn84Hyq1mymytgfwMxoh4IUP7LPcEl6HfioO6zSlSspBOE8%2FA7fZfVcbivc5pZlUF4kIpUxXyDFogwp%2Bt2AUh8ZsWmfBJTP%2FuJN2S4KL656iwCAw%2FAeBKoKcdL%2FxVRE6G3LHoeoM0ivcucVzims44ipvzNmcnplPJHQfLUj%2Fsk3gpNB%2BzzI%2BpcHN3JK%2FJZVhfQ00oBYf2pgSLmObWyF48oJeYGbKi1cyXyaI7bYr58z9eciss%2FdjlMd0IXr4a%2BXI3f1ZR04APAZAJN59y%2B0dQ2oWPvrPfuVmwW9kTB9sKTGlNUYdupeppuOU0rd8Pwr3OT0ayeTIDB9%2FlBCtL2MschsOFg%2BYhPeK6IYqkZ2dUa1mohrzA45cOWpp30Y9XOqcI7h%2BwNreMJx9zEtljvfz8VK5t042NP16rwIuYBIJmLN%2Fi0ThcLOgvddCgpkQXfcF%2F%2B%2FaNOHBBVPBN5OubcWCLg3BBfjRrwS3TBy4cU4XEYFayDCdodrWBjqxAYjJISSQYrIol6SQarr6afXKC4LClx8raZDwTyyENCceZW83tVjt%2BaA6VAOhZSwpKOtluZn%2ByVTTkI4j%2BXr0M2NqWVBc3RpV%2Fv76yFUN3W7FeFebr5E3TeZRHAU7ZJtHaos2O5l1eW3QkgMaFSUeeUP0E%2FB7T43QpET8G1%2F0Y5vdiLiFPdZL%2F1u5qzwic3yC24f9ViTFYAPXAMkKAndO1L1%2FEWla4GUKZjXaEuTNK3Gcmw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=84662c99893172331375f37395956a83febeb837ad3a6bad3fd9afaefe93e749",
+      "file_size": 12441,
+      "type": "application/gzip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "remembertheprice"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
