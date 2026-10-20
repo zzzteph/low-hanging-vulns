@@ -1,0 +1,139 @@
+{
+  "id": 4129642,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI5NjQy",
+  "url": "https://hackerone.com/reports/4129642",
+  "title": "HSTS cache file: three trailing dots silently disable HSTS for that host",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-10-20T00:15:29.978Z",
+  "submitted_at": "2026-10-20T00:15:30.366Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jashu19",
+    "url": "/jashu19",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/y30m2mdg5p1wlgwjggdsirlk72g3/f4770e29726b679d8210b3bcebb50139392345e8ead50e7d67de79a93076e327"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-8924",
+    "CVE-2023-46219"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-20T17:00:34.508Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-20T17:00:34.374Z",
+  "team_member_agreed_on_going_public_at": "2026-10-20T06:16:30.445Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Researcher:** Maturi Jaswanth Sai\n**Program:** curl (HackerOne)\n**Asset:** github.com/curl/curl, `lib/hsts.c`\n**Affected:** curl 8.20.0, 8.21.0, 8.22.0 and 8.23.0 (tag `curl-8_23_0`,\n2026-10-14), plus master `eb2b201a` (8.23.1-DEV, 2026-10-19)\n**Weakness:** CWE-295 / CWE-693, an HSTS pin that silently stops applying\n\nBefore we went into report to be clear I have created separate file for reproduce steps to validate manually for the team so check that.\n\n\n## What happens\n\n`CURLOPT_HSTS` (and `curl --hsts`) reads cache lines of the form\n`host \"expiry\"`. If the host on that line ends in three or more dots, curl\nstores the entry with exactly one dot still attached, for example\n`example.com.`. A later request to the clean name `example.com` never matches\nthat entry, so the HSTS pin does nothing and curl sends the request over plain\nHTTP. Nothing is logged, and the load function returns `CURLE_OK`.\n\nThe malformed entry is also written back to the cache file, so it survives\nrestarts.\n\n## Root cause\n\nThree places strip a single trailing dot, none of them loop:\n\n`hsts_add_host_expire()` (called for every line read from a file), 8.23.0\nline 459:\n\n```c\n  if(hostlen && (host[hostlen - 1] == '.'))\n    /* strip off any trailing dot */\n    hostlen--;\n\n  if(hostlen) {\n    /* only add it if not already present */\n    e = hsts_check(h, host, hostlen, FALSE);\n    if(!e)\n      result = hsts_create(h, host, hostlen, subdomain, expires);\n```\n\n`hsts_create()` (line 119):\n\n```c\n  if(hlen && (hostname[hlen - 1] == '.'))\n    /* strip off any trailing dot */\n    --hlen;\n```\n\n`hsts_check()` (line 177, exact match at line 201):\n\n```c\n    if(hostname[hlen - 1] == '.')\n      /* remove the trailing dot */\n      --hlen;\n    ...\n      if((hlen == ntail) && curl_strnequal(hostname, sts->host, hlen))\n        return sts;\n```\n\nFor `example.com...`:\n\n1. `hsts_add_host_expire()` removes one dot, leaving two. It calls\n   `hsts_check()` for the duplicate check, which trims one more dot in its own\n   local `hlen` but does not change the caller's `hostlen`. Nothing matches.\n2. `hsts_create()` is then called with the caller's length, trims one more\n   dot, and stores `example.com.`.\n\nTwo dots survive both strips and store as `example.com`, which is why the\n2-dot case works correctly. Three dots leave one behind.\n\nThe live URL path already rejects this input: `urlapi.c` `hostname_check()`\nreturns `CURLUE_BAD_HOSTNAME` for more than one trailing dot. The HSTS file\nloader never calls it.\n\n## Reproduce\n\nOne file, one command, no build needed (curl with HSTS support and python3):\n\n```sh\n./poc_hsts.py\n```\n\nIt runs the 3-dot case and the 2-dot control by itself.\n\nIt writes an HSTS file with 3 trailing dots, listens on localhost, runs\n`curl --hsts ... --connect-to ... http://example.com/`, prints the bytes curl\nsends while the request is happening, and then repeats with 2 dots as a\ncontrol.\n\nManual version, exact commands:\n\n```sh\nprintf 'example.com... \"20991231 10:00:00\"\\n' > hsts.txt\nnc -l 127.0.0.1 8768 | xxd -l 64 &\ncurl -v --noproxy '*' --hsts hsts.txt \\\n  --connect-to ::127.0.0.1:8768 http://example.com/\n```\n\n`--connect-to` only redirects the TCP connection; curl still believes it is\ntalking to `http://example.com/`, which is the decision under test.\n\nExpected on 8.23.0: the listener prints `47 45 54 20 ...` (`GET `), curl logs\n`> GET / HTTP/1.1`, and the HSTS file is rewritten as\n`example.com. \"20991231 10:00:00\"`.\n\nChange the line to `example.com..` (two dots) and the listener prints\n`16 03 01 ...`, a TLS ClientHello, because curl upgrades the URL.\n\nFull step-by-step walkthrough with both the script and the manual path:\n[REPRODUCE.md].\n\n## Evidence\n\nRaw bytes received by the local listener:\n\n| HSTS file line | first bytes on the wire | result |\n|---|---|---|\n| `example.com...` | `474554202f20485454502f312e310d0a` (`GET / HTTP/1.1`) | plain HTTP, **HSTS bypassed** |\n| `example.com..` | `1603010697...` (TLS ClientHello) | upgraded, control OK |\n| `example.com.` | `160301...` (TLS ClientHello) | upgraded, control OK |\n\nCache file after the run (3-dot case):\n\n```\n# Your HSTS cache. https://curl.se/docs/hsts.html\n# This file was generated by libcurl! Edit at your own risk.\nexample.com. \"20991231 10:00:00\"\n```\n\nScreenshot of the full run against 8.23.0 (built from the `curl-8_23_0` tag,\nwhich reports itself as 8.23.0-DEV). Both cases are in the one capture:\n\n- [hsts-full-run.png](screenshots/hsts-full-run.png)\n\nThe same result was reproduced with the curl CLI built from 8.22.0 and 8.23.0,\nand with the 8.21.0 distro package. The existing trailing-dot tests (`test440`,\n`test441`) only cover a single dot on the URL side, never multiple dots on a\nhostname in the cache file, which is why this went unnoticed.\n\n## What I ruled out\n\n- `urlapi.c` rejects more than one trailing dot on live URLs, so this cannot\n  be triggered by a server response or a crafted URL. The file loader does not\n  use that check.\n- `Curl_hsts_parse()` handles `Strict-Transport-Security` response headers and\n  passes an already validated hostname to `hsts_create()`; the 3-dot input\n  cannot reach it that way.\n- `test440` and `test441` (from PR #8821, the last trailing-dot change in this\n  file) exercise a trailing dot in the URL, not several dots in a file entry.\n  `test2582` is about cookies, not HSTS.\n- CVE-2026-8924 (trailing-dot cookie supercookie) only changed `lib/cookie.c`\n  and its tests, not `lib/hsts.c`.\n- Searched curl issues/PRs for `hsts dot`, `hsts trailing`, `CURLOPT_HSTS`\n  and found no report for this file-loader case.\n\n## Suggested fix\n\nStrip trailing dots in a loop in one place, for example in\n`hsts_add_host_expire()` before the calls to `hsts_check()` and\n`hsts_create()`:\n\n```c\nwhile(hostlen && host[hostlen - 1] == '.')\n  hostlen--;\n```\n\nor reject any hostname with two or more trailing dots at load time, matching\n`urlapi.c`. Add tests for the 3-dot and 4-dot cases next to `test440` and\n`test441`.\n\n## Impact\n\nAn HSTS cache file entry that says `example.com` should be pinned is silently\nturned into an entry for `example.com.`, and the host loses its HSTS\nprotection. A later `http://example.com/` request goes out in cleartext and can\nbe stripped or modified on the network.\n\nThe weak point is the input: this needs a malformed HSTS file line, and anyone\nwho can edit that file can delete the line instead. That makes it a silent\nfailure of a security control rather than an attacker capability. It is the\nsame shape as CVE-2023-46219 (a filename length silently cleared the whole\ncache, rated Low), where the problem is that the protection the operator asked\nfor disappears without an error. I rate this Low.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7038764,
+      "file_name": "poc_hsts.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/4bhrpc6pq3lo92ymg1pv0aygm4nd?response-content-disposition=attachment%3B%20filename%3D%22poc_hsts.py%22%3B%20filename%2A%3DUTF-8%27%27poc_hsts.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR6DLGGBN%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T174316Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH0aCXVzLXdlc3QtMiJGMEQCIAV%2B1Ulwfl%2BLBvgYFXGshwYx6iiRvYNLxTNpxgdlIS07AiBVLIKF%2F6ahdZ%2FrZIPw8Yol%2FSknf%2FL4Gmnk9SiOX4aEMiqyBQhGEAMaDDAxMzYxOTI3NDg0OSIMQTTsB4ufaY9ZhDniKo8FmIl0A9UnQpDGlRK9ez08yh4%2Fi023OWNt1FRKDdLSE6koPGgic399eg3i%2F9j1pCjU%2B6JctgeAzbI9L1rVO1N3u44qKankkHxw4ksnTN9fBqaHeA2Ze%2BRkG1kGkjcKFgm6%2FdG2elxRdIY3TY%2F3fdeK8qsRdc8Kk%2BBZuUKi0imttGsQD5ewr%2BnMPVGklOjpk%2BmNVZ14fyvhWR8YCsMtauzggJsGpEJ%2F%2BM2y2wDMsAFqP8mp4HFY7nejK2x6g8jZzz4qTS0cwSTaRo93%2BerBaxXmeNOVwORqzToFlPZF1RY%2BYjqBLY8X1618hc3ekwn5VEJdhFSqupVk7vNpb25tgMTr%2FWnQP1quS5qfMFbhnUIMC5xc6h1EuARBCbnMQ0McKVK8%2FLZILglGRMrtgw14Dsoe6GeC4mf02hdfV%2Fi49czfDU6K5OPQzFX3X93HPDPC7XuMP38R4SV0Gzn839lbgn2Eynmst5tKp%2FFwTjmA0WFJaR7Lbqd6ftEIHzCPCtFggDljhXBTOr8VLkCON02DLK8xxdU6eRIKpyN7iOr8CgdeYq4R4tRUABQff%2BcNbwNxHmpGnfP6XjtHsIhQ%2FaKHZlX%2BXKSUcmsJHrve3QfpWOBTERRmP6nvXk47ZWtuDj5Gb%2BhwSPy0lr2a%2BLxCebwVDrxHktRtEmEw7cwNOni7HH0IHrP65qCpFn9tDz4EkfuvflL3%2FZKYW0j1ies8isP3s9CPaMXpTNa%2Bije%2FDP0upZQDt9MTKF%2FstvPre%2F%2BnLzDzLux%2F0QcGvnNQ5dBsf0WvKwI0bGtvougFv%2F5wnh4b%2F7uJ%2FWv7GvmQrzD%2FgjOblAh9rfL%2BE1R95u2U5WcusulCpc5n22Yr7%2BThhcv73aLKqjgVETCUwt3WBjqyAYDD%2F8cM84pbh9e687Uz9TIQWRUnMxZh404HYQ5dGgV81dFBhlf8iHjbvczIIOsIUULJ2iX6XnkqSw56suC6fd7Fo1BXTqY%2FLRwfwBSKXQzpvSKMEMf67Jhwjt2EqzVAiggkFbdOg4WcFIMDXM2CYXMc4UXAO4p09qtx1khspRo6SMT5nuXTV3HLCoTsboBgHUsjgHGTAKFM7AdAz9BWHF9dQ7rgEi5eO%2Bu5lg9MTlD1pag%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=9af27e5b4c778538fb10dc642f6830bc494fc68d8d14012eeb98991edd1adf22",
+      "file_size": 5821,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 7038765,
+      "file_name": "REPRODUCE.md",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/2ey9zgjppnuz85uz8qe36gfrhend?response-content-disposition=attachment%3B%20filename%3D%22REPRODUCE.md%22%3B%20filename%2A%3DUTF-8%27%27REPRODUCE.md&response-content-type=text%2Fmarkdown&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR6DLGGBN%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T174316Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH0aCXVzLXdlc3QtMiJGMEQCIAV%2B1Ulwfl%2BLBvgYFXGshwYx6iiRvYNLxTNpxgdlIS07AiBVLIKF%2F6ahdZ%2FrZIPw8Yol%2FSknf%2FL4Gmnk9SiOX4aEMiqyBQhGEAMaDDAxMzYxOTI3NDg0OSIMQTTsB4ufaY9ZhDniKo8FmIl0A9UnQpDGlRK9ez08yh4%2Fi023OWNt1FRKDdLSE6koPGgic399eg3i%2F9j1pCjU%2B6JctgeAzbI9L1rVO1N3u44qKankkHxw4ksnTN9fBqaHeA2Ze%2BRkG1kGkjcKFgm6%2FdG2elxRdIY3TY%2F3fdeK8qsRdc8Kk%2BBZuUKi0imttGsQD5ewr%2BnMPVGklOjpk%2BmNVZ14fyvhWR8YCsMtauzggJsGpEJ%2F%2BM2y2wDMsAFqP8mp4HFY7nejK2x6g8jZzz4qTS0cwSTaRo93%2BerBaxXmeNOVwORqzToFlPZF1RY%2BYjqBLY8X1618hc3ekwn5VEJdhFSqupVk7vNpb25tgMTr%2FWnQP1quS5qfMFbhnUIMC5xc6h1EuARBCbnMQ0McKVK8%2FLZILglGRMrtgw14Dsoe6GeC4mf02hdfV%2Fi49czfDU6K5OPQzFX3X93HPDPC7XuMP38R4SV0Gzn839lbgn2Eynmst5tKp%2FFwTjmA0WFJaR7Lbqd6ftEIHzCPCtFggDljhXBTOr8VLkCON02DLK8xxdU6eRIKpyN7iOr8CgdeYq4R4tRUABQff%2BcNbwNxHmpGnfP6XjtHsIhQ%2FaKHZlX%2BXKSUcmsJHrve3QfpWOBTERRmP6nvXk47ZWtuDj5Gb%2BhwSPy0lr2a%2BLxCebwVDrxHktRtEmEw7cwNOni7HH0IHrP65qCpFn9tDz4EkfuvflL3%2FZKYW0j1ies8isP3s9CPaMXpTNa%2Bije%2FDP0upZQDt9MTKF%2FstvPre%2F%2BnLzDzLux%2F0QcGvnNQ5dBsf0WvKwI0bGtvougFv%2F5wnh4b%2F7uJ%2FWv7GvmQrzD%2FgjOblAh9rfL%2BE1R95u2U5WcusulCpc5n22Yr7%2BThhcv73aLKqjgVETCUwt3WBjqyAYDD%2F8cM84pbh9e687Uz9TIQWRUnMxZh404HYQ5dGgV81dFBhlf8iHjbvczIIOsIUULJ2iX6XnkqSw56suC6fd7Fo1BXTqY%2FLRwfwBSKXQzpvSKMEMf67Jhwjt2EqzVAiggkFbdOg4WcFIMDXM2CYXMc4UXAO4p09qtx1khspRo6SMT5nuXTV3HLCoTsboBgHUsjgHGTAKFM7AdAz9BWHF9dQ7rgEi5eO%2Bu5lg9MTlD1pag%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=126d29720e5aeeee3b35502cad761cbb0f1e439fefdd264e02c0eea494c9ea41",
+      "file_size": 2803,
+      "type": "text/markdown",
+      "moderated": null
+    },
+    {
+      "id": 7038768,
+      "file_name": "hsts-full-run.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/by5ad7sal901li8yj1e3rhc5tcyv?response-content-disposition=attachment%3B%20filename%3D%22hsts-full-run.png%22%3B%20filename%2A%3DUTF-8%27%27hsts-full-run.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR6DLGGBN%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T174316Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH0aCXVzLXdlc3QtMiJGMEQCIAV%2B1Ulwfl%2BLBvgYFXGshwYx6iiRvYNLxTNpxgdlIS07AiBVLIKF%2F6ahdZ%2FrZIPw8Yol%2FSknf%2FL4Gmnk9SiOX4aEMiqyBQhGEAMaDDAxMzYxOTI3NDg0OSIMQTTsB4ufaY9ZhDniKo8FmIl0A9UnQpDGlRK9ez08yh4%2Fi023OWNt1FRKDdLSE6koPGgic399eg3i%2F9j1pCjU%2B6JctgeAzbI9L1rVO1N3u44qKankkHxw4ksnTN9fBqaHeA2Ze%2BRkG1kGkjcKFgm6%2FdG2elxRdIY3TY%2F3fdeK8qsRdc8Kk%2BBZuUKi0imttGsQD5ewr%2BnMPVGklOjpk%2BmNVZ14fyvhWR8YCsMtauzggJsGpEJ%2F%2BM2y2wDMsAFqP8mp4HFY7nejK2x6g8jZzz4qTS0cwSTaRo93%2BerBaxXmeNOVwORqzToFlPZF1RY%2BYjqBLY8X1618hc3ekwn5VEJdhFSqupVk7vNpb25tgMTr%2FWnQP1quS5qfMFbhnUIMC5xc6h1EuARBCbnMQ0McKVK8%2FLZILglGRMrtgw14Dsoe6GeC4mf02hdfV%2Fi49czfDU6K5OPQzFX3X93HPDPC7XuMP38R4SV0Gzn839lbgn2Eynmst5tKp%2FFwTjmA0WFJaR7Lbqd6ftEIHzCPCtFggDljhXBTOr8VLkCON02DLK8xxdU6eRIKpyN7iOr8CgdeYq4R4tRUABQff%2BcNbwNxHmpGnfP6XjtHsIhQ%2FaKHZlX%2BXKSUcmsJHrve3QfpWOBTERRmP6nvXk47ZWtuDj5Gb%2BhwSPy0lr2a%2BLxCebwVDrxHktRtEmEw7cwNOni7HH0IHrP65qCpFn9tDz4EkfuvflL3%2FZKYW0j1ies8isP3s9CPaMXpTNa%2Bije%2FDP0upZQDt9MTKF%2FstvPre%2F%2BnLzDzLux%2F0QcGvnNQ5dBsf0WvKwI0bGtvougFv%2F5wnh4b%2F7uJ%2FWv7GvmQrzD%2FgjOblAh9rfL%2BE1R95u2U5WcusulCpc5n22Yr7%2BThhcv73aLKqjgVETCUwt3WBjqyAYDD%2F8cM84pbh9e687Uz9TIQWRUnMxZh404HYQ5dGgV81dFBhlf8iHjbvczIIOsIUULJ2iX6XnkqSw56suC6fd7Fo1BXTqY%2FLRwfwBSKXQzpvSKMEMf67Jhwjt2EqzVAiggkFbdOg4WcFIMDXM2CYXMc4UXAO4p09qtx1khspRo6SMT5nuXTV3HLCoTsboBgHUsjgHGTAKFM7AdAz9BWHF9dQ7rgEi5eO%2Bu5lg9MTlD1pag%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=a9d782162093c6c678f2027ee7212641695d923dc7d6b43ed25fe0884822459e",
+      "file_size": 236183,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

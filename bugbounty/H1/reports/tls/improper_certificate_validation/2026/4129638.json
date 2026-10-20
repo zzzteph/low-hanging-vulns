@@ -1,0 +1,139 @@
+{
+  "id": 4129638,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI5NjM4",
+  "url": "https://hackerone.com/reports/4129638",
+  "title": "TLS session cache ignores CURLOPT_SSL_CTX_FUNCTION identity and resumes one client's session for another",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-10-20T00:12:25.637Z",
+  "submitted_at": "2026-10-20T00:12:25.908Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jashu19",
+    "url": "/jashu19",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/y30m2mdg5p1wlgwjggdsirlk72g3/f4770e29726b679d8210b3bcebb50139392345e8ead50e7d67de79a93076e327"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2016-5419",
+    "CVE-2017-7468"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-20T17:00:44.628Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-20T17:00:44.496Z",
+  "team_member_agreed_on_going_public_at": "2026-10-20T05:56:39.954Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Researcher:** Maturi Jaswanth Sai\n**Program:** curl (HackerOne)\n**Asset:** github.com/curl/curl, `lib/vtls/vtls_scache.c`\n**Affected:** curl 8.21.0, 8.22.0 and 8.23.0 (tag `curl-8_23_0`,\n2026-10-14), plus master `eb2b201a` (8.23.1-DEV, 2026-10-19)\n**Weakness:** CWE-295, wrong client identity on a resumed TLS session. Same\nclass as CVE-2016-5419 and CVE-2017-7468\n\nBefore we went into report to be clear I have created separate file for reproduce steps to validate manually for the team so check that.\n\n\n## What happens\n\n`CURLOPT_SSL_CTX_FUNCTION` lets an application configure the TLS context,\nincluding loading a client certificate. Two easy handles that pick different\nclient certificates only through this callback, without setting\n`CURLOPT_SSLCERT` or `CURLOPT_SSLKEY`, end up with the same TLS session-cache\npeer key, because the key is built from `struct ssl_filter_config` fields and\nnever looks at the callback or its userdata.\n\nThe second handle opens its own TCP connection and its callback runs and loads\nits own certificate, but curl offers the first handle's cached TLS session.\nThe server accepts the resumption, never asks for the second certificate, and\ncontinues as the first identity. Both requests return the first client's data\nand no error is reported.\n\n## Root cause\n\n`cf_ssl_peer_key_add_mtls()` (8.23.0, `lib/vtls/vtls_scache.c:126`) adds the\nclient certificate material that comes from the normal options:\n\n```c\n  if(ssl->clientcert && ssl->clientcert[0]) {\n    result = cf_ssl_peer_key_add_path(buf, \"CCERT\", ssl->clientcert, is_local);\n    ...\n  if(ssl->key && ssl->key[0]) {\n    result = cf_ssl_peer_key_add_path(buf, \"KEY\", ssl->key, is_local);\n    ...\n  if(ssl->key_blob) {\n    result = cf_ssl_peer_key_add_hash(buf, \"KEYBlob\", ssl->key_blob);\n```\n\n`ssl_peer_key_build()` calls it at line 320. There is no entry for\n`data->set.ssl_fsslctx` or `data->set.ssl_fsslctxp`, and no code that disables\nthe session cache when the callback is set.\n\nThe connection-reuse matcher (`match_ssl_primary_config()` in\n`lib/vtls/vtls_config.c`) is fine and is not what causes this: the two requests\nuse different connections (ids 0 and 1). The confusion happens at the TLS\nsession layer.\n\n## Reproduce\n\nOne file, one command:\n\n```sh\n./poc_sslctx.py\n```\n\nIt runs the bug case, the failed-workaround case and the control by itself.\n\nThe script generates two client certificates (alice, bob) and a server\ncertificate, builds its C client against the installed libcurl, starts an mTLS\nserver, and runs three cases. Server connections, callbacks and responses are\nprinted while they happen:\n\n1. `default` — bug: both connections show `alice-client`\n2. `forbid-reuse` — callback sets `CURLOPT_FORBID_REUSE`, still `alice-client`\n3. `no-session-cache` — `CURLOPT_SSL_SESSIONID_CACHE=0`, server shows\n   `bob-client`\n\nTo use a libcurl built from the `curl-8_23_0` tag instead of the system\nlibrary (full commands in [REPRODUCE.md](REPRODUCE.md)):\n\n```sh\nCURL_CFLAGS=\"-I$PWD/curl/include\" \\\nCURL_LIBS=\"$PWD/curl/build/lib/libcurl.a -lssl -lcrypto -lpsl \\\n-lbrotlidec -lbrotlicommon -lz -lzstd -lpthread -ldl\" \\\n./poc_sslctx.py\n```\n\nFull walkthrough, including building libcurl from source:\n[REPRODUCE.md].\n\n## Evidence\n\nServer log, default case (8.23.0):\n\n```\nCONN#1 from ('127.0.0.1', 42158): client_cert_CN=alice-client  first_line=b'GET / HTTP/1.1'\nCONN#2 from ('127.0.0.1', 42164): client_cert_CN=alice-client  first_line=b'GET / HTTP/1.1'\n```\n\nClient output from the same run:\n\n```\n[callback] loading alice.crt into SSL_CTX\nconnection id: 0\n\n=== request 2: bob's SSL_CTX_FUNCTION ===\n[callback] loading bob.crt into SSL_CTX\nconnection id: 1\n\nresp1: seen-cert=alice-client\nresp2: seen-cert=alice-client\n\nconnections: 0 then 1 (separate connections)\nidentity the server actually saw: alice-client\nRESULT: BUG (bob authenticated as alice)\n```\n\nControl case with the session cache disabled:\n\n```\nCONN#2 from ('127.0.0.1', 54416): client_cert_CN=bob-client\nresp2: seen-cert=bob-client\nRESULT: OK (bob authenticated as bob)\n```\n\nThe default case reproduced on every run with 8.23.0 and master, and also\nreproduced with 8.21.0 and 8.22.0. The control always flipped to bob.\n\nScreenshot of the full run, all three cases in one capture:\n\n- [sslctx-full-run.png](screenshots/sslctx-full-run.png)\n\n## The documented workaround does not work\n\n`docs/libcurl/opts/CURLOPT_SSL_CTX_FUNCTION.md` says:\n\n> The CURLOPT_SSL_CTX_FUNCTION callback allows the application to reach in and\n> modify SSL details in the connection without libcurl itself knowing anything\n> about it, which then subsequently can lead to libcurl unknowingly reusing SSL\n> connections with different properties. To remedy this you may set\n> CURLOPT_FORBID_REUSE from the callback function.\n\nSetting `CURLOPT_FORBID_REUSE` inside both callbacks gives two separate\nconnections but the same result: the second connection resumes the first\nsession and the server still sees `alice-client`. The workaround covers\nconnection reuse, not session resumption. Only\n`CURLOPT_SSL_SESSIONID_CACHE=0` changes the outcome.\n\n## What I checked\n\n- `match_ssl_primary_config()` in `lib/vtls/vtls_config.c` is complete for\n  `ssl_primary_config`; this is not a connection-reuse bug.\n- `fsslctx` has 20 references in `lib/`: setopt storage, the OpenSSL, wolfSSL\n  and mbedTLS backends that invoke the callback, DoH propagation and the\n  callback bookkeeping in `api.c`. `grep -rn fsslctx lib/vtls/vtls_scache.c`\n  returns nothing, so the session cache cannot see the callback at all.\n- `docs/libcurl/opts/CURLOPT_SSL_SESSIONID_CACHE.md` says \"nothing ever should\n  get hurt by attempting to reuse SSL session-IDs\". This is a counterexample.\n- Searched curl issues and PRs for `SSL_CTX_FUNCTION session`,\n  `session resumption client cert` and `fsslctx`; no existing report matches.\n\n## Suggested fix\n\nOnly reuse a cached session when the callback identity matches. The pointer\nvalues are enough:\n\n- add `ssl_fsslctx` and `ssl_fsslctxp` to the peer key in\n  `ssl_peer_key_build()`, or\n- do not cache or resume sessions for handles where `ssl_fsslctx` is set.\n\nA test can use two callbacks that load different client certs and assert the\nsecond connection is authenticated as the second identity.\n\n## Impact\n\nAn application that uses `CURLOPT_SSL_CTX_FUNCTION` to select a client\ncertificate per request against the same host, for example a gateway or proxy\nthat authenticates to one backend as different tenants, can have one tenant's\nrequest authenticated as another tenant. The correct callback runs and returns\nsuccess, the server accepts a valid resumption, and nothing reports an error.\n\nPreconditions are specific: the client certificate must be set only through the\ncallback, and both handles must share a multi handle so they share the session\ncache. In exchange the impact is a server-side identity mix-up, which is why I\nrate this Medium. The project has fixed this class twice before\n(CVE-2016-5419, CVE-2017-7468) for the normal certificate options.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7038742,
+      "file_name": "sslctx-full-run.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bbreuy76mwqnl3n5dnxbgnd0hvae?response-content-disposition=attachment%3B%20filename%3D%22sslctx-full-run.png%22%3B%20filename%2A%3DUTF-8%27%27sslctx-full-run.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYA75VC3D%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T174315Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH0aCXVzLXdlc3QtMiJIMEYCIQD74uF1f3wprtugHh2%2FIt8%2BC9SFCYdksUfE1B8v2kMZlAIhALrRKVnZIEHLwWudyvrf3eCr1o93%2BZ0VSo9HJoFj83OdKrIFCEYQAxoMMDEzNjE5Mjc0ODQ5IgzPKgnj6E%2FAOVVWzzAqjwXq6pOE%2BsrhaymWo67t2fBaTmkWj7aS3WhhBMrPA66mZxsuARyoe20P%2BibWFb0MMzmrJHi5zzNuI%2F50VYpTjRQRYVO1X1%2BBYK6J9Tbf20Ny79ts70JXDUI43FhtVIpAknE6L2wJ8OGx%2F6GgFpWl3pW%2B%2FuEkUuJmZR4gNUZeNhkXH6wlmwx5qcUJxfOuumAVwXVxKyV1lorI8eVhvoACwCFaJS8pCDVuYF4iI%2FHq1a%2FfaqgLWU3AsPwBKn2JmE88LzaY%2Bnym2F6etMKenTCu5uX0xWuiatapYVT285PapOohu4zbZgvlGqWhVNoTl%2Bm5R9RRe3dcI2Z2hCRQ1LBXbNsFkliwCv%2B0muPE78gLPz1WTEqbLgLihZMMN611b4rGCR3vRIIKIC3NCc4t3PkP92%2BsWha5nHfRNgX3kVtrqZ0YyDoeFG4uVw%2BmCvLfR5bzOdtZhgoNwo0XzREyhJqh7%2BpG7MGAZlAC9aF4KTlTck5iHL5sA3%2BPlu3Ng2jvyPpB8klDG3tykCixJDdPDKUywX5%2BNeVPYM4ztASZn%2FQ%2BDzm0N%2FECnMFEZTJ7DzXyWQMPD41a1LmYGzUT2%2FL434XdIxY5Bcx4ol5weMor4A1GeZiuSSdKwP7nwNVf9Os0ZD4xz5D1mKSqP22vQwZHsAF%2FAux5Y1JmBG1KJmJD94fdV50jrAW9aBKvfirlHh0ClkRJ14EFRZM1yTFAKB5uysAcQyIWdfRf4XMfRd1Skvmn8wtvB69G1rDQYxjEha0Vi%2BQvte2k1XMaTUBXRqXwJ4NOGyqA%2BfydibPf6Sp0Tjr95oSEPuMeDejR1Os2FPDQ0Wt2LXq1xKYoXgMgTqJJbBMNQhuWd%2FeokITFO6KoHuFRem9dMMfP3dYGOrAB%2FeSNdXJcGwebRT5zUYo3TxcxggkK4CgRXdI2UjPlSsicK6j3SNBptFStjugyZGTybaKdTM2Rl%2Bur6Tj7nF%2FAgCBhQpVc1mCMpR1JaGBoqXfvBKKtPbqQfIPRrduq2THDKSBwPLTsRXKUtSmKR8KDwNeK9AmD73gWxtYWUUWTwPpZYyM6gwVtWH0o0d%2FgEwyBPiOUULgqUrpqLurn9OwZwGmdELrpoyOkc4fWuP5DdUI%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=7e938629ae7799d3dac380bdd5e27c829b3bf818909bf645ad71a0454dcaa1e0",
+      "file_size": 229075,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 7038743,
+      "file_name": "poc_sslctx.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/eqmg0uy0vu117ig32b7dpumagup4?response-content-disposition=attachment%3B%20filename%3D%22poc_sslctx.py%22%3B%20filename%2A%3DUTF-8%27%27poc_sslctx.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYA75VC3D%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T174315Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH0aCXVzLXdlc3QtMiJIMEYCIQD74uF1f3wprtugHh2%2FIt8%2BC9SFCYdksUfE1B8v2kMZlAIhALrRKVnZIEHLwWudyvrf3eCr1o93%2BZ0VSo9HJoFj83OdKrIFCEYQAxoMMDEzNjE5Mjc0ODQ5IgzPKgnj6E%2FAOVVWzzAqjwXq6pOE%2BsrhaymWo67t2fBaTmkWj7aS3WhhBMrPA66mZxsuARyoe20P%2BibWFb0MMzmrJHi5zzNuI%2F50VYpTjRQRYVO1X1%2BBYK6J9Tbf20Ny79ts70JXDUI43FhtVIpAknE6L2wJ8OGx%2F6GgFpWl3pW%2B%2FuEkUuJmZR4gNUZeNhkXH6wlmwx5qcUJxfOuumAVwXVxKyV1lorI8eVhvoACwCFaJS8pCDVuYF4iI%2FHq1a%2FfaqgLWU3AsPwBKn2JmE88LzaY%2Bnym2F6etMKenTCu5uX0xWuiatapYVT285PapOohu4zbZgvlGqWhVNoTl%2Bm5R9RRe3dcI2Z2hCRQ1LBXbNsFkliwCv%2B0muPE78gLPz1WTEqbLgLihZMMN611b4rGCR3vRIIKIC3NCc4t3PkP92%2BsWha5nHfRNgX3kVtrqZ0YyDoeFG4uVw%2BmCvLfR5bzOdtZhgoNwo0XzREyhJqh7%2BpG7MGAZlAC9aF4KTlTck5iHL5sA3%2BPlu3Ng2jvyPpB8klDG3tykCixJDdPDKUywX5%2BNeVPYM4ztASZn%2FQ%2BDzm0N%2FECnMFEZTJ7DzXyWQMPD41a1LmYGzUT2%2FL434XdIxY5Bcx4ol5weMor4A1GeZiuSSdKwP7nwNVf9Os0ZD4xz5D1mKSqP22vQwZHsAF%2FAux5Y1JmBG1KJmJD94fdV50jrAW9aBKvfirlHh0ClkRJ14EFRZM1yTFAKB5uysAcQyIWdfRf4XMfRd1Skvmn8wtvB69G1rDQYxjEha0Vi%2BQvte2k1XMaTUBXRqXwJ4NOGyqA%2BfydibPf6Sp0Tjr95oSEPuMeDejR1Os2FPDQ0Wt2LXq1xKYoXgMgTqJJbBMNQhuWd%2FeokITFO6KoHuFRem9dMMfP3dYGOrAB%2FeSNdXJcGwebRT5zUYo3TxcxggkK4CgRXdI2UjPlSsicK6j3SNBptFStjugyZGTybaKdTM2Rl%2Bur6Tj7nF%2FAgCBhQpVc1mCMpR1JaGBoqXfvBKKtPbqQfIPRrduq2THDKSBwPLTsRXKUtSmKR8KDwNeK9AmD73gWxtYWUUWTwPpZYyM6gwVtWH0o0d%2FgEwyBPiOUULgqUrpqLurn9OwZwGmdELrpoyOkc4fWuP5DdUI%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=56cb140ce781b3d3caaabb044b010b12a1024ca6f44992e6351da1fa19800e28",
+      "file_size": 13822,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 7038744,
+      "file_name": "REPRODUCE.md",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/gyfbu29eltwyo9vuk8grs97yh1ms?response-content-disposition=attachment%3B%20filename%3D%22REPRODUCE.md%22%3B%20filename%2A%3DUTF-8%27%27REPRODUCE.md&response-content-type=text%2Fmarkdown&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQYA75VC3D%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T174315Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEH0aCXVzLXdlc3QtMiJIMEYCIQD74uF1f3wprtugHh2%2FIt8%2BC9SFCYdksUfE1B8v2kMZlAIhALrRKVnZIEHLwWudyvrf3eCr1o93%2BZ0VSo9HJoFj83OdKrIFCEYQAxoMMDEzNjE5Mjc0ODQ5IgzPKgnj6E%2FAOVVWzzAqjwXq6pOE%2BsrhaymWo67t2fBaTmkWj7aS3WhhBMrPA66mZxsuARyoe20P%2BibWFb0MMzmrJHi5zzNuI%2F50VYpTjRQRYVO1X1%2BBYK6J9Tbf20Ny79ts70JXDUI43FhtVIpAknE6L2wJ8OGx%2F6GgFpWl3pW%2B%2FuEkUuJmZR4gNUZeNhkXH6wlmwx5qcUJxfOuumAVwXVxKyV1lorI8eVhvoACwCFaJS8pCDVuYF4iI%2FHq1a%2FfaqgLWU3AsPwBKn2JmE88LzaY%2Bnym2F6etMKenTCu5uX0xWuiatapYVT285PapOohu4zbZgvlGqWhVNoTl%2Bm5R9RRe3dcI2Z2hCRQ1LBXbNsFkliwCv%2B0muPE78gLPz1WTEqbLgLihZMMN611b4rGCR3vRIIKIC3NCc4t3PkP92%2BsWha5nHfRNgX3kVtrqZ0YyDoeFG4uVw%2BmCvLfR5bzOdtZhgoNwo0XzREyhJqh7%2BpG7MGAZlAC9aF4KTlTck5iHL5sA3%2BPlu3Ng2jvyPpB8klDG3tykCixJDdPDKUywX5%2BNeVPYM4ztASZn%2FQ%2BDzm0N%2FECnMFEZTJ7DzXyWQMPD41a1LmYGzUT2%2FL434XdIxY5Bcx4ol5weMor4A1GeZiuSSdKwP7nwNVf9Os0ZD4xz5D1mKSqP22vQwZHsAF%2FAux5Y1JmBG1KJmJD94fdV50jrAW9aBKvfirlHh0ClkRJ14EFRZM1yTFAKB5uysAcQyIWdfRf4XMfRd1Skvmn8wtvB69G1rDQYxjEha0Vi%2BQvte2k1XMaTUBXRqXwJ4NOGyqA%2BfydibPf6Sp0Tjr95oSEPuMeDejR1Os2FPDQ0Wt2LXq1xKYoXgMgTqJJbBMNQhuWd%2FeokITFO6KoHuFRem9dMMfP3dYGOrAB%2FeSNdXJcGwebRT5zUYo3TxcxggkK4CgRXdI2UjPlSsicK6j3SNBptFStjugyZGTybaKdTM2Rl%2Bur6Tj7nF%2FAgCBhQpVc1mCMpR1JaGBoqXfvBKKtPbqQfIPRrduq2THDKSBwPLTsRXKUtSmKR8KDwNeK9AmD73gWxtYWUUWTwPpZYyM6gwVtWH0o0d%2FgEwyBPiOUULgqUrpqLurn9OwZwGmdELrpoyOkc4fWuP5DdUI%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=0ab5fe48473e390352ffff7c1497451529ca23cbe46f7ab667033c7ec6a77be3",
+      "file_size": 3041,
+      "type": "text/markdown",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
