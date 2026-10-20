@@ -1,0 +1,130 @@
+{
+  "id": 4123646,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTIzNjQ2",
+  "url": "https://hackerone.com/reports/4123646",
+  "title": "TLS session cache key omits native_ca_store: a session validated with CURLSSLOPT_NATIVE_CA can be resumed by a transfer that disabled it (incomplete f",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-10-17T23:22:30.634Z",
+  "submitted_at": "2026-10-17T23:22:30.890Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": true,
+    "username": "joumaaa",
+    "url": "/joumaaa",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/7jb8m1fd01xv19xi8qz0dhb844he/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-11564"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-20T06:17:25.919Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-19T18:25:35.374Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nCVE-2026-11564 fixed the connection *pool* so that a connection whose certificate was\nvalidated with the native CA store is not reused by a later transfer that switched to\ncustom CA material. That same field, `native_ca_store`, is compared for connection reuse\nbut is NOT part of the TLS *session* cache key. So a TLS session established and validated\nwith `CURLSSLOPT_NATIVE_CA` can be resumed, on a brand-new connection, by a transfer that\nhas native CA turned off. Resumption sends no server Certificate, so the second transfer\nnever validates the peer and ends up trusting a server its own CA configuration would have\nrejected. Same certificate-validation bypass as CVE-2026-11564, reached through the session\ncache instead of the connection pool — i.e. that fix is incomplete.\n\nExact source lines:\n\n- `native_ca_store` IS required to match for connection reuse:\n  `lib/vtls/vtls_config.c:148`\n  `    (c1->native_ca_store == c2->native_ca_store) &&`\n\n- `native_ca_store` is NEVER added to the session cache key. `ssl_peer_key_build()` in\n  `lib/vtls/vtls_scache.c` builds it; the `verifypeer` block (around\n  `lib/vtls/vtls_scache.c:292-317`) adds CAfile, CApath, Issuer, CAInfoBlob, issuercert_blob\n  — but not `native_ca_store`. Verify: `git grep -n native_ca_store lib/vtls/vtls_scache.c`\n  returns 0 hits.\n\n- `CURLSSLOPT_NATIVE_CA` only flips the flag (`lib/vtls/vtls_config.c:254`); it does not\n  change CAfile/CApath, so two configs differing only in `native_ca_store` build a\n  byte-identical session key.\n\n## Affected version\n\nmaster @ 8e3722b7 (8.23.1-DEV). Any build where `CURLSSLOPT_NATIVE_CA` is meaningful\n(OpenSSL with the native store loaded, Schannel, Secure Transport).\n\n## Steps To Reproduce\n\nPreconditions: two transfers to the same https origin that share a TLS session cache (two\neasy handles sharing a `CURLSHOPT_SSL_SESSION` share, or two transfers on one multi handle),\nTLS resumption enabled (default), and a server whose certificate chains to a root present in\nthe OS native store but NOT in the file bundle (realistic with an enterprise/MDM OS root).\n\n1. Handle A -> `https://target`, `CURLSSLOPT_NATIVE_CA` set, verifypeer on, default/empty\n   CAfile. A validates the server cert against the native store and stores the TLS session\n   (`Curl_ssl_scache_put`).\n2. Handle B -> same `https://target`, `CURLSSLOPT_NATIVE_CA` NOT set, same CAfile, verifypeer\n   on. B builds the same session key, opens a new connection, and `Curl_ssl_scache_get_session`\n   returns A's cached session. TLS resumes; no certificate is sent or validated.\n3. Result: B completes the handshake and trusts a server whose certificate its own\n   (bundle-only) configuration would have rejected.\n\nNegative control: give A and B the same `native_ca_store` value -> no bypass (intended\nbehaviour). The bug is only the config mismatch being invisible to the session key.\n\nThe attached `verify.sh` proves the code-level asymmetry against a fresh clone (native_ca_store\nrequired for connection reuse, 0 occurrences in the session-key builder).\n\n## Suggested fix\n\nAdd `native_ca_store` to the `verifypeer` part of the session key in `ssl_peer_key_build()`\n(`lib/vtls/vtls_scache.c`), exactly as it is compared in `match_ssl_primary_config()`\n(`lib/vtls/vtls_config.c:148`). The ECH fields (`ech`/`ech_config`/`ech_public`) are also\ncompared for reuse but absent from the key — worth adding in the same change.\n\n## Impact\n\n## Summary\n\nA transfer that deliberately restricts trust to a file CA bundle can resume a TLS session\nthat was only ever validated against the operating-system native CA store, and therefore\naccept a server certificate it would otherwise reject.\n\nAn active network attacker who holds a certificate trusted by one store but not the other\n(for example a cert chaining to a corporate/MDM root present in the OS store but absent from\nthe application's bundle) can MITM the stricter transfer: it resumes the session and never\nre-validates the peer.\n\nThis is the same impact as CVE-2026-11564 (certificate validation bypass, CWE-295), reached\nthrough TLS session resumption rather than connection pooling, so the fix for that CVE is\nincomplete.\n\nNot a bypass when: native CA is not used, the two configs use the same `native_ca_store`\nvalue, or no session cache is shared across differing configs. Hence Low severity, matching\nthe parent CVE.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7019557,
+      "file_name": "verify.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/z4i5qct7hb73kth7knvfz1g09o02?response-content-disposition=attachment%3B%20filename%3D%22verify.sh%22%3B%20filename%2A%3DUTF-8%27%27verify.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3F6H66KC%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T070000Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIQDYsUPnsomkpa7DiYsm%2FLzL3eysbJPyHTpHUfl5ItdUZgIgJRIP5xQ%2BhgiWwyJepjWMTgLzYkus2x%2F2jOzrt2NaG1YqsgUIQBADGgwwMTM2MTkyNzQ4NDkiDD%2BemO9NRWGSuXvjViqPBf3uk%2F9jNXKOT68EfeYpbvZPYs1ezcNHytANH%2Bk29PPv6ZQmBSXw9mlld4RdAzairMXrOf9H1DCwzROJy1IUvWqanOkT3nhX6iuRyzt8VPaUZGNr5fZUW%2FIEpc9jrXazxbaW0sVsOA3NZx9vKsSZgeSAmtU7aUZrJTzfHLocOnk%2FsYvEMFOumPXZhUCMh1HXPh2iNLvfYVKG53xJ6yBM4ZdVQ%2BOGxXRr9PnwdoXeX5xzTb4GTJBuFWlZOrzP%2F0y4FxtWYQa2EeFb8eNEn5HmKPTlLY3Glg2N9VUVlNwV5db%2FyF66DoGyi8hLunRxigSql3iHMjfT8rZxX%2BAhEtTbD5sm8dU7y3cQL69Q7c0MXCm8Xtck3VHzwPRi87lN%2B60sAoEn4EG%2BrlQpsLgICZuuxldNImE6lDDUSwnts9b1zhKsQH153W3Q2HiQANUkWglM0ltalaOSG%2Fzjkq4nBgCi3gcBUlJIzybnq5speQ3Hjbt%2FFHMpDpRIUQo5ImsI85YHuZdU%2BMs0YCTjuAurXoluLnxeNW764ynnUezh9ThW60RYNCrOO87%2BpBQ5lep3tGz%2FOwHWxLutOUPs%2F7637Zzcqr8S%2FuAVFdmOcuS9lr%2B00%2BINL7w0doiqnoZMJCBG2Ba%2F9i41KHGcmkxsVlIJQueIJ7FSdbHvuhK%2BDlXvip8UIY0g%2BHzPS1EwqqDHgc8XalPTJ2RHu8kr4vCjBiI7jsfcB7l330865I5hLWrTMAplxpVJ8VsC72fcNoxh7wss2H%2BE2c2m2ugVkq64qw8gGqcjhmvIDYl8%2Bsw9AUOBRsYfw4BA9fcQRlf%2BQ9KWHexqjPaHd0NHKc9rtV2LuxB6sHtGOmbLhnlSwVxkzww%2BXcp2ws4wjJTc1gY6sQGBnMfeb7cS565Q85VDDSNJ7XedBY8kMV9FCdqDLhzntrpO%2F3u%2F9PB2w%2B0VemAPP8Cc8%2FgPMMAzZ%2B7tlWcH4lzlXGAeEIdPmKtYs%2FrTxAf1Dam8NkERTunmAgxzLJ5BmW5A6XvUpoFektPkiJ%2F1hxGCOr4nIX%2BqFN%2BxofUwKf204twLmWkcK%2Fmkd4dw3hKHVFwqsgyeTj0KrO80OZOWDQ3eumilN0G8VDyKjc6M9oG00oI%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=78f7afdbd6390bcff0681992119614a8bdc48cdff8b3de897224e338a7684d7d",
+      "file_size": 1364,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 7019558,
+      "file_name": "verify-output.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/7shk0vkigivdbt5w9bp4thhisoq4?response-content-disposition=attachment%3B%20filename%3D%22verify-output.txt%22%3B%20filename%2A%3DUTF-8%27%27verify-output.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3F6H66KC%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T070000Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIQDYsUPnsomkpa7DiYsm%2FLzL3eysbJPyHTpHUfl5ItdUZgIgJRIP5xQ%2BhgiWwyJepjWMTgLzYkus2x%2F2jOzrt2NaG1YqsgUIQBADGgwwMTM2MTkyNzQ4NDkiDD%2BemO9NRWGSuXvjViqPBf3uk%2F9jNXKOT68EfeYpbvZPYs1ezcNHytANH%2Bk29PPv6ZQmBSXw9mlld4RdAzairMXrOf9H1DCwzROJy1IUvWqanOkT3nhX6iuRyzt8VPaUZGNr5fZUW%2FIEpc9jrXazxbaW0sVsOA3NZx9vKsSZgeSAmtU7aUZrJTzfHLocOnk%2FsYvEMFOumPXZhUCMh1HXPh2iNLvfYVKG53xJ6yBM4ZdVQ%2BOGxXRr9PnwdoXeX5xzTb4GTJBuFWlZOrzP%2F0y4FxtWYQa2EeFb8eNEn5HmKPTlLY3Glg2N9VUVlNwV5db%2FyF66DoGyi8hLunRxigSql3iHMjfT8rZxX%2BAhEtTbD5sm8dU7y3cQL69Q7c0MXCm8Xtck3VHzwPRi87lN%2B60sAoEn4EG%2BrlQpsLgICZuuxldNImE6lDDUSwnts9b1zhKsQH153W3Q2HiQANUkWglM0ltalaOSG%2Fzjkq4nBgCi3gcBUlJIzybnq5speQ3Hjbt%2FFHMpDpRIUQo5ImsI85YHuZdU%2BMs0YCTjuAurXoluLnxeNW764ynnUezh9ThW60RYNCrOO87%2BpBQ5lep3tGz%2FOwHWxLutOUPs%2F7637Zzcqr8S%2FuAVFdmOcuS9lr%2B00%2BINL7w0doiqnoZMJCBG2Ba%2F9i41KHGcmkxsVlIJQueIJ7FSdbHvuhK%2BDlXvip8UIY0g%2BHzPS1EwqqDHgc8XalPTJ2RHu8kr4vCjBiI7jsfcB7l330865I5hLWrTMAplxpVJ8VsC72fcNoxh7wss2H%2BE2c2m2ugVkq64qw8gGqcjhmvIDYl8%2Bsw9AUOBRsYfw4BA9fcQRlf%2BQ9KWHexqjPaHd0NHKc9rtV2LuxB6sHtGOmbLhnlSwVxkzww%2BXcp2ws4wjJTc1gY6sQGBnMfeb7cS565Q85VDDSNJ7XedBY8kMV9FCdqDLhzntrpO%2F3u%2F9PB2w%2B0VemAPP8Cc8%2FgPMMAzZ%2B7tlWcH4lzlXGAeEIdPmKtYs%2FrTxAf1Dam8NkERTunmAgxzLJ5BmW5A6XvUpoFektPkiJ%2F1hxGCOr4nIX%2BqFN%2BxofUwKf204twLmWkcK%2Fmkd4dw3hKHVFwqsgyeTj0KrO80OZOWDQ3eumilN0G8VDyKjc6M9oG00oI%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2db80872a4b2bb91cf0d2277ad6e27b93db629ee95c9e21c842f2d49b84105e1",
+      "file_size": 1006,
+      "type": "text/plain",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,120 @@
+{
+  "id": 4127399,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI3Mzk5",
+  "url": "https://hackerone.com/reports/4127399",
+  "title": "wolfSSL Backend Silently Ignores --cert-status (OCSP Stapling Bypass)",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-10-19T10:46:51.130Z",
+  "submitted_at": "2026-10-19T10:46:51.427Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "sheldonholmes",
+    "url": "/sheldonholmes",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-20T06:04:13.868Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-19T18:13:57.800Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\nWhen curl is built with the wolfSSL TLS backend, `--cert-status` (`CURLOPT_SSL_VERIFYSTATUS`) is silently accepted and ignored. The wolfSSL backend sets `cert_status_request = NULL` in its vtable (`lib/vtls/wolfssl.c:2309`), meaning OCSP stapling is not implemented. The `curl_easy_setopt()` call returns `CURLE_NOT_BUILT_IN`, but the CLI tool at `src/config2setopts.c:442` discards this return value — the user gets no error, no warning, and the connection proceeds without OCSP verification.\n\nThis is confirmed exploitable on the HTTP/3 (QUIC) path where a server providing no OCSP staple is accepted despite `--cert-status` being set.\n\n## Root Cause (\n\n**Layer 1 — wolfSSL backend lacks OCSP support:**\n`lib/vtls/wolfssl.c:2309` — vtable entry:\n```c\nNULL,                            /* cert_status_request */\n```\n\nZero references to `verifystatus` or OCSP anywhere in `wolfssl.c`. Compare with OpenSSL (6 references) and GnuTLS (4 references).\n\n**Layer 2 — CLI silently drops the error:**\n`src/config2setopts.c:441-442`:\n```c\nif(config->verifystatus)\n    my_setopt_long(curl, CURLOPT_SSL_VERIFYSTATUS, 1);\n```\n\n`my_setopt_long` expands to `curl_easy_setopt()` and the `CURLE_NOT_BUILT_IN` return is discarded. No warning printed, no error to the user.\n\n**Layer 3 — QUIC path also has no check:**\n`lib/vquic/vquic-tls.c:169-186` — wolfSSL QUIC verification checks `verifyhost` (line 171) and pinned key (line 186) but has no `verifystatus` check, even as a \"not supported\" error.\n\n## Proof of Concept\n\nDocker container: curl 8.23.1-DEV built with wolfSSL 5.9.4, ngtcp2 1.8.1, nghttp3 1.6.0.\nQUIC server: ngtcp2 `wsslserver` example (no OCSP staple configured).\n\n### Test A: H3 without --cert-status (control)\n\n```\ncurl --http3-only --insecure https://127.0.0.1:4434/\n→ exit:0 http:404 (works as expected)\n```\n\n### Test B: H3 WITH --cert-status (VULNERABILITY)\n\n```\ncurl --http3-only --insecure --cert-status https://127.0.0.1:4434/\n→ exit:0 http:404\n```\n\nServer provides NO OCSP staple. `--cert-status` is set but silently ignored. Full HTTP/3 connection succeeds:\n```\n* SSL connection using TLSv1.3 / TLS13-AES128-GCM-SHA256\n* [HTTP/3] [0] OPENED stream for https://127.0.0.1:4435/\n> GET / HTTP/3\n< HTTP/3 404\n```\n\n**Expected behavior:** Either reject the connection with `CURLE_SSL_INVALIDCERTSTATUS`, or error at startup with \"OCSP stapling not supported with this TLS backend.\"\n\n## Suggested Fix\n\n**Option A (minimal):** Make `config2setopts.c` check the return value and warn/error:\n```c\nif(config->verifystatus) {\n    result = my_setopt_long(curl, CURLOPT_SSL_VERIFYSTATUS, 1);\n    if(result == CURLE_NOT_BUILT_IN) {\n        warnf(global, \"OCSP stapling not supported by this TLS backend\");\n        return result;\n    }\n}\n```\n\n**Option B (complete):** Add `verifystatus` check to the wolfSSL QUIC path at `vquic-tls.c`:\n```c\nif(conn_config->verifystatus) {\n    failf(data, \"OCSP stapling not supported with wolfSSL QUIC\");\n    return CURLE_SSL_INVALIDCERTSTATUS;\n}\n```\n\n## Impact\n\n1. User sets `--cert-status` expecting OCSP stapling enforcement — it is silently ignored\n2. A revoked certificate that would be caught by OCSP is accepted without warning\n3. Applications using `CURLOPT_SSL_VERIFYSTATUS` with wolfSSL have a false sense of security\n4. The silent failure is worse than a crash — the user believes they have OCSP protection when they do not",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7032219,
+      "file_name": "poc_wolfssl_ocsp.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/8ygsd8of540qv01d2y18dm14xors?response-content-disposition=attachment%3B%20filename%3D%22poc_wolfssl_ocsp.sh%22%3B%20filename%2A%3DUTF-8%27%27poc_wolfssl_ocsp.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ522ANIO6%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T070002Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJGMEQCICggnNsz674sZKmVXRRDf0iQ5NRlddgo8JkAnBAqoYl1AiBJhPd%2Fj6tMnRCnPYNYj6crwd4rxKP7cAik9X8bbZkamiqyBQhAEAMaDDAxMzYxOTI3NDg0OSIM%2FbXmeodgylCv%2F7j9Ko8Fj9Ae8rqI1hkoyd1v%2BoqSB1pR7RBYsowpew9aU62QRXWYWxzmQcOvyQz6VHkmIdkorlSg2kFJlrZgHwG9Y1IIZ65Zgvw4wBG%2Ftn1ApKncewYAbGZypdHr58uOz96bkKgH6%2BokRsZPFuhZTBhbUWrxANGOJtj8UzEgYjbPxUq8LxSiunp9wQUjmpWLmq4UBuZQ3aTyRHeqpaHy7v5qpa%2Fj4iFKvaTtzKKDWJz%2Fvp16rxRCXk6jgIZ4jzqtSSe0jU37rzxFm1RpHnZ%2BzOMBrjaaHWTXyTwlEqJzrmSIVbPCgclsqLLbmXq5vnZgKTSSk8aCMnW8P7nhsGwIZ64bdPBk8%2FPPfswVH7%2BVGk23lqWGhGtSQEA9X%2B%2FVroS9x1INr1Scxv6p6WLGzFHI1TaIgUVJK6StO3lSlKseT6aon8H74S1w6v%2FBiWmc6oXEhS%2FEqJT%2Bbqze1gCAFuFO3slxaTMuxl05u2UGy7DZxFh%2FWbq1vtMKoZ1Rzx0q%2BMvtDcMktzUNZUDiyjEuEzOVZDDMCymiNuSXs%2BQkACkYC2HtH3ikKHhXaWUfF0I3gMOVydULY59p0%2B3uvnJVKwtAuMXtTOnLceWjzw2oE%2Be1nB9ycC7jM5VEcz04kag6o67qhz3dDFAKaKOKrmHYypif4Kvpq2Zt0L217jIPumc%2F4h2H%2FoCtRtOVBzHp%2BK9dipG55eXTsQB6Dqx4gC%2BS7dN0cEbiQGlsRQYy8Bng2p6CUeyhFkk2XxFwMwm9mR1Q2E7Y759re5YGMYTaTHdzjc%2Bho9BrFPDRG%2FcTOL%2Bvm2Tx%2FFuHJexRDeyfNkp%2FDYxUGgO9txxzFwcGXwiJ24haV85MJiVVNsZCRnFWUHlua0wWDaKGWIOwnzCsk9zWBjqyAcjjmpxOa7amYQcU58dByMXCXgNer8OTGqXBjLgEgBDWXQ%2FVxUcXyYidCLTYNbA0mv1Y2fftgELDDlkUR1oG6o5ZAHAqxaeuet3hwJGSODMf09c3bvDDr8YwGm2nWmppsfwfkiAQWs00X%2BVzviazVJ%2B5RRXOO2fc9PaQPoazb2FhyvjbabODDEa4vLa9yBmdvNUZz52%2BuKr0JIZGh4iFN%2By6proSB38KmT6pKXF7LVILY98%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d82608996080edcd22be6f96635d33448c2ff1a1fb119b66ab653344c67c5291",
+      "file_size": 1674,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

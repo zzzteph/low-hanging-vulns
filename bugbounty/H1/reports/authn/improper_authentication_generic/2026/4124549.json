@@ -1,0 +1,162 @@
+{
+  "id": 4124549,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI0NTQ5",
+  "url": "https://hackerone.com/reports/4124549",
+  "title": "CURLOPT_PROXYHEADER is not part of the HTTP-proxy connection reuse key: a second CONNECT-tunnel transfer silently reuses the first tunnel's Proxy-Auth",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-10-18T09:25:54.302Z",
+  "submitted_at": "2026-10-18T09:25:54.657Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": true,
+    "username": "joumaaa",
+    "url": "/joumaaa",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/7jb8m1fd01xv19xi8qz0dhb844he/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-3784"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-20T06:17:04.081Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-19T18:24:11.621Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWhen libcurl tunnels through an HTTP proxy with `CONNECT` (HTTPS-over-proxy), the custom headers\nset via `CURLOPT_PROXYHEADER` are sent to the proxy **once, at tunnel-setup time**\n(`lib/http_proxy.c:63-83`). The connection-reuse decision for a proxied connection, however, does\n**not** take `proxyheaders` into account. `proxy_info_matches()` compares only the proxy type, the\nproxy destination, and `Curl_creds`:\n\n```c\n/* lib/url.c:540-549 */\nstatic bool proxy_info_matches(const struct proxy_info *data,\n                               const struct proxy_info *needle)\n{\n  if((data->proxytype == needle->proxytype) &&\n     Curl_peer_same_destination(data->peer, needle->peer) &&\n     Curl_creds_same(data->creds, needle->creds)) {\n    return TRUE;\n  }\n  return FALSE;\n}\n```\n\n`git grep proxyheaders lib/url.c` returns nothing — the field is absent from the entire\nreuse-matching path (`url_match_proxy_use`, `url_match_*`).\n\nConsequently, two transfers to the same destination through the same proxy that differ **only** in\ntheir `CURLOPT_PROXYHEADER` are treated as reusable. The second transfer rides the tunnel the first\nestablished, and its own proxy headers are never presented to the proxy.\n\n## Why this is the CVE-2026-3784 class\n\nCVE-2026-3784 (\"wrong proxy connection reuse with credentials\") established that proxy-side identity\nmust be part of the reuse key. Its fix covers `Curl_creds` (the `CURLOPT_PROXYUSERPWD` path). But a\nvery common way to pass proxy identity — especially bearer tokens and multi-tenant routing headers —\nis `CURLOPT_PROXYHEADER` (`Proxy-Authorization: Bearer ...`, `X-Tenant: ...`, etc.). Those live\noutside `Curl_creds` and were not added to the key, so the same wrong-reuse outcome is still\nreachable through a different, un-keyed identity channel.\n\n## Attacker model / impact\n\nA process (or application embedding libcurl) that issues multiple proxied transfers over a shared\nconnection pool — the normal case for one easy handle reused, a multi handle, or a `CURLSH` with\n`CURL_LOCK_DATA_CONNECT` — where different transfers are meant to present **different proxy\nidentities** via `CURLOPT_PROXYHEADER`. A later transfer that should authenticate to the proxy as\nidentity B instead silently inherits the tunnel authenticated as identity A. In a multi-tenant\nclient this is a cross-tenant proxy-identity confusion; where the first tunnel was established with a\nprivileged `Proxy-Authorization`, a subsequent unprivileged transfer reuses that privileged tunnel.\n\n## PoC (live, with control)\n\n`attachments/poc_proxy_hdr_reuse.py` stands up a local TLS origin and a local HTTP `CONNECT` proxy\nthat logs the headers of every CONNECT it receives. `attachments/proxy_client.c` (linked against the\nlibcurl built from this commit) performs two HTTPS-over-CONNECT transfers on **one** easy handle\n(shared pool), differing only in `CURLOPT_PROXYHEADER` — here a real proxy credential:\n`Proxy-Authorization: Bearer TOKEN_A` then `Proxy-Authorization: Bearer TOKEN_B`.\nCaptured output (`attachments/proxy_hdr_transcript.txt`):\n\n```\n################ EXPLOIT (fresh2=0): differing proxy headers, shared pool ################\n  CONNECT requests the proxy received : 1\n  Proxy-Authorization the proxy saw   : ['Bearer TOKEN_A']\n  >>> transfer#2 reused the tunnel; its 'Proxy-Authorization: Bearer TOKEN_B' never reached the proxy\n\n################ CONTROL (fresh2=1): transfer#2 FRESH_CONNECT ################\n  CONNECT requests the proxy received : 2\n  Proxy-Authorization the proxy saw   : ['Bearer TOKEN_A', 'Bearer TOKEN_B']\n  >>> forcing a fresh connection makes BBB appear\n```\n\nThe exploit run proves the proxy only ever authenticated `Bearer TOKEN_A`; transfer #2's\n`Proxy-Authorization: Bearer TOKEN_B` was dropped because the tunnel was reused, so transfer #2\noperated under transfer #1's proxy credential. The control (`CURLOPT_FRESH_CONNECT` on transfer #2)\nshows both credentials reaching the proxy when a new tunnel is forced — isolating the cause to the\nreuse decision, not to header emission.\n\n## Steps to reproduce\n\n```\ngcc -I include attachments/proxy_client.c lib/.libs/libcurl.a \\\n    -lssl -lcrypto -lbrotlidec -lbrotlicommon -lz -o proxy_client\npython3 -I attachments/poc_proxy_hdr_reuse.py   # edit SCRATCH paths at top if needed\n```\n\n## Suggested fix\n\nInclude the `CURLOPT_PROXYHEADER` list in the proxy reuse comparison (e.g. compare\n`data->set.proxyheaders` in `proxy_info_matches()` / `url_match_proxy_use()`), so that transfers\npresenting different proxy headers are not merged onto the same tunnel — mirroring how proxy\ncredentials were added to the key for CVE-2026-3784. At minimum, differing `Proxy-Authorization`\nproxy headers should bar reuse.\n\n## Impact\n\n## Impact\n\nA transfer that is supposed to present a specific proxy-side identity or credential through\n`CURLOPT_PROXYHEADER` (commonly `Proxy-Authorization: Bearer ...` or a tenant/routing header) can\ninstead silently reuse an earlier transfer's CONNECT tunnel that was established under a *different*\nproxy identity. The later transfer's proxy headers are never sent to the proxy.\n\nConcrete consequences in a libcurl-embedding client that shares a connection pool:\n- **Cross-identity / cross-tenant confusion:** per-tenant proxy headers do not isolate tunnels;\n  tenant B's request can ride tenant A's authenticated tunnel.\n- **Privilege inheritance:** if the first tunnel was opened with a privileged `Proxy-Authorization`,\n  a subsequent transfer that omits it (or carries a lesser token) reuses the privileged tunnel.\n- **Silent credential non-presentation:** a rotated/renewed proxy token in `CURLOPT_PROXYHEADER` is\n  not actually presented until a fresh connection is made.\n\n## What it is / is not\n\n- It **is** confirmed live on a default build: with a shared pool and differing proxy headers the\n  proxy sees a single CONNECT (first identity only); forcing a fresh connection restores the second\n  identity, isolating the cause to the reuse key.\n- It **is** the same class as CVE-2026-3784, reached through the `CURLOPT_PROXYHEADER` channel that\n  the fix did not cover (that fix keyed on `Curl_creds` only).\n- It is **not** a remote-attacker primitive on its own: the differing identities come from the\n  application's own configuration across transfers sharing a pool. The security impact lands when\n  those identities are meant to be isolated (multi-tenant / privilege-separated proxy use).\n- It is **not** memory-unsafe.\n\n## Honest severity\n\nLow, argued toward Medium in multi-identity/multi-tenant proxy clients (the parent CVE-2026-3784 is\nMedium). I rate it Low by default because exploitation requires the application to intentionally use\ndifferent proxy headers across pooled transfers; I report it because it is a demonstrable,\nunpatched continuation of a class curl already treats as a security bug, with a clear keying fix.",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7022483,
+      "file_name": "proxy_hdr_transcript.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/hvqsldaxjgrq8veesxtxtcsspj0v?response-content-disposition=attachment%3B%20filename%3D%22proxy_hdr_transcript.txt%22%3B%20filename%2A%3DUTF-8%27%27proxy_hdr_transcript.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQONUBXCR%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T070000Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIQC0xzFwpz5b8McnRwIA535xGjKvPcHNZOhpUM41dgyRLAIgHHE9qXO1DnuHntT37KCNSGc12xiPifOvPE%2Fwo9HXDvwqsgUIPxADGgwwMTM2MTkyNzQ4NDkiDF4wJ1BN7NDeLXHIHiqPBevCVu%2FZAfGiJ7y%2FBiwldp21iO4LXWYt%2FWIBhvPiCWeDcn%2BznaBXvaVNR8aNdV7ruGTOALD9IraBUTKJeuowsAx%2F3aXyyVGkKXF9rFoRge%2BUJdmIv3ajNmPvOGHG3Ild2zfSSLkqtGGJj9D08JshTeYjQ0ig0%2FPg2wdDi%2BZPmaV3y3ZBaMshpYI9WDxW3oWAIcrd32oEkLg8eLmWyJj6ZwgObyNt%2BpsUxHI3Vr0PSsIcTVhRjiIL%2B8LbaIdo%2BxMyiw4jB2uhNgClqvxCs3G6wsz2Yl9SgU9IrJDjpAoe1IDvvNPGF6Z21Ps6jYlHt8eoaYbh7KXbR%2FrlxXwvwwzi1vuS6kxiZJq2kPaABHBET%2FkcXljInfLbINzR68c1AHQ2AqSm7JuxA9Zec2TgJaob4rzpOCCo7ehCZGMhlJN3TiCG2frVI1ZUrtoDUu9Y5pAj2cJgCjgBop%2ByZ7RcJ7Y5Hd3ZKsoYXuEoOwX8YgL%2BbCv1Rm97KMxHj%2FeGkd%2FSPWdjlYRMY2b32v08g0g4ZaOd5FXcjA%2BIuvEzA4PdYmeJXHJzy6xDee6ZgMQ%2FTtSoHEtcf6OByDj54LpI5QTPI0ZB2F0%2BLMa54kCt%2FTH19sijC53iMHMAPY1orwqAR7%2BXpo55pfF8GiZ4O%2BRYQYmFgJqwz8ieg5jmBnFx3cP%2BrZxDumg7FUKhZNuZ2qzlcVYFwkbHQdWGV3v1o5Edxhkd%2BzczecegwR%2B4Ik6KlVTjic%2BOmdnuC4Kcw6hhL%2B6Z2pJh6JiLk3c47RDfi8LGqaoVgs%2F5riRpWwUJsn2ezbt%2FpeFrLl8K%2FzZemos5w5PfWBexi5Vvh1%2FG9qWFUDxSPYKMcW70JHYOaaAyx3d9uV%2FWWqXCyqow0Jrc1gY6sQGwmekAlo75gAFYTpTZHrnNN7jllOyJakYFrt0W5kdWs0z%2BSd2fhLIfVCYdlSUkNCnLL0HwbJnvMFYqWMp20Vl0YZeqsmKR%2BaxhYaOHtw8aOEWWobs0DLZKCn4ZAMQgmoL%2FyPiiixpkmPkqSy3%2BidjBhuIaTEps%2BbUi3chDVs5ca1seCrmP0diM9dLmbDlK3P67X8Z0wTQALqPvL8jehgemlUVI9JatEIzllCGGCe8dohk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=0ca51247361bcc3d2678781abc6cac59d9afd0e202c0ff6109a251dd6d56eaa7",
+      "file_size": 1373,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 7022484,
+      "file_name": "proxy_client.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/7ki6ub0mzt3bwvd02mdanp5kml47?response-content-disposition=attachment%3B%20filename%3D%22proxy_client.c%22%3B%20filename%2A%3DUTF-8%27%27proxy_client.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQONUBXCR%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T070000Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIQC0xzFwpz5b8McnRwIA535xGjKvPcHNZOhpUM41dgyRLAIgHHE9qXO1DnuHntT37KCNSGc12xiPifOvPE%2Fwo9HXDvwqsgUIPxADGgwwMTM2MTkyNzQ4NDkiDF4wJ1BN7NDeLXHIHiqPBevCVu%2FZAfGiJ7y%2FBiwldp21iO4LXWYt%2FWIBhvPiCWeDcn%2BznaBXvaVNR8aNdV7ruGTOALD9IraBUTKJeuowsAx%2F3aXyyVGkKXF9rFoRge%2BUJdmIv3ajNmPvOGHG3Ild2zfSSLkqtGGJj9D08JshTeYjQ0ig0%2FPg2wdDi%2BZPmaV3y3ZBaMshpYI9WDxW3oWAIcrd32oEkLg8eLmWyJj6ZwgObyNt%2BpsUxHI3Vr0PSsIcTVhRjiIL%2B8LbaIdo%2BxMyiw4jB2uhNgClqvxCs3G6wsz2Yl9SgU9IrJDjpAoe1IDvvNPGF6Z21Ps6jYlHt8eoaYbh7KXbR%2FrlxXwvwwzi1vuS6kxiZJq2kPaABHBET%2FkcXljInfLbINzR68c1AHQ2AqSm7JuxA9Zec2TgJaob4rzpOCCo7ehCZGMhlJN3TiCG2frVI1ZUrtoDUu9Y5pAj2cJgCjgBop%2ByZ7RcJ7Y5Hd3ZKsoYXuEoOwX8YgL%2BbCv1Rm97KMxHj%2FeGkd%2FSPWdjlYRMY2b32v08g0g4ZaOd5FXcjA%2BIuvEzA4PdYmeJXHJzy6xDee6ZgMQ%2FTtSoHEtcf6OByDj54LpI5QTPI0ZB2F0%2BLMa54kCt%2FTH19sijC53iMHMAPY1orwqAR7%2BXpo55pfF8GiZ4O%2BRYQYmFgJqwz8ieg5jmBnFx3cP%2BrZxDumg7FUKhZNuZ2qzlcVYFwkbHQdWGV3v1o5Edxhkd%2BzczecegwR%2B4Ik6KlVTjic%2BOmdnuC4Kcw6hhL%2B6Z2pJh6JiLk3c47RDfi8LGqaoVgs%2F5riRpWwUJsn2ezbt%2FpeFrLl8K%2FzZemos5w5PfWBexi5Vvh1%2FG9qWFUDxSPYKMcW70JHYOaaAyx3d9uV%2FWWqXCyqow0Jrc1gY6sQGwmekAlo75gAFYTpTZHrnNN7jllOyJakYFrt0W5kdWs0z%2BSd2fhLIfVCYdlSUkNCnLL0HwbJnvMFYqWMp20Vl0YZeqsmKR%2BaxhYaOHtw8aOEWWobs0DLZKCn4ZAMQgmoL%2FyPiiixpkmPkqSy3%2BidjBhuIaTEps%2BbUi3chDVs5ca1seCrmP0diM9dLmbDlK3P67X8Z0wTQALqPvL8jehgemlUVI9JatEIzllCGGCe8dohk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=876d35ff87db9785d4d55905643f4c9930ef4b8844fd37b04635c3aa84dc10bc",
+      "file_size": 1939,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 7022485,
+      "file_name": "impact.md",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ik2h132vjkp7x69wclf9g6is80mj?response-content-disposition=attachment%3B%20filename%3D%22impact.md%22%3B%20filename%2A%3DUTF-8%27%27impact.md&response-content-type=text%2Fmarkdown&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQONUBXCR%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T070000Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIQC0xzFwpz5b8McnRwIA535xGjKvPcHNZOhpUM41dgyRLAIgHHE9qXO1DnuHntT37KCNSGc12xiPifOvPE%2Fwo9HXDvwqsgUIPxADGgwwMTM2MTkyNzQ4NDkiDF4wJ1BN7NDeLXHIHiqPBevCVu%2FZAfGiJ7y%2FBiwldp21iO4LXWYt%2FWIBhvPiCWeDcn%2BznaBXvaVNR8aNdV7ruGTOALD9IraBUTKJeuowsAx%2F3aXyyVGkKXF9rFoRge%2BUJdmIv3ajNmPvOGHG3Ild2zfSSLkqtGGJj9D08JshTeYjQ0ig0%2FPg2wdDi%2BZPmaV3y3ZBaMshpYI9WDxW3oWAIcrd32oEkLg8eLmWyJj6ZwgObyNt%2BpsUxHI3Vr0PSsIcTVhRjiIL%2B8LbaIdo%2BxMyiw4jB2uhNgClqvxCs3G6wsz2Yl9SgU9IrJDjpAoe1IDvvNPGF6Z21Ps6jYlHt8eoaYbh7KXbR%2FrlxXwvwwzi1vuS6kxiZJq2kPaABHBET%2FkcXljInfLbINzR68c1AHQ2AqSm7JuxA9Zec2TgJaob4rzpOCCo7ehCZGMhlJN3TiCG2frVI1ZUrtoDUu9Y5pAj2cJgCjgBop%2ByZ7RcJ7Y5Hd3ZKsoYXuEoOwX8YgL%2BbCv1Rm97KMxHj%2FeGkd%2FSPWdjlYRMY2b32v08g0g4ZaOd5FXcjA%2BIuvEzA4PdYmeJXHJzy6xDee6ZgMQ%2FTtSoHEtcf6OByDj54LpI5QTPI0ZB2F0%2BLMa54kCt%2FTH19sijC53iMHMAPY1orwqAR7%2BXpo55pfF8GiZ4O%2BRYQYmFgJqwz8ieg5jmBnFx3cP%2BrZxDumg7FUKhZNuZ2qzlcVYFwkbHQdWGV3v1o5Edxhkd%2BzczecegwR%2B4Ik6KlVTjic%2BOmdnuC4Kcw6hhL%2B6Z2pJh6JiLk3c47RDfi8LGqaoVgs%2F5riRpWwUJsn2ezbt%2FpeFrLl8K%2FzZemos5w5PfWBexi5Vvh1%2FG9qWFUDxSPYKMcW70JHYOaaAyx3d9uV%2FWWqXCyqow0Jrc1gY6sQGwmekAlo75gAFYTpTZHrnNN7jllOyJakYFrt0W5kdWs0z%2BSd2fhLIfVCYdlSUkNCnLL0HwbJnvMFYqWMp20Vl0YZeqsmKR%2BaxhYaOHtw8aOEWWobs0DLZKCn4ZAMQgmoL%2FyPiiixpkmPkqSy3%2BidjBhuIaTEps%2BbUi3chDVs5ca1seCrmP0diM9dLmbDlK3P67X8Z0wTQALqPvL8jehgemlUVI9JatEIzllCGGCe8dohk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=0a00c3f80d76d843f465c5d6be76a910dc379cd2b2592a8b7169cf3e4c8b050d",
+      "file_size": 2144,
+      "type": "text/markdown",
+      "moderated": null
+    },
+    {
+      "id": 7022486,
+      "file_name": "poc_proxy_hdr_reuse.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/4c0w17kpw57bz1k2apyhzi4wyldu?response-content-disposition=attachment%3B%20filename%3D%22poc_proxy_hdr_reuse.py%22%3B%20filename%2A%3DUTF-8%27%27poc_proxy_hdr_reuse.py&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQONUBXCR%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T070000Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIQC0xzFwpz5b8McnRwIA535xGjKvPcHNZOhpUM41dgyRLAIgHHE9qXO1DnuHntT37KCNSGc12xiPifOvPE%2Fwo9HXDvwqsgUIPxADGgwwMTM2MTkyNzQ4NDkiDF4wJ1BN7NDeLXHIHiqPBevCVu%2FZAfGiJ7y%2FBiwldp21iO4LXWYt%2FWIBhvPiCWeDcn%2BznaBXvaVNR8aNdV7ruGTOALD9IraBUTKJeuowsAx%2F3aXyyVGkKXF9rFoRge%2BUJdmIv3ajNmPvOGHG3Ild2zfSSLkqtGGJj9D08JshTeYjQ0ig0%2FPg2wdDi%2BZPmaV3y3ZBaMshpYI9WDxW3oWAIcrd32oEkLg8eLmWyJj6ZwgObyNt%2BpsUxHI3Vr0PSsIcTVhRjiIL%2B8LbaIdo%2BxMyiw4jB2uhNgClqvxCs3G6wsz2Yl9SgU9IrJDjpAoe1IDvvNPGF6Z21Ps6jYlHt8eoaYbh7KXbR%2FrlxXwvwwzi1vuS6kxiZJq2kPaABHBET%2FkcXljInfLbINzR68c1AHQ2AqSm7JuxA9Zec2TgJaob4rzpOCCo7ehCZGMhlJN3TiCG2frVI1ZUrtoDUu9Y5pAj2cJgCjgBop%2ByZ7RcJ7Y5Hd3ZKsoYXuEoOwX8YgL%2BbCv1Rm97KMxHj%2FeGkd%2FSPWdjlYRMY2b32v08g0g4ZaOd5FXcjA%2BIuvEzA4PdYmeJXHJzy6xDee6ZgMQ%2FTtSoHEtcf6OByDj54LpI5QTPI0ZB2F0%2BLMa54kCt%2FTH19sijC53iMHMAPY1orwqAR7%2BXpo55pfF8GiZ4O%2BRYQYmFgJqwz8ieg5jmBnFx3cP%2BrZxDumg7FUKhZNuZ2qzlcVYFwkbHQdWGV3v1o5Edxhkd%2BzczecegwR%2B4Ik6KlVTjic%2BOmdnuC4Kcw6hhL%2B6Z2pJh6JiLk3c47RDfi8LGqaoVgs%2F5riRpWwUJsn2ezbt%2FpeFrLl8K%2FzZemos5w5PfWBexi5Vvh1%2FG9qWFUDxSPYKMcW70JHYOaaAyx3d9uV%2FWWqXCyqow0Jrc1gY6sQGwmekAlo75gAFYTpTZHrnNN7jllOyJakYFrt0W5kdWs0z%2BSd2fhLIfVCYdlSUkNCnLL0HwbJnvMFYqWMp20Vl0YZeqsmKR%2BaxhYaOHtw8aOEWWobs0DLZKCn4ZAMQgmoL%2FyPiiixpkmPkqSy3%2BidjBhuIaTEps%2BbUi3chDVs5ca1seCrmP0diM9dLmbDlK3P67X8Z0wTQALqPvL8jehgemlUVI9JatEIzllCGGCe8dohk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=93fc5c104507d8a61050eb26d1f5ccfa85b79c883fa7163ee366251d64e0c6c4",
+      "file_size": 7376,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 7022487,
+      "file_name": "description.md",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/0i8vukzqdua34kg7l63u4l4yyaxp?response-content-disposition=attachment%3B%20filename%3D%22description.md%22%3B%20filename%2A%3DUTF-8%27%27description.md&response-content-type=text%2Fmarkdown&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQONUBXCR%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T070000Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIQC0xzFwpz5b8McnRwIA535xGjKvPcHNZOhpUM41dgyRLAIgHHE9qXO1DnuHntT37KCNSGc12xiPifOvPE%2Fwo9HXDvwqsgUIPxADGgwwMTM2MTkyNzQ4NDkiDF4wJ1BN7NDeLXHIHiqPBevCVu%2FZAfGiJ7y%2FBiwldp21iO4LXWYt%2FWIBhvPiCWeDcn%2BznaBXvaVNR8aNdV7ruGTOALD9IraBUTKJeuowsAx%2F3aXyyVGkKXF9rFoRge%2BUJdmIv3ajNmPvOGHG3Ild2zfSSLkqtGGJj9D08JshTeYjQ0ig0%2FPg2wdDi%2BZPmaV3y3ZBaMshpYI9WDxW3oWAIcrd32oEkLg8eLmWyJj6ZwgObyNt%2BpsUxHI3Vr0PSsIcTVhRjiIL%2B8LbaIdo%2BxMyiw4jB2uhNgClqvxCs3G6wsz2Yl9SgU9IrJDjpAoe1IDvvNPGF6Z21Ps6jYlHt8eoaYbh7KXbR%2FrlxXwvwwzi1vuS6kxiZJq2kPaABHBET%2FkcXljInfLbINzR68c1AHQ2AqSm7JuxA9Zec2TgJaob4rzpOCCo7ehCZGMhlJN3TiCG2frVI1ZUrtoDUu9Y5pAj2cJgCjgBop%2ByZ7RcJ7Y5Hd3ZKsoYXuEoOwX8YgL%2BbCv1Rm97KMxHj%2FeGkd%2FSPWdjlYRMY2b32v08g0g4ZaOd5FXcjA%2BIuvEzA4PdYmeJXHJzy6xDee6ZgMQ%2FTtSoHEtcf6OByDj54LpI5QTPI0ZB2F0%2BLMa54kCt%2FTH19sijC53iMHMAPY1orwqAR7%2BXpo55pfF8GiZ4O%2BRYQYmFgJqwz8ieg5jmBnFx3cP%2BrZxDumg7FUKhZNuZ2qzlcVYFwkbHQdWGV3v1o5Edxhkd%2BzczecegwR%2B4Ik6KlVTjic%2BOmdnuC4Kcw6hhL%2B6Z2pJh6JiLk3c47RDfi8LGqaoVgs%2F5riRpWwUJsn2ezbt%2FpeFrLl8K%2FzZemos5w5PfWBexi5Vvh1%2FG9qWFUDxSPYKMcW70JHYOaaAyx3d9uV%2FWWqXCyqow0Jrc1gY6sQGwmekAlo75gAFYTpTZHrnNN7jllOyJakYFrt0W5kdWs0z%2BSd2fhLIfVCYdlSUkNCnLL0HwbJnvMFYqWMp20Vl0YZeqsmKR%2BaxhYaOHtw8aOEWWobs0DLZKCn4ZAMQgmoL%2FyPiiixpkmPkqSy3%2BidjBhuIaTEps%2BbUi3chDVs5ca1seCrmP0diM9dLmbDlK3P67X8Z0wTQALqPvL8jehgemlUVI9JatEIzllCGGCe8dohk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=8b3a122d80ed91c67152f091b961dcec7b480b7b18da5b3d650ac6cb6c249424",
+      "file_size": 4726,
+      "type": "text/markdown",
+      "moderated": null
+    },
+    {
+      "id": 7022488,
+      "file_name": "REPORT-HEADER.md",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/xb9kr5k2shno6oh959df5gwj2a7d?response-content-disposition=attachment%3B%20filename%3D%22REPORT-HEADER.md%22%3B%20filename%2A%3DUTF-8%27%27REPORT-HEADER.md&response-content-type=text%2Fmarkdown&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQONUBXCR%2F20261020%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261020T070000Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEHcaCXVzLXdlc3QtMiJHMEUCIQC0xzFwpz5b8McnRwIA535xGjKvPcHNZOhpUM41dgyRLAIgHHE9qXO1DnuHntT37KCNSGc12xiPifOvPE%2Fwo9HXDvwqsgUIPxADGgwwMTM2MTkyNzQ4NDkiDF4wJ1BN7NDeLXHIHiqPBevCVu%2FZAfGiJ7y%2FBiwldp21iO4LXWYt%2FWIBhvPiCWeDcn%2BznaBXvaVNR8aNdV7ruGTOALD9IraBUTKJeuowsAx%2F3aXyyVGkKXF9rFoRge%2BUJdmIv3ajNmPvOGHG3Ild2zfSSLkqtGGJj9D08JshTeYjQ0ig0%2FPg2wdDi%2BZPmaV3y3ZBaMshpYI9WDxW3oWAIcrd32oEkLg8eLmWyJj6ZwgObyNt%2BpsUxHI3Vr0PSsIcTVhRjiIL%2B8LbaIdo%2BxMyiw4jB2uhNgClqvxCs3G6wsz2Yl9SgU9IrJDjpAoe1IDvvNPGF6Z21Ps6jYlHt8eoaYbh7KXbR%2FrlxXwvwwzi1vuS6kxiZJq2kPaABHBET%2FkcXljInfLbINzR68c1AHQ2AqSm7JuxA9Zec2TgJaob4rzpOCCo7ehCZGMhlJN3TiCG2frVI1ZUrtoDUu9Y5pAj2cJgCjgBop%2ByZ7RcJ7Y5Hd3ZKsoYXuEoOwX8YgL%2BbCv1Rm97KMxHj%2FeGkd%2FSPWdjlYRMY2b32v08g0g4ZaOd5FXcjA%2BIuvEzA4PdYmeJXHJzy6xDee6ZgMQ%2FTtSoHEtcf6OByDj54LpI5QTPI0ZB2F0%2BLMa54kCt%2FTH19sijC53iMHMAPY1orwqAR7%2BXpo55pfF8GiZ4O%2BRYQYmFgJqwz8ieg5jmBnFx3cP%2BrZxDumg7FUKhZNuZ2qzlcVYFwkbHQdWGV3v1o5Edxhkd%2BzczecegwR%2B4Ik6KlVTjic%2BOmdnuC4Kcw6hhL%2B6Z2pJh6JiLk3c47RDfi8LGqaoVgs%2F5riRpWwUJsn2ezbt%2FpeFrLl8K%2FzZemos5w5PfWBexi5Vvh1%2FG9qWFUDxSPYKMcW70JHYOaaAyx3d9uV%2FWWqXCyqow0Jrc1gY6sQGwmekAlo75gAFYTpTZHrnNN7jllOyJakYFrt0W5kdWs0z%2BSd2fhLIfVCYdlSUkNCnLL0HwbJnvMFYqWMp20Vl0YZeqsmKR%2BaxhYaOHtw8aOEWWobs0DLZKCn4ZAMQgmoL%2FyPiiixpkmPkqSy3%2BidjBhuIaTEps%2BbUi3chDVs5ca1seCrmP0diM9dLmbDlK3P67X8Z0wTQALqPvL8jehgemlUVI9JatEIzllCGGCe8dohk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=102fee336a6e2876ce210fe9e9136c9e5de5392c988f5df11291a7ac3a2ecef8",
+      "file_size": 1749,
+      "type": "text/markdown",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
