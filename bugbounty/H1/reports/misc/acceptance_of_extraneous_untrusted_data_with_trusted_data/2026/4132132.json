@@ -1,0 +1,122 @@
+{
+  "id": 4132132,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTMyMTMy",
+  "url": "https://hackerone.com/reports/4132132",
+  "title": "POP3: data after the end-of-body terminator is written into the retrieved message",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-10-20T17:36:09.270Z",
+  "submitted_at": "2026-10-20T17:36:09.543Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "durgasai1",
+    "url": "/durgasai1",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/71dhkq7rkr4125e56f7bg45p2zbq/f4770e29726b679d8210b3bcebb50139392345e8ead50e7d67de79a93076e327"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": true,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-21T04:21:36.257Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-20T22:28:34.941Z",
+  "team_member_agreed_on_going_public_at": "2026-10-21T04:21:36.090Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Vulnerability Information\n\nWhen a POP3 server sends the end-of-body terminator and further data in the same read, curl\nwrites the bytes after the terminator into the retrieved message's output file and still reports\nsuccess. The PoC returns the message, its \".\" line, and then a second \"+OK\" response that answers\nno command; the file for message 1 becomes b'HONEST-ONE\\r\\n.\\r\\n+OK 99\\r\\nATTACKER-TWO\\r\\n'\ninstead of b'HONEST-ONE\\r\\n'. lib/pop3.c:1241 hands the receive buffer's leftover bytes to\npop3_write() as more body, and the comment there states that \"there may even be additional headers\nafter the body\". A malicious or compromised POP3 server, or an on-path attacker against cleartext\nPOP3, can therefore append attacker-chosen bytes to any downloaded message and the application\ncannot detect it, because the transfer exits 0. Reproduced on curl 8.21 and current master.\n\n    python3 poc.py\n    exit=0  message 1 file: b'HONEST-ONE\\r\\n.\\r\\n+OK 99\\r\\nATTACKER-TWO\\r\\n'\n    expected:  b'HONEST-ONE\\r\\n'\n\n\n## PoC (26 non-empty lines, stdlib only, localhost only)\n\n```python\nimport socket, subprocess, threading, time, os\ndef srv(p):\n    s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n    s.bind((\"127.0.0.1\", p)); s.listen(1); c, _ = s.accept(); b = b\"\"\n    c.sendall(b\"+OK ready\\r\\n\")\n    while True:\n        d = c.recv(4096)\n        if not d: return\n        b += d\n        while b\"\\r\\n\" in b:\n            l, _, b = b.partition(b\"\\r\\n\"); u = l.split(b\" \")[0].upper()\n            if u == b\"RETR\":\n                # ONE write: the message, its \".\" terminator, then a second\n                # response that answers nothing\n                c.sendall(b\"+OK 12\\r\\nHONEST-ONE\\r\\n.\\r\\n\"\n                          b\"+OK 99\\r\\nATTACKER-TWO\\r\\n.\\r\\n\")\n            elif u == b\"CAPA\": c.sendall(b\"+OK\\r\\nUSER\\r\\n.\\r\\n\")\n            elif u == b\"QUIT\": c.sendall(b\"+OK bye\\r\\n\"); return\n            else: c.sendall(b\"+OK\\r\\n\")\np = 12345\nthreading.Thread(target=srv, args=(p,), daemon=True).start(); time.sleep(0.4)\nif os.path.exists(\"m1\"): os.unlink(\"m1\")\nr = subprocess.run([\"curl\", \"-s\", \"-S\", \"-u\", \"u:p\", \"-o\", \"m1\",\n                    \"pop3://127.0.0.1:%d/1\" % p])\nprint(\"exit=%d  message 1 file: %r\" % (r.returncode, open(\"m1\", \"rb\").read()))\nprint(\"expected:  b'HONEST-ONE\\r\\n'\")\n```\n\n## Where this came from\n\nFound while testing a separate reuse issue. The distinguishing point is that here the extra bytes\nare already in curl's buffer **while the transfer is still running**, so this is not a race the\nclient could lose — a client must stop at the `.` terminator.\n\n## Held back, available on request\n\nThe affected code path and why the leftover is treated as body, with the fix shape: `lib/imap.c:1417-1437` has the same construct and the same comment but clamps the write to the declared literal size (`if((curl_off_t)chunk > size) chunk = size`), while `lib/pop3.c:1252` passes `curlx_dyn_len(&pp->recvbuf)` with no bound · IMAP, SMTP and FTP checked and not affected · the separate connection-reuse finding this was found alongside · AI-use disclosure details.\n\n## Impact\n\nPrimary — silent integrity failure of a downloaded message. curl -o msg1 pop3://srv/1 produces a file that is not what the mailbox   stored: the message, then a literal . line, then arbitrary server-chosen bytes — and curl exits 0.\n\n   1. Content injection attributed to a real message. The appended bytes sit inside the file the user asked to be \"message 1 from my   mailbox\", after genuine content from a known sender. Anything consuming that file — a client's display, an archive, a search index, a filter, an agent summarising mail — ingests text the mailbox never contained. Comparing against the server shows a different artifact.\n   2. No signal. Exit 0, no warning, no size discrepancy surfaced. An integrity-sensitive application has nothing it can check, so it   cannot defend even if it wants to.\n   3. Message-boundary corruption. The file contains a bare . line, which is not legal inside a POP3 message body. Anything that re-splits on lines, re-forwards, or re-uploads the file mis-frames it; for MIME it can shift part boundaries.\n   4. Availability/correctness. Byte-exact consumers (maildir sync, signed document retrieval, backups) silently get garbage.\n\n   Who can trigger it: on cleartext POP3 (port 110, no STLS) an on-path attacker needs no server compromise — that's the strongest   scenario. With POP3S it takes a malicious or compromised server or mail proxy. No user interaction beyond downloading.\n\n   What it is not — say it before they do: no memory corruption or code execution (I traced the state machine; eob only ranges 0→5, so the    POP3_EOB, prev writes stay inside the 5-byte static string), no credential exposure, no other user's mail, no write outside the -o   path the app chose, and no cascade — in my two-URL test message 2 still got its honest answer.",
+  "weakness": {
+    "id": 591,
+    "name": "Acceptance of Extraneous Untrusted Data With Trusted Data"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7046504,
+      "file_name": "poc.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ykz0dwf174horfxfc5bgm2nkmvcs?response-content-disposition=attachment%3B%20filename%3D%22poc.py%22%3B%20filename%2A%3DUTF-8%27%27poc.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQXEIGI33V%2F20261021%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261021T053905Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEI3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIEzCmGceg9dG%2F4YgTtUUKClY3Yy8QzNEBbpEVlZWdnG9AiB4tHROga7UTViNfgSqBdfJqYbOUsYrXXaP5N%2BGNJ9LByqyBQhWEAMaDDAxMzYxOTI3NDg0OSIMalnAJG45uvEa1GJlKo8FbZK%2FMq62sVoC4EJUnzjAuRFcvvSl9uDBlRddEtoRa3L2RfYz1k6aKPAeJhIVs%2ByZ2VMZCYD3IL9YoBanB5xcw5sPAd2vKGzDDB3D4fQ9VBL3o1wsFm5DHx2rXQQmujpels1u5InlXkLZpZEpwX66nPWoXMFN1K93zLWqOAVSGCOn7ci86hTRyRtDsZi2ctli2vVrWm8Ih4KRA8fe2qriUhjhbqCaMWD5Ieqhwv8KbaZHGRlBTN9g6NEGku05VnE8rcNuU7%2FNpSLAKWb0EKvcMOr2Vn9gf8%2BLSgHHe1CqfxNmIeqvXuYpjm5FTV49JoPrJtnXTIocs9Yi9swAEm7ElTfIFncVZFlS7N77G84DWJ7%2FgxLnP00PPSXhoNM0W4uTDwRPlaPsibvNwWT73Jf%2Bro7k8elJy9i2sD%2B8%2Bec%2BG3RcbnKor2xl6qeJmC1Qbts8CwkH%2F3hp8hYOd8r5BFVvmRjRfm8Ryim10TqX4t6nuDCrBkkTa2fBhjIt%2FocuaEATDrtge6GP1nQHsc6O1ggZqVvKjEt3PaS6KLHD7E4YfuaXVWXVer4Bvv39SQdJFCoipVKQ1pCY1vUof09KDTywotOMw%2BNBxuNMAZIFk1tmLhcJQOl7wlpUdwN6qzSB5FTi009fzYjiN1iARnDI53eJ3NOEDhJ9qB8jDTDsosPjmgWp0MB%2Fa59c71A99TiYA6NprGbWKkVlAw6l344wr4dr7%2B39MWQkGfX6dZMhCvLzZ5LO%2BxZKU5UV7%2F9zDT%2FtDc0IuS%2FrfLJkBF95Y1mchKQSmlXBS8TAIItYvqKeukmDGkImxr2lb90QyQKHJ0Ptoyr65MYMFoaTDDdNQDKkoAt3TuVWxczj8HtRDN2Edoy4tzDVkOHWBjqyAWsspomMA2ydScDHvbzbt6su%2B0ejTXDUVd77iYdibc2DuW%2F81IysmDyPEy6ejIJclS9G8CzM3AhHUo4BqAjJFKkE%2BXYm6%2FiU2vo6PRUvNRvHeQx%2FPbABRuJweUPRtlQ6icLJyvgGPvx%2BQIBHOhEivmkOBsnNusNEh4ziMUVbzaNPOnPT6lOM5QZLT9q6Ql%2Fm3XZ4BBFgr0KXFvgILcKjZMd%2BUBLYg%2FkWjRFEIDPxfYBmVdk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1cc27b2753d7acd30652815327b349e55ffc03e08d1daee2bc39cb91f4d05902",
+      "file_size": 1233,
+      "type": "text/x-python",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "jashu19"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
