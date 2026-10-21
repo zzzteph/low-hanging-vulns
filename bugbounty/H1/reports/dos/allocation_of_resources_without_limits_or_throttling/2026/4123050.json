@@ -1,0 +1,124 @@
+{
+  "id": 4123050,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTIzMDUw",
+  "url": "https://hackerone.com/reports/4123050",
+  "title": "CVE-2026-11586 fix is incomplete: auto-PONG memory grows without limit through curl_ws_recv() (CONNECT_ONLY)",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-10-17T18:08:00.303Z",
+  "submitted_at": "2026-10-17T18:08:00.518Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "sujitjaunjal",
+    "url": "/sujitjaunjal",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/09ufu95pf862x3u4qjn0xdlc3u45/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-11586"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-21T17:25:46.256Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-20T11:22:17.268Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nThe CVE-2026-11586 fix (849317ff5c, \"ws: make pong sending lazy\") adds the automatic PONG only when the WebSocket send buffer has room, but it put that check in ws_flush() (lib/ws.c:1712). curl_ws_recv(), the receive call of the documented CONNECT_ONLY model, still calls ws_enc_add_pending() without it at the end of every call that returns a frame (lib/ws.c:1694-1698 in 8.23.0, unchanged in master). Once the server stops reading and the 128 KB send buffer is full, that call appends the 6-byte PONG for an empty PING (ws.c:973) and returns CURLE_AGAIN before it clears ws->pending, because ws_enc_write_payload() refuses even a 0-byte payload when the buffer is full (ws.c:1010), so the next call appends the same PONG again. From then on every frame the application receives adds 6 bytes that are neither sent nor freed while the server does not read, even if the server sends no more PINGs, which is the unbounded growth CVE-2026-11586 describes, reached through the other documented API. Against the same server, a CONNECT_ONLY client with default options kept growing until the end of every run on 8.23.0 and master on Linux, and on 8.23.0 and 8.21.0 natively on macOS (about 345 MB of heap in 30 seconds), while CURLWS_NOAUTOPONG, the 8.23.0 curl tool (callback mode, which the fix covers) and 8.23.0 with the fix below stayed flat. The call in curl_ws_recv() came with 0b09132877, the advisory's Introduced-in commit, and the fix's test (test_20_11_crazy_pings) runs the curl tool, so only the callback path was checked.\n\n## Affected version\n8.21.0 to 8.23.0 and master, which is every release with the CVE-2026-11586 fix. ws_enc_add_pending(), ws_enc_add_frame() and ws_enc_write_payload() are byte-identical in 8.21.0, 8.22.0 and 8.23.0, and all three end curl_ws_recv() with the unguarded call (39b06935be added `!ws->using_reader` to its condition in 8.23.0, but using_reader is never set in CONNECT_ONLY mode, ws.c:1469-1486). lib/ws.c and lib/bufq.c are unchanged from 8.23.0 to today's master 59d2537b40. Earlier versions are covered by CVE-2026-11586.\n\nTested with release builds (no sanitizers): on Linux, curl-8_23_0, curl-8_23_0 with the fix below, and master 629646d9b7 (same lib/ws.c and lib/bufq.c as 59d2537b40), with OpenSSL in a Debian 12 container over TCP on 127.0.0.1 (amd64 under emulation on an Apple silicon Mac); natively on macOS 27.0.1, curl-8_23_0 and curl-8_21_0 over a Unix socket.\n\n```\ncurl 8.23.0-DEV (Linux) libcurl/8.23.0-DEV OpenSSL/3.0.22 zlib/1.2.13\ncurl 8.23.1-DEV (Linux) libcurl/8.23.1-DEV OpenSSL/3.0.22 zlib/1.2.13   (master 629646d9b7)\ncurl 8.23.0-DEV (Darwin) libcurl/8.23.0-DEV OpenSSL/3.6.4 zlib/1.2.12\ncurl 8.21.0-DEV (Darwin) libcurl/8.21.0-DEV zlib/1.2.12 mit-krb5/1.22.2\n```\n\n## Steps To Reproduce:\nLinux with glibc 2.33 or later (the client uses mallinfo2()), everything on 127.0.0.1, files from the attached zip; linux/*.sh have the exact commands behind the numbers below.\n\n1. Build a static libcurl without optional dependencies, so the client links with OpenSSL and zlib only: `cmake -S curl -B build -DCMAKE_BUILD_TYPE=Release -DCURL_USE_OPENSSL=ON -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF -DBUILD_LIBCURL_DOCS=OFF -DBUILD_MISC_DOCS=OFF -DCURL_USE_LIBPSL=OFF -DUSE_LIBIDN2=OFF -DCURL_USE_LIBSSH2=OFF -DUSE_NGHTTP2=OFF -DCURL_BROTLI=OFF -DCURL_ZSTD=OFF -DCURL_DISABLE_LDAP=ON && cmake --build build`\n2. `cc -O2 poc/ws_recv_client.c -Icurl/include build/lib/libcurl.a -lssl -lcrypto -lz -lpthread -o ws_recv_client`. A plain CONNECT_ONLY client: curl_ws_recv() in a loop with poll() on CURLE_AGAIN, as curl_ws_recv(3) says. It never sends anything itself and prints RSS and heap in use every second.\n3. `python3 poc/ws_noread_server.py 25001 185 &`. The server completes the handshake, never reads again, and sends empty PING and empty TEXT frames.\n4. `./ws_recv_client ws://127.0.0.1:25001/ 180`. At first the PONGs only fill the TCP send path (about 30 seconds in my emulated container); after that heap and RSS grow by about 6 bytes per frame until the end.\n5. Controls, each against a fresh server: `./ws_recv_client ws://127.0.0.1:25002/ 150 noautopong` and the curl tool, `build/src/curl -s -o /dev/null ws://127.0.0.1:25003/`. Both stay flat.\n\nOn macOS the same two files work over a Unix socket, where the growth starts at once: `python3 poc/ws_noread_server.py /tmp/ws.sock 35 &` and `UNIX_SOCKET=/tmp/ws.sock ./ws_recv_client ws://localhost/ 30` (link line in macos/run_macos.sh).\n\nLinux, TCP, same server:\n\n| run | frames returned | heap in use | RSS | growth per frame |\n|---|---|---|---|---|\n| 8.23.0, default options, 180 s | 14.2 million | 0.4 to 79.7 MB | 17.8 to 98.8 MB | 6.0 bytes |\n| master, default options, 150 s | 12.3 million | 0.4 to 68.5 MB | 17.6 to 87.2 MB | 6.0 bytes |\n| 8.23.0, only empty TEXT frames after 40 s, 210 s | 10.4 million | 0.4 to 52.6 MB | 17.5 to 70.7 MB | 6.0 bytes per 2-byte frame |\n| 8.23.0, CURLWS_NOAUTOPONG, 150 s | 250.9 million (PINGs included) | 0.3 to 8.6 MB, no trend | 16.8 to 25.5 MB, flat after 68 s | none |\n| 8.23.0 curl tool, 150 s | | | 18.1 to 18.3 MB | none |\n| 8.23.0 with the fix below, 150 s | 24.3 million | 0.4 to 10.2 MB, no trend | 16.6 to 26.5 MB, flat after 34 s | none |\n\nNatively on macOS (Unix socket, 30 s each, about 1.6 million frames per second), 8.23.0 went from 0.7 to 343.4 MB of heap and 8.21.0 from 0.3 to 346.0 MB, while CURLWS_NOAUTOPONG stayed at 0.6 MB and the curl tool peaked at a 2.9 MB footprint; there it is 7.5 bytes of heap per frame, because malloc rounds each 65,575-byte buffer chunk up to 80 KB. In every Linux run, the controls included, heap in use also jumps by up to about 10 MB and falls back, because curl_ws_recv() reads the socket backlog into its receive buffer in one call; the growth per frame is measured between those low points (README.txt).\n\nRaw output in evidence/: 01b-linux-tcp-long.txt (8.23.0, master), 05-linux-tcp-text-only.txt, 04-linux-tcp-controls-150s.txt (CURLWS_NOAUTOPONG, curl tool), 02-fix-check.txt (fix) and 03-macos-unix-socket.txt (macOS).\n\n## Fix\nIn curl_ws_recv(), call ws_flush() instead of ws_enc_add_pending(): ws_flush() adds the pending PONG only when the send buffer has room, as the CVE-2026-11586 fix intended (fix/ws-recv-pong-guard.diff applies to 8.23.0 and master; 02-fix-check.txt is 8.23.0 with it).\n\nAI disclosure: I used an AI assistant (Claude) for code review, test setup and drafting. I reproduced every result myself on curl built from the curl-8_23_0 and curl-8_21_0 tags and from master, on Linux and macOS; the attached logs are the raw output.\n\n## Impact\n\nA malicious WebSocket server can make any libcurl application that uses the documented CONNECT_ONLY model (curl_ws_recv()) with default options keep allocating memory, without limit, for as long as the connection is open, which is what the CVE-2026-11586 fix was meant to stop. The server completes a normal handshake, stops reading and sends small frames: once the TCP send path is full, every frame the application receives costs 6 bytes that stay allocated, three times the 2 bytes of an empty TEXT frame, and after the first stuck PONG the server does not need to send any more PINGs. The growth only depends on how many frames the server sends and the application reads; natively on macOS that was about 345 MB in 30 seconds. In #3788931 jimfuller2024 named long-lived libcurl applications with WebSocket connections to untrusted peers, such as services that proxy or aggregate WebSocket feeds, as the main concern; when they use curl_ws_recv(), the fix does not protect them. The curl tool is not affected because it uses the callback model that the fix covers, and CURLWS_NOAUTOPONG avoids the problem.",
+  "weakness": {
+    "id": 120,
+    "name": "Allocation of Resources Without Limits or Throttling"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7016956,
+      "file_name": "curl-ws-autopong-curl_ws_recv-evidence.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/b7u23vyg487l46sufxasl6bthbsm?response-content-disposition=attachment%3B%20filename%3D%22curl-ws-autopong-curl_ws_recv-evidence.zip%22%3B%20filename%2A%3DUTF-8%27%27curl-ws-autopong-curl_ws_recv-evidence.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5HB3WB7V%2F20261021%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261021T195233Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFF2LitxobkRVtLWJJpsOJp3Gmd6TXH6aWFy1fP7IPNZAiAtCAX8ewdN2QyzyUV%2BmrPf0G2olyoGMNXu7QhA84shnSqyBQhhEAMaDDAxMzYxOTI3NDg0OSIMSboik7VIIv9Yv4tzKo8FHvbyfDKmrncGkGQzIFVR2mdjO1tXtaUfehnOagNmQfLpQGZancN7KdBTGFdb4VgIms6jV8RonCVksmPO0FVTxPdUxrCRiszAGrfKzOK%2Fy%2B%2BjUQoie%2FtDYS1%2BoriKzdsDwS3Kaz%2FsPap2aws5sgxtQ0Nl3I%2F59AuJ7NWj0pswSN7l5NPmfXf5yZupIZtrCLYEh5wveRSwE6g22Qz3TvhpRhUWEAEU0bjC3MvmuVffzgONRUJyD08eGzTL27%2FJ85XFUuiBrTEGHz2cRRcwuevdc9YWBOSSh4dYAxRghZXu%2Ft3m82KnL3J9iKFAUisudUaBHx3hQZpQjynuAcqqNXZ%2BBJtwhbaZ5moS6yFSiBIiXf0eFqfDHo9aR7zRIrjynTTak5q9HN2PRYzQaD%2B2n4u25COAdTFPzt%2BxsBuaqPy0VG1mxqZ6cwCPUicrrKeRrilzeamFcr8YF3d0WioWlF%2FM4Ltywf%2Bs6Hl3f%2F08MiQcTZo1gPvBYwpiVByThBkgWDQdekReaxdrulzNJMWN58sh43bQKcp11seoNG7sdKQwQwnxrCHE6is%2BySuA78QxIvzdwYL%2F4gZwssmv3v1WL4Tmr0MuFfPm41q2V6X7D%2F%2BEIS3Xt4GfK%2FzDAMLZpyKZq0n9XrcAJ%2BIQhdac9uPw3hDM7GOc8Th42uM2Ypa20gOHhfFk9KD4DR2eMEorU8WHlzbb4mgavGCefziQZgIdLeozn5nzNm42gGhYl28%2FRTzLNGDjotojalkeIzgcdf1xKxGqI1OrFsRNONMzf0DYiePhy5rHI49Li2GZ%2B2gHxxe%2BjABhhkR1XpdkRoeVb0zDjMYASsI4L3xfL7s18JqmrA29xdQZbgq5aH1JFL33BFzdWTDH3OPWBjqyAVm1z1QDRMicVvPwNB3PmPdRlj%2FNe9MzouqY%2Fzs5sY2RjbSulrEJdIbNOy7162kM6Qczz8vc3wCl7zFLB7pFFbupeAdU4dfq4rW%2FrW48MRJXIiRt1ETg7a3zdyLJe5lXUKynShpgXOn1A5K%2BY9wRdhFS5mLLAJIx0o4eOJyoZzHsbt8q2DWKt8q9gcZdkmcQ7hrtGMjy%2FpxLjWQDRA6k9iecRjxLfMJi82Mz%2BJMkxwFZC1g%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c50b393ce65cc24a0ba8612d5f311c5d562c8fdc8cac00ad453ed380a70a47ae",
+      "file_size": 40100,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "jadedimp64"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,154 @@
+{
+  "id": 3636758,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjM2NzU4",
+  "url": "https://hackerone.com/reports/3636758",
+  "title": "Cross-room signaling injection enabling unauthorized force-mute",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-03-30T02:34:47.441Z",
+  "submitted_at": "2026-03-30T02:34:47.766Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "brumbelow",
+    "url": "/brumbelow",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/7gumufo87iwat9dspv5s6yhpsava/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": true,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-45266"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-21T18:56:00.702Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-21T18:55:55.997Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nA low-privileged participant can read another participant's live Talk `sessionId` from the room participant list, then use moderator rights in an unrelated room they control to inject moderator-only internal-signaling `control` messages into the victim's room session.\n\nThe server checks moderator permissions only against the sender session's own room, but it queues the message to any attacker-supplied recipient `sessionId`. Message delivery is then keyed only by recipient session ID, not by room. I reproduced this by sending a `forceMute` control from room B into a victim active in room A.\n\nWhen the victim is in a call, the shipped client handles `forceMute` by muting the local user session.\n\n## Product / Version\n\n- Nextcloud Server: `34.0.0.1` (`status.php` reported `versionstring: 34.0.0 dev`)\n- Talk app: `24.0.0-dev.2`\n- `spreed` commit: `031e0708bde280b2a83943a0e7a6102d8eede207`\n- Server commit used in the lab: `b71661a38bb40fbdfc071f273ea506a4a9fae091`\n- Reproduced with the default internal-signaling mode on a local Nextcloud lab\n\n## Affected Code\n\n- `lib/Controller/RoomController.php:1217-1220`\n  Active participant session IDs are exposed in the participant list.\n- `lib/Controller/RoomController.php:1250-1253`\n  Single-session participants are returned with `sessionIds`.\n- `lib/Controller/SignalingController.php:387-418`\n  `control` messages are authorized against the sender's session, then queued to arbitrary `decodedMessage['to']`.\n- `lib/Signaling/Messages.php:48-56`\n  Queue entries store `sender`, `recipient`, and `message` only.\n- `lib/Signaling/Messages.php:102-110`\n  Messages are fetched solely by `recipient = $sessionId`.\n- `lib/Controller/SignalingController.php:551-585`\n  Victim polling consumes any queued message for that session.\n- `src/utils/webrtc/simplewebrtc/simplewebrtc.js:108-113`\n  Incoming `forceMute` causes the client to mute itself when `peerId` matches the current session.\n\n## Steps To Reproduce:\n\nPreconditions:\n- Victim and attacker both participate in room A.\n- Attacker is only a normal participant in room A.\n- Attacker owns or moderates unrelated room B.\n- Internal signaling is enabled.\n\nSteps:\n\n  1. On nextcloud  spreed (34.0.0.1 / Talk 24.0.0-dev.2), `victim` created room A and added `attacker` (evil). Both joined room A.\n     evil queried GET /ocs/v2.php/apps/spreed/api/v4/room/97oqymwq/participants?format=json and received victim’s live room-A session ID JRal9O65....\n  2. evil created unrelated room B, joined it, and got room-B sender session pekgCNiV....\n  3. evil sent this to room B:\n\n     {\n       \"messages\": \"[{\\\"ev\\\":\\\"message\\\",\\\"sessionId\\\":\\\"<evil_room_b_session>\\\",\\\"fn\\\":\\\"{\\\\\\\"type\\\\\\\":\\\\\\\"control\\\\\\\",\\\\\\\"to\\\\\\\":\\\\\\\"<victim_room_a_session>\\\\\\\",\\\\\\\"payload\\\\\\\":{\\\\\\\"action\\\\\\\":\\\\\\\"forceMute\\\\\\\",\\\\\\\"peerId\\\\\\\":\\\\\\\"<victim_room_a_session>\\\\\\\"}}\\\"}]\"\n     }\n     to POST /ocs/v2.php/apps/spreed/api/v3/signaling/pfo7kdcz?format=json\n  4. Server-side evidence showed a queued row with sender pekgCNiV... and recipient JRal9O65... in oc_talk_internalsignaling.\n  5. victim then polled room A with GET /ocs/v2.php/apps/spreed/api/v3/signaling/97oqymwq?format=json and received the injected control message with \"from\":\"pekgCNiV...\".\n  6. Negative control: sending the same forceMute from room A itself, using evil’s room-A session QBL3zUuH..., created no victim-targeted queue row and victim’s next poll returned only usersInRoom.\n\n\n## Supporting Material/References:\n\nHere the attacker reads the session of the victim in the shared room\n{F5634941}\n\nthe attacker uses the victim's session as the recipient and the attackers room B as the sender\n{F5634940}\n\nvictim in room A receives injected message from attacker in room B and is muted \n{F5634942}\n\n## Impact\n\n- A low-privileged user can inject moderator-only internal-signaling controls into a room they do not moderate.\n- The reproduced payload is `forceMute`. When the victim is in a call, the shipped client handles this by muting the local session.\n- More generally, the room boundary for internal signaling is broken because delivery is keyed only by recipient session ID.",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5634940,
+      "file_name": "attacker_sending_injected_msg_to_room_a.jpg",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/uqwbd7mmizqxxw43tm9xa3hjrfe1?response-content-disposition=attachment%3B%20filename%3D%22attacker_sending_injected_msg_to_room_a.jpg%22%3B%20filename%2A%3DUTF-8%27%27attacker_sending_injected_msg_to_room_a.jpg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5HB3WB7V%2F20261021%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261021T195232Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFF2LitxobkRVtLWJJpsOJp3Gmd6TXH6aWFy1fP7IPNZAiAtCAX8ewdN2QyzyUV%2BmrPf0G2olyoGMNXu7QhA84shnSqyBQhhEAMaDDAxMzYxOTI3NDg0OSIMSboik7VIIv9Yv4tzKo8FHvbyfDKmrncGkGQzIFVR2mdjO1tXtaUfehnOagNmQfLpQGZancN7KdBTGFdb4VgIms6jV8RonCVksmPO0FVTxPdUxrCRiszAGrfKzOK%2Fy%2B%2BjUQoie%2FtDYS1%2BoriKzdsDwS3Kaz%2FsPap2aws5sgxtQ0Nl3I%2F59AuJ7NWj0pswSN7l5NPmfXf5yZupIZtrCLYEh5wveRSwE6g22Qz3TvhpRhUWEAEU0bjC3MvmuVffzgONRUJyD08eGzTL27%2FJ85XFUuiBrTEGHz2cRRcwuevdc9YWBOSSh4dYAxRghZXu%2Ft3m82KnL3J9iKFAUisudUaBHx3hQZpQjynuAcqqNXZ%2BBJtwhbaZ5moS6yFSiBIiXf0eFqfDHo9aR7zRIrjynTTak5q9HN2PRYzQaD%2B2n4u25COAdTFPzt%2BxsBuaqPy0VG1mxqZ6cwCPUicrrKeRrilzeamFcr8YF3d0WioWlF%2FM4Ltywf%2Bs6Hl3f%2F08MiQcTZo1gPvBYwpiVByThBkgWDQdekReaxdrulzNJMWN58sh43bQKcp11seoNG7sdKQwQwnxrCHE6is%2BySuA78QxIvzdwYL%2F4gZwssmv3v1WL4Tmr0MuFfPm41q2V6X7D%2F%2BEIS3Xt4GfK%2FzDAMLZpyKZq0n9XrcAJ%2BIQhdac9uPw3hDM7GOc8Th42uM2Ypa20gOHhfFk9KD4DR2eMEorU8WHlzbb4mgavGCefziQZgIdLeozn5nzNm42gGhYl28%2FRTzLNGDjotojalkeIzgcdf1xKxGqI1OrFsRNONMzf0DYiePhy5rHI49Li2GZ%2B2gHxxe%2BjABhhkR1XpdkRoeVb0zDjMYASsI4L3xfL7s18JqmrA29xdQZbgq5aH1JFL33BFzdWTDH3OPWBjqyAVm1z1QDRMicVvPwNB3PmPdRlj%2FNe9MzouqY%2Fzs5sY2RjbSulrEJdIbNOy7162kM6Qczz8vc3wCl7zFLB7pFFbupeAdU4dfq4rW%2FrW48MRJXIiRt1ETg7a3zdyLJe5lXUKynShpgXOn1A5K%2BY9wRdhFS5mLLAJIx0o4eOJyoZzHsbt8q2DWKt8q9gcZdkmcQ7hrtGMjy%2FpxLjWQDRA6k9iecRjxLfMJi82Mz%2BJMkxwFZC1g%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=106bdb22d19d5929d1230cce7dc113851ec981467b55ceb9dd21b7560238f550",
+      "file_size": 60631,
+      "type": "image/jpeg",
+      "moderated": false
+    },
+    {
+      "id": 5634941,
+      "file_name": "attacker_read_session.jpg",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/mubatf6arzr9793l56n6o5gqjtdq?response-content-disposition=attachment%3B%20filename%3D%22attacker_read_session.jpg%22%3B%20filename%2A%3DUTF-8%27%27attacker_read_session.jpg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5HB3WB7V%2F20261021%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261021T195232Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFF2LitxobkRVtLWJJpsOJp3Gmd6TXH6aWFy1fP7IPNZAiAtCAX8ewdN2QyzyUV%2BmrPf0G2olyoGMNXu7QhA84shnSqyBQhhEAMaDDAxMzYxOTI3NDg0OSIMSboik7VIIv9Yv4tzKo8FHvbyfDKmrncGkGQzIFVR2mdjO1tXtaUfehnOagNmQfLpQGZancN7KdBTGFdb4VgIms6jV8RonCVksmPO0FVTxPdUxrCRiszAGrfKzOK%2Fy%2B%2BjUQoie%2FtDYS1%2BoriKzdsDwS3Kaz%2FsPap2aws5sgxtQ0Nl3I%2F59AuJ7NWj0pswSN7l5NPmfXf5yZupIZtrCLYEh5wveRSwE6g22Qz3TvhpRhUWEAEU0bjC3MvmuVffzgONRUJyD08eGzTL27%2FJ85XFUuiBrTEGHz2cRRcwuevdc9YWBOSSh4dYAxRghZXu%2Ft3m82KnL3J9iKFAUisudUaBHx3hQZpQjynuAcqqNXZ%2BBJtwhbaZ5moS6yFSiBIiXf0eFqfDHo9aR7zRIrjynTTak5q9HN2PRYzQaD%2B2n4u25COAdTFPzt%2BxsBuaqPy0VG1mxqZ6cwCPUicrrKeRrilzeamFcr8YF3d0WioWlF%2FM4Ltywf%2Bs6Hl3f%2F08MiQcTZo1gPvBYwpiVByThBkgWDQdekReaxdrulzNJMWN58sh43bQKcp11seoNG7sdKQwQwnxrCHE6is%2BySuA78QxIvzdwYL%2F4gZwssmv3v1WL4Tmr0MuFfPm41q2V6X7D%2F%2BEIS3Xt4GfK%2FzDAMLZpyKZq0n9XrcAJ%2BIQhdac9uPw3hDM7GOc8Th42uM2Ypa20gOHhfFk9KD4DR2eMEorU8WHlzbb4mgavGCefziQZgIdLeozn5nzNm42gGhYl28%2FRTzLNGDjotojalkeIzgcdf1xKxGqI1OrFsRNONMzf0DYiePhy5rHI49Li2GZ%2B2gHxxe%2BjABhhkR1XpdkRoeVb0zDjMYASsI4L3xfL7s18JqmrA29xdQZbgq5aH1JFL33BFzdWTDH3OPWBjqyAVm1z1QDRMicVvPwNB3PmPdRlj%2FNe9MzouqY%2Fzs5sY2RjbSulrEJdIbNOy7162kM6Qczz8vc3wCl7zFLB7pFFbupeAdU4dfq4rW%2FrW48MRJXIiRt1ETg7a3zdyLJe5lXUKynShpgXOn1A5K%2BY9wRdhFS5mLLAJIx0o4eOJyoZzHsbt8q2DWKt8q9gcZdkmcQ7hrtGMjy%2FpxLjWQDRA6k9iecRjxLfMJi82Mz%2BJMkxwFZC1g%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f00f1ec79a228d04b70a5220bc45291154e8884565b411351b7dd9d9ffd90989",
+      "file_size": 112497,
+      "type": "image/jpeg",
+      "moderated": false
+    },
+    {
+      "id": 5634942,
+      "file_name": "victim_view_of_injected_message.jpg",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fgxf5lsacm6f4lvv5wfxqjvv2jxc?response-content-disposition=attachment%3B%20filename%3D%22victim_view_of_injected_message.jpg%22%3B%20filename%2A%3DUTF-8%27%27victim_view_of_injected_message.jpg&response-content-type=image%2Fjpeg&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ5HB3WB7V%2F20261021%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261021T195232Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJn%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIFF2LitxobkRVtLWJJpsOJp3Gmd6TXH6aWFy1fP7IPNZAiAtCAX8ewdN2QyzyUV%2BmrPf0G2olyoGMNXu7QhA84shnSqyBQhhEAMaDDAxMzYxOTI3NDg0OSIMSboik7VIIv9Yv4tzKo8FHvbyfDKmrncGkGQzIFVR2mdjO1tXtaUfehnOagNmQfLpQGZancN7KdBTGFdb4VgIms6jV8RonCVksmPO0FVTxPdUxrCRiszAGrfKzOK%2Fy%2B%2BjUQoie%2FtDYS1%2BoriKzdsDwS3Kaz%2FsPap2aws5sgxtQ0Nl3I%2F59AuJ7NWj0pswSN7l5NPmfXf5yZupIZtrCLYEh5wveRSwE6g22Qz3TvhpRhUWEAEU0bjC3MvmuVffzgONRUJyD08eGzTL27%2FJ85XFUuiBrTEGHz2cRRcwuevdc9YWBOSSh4dYAxRghZXu%2Ft3m82KnL3J9iKFAUisudUaBHx3hQZpQjynuAcqqNXZ%2BBJtwhbaZ5moS6yFSiBIiXf0eFqfDHo9aR7zRIrjynTTak5q9HN2PRYzQaD%2B2n4u25COAdTFPzt%2BxsBuaqPy0VG1mxqZ6cwCPUicrrKeRrilzeamFcr8YF3d0WioWlF%2FM4Ltywf%2Bs6Hl3f%2F08MiQcTZo1gPvBYwpiVByThBkgWDQdekReaxdrulzNJMWN58sh43bQKcp11seoNG7sdKQwQwnxrCHE6is%2BySuA78QxIvzdwYL%2F4gZwssmv3v1WL4Tmr0MuFfPm41q2V6X7D%2F%2BEIS3Xt4GfK%2FzDAMLZpyKZq0n9XrcAJ%2BIQhdac9uPw3hDM7GOc8Th42uM2Ypa20gOHhfFk9KD4DR2eMEorU8WHlzbb4mgavGCefziQZgIdLeozn5nzNm42gGhYl28%2FRTzLNGDjotojalkeIzgcdf1xKxGqI1OrFsRNONMzf0DYiePhy5rHI49Li2GZ%2B2gHxxe%2BjABhhkR1XpdkRoeVb0zDjMYASsI4L3xfL7s18JqmrA29xdQZbgq5aH1JFL33BFzdWTDH3OPWBjqyAVm1z1QDRMicVvPwNB3PmPdRlj%2FNe9MzouqY%2Fzs5sY2RjbSulrEJdIbNOy7162kM6Qczz8vc3wCl7zFLB7pFFbupeAdU4dfq4rW%2FrW48MRJXIiRt1ETg7a3zdyLJe5lXUKynShpgXOn1A5K%2BY9wRdhFS5mLLAJIx0o4eOJyoZzHsbt8q2DWKt8q9gcZdkmcQ7hrtGMjy%2FpxLjWQDRA6k9iecRjxLfMJi82Mz%2BJMkxwFZC1g%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=4f0a2dc582f7e12aa7eec3975a0e1dd2f19fa568727d2f84553c5c5c1cf7db0d",
+      "file_size": 184762,
+      "type": "image/jpeg",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-21T18:55:58.087Z",
+  "allow_singular_disclosure_after": -3394.391052163,
+  "singular_disclosure_allowed": true,
+  "vote_count": 2,
+  "voters": [
+    "brumbelow",
+    "jadedimp64"
+  ],
+  "severity": {
+    "rating": "low",
+    "score": 3.3,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "local",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 14804,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "nextcloud/spreed",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
