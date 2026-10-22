@@ -1,0 +1,122 @@
+{
+  "id": 4128701,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI4NzAx",
+  "url": "https://hackerone.com/reports/4128701",
+  "title": "Pinned public key check passes for a key the server does not hold with the wolfSSL backend",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "low",
+  "readable_substate": "N/A",
+  "created_at": "2026-10-19T19:15:21.964Z",
+  "submitted_at": "2026-10-19T19:15:22.193Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "matty69v",
+    "url": "/matty69v",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d9drin7bro3d44gr64nbpghu6pik/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-22T06:56:59.365Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-22T06:56:46.830Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nWith the wolfSSL backend, `--pinnedpubkey` is checked against a public key that curl extracts by re-parsing the server certificate with its own ASN.1 parser (lib/vtls/x509asn1.c), while wolfSSL verifies the chain with its own parser. curl 8.23.0 added a check that the `validity` field of the TBSCertificate is fully consumed by its two dates, but the two fields parsed right before it get no such check: the optional `version [0]` element and the `signature` AlgorithmIdentifier, whose return value is not even NULL-checked. A CA-signed certificate whose `version [0]` or `signature` element declares a length that swallows the real issuer, validity, subject and public key A, with a tail carrying a second issuer, validity, subject and public key B inside a BIT STRING that wolfSSL skips, is chain-verified by wolfSSL 5.9.2 with key A while curl pins key B.\n\nThis breaks pinnedpubkey.md (https://curl.se/docs/manpage.html#--pinnedpubkey, source https://github.com/curl/curl/blob/curl-8_23_0/docs/cmdline-opts/pinnedpubkey.md):\n\n> A public key is extracted from this certificate and if it does not exactly match the public key provided to this option, curl aborts the connection before sending or receiving any data.\n\nPrecondition: wolfSSL 5.9.2 or older (5.9.4 rejects the certificate itself), the same precondition as the related advisory published with 8.23.0. lib/vtls/schannel.c lines 1140 to 1160 use the same parser for pinning and are likely affected on Windows; not tested here. mbedTLS, GnuTLS and OpenSSL take the key from the TLS library and are not affected.\n\n\n## Affected version\ncurl 8.23.0 and master 7d091c71fd built with wolfSSL 5.9.2, macOS. The master change for indefinite-length elements does not cover this.\n\n## Steps To Reproduce:\n1. Build a certificate signed by a test CA with real fields and key A, where the `signature` SEQUENCE (or `version [0]`) declares an oversized length, and append a fake issuer, validity, subject and public key B inside an `issuerUniqueID` BIT STRING. Serve it on 127.0.0.1:37000 with key A only. Pin B is the hash of a key that exists only in the test directory.\n\n2. Run:\n\n```\ncurl --cacert ca.pem --pinnedpubkey \"sha256//<pin B>\" https://127.0.0.1:37000/\n```\n\n3. Result on 8.23.0 built with wolfSSL 5.9.2:\n\n```\npin B:  exit=0  http=200   public key hash matches pinned value\npin A:  exit=90 http=000   public key does not match pinned public key\nserver log: REQUEST GET / Host=127.0.0.1:37000 TLS=304\n```\n\nControl certificate (well-formed, key A): pin A exit 0, pin B exit 90. The certificate layout fixed in 8.23.0 is refused by this build (parse error, exit 35), so this is a different, unfixed path. Same certificate on wolfSSL 5.9.4, OpenSSL, mbedTLS, Apple: rejected by the TLS library (exit 35); GnuTLS pins its own key A and refuses pin B (exit 90). The generator script, server and run.sh are attached.\n\nRoot cause, lib/vtls/x509asn1.c `Curl_parseX509()`:\n\n```c\n  if(elem.tag == 0) {\n    if(!getASN1Element(&cert->version, elem.beg, elem.end))\n      return -1;\n    beg = getASN1Element(&elem, beg, end);\n    ...\n  }\n  cert->serialNumber = elem;\n  /* Get signature algorithm. */\n  beg = getASN1Element(&cert->signatureAlgorithm, beg, end);\n  /* Get issuer. */\n  beg = getASN1Element(&cert->issuer, beg, end);\n```\n\nProposed fix (verified against wolfSSL 5.9.2: both crafted certificates refused, control still pins correctly, revert brings the bypass back):\n\n```diff\n--- a/lib/vtls/x509asn1.c\n+++ b/lib/vtls/x509asn1.c\n@@ -816,14 +816,28 @@ int Curl_parseX509(struct Curl_X509certificate *cert,\n   if(elem.tag == 0) {\n     if(!getASN1Element(&cert->version, elem.beg, elem.end))\n       return -1;\n+    if(cert->version.end != elem.end)\n+      return -1;\n     beg = getASN1Element(&elem, beg, end);\n     if(!beg)\n       return -1;\n   }\n   cert->serialNumber = elem;\n   /* Get signature algorithm. */\n   beg = getASN1Element(&cert->signatureAlgorithm, beg, end);\n+  if(!beg)\n+    return -1;\n+  ccp = getASN1Element(&elem, cert->signatureAlgorithm.beg,\n+                       cert->signatureAlgorithm.end);\n+  if(!ccp || elem.tag != CURL_ASN1_OBJECT_IDENTIFIER)\n+    return -1;\n+  if(ccp < cert->signatureAlgorithm.end) {\n+    ccp = getASN1Element(&elem, ccp, cert->signatureAlgorithm.end);\n+    if(!ccp)\n+      return -1;\n+  }\n+  if(ccp != cert->signatureAlgorithm.end)\n+    return -1;\n   /* Get issuer. */\n   beg = getASN1Element(&cert->issuer, beg, end);\n   if(!beg)\n```\n\n{F7036411}\n\n## Impact\n\nAn on-path attacker holding any certificate chain the client trusts, but not the key the application pinned, serves a crafted certificate; curl built with wolfSSL reports the pin as matching and sends the request. Pinning is used precisely when the CA store is not enough, so this removes the extra guarantee the user configured.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7036411,
+      "file_name": "curl-pin-poc.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/neac7zwv71eia0ez09qpwbenj09x?response-content-disposition=attachment%3B%20filename%3D%22curl-pin-poc.zip%22%3B%20filename%2A%3DUTF-8%27%27curl-pin-poc.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTL6PXJAX%2F20261022%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261022T065750Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEKb%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIH7EoOtphcqrRP%2FI14HTDE7mevl%2BxYIA0XUr4A54DffCAiB%2FiJCCiAfAPC83Ke1PyuSDSzamD%2F8UDIqC1SpYORiZNSqxBQhvEAMaDDAxMzYxOTI3NDg0OSIMzIthUr6J%2FV32NnSrKo4F0%2BuSh%2FtO%2BN%2Fpbkqui1nBYd3we6tghYwLAiAGfyxTJRYcasLwMtmUyL5owiOIWFuevpJTEyIjOuHNw9I1A6fi9ml%2BSKTKpdYF8zKhGxSWcCRVy8eIeX8KoPnuv0a5y82SyjQZL2Nq72YPJkRnAojTNh5nDFghA9pBEyy3tUvMgKwhR98Drjm0kw4k6WVDavdkc7HE9zhTq%2FDYM0sW3dzlgOVOQ0vLt5nPVwN3auMlOxrzayz%2FsVI6WhPcpaAAinQo0aDjNSIE4ku%2BQaXVWF4Cpdc3lORta13U4OZhS37DawtdOdSjwTtiFK7q0TJ6ex%2FOnSkoZsSMPu0UyoDkJGHcswmxbLtChaP1Ikvgr3qzWQdP4fKraPbv9ftQCdRuNGLkQ3O6YzZ4zKfsupztT8ZoAVUih5WNVshPVL%2BPaDkPiUw01F82VKFdF69LefWNwUChkmUGk4dHy2tC07QFrZefE84W3gIHtr9rCeGNRGu%2F446GOndDlN8kNGbb71YzpK8lV%2BAskXXruoxzh6on2HurWm%2FMzll76W57cQskSQi5%2BcMc4GSNePDl%2Bfi%2Fd9PvOJOpJ6KD068K3mmtrg%2Fy73T%2B3TUrmZbuPOkILKYwF97ybzSPOIBPOgceSHqycw39QhlQ%2B2%2BG2n%2FN5P9%2Ffnl7AFWZeDJEMLAx51hYDQ6vYOJk51RgTh0JPP7fdjGwNVdUzF4hLT4J%2F1yAOTbulxjnGdoXok8u%2F6SLVZubT%2BgW9dVnPXxUMIS1vNKPF9gFogQKhpMlGzPs2DkKm79bQAAbVEqX%2FOw38x8%2FF7JsIIPUwqQBsc7aO3aEdVnzuMW8x0MgTdMDjcAmk1DIZSiGrmlTs%2Bu%2BSR8a60EDZxqy1MJiUYFTMKnH5tYGOrIBh0buKU5D2rL5nv0s6bCJ3rJ%2B9LFJDqyv8J5ynLCsX3WzPWAgnM1H5Aq1VxZ3tiUyPPCTtpbZVps%2FXDSL9HsAlgkHOB0AK9zecI%2Fii%2FmnxuKMn%2BoaQDpC6ERdd75BFKozz5MOLuHhaf97jwxgGvoeQn%2FeZn1KQIQSxn0Jg2DPWuW6%2FX5cldUCW1Ob3v%2BhClipgzZdrQdh3G19gFl1BYzTpPVKp4fZm6j106lsPw7A7RPSmw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=20d2324961e2e1e7f644cc806e9dbb3eb92bb5dce33fae62e24d3e53868dd26e",
+      "file_size": 72870,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "matty69v"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
