@@ -1,0 +1,165 @@
+{
+  "id": 4038342,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDM4MzQy",
+  "url": "https://hackerone.com/reports/4038342",
+  "title": "dns.resolve truncates names containing NUL char",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-17T20:33:05.767Z",
+  "submitted_at": "2026-09-17T20:33:06.032Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "hasanfleyah",
+    "url": "/hasanfleyah",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/bvoo2nh7ia1cwlnij2ia06gfyz9d/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 22984,
+    "url": "https://hackerone.com/nodejs",
+    "handle": "nodejs",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/022/984/e600648ace4a8553247bce967d461a030aa81d49_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Node.js",
+      "twitter_handle": "nodejs",
+      "website": "https://nodejs.org",
+      "about": "The Node.js JavaScript Runtime"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-105482"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-23T12:16:47.965Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-23T12:16:47.810Z",
+  "team_member_agreed_on_going_public_at": "2026-10-23T12:02:39.644Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nI looked at the June 18 2026 fix for CVE-2026-48930 and found it is incomplete. The\nfix rejects embedded NUL bytes at the entry points that feed libuv's `getaddrinfo`\n(`dns.lookup`, `dns.promises.lookup`) and at `options.host` in `net`/`tls`. It does not\nreject them at any of the `dns.resolve*` entry points, which feed the c-ares binding —\nthe binding the advisory title actually names.\n\nOn Node v26.9.0 I passed `attacker.test\\x00.trusted.corp` to `dns.resolve4()`. The call\ndid not throw. I read the DNS packet off the wire and the QNAME was `attacker.test`.\nThe `.trusted.corp` portion was not in the packet at all. The call then returned an\naddress, successfully, with no error and no warning.\n\nSo the name a program validates in JavaScript and the name Node actually asks a DNS\nserver about can be two different names, on the current patched release.\n\n## What I tested\n\nI used two Node builds: the patched v26.9.0 from nodejs.org (verified by checksum) and\nthe system v26.3.0, which is pre-patch, as my positive control. Everything ran on\n127.0.0.1 and 127.0.0.2. No real CA and no third-party host was contacted.\n\nI wrote a small authoritative DNS server on loopback, pointed the runtime at it with\n`dns.setServers()`, and read the question section of each packet directly so I could\ncompare the name I asked for in JavaScript against the name that left the process.\n\n## What happened\n\nI asked `dns.resolve4()` for `control.bound.test` first. The QNAME on the wire was\n`control.bound.test`, 18 characters, matching exactly. That is my control and it shows\nthe harness reads QNAMEs correctly.\n\nI then asked for `attacker.test\\x00.trusted.corp`, 27 characters. The QNAME on the wire\nwas `attacker.test`, 13 characters. The raw question section was\n`0861747461636b657204746573740000010001` — one label `attacker`, one label `test`, then\nthe terminator. The call returned an address normally.\n\nI ran the same thing through `dns.lookup()`, which is the entry point the fix did cover.\nIt threw `ERR_INVALID_ARG_VALUE` and zero packets left the process. That is the negative\narm: the same name, correctly refused, in the same run.\n\nOn v26.3.0 the `dns.resolve4` arms are byte-identical, and the `dns.lookup` arm is *not*\nrefused. So the fix demonstrably landed on one path and demonstrably did not land on the\nother.\n\nI then built the ordinary shape this reaches: a guard that suffix-checks a hostname,\nresolves it with `dns.promises.resolve4`, and connects to the address it gets back. With\n`attacker.test` the guard refused and nothing was contacted. With\n`attacker.test\\x00.trusted.corp` the guard approved it, Node queried `attacker.test`, the\naddress returned was 127.0.0.2 instead of 127.0.0.1, and the service on 127.0.0.2\nanswered the connection.\n\n## Impact\n\n## Impact\n\nAny code that validates a hostname string and then resolves it with `dns.resolve*` is\nvalidating a different name from the one Node queries. The affected calls are\n`resolveAny, resolve4, resolve6, resolveCaa, resolveCname, resolveMx, resolveNs,\nresolveTlsa, resolveTxt, resolveSrv, resolvePtr, resolveNaptr, resolveSoa` and `reverse`,\nin both the callback and promise APIs, on the default resolver and on any `new\ndns.Resolver()`.\n\nThat covers SSRF allowlists, DNS-rebinding guards, and domain-verification lookups such as TXT-record checks. The lookup succeeds rather than failing, so nothing surfaces the substitution.\n\n## Reproduction \n\n\n\n## Run this\n\n```\ncd C:/Users/Owner/Documents/mywork/nodejs-node/CVE-2026-48930\nnode proof/poc.js\n```\n\nOne file, no arguments, no environment variables, no companion files. It locates the\npatched runtime relative to its own `__dirname`, re-executes itself inside it, stands up a loopback authoritative UDP DNS server and two loopback TCP services, runs every arm, then repeats the same arms on the system `node` (v26.3.0) for the pre-patch contrast. Exit code 0 means the expected pattern held; non-zero means it did not.\n\n{F6751460}\n\n{F6751469}\n\n{F6751472}",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6751460,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/4507vegb7hnvq9c9cc771j3qlsc9?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4XTK5IJ7%2F20261023%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261023T153607Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMb%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCteZBpISOytVKDEOg3vJB%2BO8OntPO3v3t990FPl3yPoAIhALHasvxL2ZE5roW7QrLqZr88I4TUsz6LDlWNH6Ri7NlFKrsFCI%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwSKMgmpe280BlwMUYqjwUaw9tBsKvAZLSsHarUNOFpknerHcw3er0sp%2Fjd02%2Fr5iA3MVnn5kLxfKHefPBC%2F4q24VhIQXQdV42p4%2BtmxVcO6uf0i6aY%2FKYuOtj%2FZ%2BnT6UFTYMuOUmDDcD5VCdyLynRmKn0FKbAQQjPGjzJYIxvVAjmLV8RBFaRfyLUE4VlyRzlH2K%2BBlp0eiQzCOwZ2OmkMXR0MDhBUFkkQD5vTovjJ2ua3cort%2FR2HpjIxUQSkBGaQ4Lmg6bU8BFZLcx8YYpzul182eyL%2BShs3D4dkUzLhfYweCNvaPWdnMImXNr9tZ4aAhpQM1Kh8OIE2a4XpW1CFDu9AkGaaDY6%2FRxi0o2%2BzxTqT4tHVhEOmhVZ5rpxiWnsM8rSlHGE9DPdOHUHRwXq1qQ76GLGdhlUi3xzp4%2BIv9lT1XczjnMwitbil9CYxrqWBfm13PjuEVRvXdWy3U75XT46jjrJ9jj00ar09ct5PSdLVYN6EfhghLDPFvAErhNi0KnOtrzlF2kikZuQ3xwn3IaUvN9NpPa6VsW%2BG6mXA%2FTlMY8wu31ipsj80Ms7p%2BstsYABTPAi29SfZfiofXy0SF%2FtTfu5RfltHAzcJrIbmahma591EP6F5sWf3%2FjWAjdnjEL6853L2vXjPLOl8RTPGLRhwAvCKRcE%2FSg%2FSoz%2BQ7SfMNvh8kG3PHQzB%2FZ2w4%2BcO0A%2F0nEAEaDqzSHicHiKMDkQkU%2BZozKt6UE2X2nWIQvU1GGEQXBOlJuEFtp4UTHlHQj%2Bf%2B4Sf9q6WF6dWcaO782pPdqGFsmABvFIeTtktwoO5nxxNViOpfUFyvuGNNPkB6F4JA3OCqs1PnxvDWywKLPXzjXeSW%2FUyd5MerDfjZwBOhG5XTRKRIhIx8EdpMMjO7dYGOrAB771a5WNNz%2Fz%2F%2BduJDnovHEm%2BfWH7EbnppF6NyIKQroAj5jVi5KABIP6rMfsjr9%2FjUAtjytQ48BMHz95nXyl8su3oRt3XsMCPEm5ylZMUBnOGvAKnlJdBkmk%2B7C%2B3vFfGpkAU%2BpkX06vmJyUawiTXoCB3NYQLL7JvPmwwSndcC3F1%2FtnEcgqHfOkRYCwnGmB%2BNCBwSDw9usAhnaiYliaME0ozf9P74Vh8FgL4M18FmNw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f7d7f931edceed2009358ac3dcfc545c21ba9455c111f37debff43a669132701",
+      "file_size": 313555,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6751469,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bg3iw1e75c3mi8kz57p8p4dg3h78?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4XTK5IJ7%2F20261023%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261023T153607Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMb%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCteZBpISOytVKDEOg3vJB%2BO8OntPO3v3t990FPl3yPoAIhALHasvxL2ZE5roW7QrLqZr88I4TUsz6LDlWNH6Ri7NlFKrsFCI%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwSKMgmpe280BlwMUYqjwUaw9tBsKvAZLSsHarUNOFpknerHcw3er0sp%2Fjd02%2Fr5iA3MVnn5kLxfKHefPBC%2F4q24VhIQXQdV42p4%2BtmxVcO6uf0i6aY%2FKYuOtj%2FZ%2BnT6UFTYMuOUmDDcD5VCdyLynRmKn0FKbAQQjPGjzJYIxvVAjmLV8RBFaRfyLUE4VlyRzlH2K%2BBlp0eiQzCOwZ2OmkMXR0MDhBUFkkQD5vTovjJ2ua3cort%2FR2HpjIxUQSkBGaQ4Lmg6bU8BFZLcx8YYpzul182eyL%2BShs3D4dkUzLhfYweCNvaPWdnMImXNr9tZ4aAhpQM1Kh8OIE2a4XpW1CFDu9AkGaaDY6%2FRxi0o2%2BzxTqT4tHVhEOmhVZ5rpxiWnsM8rSlHGE9DPdOHUHRwXq1qQ76GLGdhlUi3xzp4%2BIv9lT1XczjnMwitbil9CYxrqWBfm13PjuEVRvXdWy3U75XT46jjrJ9jj00ar09ct5PSdLVYN6EfhghLDPFvAErhNi0KnOtrzlF2kikZuQ3xwn3IaUvN9NpPa6VsW%2BG6mXA%2FTlMY8wu31ipsj80Ms7p%2BstsYABTPAi29SfZfiofXy0SF%2FtTfu5RfltHAzcJrIbmahma591EP6F5sWf3%2FjWAjdnjEL6853L2vXjPLOl8RTPGLRhwAvCKRcE%2FSg%2FSoz%2BQ7SfMNvh8kG3PHQzB%2FZ2w4%2BcO0A%2F0nEAEaDqzSHicHiKMDkQkU%2BZozKt6UE2X2nWIQvU1GGEQXBOlJuEFtp4UTHlHQj%2Bf%2B4Sf9q6WF6dWcaO782pPdqGFsmABvFIeTtktwoO5nxxNViOpfUFyvuGNNPkB6F4JA3OCqs1PnxvDWywKLPXzjXeSW%2FUyd5MerDfjZwBOhG5XTRKRIhIx8EdpMMjO7dYGOrAB771a5WNNz%2Fz%2F%2BduJDnovHEm%2BfWH7EbnppF6NyIKQroAj5jVi5KABIP6rMfsjr9%2FjUAtjytQ48BMHz95nXyl8su3oRt3XsMCPEm5ylZMUBnOGvAKnlJdBkmk%2B7C%2B3vFfGpkAU%2BpkX06vmJyUawiTXoCB3NYQLL7JvPmwwSndcC3F1%2FtnEcgqHfOkRYCwnGmB%2BNCBwSDw9usAhnaiYliaME0ozf9P74Vh8FgL4M18FmNw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c7884eff0430e1269b50343cf4bfbe42144466b5b5aed6cb63d6e3ae70950b44",
+      "file_size": 315800,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6751472,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ih13107677w6mad4qmlex2ruq4jd?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4XTK5IJ7%2F20261023%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261023T153607Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMb%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCteZBpISOytVKDEOg3vJB%2BO8OntPO3v3t990FPl3yPoAIhALHasvxL2ZE5roW7QrLqZr88I4TUsz6LDlWNH6Ri7NlFKrsFCI%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwSKMgmpe280BlwMUYqjwUaw9tBsKvAZLSsHarUNOFpknerHcw3er0sp%2Fjd02%2Fr5iA3MVnn5kLxfKHefPBC%2F4q24VhIQXQdV42p4%2BtmxVcO6uf0i6aY%2FKYuOtj%2FZ%2BnT6UFTYMuOUmDDcD5VCdyLynRmKn0FKbAQQjPGjzJYIxvVAjmLV8RBFaRfyLUE4VlyRzlH2K%2BBlp0eiQzCOwZ2OmkMXR0MDhBUFkkQD5vTovjJ2ua3cort%2FR2HpjIxUQSkBGaQ4Lmg6bU8BFZLcx8YYpzul182eyL%2BShs3D4dkUzLhfYweCNvaPWdnMImXNr9tZ4aAhpQM1Kh8OIE2a4XpW1CFDu9AkGaaDY6%2FRxi0o2%2BzxTqT4tHVhEOmhVZ5rpxiWnsM8rSlHGE9DPdOHUHRwXq1qQ76GLGdhlUi3xzp4%2BIv9lT1XczjnMwitbil9CYxrqWBfm13PjuEVRvXdWy3U75XT46jjrJ9jj00ar09ct5PSdLVYN6EfhghLDPFvAErhNi0KnOtrzlF2kikZuQ3xwn3IaUvN9NpPa6VsW%2BG6mXA%2FTlMY8wu31ipsj80Ms7p%2BstsYABTPAi29SfZfiofXy0SF%2FtTfu5RfltHAzcJrIbmahma591EP6F5sWf3%2FjWAjdnjEL6853L2vXjPLOl8RTPGLRhwAvCKRcE%2FSg%2FSoz%2BQ7SfMNvh8kG3PHQzB%2FZ2w4%2BcO0A%2F0nEAEaDqzSHicHiKMDkQkU%2BZozKt6UE2X2nWIQvU1GGEQXBOlJuEFtp4UTHlHQj%2Bf%2B4Sf9q6WF6dWcaO782pPdqGFsmABvFIeTtktwoO5nxxNViOpfUFyvuGNNPkB6F4JA3OCqs1PnxvDWywKLPXzjXeSW%2FUyd5MerDfjZwBOhG5XTRKRIhIx8EdpMMjO7dYGOrAB771a5WNNz%2Fz%2F%2BduJDnovHEm%2BfWH7EbnppF6NyIKQroAj5jVi5KABIP6rMfsjr9%2FjUAtjytQ48BMHz95nXyl8su3oRt3XsMCPEm5ylZMUBnOGvAKnlJdBkmk%2B7C%2B3vFfGpkAU%2BpkX06vmJyUawiTXoCB3NYQLL7JvPmwwSndcC3F1%2FtnEcgqHfOkRYCwnGmB%2BNCBwSDw9usAhnaiYliaME0ozf9P74Vh8FgL4M18FmNw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=84aabdb31ecbdbf8dd2f16789b12078ceca7ed18c6d70bcf5f31890576c63f84",
+      "file_size": 322940,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6751474,
+      "file_name": "proof.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/tsi5ts4a5ut7dzdz26ycctdyv2hu?response-content-disposition=attachment%3B%20filename%3D%22proof.zip%22%3B%20filename%2A%3DUTF-8%27%27proof.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4XTK5IJ7%2F20261023%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261023T153607Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMb%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQCteZBpISOytVKDEOg3vJB%2BO8OntPO3v3t990FPl3yPoAIhALHasvxL2ZE5roW7QrLqZr88I4TUsz6LDlWNH6Ri7NlFKrsFCI%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwSKMgmpe280BlwMUYqjwUaw9tBsKvAZLSsHarUNOFpknerHcw3er0sp%2Fjd02%2Fr5iA3MVnn5kLxfKHefPBC%2F4q24VhIQXQdV42p4%2BtmxVcO6uf0i6aY%2FKYuOtj%2FZ%2BnT6UFTYMuOUmDDcD5VCdyLynRmKn0FKbAQQjPGjzJYIxvVAjmLV8RBFaRfyLUE4VlyRzlH2K%2BBlp0eiQzCOwZ2OmkMXR0MDhBUFkkQD5vTovjJ2ua3cort%2FR2HpjIxUQSkBGaQ4Lmg6bU8BFZLcx8YYpzul182eyL%2BShs3D4dkUzLhfYweCNvaPWdnMImXNr9tZ4aAhpQM1Kh8OIE2a4XpW1CFDu9AkGaaDY6%2FRxi0o2%2BzxTqT4tHVhEOmhVZ5rpxiWnsM8rSlHGE9DPdOHUHRwXq1qQ76GLGdhlUi3xzp4%2BIv9lT1XczjnMwitbil9CYxrqWBfm13PjuEVRvXdWy3U75XT46jjrJ9jj00ar09ct5PSdLVYN6EfhghLDPFvAErhNi0KnOtrzlF2kikZuQ3xwn3IaUvN9NpPa6VsW%2BG6mXA%2FTlMY8wu31ipsj80Ms7p%2BstsYABTPAi29SfZfiofXy0SF%2FtTfu5RfltHAzcJrIbmahma591EP6F5sWf3%2FjWAjdnjEL6853L2vXjPLOl8RTPGLRhwAvCKRcE%2FSg%2FSoz%2BQ7SfMNvh8kG3PHQzB%2FZ2w4%2BcO0A%2F0nEAEaDqzSHicHiKMDkQkU%2BZozKt6UE2X2nWIQvU1GGEQXBOlJuEFtp4UTHlHQj%2Bf%2B4Sf9q6WF6dWcaO782pPdqGFsmABvFIeTtktwoO5nxxNViOpfUFyvuGNNPkB6F4JA3OCqs1PnxvDWywKLPXzjXeSW%2FUyd5MerDfjZwBOhG5XTRKRIhIx8EdpMMjO7dYGOrAB771a5WNNz%2Fz%2F%2BduJDnovHEm%2BfWH7EbnppF6NyIKQroAj5jVi5KABIP6rMfsjr9%2FjUAtjytQ48BMHz95nXyl8su3oRt3XsMCPEm5ylZMUBnOGvAKnlJdBkmk%2B7C%2B3vFfGpkAU%2BpkX06vmJyUawiTXoCB3NYQLL7JvPmwwSndcC3F1%2FtnEcgqHfOkRYCwnGmB%2BNCBwSDw9usAhnaiYliaME0ozf9P74Vh8FgL4M18FmNw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=e0fd0ba635b2ab8f4b1530127b1efebd9508cada46f00f4f65cfddc18e126c1a",
+      "file_size": 14523,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-11-22T12:02:39.850Z",
+  "allow_singular_disclosure_after": 2579192.184981742,
+  "singular_disclosure_allowed": false,
+  "vote_count": 5,
+  "voters": [
+    "2026",
+    "0x097",
+    "campelohunterhackerone_2026",
+    "bogoss-ilyas",
+    "frank_jnr279"
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 7.4,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 666,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/nodejs/node",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
