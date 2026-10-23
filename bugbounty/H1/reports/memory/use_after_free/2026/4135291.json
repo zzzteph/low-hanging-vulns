@@ -1,0 +1,111 @@
+{
+  "id": 4135291,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTM1Mjkx",
+  "url": "https://hackerone.com/reports/4135291",
+  "title": "Heap-use-after-free in libcurl's multi event machinery (curl_multi_remove_handle() from a socket callback nested under a notify callback)",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "low",
+  "readable_substate": "Informative",
+  "created_at": "2026-10-21T18:37:22.275Z",
+  "submitted_at": "2026-10-21T18:37:22.507Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "soop-ost",
+    "url": "/soop-ost",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-23T07:27:01.514Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-22T09:08:23.401Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nThe multi interface in libcurl 8.23.0 and current master has a reproducible use-after-free. Inside a `CURLMOPT_NOTIFYFUNCTION` callback, calling `curl_easy_pause()` on a second transfer that is still in flight re-enters libcurl's event handling and invokes the socket callback, where a `curl_multi_remove_handle()` on that transfer is allowed (it returns 0) and frees its `easy_pollset` while `mev_pollset_diff()` is still walking it - ASan points at `lib/multi_ev.c:437` (read), with a write path at `:497`.\n\n## Affected version\ncurl 8.23.0 (release tarball) and current master (8.23.1-DEV, checked 2026-10-21), built static with ASan+UBSan (`-fsanitize=address,undefined`) on Linux x86-64; no platform-specific behaviour is involved.\n\n## Steps To Reproduce:\nBuild curl with `-fsanitize=address,undefined`, compile the program below with `gcc -g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined poc.c -I$SRC/include $SRC/lib/.libs/libcurl.a -lpthread -o poc`, then run it - the program puts two transfers on one multi handle (a `file://` transfer that finishes and raises EASY_DONE, and an HTTP transfer to a local socket that never answers), pauses the HTTP transfer inside the notify callback, and removes it from the socket callback that pause triggers.\n\n```c\n#include <curl/curl.h>\n#include <arpa/inet.h>\n#include <sys/select.h>\n#include <stdio.h>\n#include <string.h>\nstatic CURLM *m; static CURL *a, *b; static curl_socket_t fd[8]; static int act[8], run = 1, ntfy, gone, nf;\nstatic size_t wr(char *p, size_t s, size_t n, void *u){ (void)p; (void)u; return s * n; }\nstatic int sc(CURL *e, curl_socket_t s, int w, void *c, void *d){ int i; (void)c; (void)d;\n  for(i = 0; i < nf && fd[i] != s; ++i); if(w == CURL_POLL_REMOVE){ if(i < nf){ fd[i] = fd[--nf]; act[i] = act[nf]; } } else { if(i == nf) fd[nf++] = s; act[i] = w; }\n  if(ntfy && e == b && !gone){ gone = 1; printf(\"remove_handle rc=%d\\n\", (int)curl_multi_remove_handle(m, b)); } return 0; }\nstatic int tc(CURLM *x, long t, void *u){ (void)x; (void)t; (void)u; return 0; }\nstatic void nc(CURLM *x, unsigned t, CURL *e, void *u){ (void)x; (void)t; (void)e; (void)u; ntfy = 1; printf(\"pause B from notify cb\\n\"); curl_easy_pause(b, CURLPAUSE_RECV); ntfy = 0; }\nint main(void){ setbuf(stdout, NULL); int ls, i, n, mx, ev; struct sockaddr_in ad; socklen_t al = sizeof(ad); char url[64]; fd_set r, w; struct timeval tv; curl_socket_t ff[8]; int ee[8];\n  memset(&ad, 0, sizeof(ad)); ad.sin_family = AF_INET; ad.sin_addr.s_addr = htonl(0x7f000001);\n  ls = socket(AF_INET, SOCK_STREAM, 0); bind(ls, (void *)&ad, sizeof(ad)); listen(ls, 1); getsockname(ls, (void *)&ad, &al);\n  curl_global_init(CURL_GLOBAL_ALL); m = curl_multi_init(); curl_multi_setopt(m, CURLMOPT_SOCKETFUNCTION, sc); curl_multi_setopt(m, CURLMOPT_TIMERFUNCTION, tc); curl_multi_setopt(m, CURLMOPT_NOTIFYFUNCTION, nc); curl_multi_notify_enable(m, CURLMNOTIFY_EASY_DONE);\n  b = curl_easy_init(); snprintf(url, sizeof(url), \"http://127.0.0.1:%d/\", ntohs(ad.sin_port)); curl_easy_setopt(b, CURLOPT_URL, url); curl_easy_setopt(b, CURLOPT_WRITEFUNCTION, wr); curl_easy_setopt(b, CURLOPT_TIMEOUT, 10L); curl_multi_add_handle(m, b); curl_multi_socket_action(m, CURL_SOCKET_TIMEOUT, 0, &run);\n  a = curl_easy_init(); curl_easy_setopt(a, CURLOPT_URL, \"file:///etc/hosts\"); curl_easy_setopt(a, CURLOPT_WRITEFUNCTION, wr); curl_multi_add_handle(m, a);\n  while(run){ FD_ZERO(&r); FD_ZERO(&w); tv.tv_sec = 0; tv.tv_usec = 20000; mx = -1;\n    for(i = 0; i < nf; ++i){ if(act[i] & CURL_POLL_IN) FD_SET(fd[i], &r); if(act[i] & CURL_POLL_OUT) FD_SET(fd[i], &w); if((int)fd[i] > mx) mx = (int)fd[i]; }\n    select(mx + 1, &r, &w, NULL, &tv); n = nf; memcpy(ff, fd, sizeof(ff)); memcpy(ee, act, sizeof(ee));\n    for(i = 0; i < n; ++i){ ev = 0; if((ee[i] & CURL_POLL_IN) && FD_ISSET(ff[i], &r)) ev |= CURL_CSELECT_IN; if((ee[i] & CURL_POLL_OUT) && FD_ISSET(ff[i], &w)) ev |= CURL_CSELECT_OUT; if(ev) curl_multi_socket_action(m, ff[i], ev, &run); }\n    curl_multi_socket_action(m, CURL_SOCKET_TIMEOUT, 0, &run); }\n  return 0; }\n```\n\n```text\npause B from notify cb\nremove_handle rc=0\nERROR: AddressSanitizer: heap-use-after-free ... READ of size 4\n    #0 mev_pollset_diff          lib/multi_ev.c:437\n    #3 curl_easy_pause           lib/easy.c:1243\n    #4 nc                        poc.c:12\nfreed by:\n    #7 Curl_multi_remove_handle  lib/multi.c:821\n    #9 sc                        poc.c:10\nSUMMARY: AddressSanitizer: heap-use-after-free .../lib/multi_ev.c:437 in mev_pollset_diff\n```\n\n## Impact\n\nAn application using the notify-callback API as documented gets a use-after-free inside libcurl, which in a release build is undefined behaviour on freed memory (crash or corruption depending on the allocator) -  memory corruption, not a plain NULL dereference, and it is not remotely triggerable.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

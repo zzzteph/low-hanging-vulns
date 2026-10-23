@@ -1,0 +1,113 @@
+{
+  "id": 4125065,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI1MDY1",
+  "url": "https://hackerone.com/reports/4125065",
+  "title": "curl EXPIRE_SHUTDOWN timer never armed for silent servers: connection-shutdown timeout bypass in cshutdn (event-driven mode)",
+  "state": "Closed",
+  "substate": "informative",
+  "severity_rating": "medium",
+  "readable_substate": "Informative",
+  "created_at": "2026-10-18T14:03:52.059Z",
+  "submitted_at": "2026-10-18T14:03:52.243Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "noraqiu",
+    "url": "/noraqiu",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-92387"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-23T07:26:37.097Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-22T09:06:29.604Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\ncurl's non-blocking connection shutdown machinery (`lib/cshutdn.c`) is supposed to enforce a 2-second shutdown timeout (`DEFAULT_SHUTDOWN_TIMEOUT_MS`) on connections whose peer never answers the graceful shutdown. In `curl_multi_socket_action()` event-driven mode the machinery deadlocks: the only code that arms the admin handle's `EXPIRE_SHUTDOWN` timer is `cshutdn_perform()`, and `cshutdn_perform()` is only invoked from the multi's processing of the admin handle, which only happens when the admin is woken by a timer or by socket I/O. When a connection enters shutdown, the timer is deliberately not armed for the admin handle (`if(data->mid)` in `Curl_cshutdn_start_timer()`), and `Curl_cshutdn_add()` neither arms a timer nor marks the admin dirty. A server that completes the request normally but then goes silent (no TLS `close-notify`, no FTP `QUIT` reply, TCP still open) it generates no socket I/O either. So nothing ever schedules `cshutdn_perform()`: the code that would arm the wakeup timer can only run after the wakeup has already happened. The 2-second timeout is never evaluated and the connection lingers with its socket and file descriptor open until the application itself drives the multi again (in the reproduction, only `curl_multi_cleanup()`).\n\nThis is harmless in `curl_multi_perform()` polling mode, where the admin handle is unconditionally processed every call and the shutdown-timeout check is eventually reached. In event-driven mode, a malicious server that withholds its close response while keeping the TCP session open defeats the timeout entirely. Repeating this against a multi-socket client accumulates connections (memory + file descriptors) for as long as the attacker keeps the TCP sessions open.\n\n| Variant | Interface | Server behavior | EXPIRE_SHUTDOWN armed? | Shutdown-timeout (2s) enforced? | Observed linger |\n| --- | --- | --- | --- | --- | --- |\n| Polling mode (control) | `curl_multi_perform` | withholds close-notify | no, but irrelevant | yes (admin processed every call) | cleared within ~2s |\n| Event-driven mode (vulnerable) | `curl_multi_socket_action` | withholds close-notify | **no** | **no** | >15s, only cleared at `curl_multi_cleanup()` |\n| Event-driven mode | `curl_multi_socket_action` | sends close-notify normally | no | n/a (shutdown completes via I/O) | clears promptly |\n\n## Affected versions\n\n- curl 8.21.0-DEV (OpenSSL/3.5.5, c-ares/1.34.6, debug build).\n- curl master `9b2caf3` (8.22.0-DEV, verified 2026-08-31).\n- Current master `5d4eaac8f` (8.23.1-DEV, verified 2026-10-18). **Still affected, including after the 8.23.0 `cshutdn` refactor** (\"cshutdown: make it smaller\" / \"use ptrarray instead of llist\"). The harness was re-run against a libcurl built from current master: 10 of 10 transfers complete, then all 10 connections linger for the full 15-second observation window, the process FD count rises from 6 to 16 and stays there, **zero `EXPIRE_SHUTDOWN` timers are ever armed** (`Shutdown-range timers (1-2000ms): 0`), and the connections are only force-closed during `curl_multi_cleanup()`. For contrast, the same harness against the system curl 7.81.0 (pre-`cshutdn` implementation) shows 5 shutdown-range timers armed and 0 lingering connections: the older implementation cleans these connections up, the current one does not.\n\nNote: the 8.23.0 refactor already fixed the `next_expire_ms` accumulator pattern inside `cshutdn_perform()` (the first-assignment clause is present on current master). That fix does not change the behavior, because in this scenario `cshutdn_perform()` is never invoked at all (see Root cause).\n\n## Root cause\n\nThree pieces of the current shutdown machinery interact (code quoted from `5d4eaac8f`):\n\n1. When a connection enters shutdown, the timeout state is stored on the connection, but the timer is not armed for the admin handle:\n\n```c\n// lib/cshutdn.c (Curl_cshutdn_start_timer)\nconn->shutdown.start_ms[sockindex] = curlx_ptimediff_ms(pnow, &conn->created);\nconn->shutdown.timeout_ms = ... : DEFAULT_SHUTDOWN_TIMEOUT_MS;   /* 2000 */\n/* Set a timer, unless we operate on the admin handle */\nif(data->mid)\n    Curl_expire_set(data, EXPIRE_SHUTDOWN, conn->shutdown.timeout_ms, pnow);\n```\n\nShutdown of pooled connections is driven through the multi's admin handle (`mid == 0`), so this arming is always skipped in that flow. Instrumented run: `start_timer: sock=0 timeout_ms=2000 mid=0` for all 10 connections.\n\n2. `Curl_cshutdn_add()` puts the connection on the shutdown list and registers its sockets with the event callback (so socket I/O would wake the loop), but arms no timer and does not mark the admin handle dirty.\n\n3. The only place that arms the admin's `EXPIRE_SHUTDOWN` timer is `cshutdn_perform()`:\n\n```c\n// lib/cshutdn.c (cshutdn_perform)\n  ms = cshutdn_conn_timeleft(admin, conn);\n  if(ms && (!next_expire_ms || (ms < next_expire_ms)))\n    next_expire_ms = ms;\n  ...\n  if(next_expire_ms)\n    Curl_expire(admin, next_expire_ms, EXPIRE_SHUTDOWN);\n```\n\nThe accumulator itself is correct on current master. But `cshutdn_perform()` is only called from the multi's processing of the admin handle (`lib/multi.c`, `Curl_multi_process`: `if(data == multi->admin) { ... Curl_cshutdn_perform(...) ... }`), and the admin is only processed when it has been marked dirty, either by a timer expiring or by socket I/O. With the arming skipped (piece 1), no dirty-marking at add time (piece 2), and a silent peer producing no I/O, nothing ever wakes the admin.\n\nThis is a scheduling deadlock: the code that would arm the wakeup timer can only run after the wakeup has already happened. Instrumented run on current master (`5d4eaac8f`): during a 15-second idle observation with 10 connections sitting in the shutdown list, `cshutdn_perform()` was invoked zero times. At the application's next multi call it ran once and terminated all 10 connections immediately. `Curl_cshutdn_try_once()` returned done for every one of them, meaning the cleanup itself needs no I/O, only scheduling.\n\nWhy this only bites in event-driven mode: `curl_multi_perform()` processes the admin handle unconditionally on every call, so `cshutdn_perform()` runs there regardless of timers and the 2-second timeout is enforced. `curl_multi_socket_action()` processes only what is dirty.\n\n## PoC\n\nThe harness uses the `curl_multi_socket_action` event-driven API with `CURLMOPT_SOCKETFUNCTION` and `CURLMOPT_TIMERFUNCTION` callbacks. It performs 10 sequential HTTPS transfers against a mock server, with `CURLOPT_FORBID_REUSE` set so each connection enters the shutdown path once its transfer completes. The mock server is a normal Python HTTPS server except that it does not send a TLS `close-notify` and keeps the TCP connections open without sending further data, which is the behavior of a malicious or compromised server.\n\n1. Build curl from current master (plain cmake Debug build) and instrument `lib/cshutdn.c` with fprintf tracing on `Curl_cshutdn_start_timer` (sockindex, timeout_ms, mid), `Curl_cshutdn_add`, and `cshutdn_perform` (entry, per-connection try_once result and timeleft, exit with the arming decision).\n2. Start the mock HTTPS server.\n3. Run the harness: it completes all 10 transfers, then observes the idle event loop for 15 seconds, then calls into the multi once more before cleanup.\n4. The server completes each HTTP exchange normally but, on shutdown, withholds TLS `close-notify` and sends nothing further.\n\nExpected (vulnerable) behavior: the trace shows the 10 `start_timer` calls (all with `mid=0`, so no arming) and the 10 `add` calls during the transfers. Then the 15-second observation passes with the process FD count frozen at 16 and zero shutdown-range timer callbacks, and `cshutdn_perform` does not appear once in that window. Only at the application's next multi call does `perform enter: conns=10` appear, followed by 10 immediate `done=1` / remove / terminate lines.\n\nNegative control (polling mode): driving the same transfers through `curl_multi_perform` clears the connections within ~2s because the admin handle is processed every call and the shutdown-timeout check is reached without depending on the armed timer.\n\n## Reproduction output\n\nCurrent master `5d4eaac8f` (8.23.1-DEV, 2026-10-18, instrumented as above), trace lines in chronological order:\n\n```\n[CSHUTDN] start_timer: sock=0 timeout_ms=2000 mid=0 start_ms=101\n[CSHUTDN] add: conn=0x55db0e035a40\n  ... (10x start_timer mid=0 + add during the transfers)\n[EXP] === POST-TRANSFER OBSERVATION ===\n[EXP] post: el=3s sk=10 fds=16 rss=9336KB tc=15 sh_timers=0\n[EXP] post: el=15s sk=10 fds=16 rss=9336KB tc=15 sh_timers=0\n  ... (15 seconds, no CSHUTDN line at all: cshutdn_perform never runs)\n[CSHUTDN] perform enter: conns=10        <- only at the application's next multi call\n[CSHUTDN] try_once result: conn=0x55db0e035a40 done=1\n[CSHUTDN] REMOVE+TERMINATE: conn=0x55db0e035a40\n  ... (10x done=1 + REMOVE+TERMINATE)\n[CSHUTDN] perform exit: next_expire_ms=0 will_arm=0\n```\n\nHarness summary from the same run (uninstrumented build, identical behavior):\n\n```\n[EXP] Transfers completed: 10/10\n[EXP] Tracked sockets: 10\n[EXP] FDs at transfer completion: 16\n[EXP] Timer callbacks: 13 (shutdown-range: 0)\n[EXP] post: el=15s sk=10 fds=16 rss=9148KB tc=13 sh_timers=0\n[EXP] Sockets still tracked: 10\n[EXP] Shutdown-range timers (1-2000ms): 0\n[EXP] FDs before multi_cleanup: 16\n[EXP] FDs after multi_cleanup: 4\n```\n\nSame harness against the system curl 7.81.0 (pre-`cshutdn` implementation), for contrast: `Shutdown-range timers (1-2000ms): 5`, sockets tracked 0, FDs back to 6 at completion. The older implementation arms and honors shutdown timers. The current one, in this mode, never runs the code that would.\n\n## Impact\n\n- **CVSS 3.1: 5.3 (Medium)**, vector `AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L`.\n- **Why we report this as a security issue: it defeats curl's own protection mechanism, not just the server.** A stalled or silent server is a well-known condition, and curl's answer to it is the shutdown timeout: `EXPIRE_SHUTDOWN` and `DEFAULT_SHUTDOWN_TIMEOUT_MS` exist precisely to close lingering shutdown connections after 2 seconds when the server stops responding. In the event-driven API this mechanism is never invoked. Not because the server stalls, but because nothing schedules the code that enforces the timeout. This places the issue under the exception in your disclosure policy (\"issues that bypass regular countermeasures\"): the countermeasure exists, works in the polling API, and demonstrably worked in the pre-`cshutdn` implementation (curl 7.81.0 arms 5 shutdown-range timers and closes all such connections in the same harness), while current master in event-driven mode never runs it. The same reasoning was applied to CVE-2026-92387 (never-ending loop that bypassed the transfer timeout), which was accepted as a security issue this release cycle.\n- **Trigger conditions:** the client uses the `curl_multi_socket_action` event-driven API (a core multi interface usage pattern), establishes a connection that requires graceful shutdown (FTP, IMAP, SMTP, TLS, etc.), and the server withholds its close response (no TLS `close-notify`, no FTP `QUIT` reply) while keeping the TCP connection open. No special payload is required. The server simply goes silent at shutdown.\n- **Realized impact (measured on current master `5d4eaac8f`, 2026-10-18):** 10 sequential transfers to a silent server all complete, then all 10 connections linger for the full 15-second observation window (and beyond, until `curl_multi_cleanup()`), with the process FD count rising from 6 to 16 and staying there, and zero shutdown-range timers armed. A long-running application that makes many sequential requests through silent or malicious servers accumulates connections and file descriptors without bound until the fd limit, at which point new connections fail for the whole process. The `curl_multi_perform` polling mode is not affected because the admin handle is processed unconditionally each call.\n- **Severity bound:** this is an availability / resource-linger issue with no confidentiality or integrity impact. Exploitation requires the attacker to be (or to control) the server the client connects to, and we understand the low end of the severity range. If the security team prefers to treat it as a regular bug we will accept that. The mechanism (unschedulable timeout enforcement in event-driven mode) and the contrast with the 7.81 behavior are the facts we want on record either way.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
