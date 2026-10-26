@@ -1,0 +1,146 @@
+{
+  "id": 4122239,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTIyMjM5",
+  "url": "https://hackerone.com/reports/4122239",
+  "title": "CVE-2026-111952: OpenSSL provider use-after-free again",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-17T11:22:25.761Z",
+  "submitted_at": "2026-10-17T11:22:26.022Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "moltenbit",
+    "url": "/moltenbit",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hzyryuywuxsuooiqo53590mr3q01/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-111952"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-26T07:52:59.561Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-26T07:20:53.544Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nSince 8.23.0, libcurl caches its OpenSSL certificate store per multi handle even when `CURLOPT_CAPATH` is set. OpenSSL loads CApath certificates lazily during verification, and they belong to the library context of the transfer that loaded them. With `CURLOPT_SSLENGINE` that is a private `OSSL_LIB_CTX`, which curl frees in `curl_easy_cleanup()` while the cached certificates stay in the multi handle. The next verification on that multi handle that looks at one of those certificates as an issuer reads the freed context. A malicious server can arrange this with forged certificates that only name a CA from the victim's CApath as issuer, so no trusted key is needed. In my tests this crashed the client on OpenSSL 3.0.13 and 3.5.5, including the curl tool with `--parallel --parallel-max 1 --engine`, and on OpenSSL 3.5.5 the server's certificate bytes chose the pointer that libcrypto dereferenced.\n\n## Conditions\n\n- libcurl with OpenSSL 3.x, and `CURLOPT_SSLENGINE` naming a provider (tested with `default`) for the transfer that loads the CA.\n- `CURLOPT_CAPATH` holds a CA that is not also loaded through `CURLOPT_CAINFO`, for example a private PKI.\n- The application cleans up that easy handle and starts another one on the same multi handle. The curl tool does this with `--parallel --parallel-max 1`.\n- Peer verification and the CA cache are on (both default), and the later connection does a full chain verification. A resumed TLS session skips it, so the reproducer uses two origin names.\n\n## Root cause\n\nLine numbers refer to `lib/vtls/openssl.c` in 8.23.0. `ossl_set_provider()` creates a private `OSSL_LIB_CTX` (`:1786`) and the `SSL_CTX` is created inside it (`:3748`). Commit `3c60b05098` (PR #23363) made stores with CApath cacheable. `X509_STORE_load_path()` (`:3044`) only registers a hash-directory lookup, so OpenSSL reads a CA from the directory during chain building, under the `SSL_CTX`'s library context, and adds it to the cached store. The cache key in `ossl_cached_x509_store_different()` (`:3205`) does not cover the library context. `curl_easy_cleanup()` frees the context through `ossl_provider_cleanup()` (`:1747`), while the store and its certificates remain in the multi handle for up to `CURLOPT_CA_CACHE_TIMEOUT` (24 hours by default). The next transfer attaches the cached store (`:3340`). When issuer selection reaches one of those certificates, `check_sig_alg_match()` → `EVP_PKEY_is_a()` → `EVP_KEYMGMT_is_a()` → `ossl_namemap_stored()` reads the freed context.\n\n## Affected versions\n\n- curl 8.23.0, and master at `eaa9103225`. In master, commit `ec0a5d1b06` (PR #23436) ties the provider context to the connection instead of the easy handle; the cached store still outlives it, and one easy handle with `CURLOPT_FORBID_REUSE` doing two transfers is enough.\n- Releases 8.14.0 to 8.22.0 skip the store cache when CApath is set. Builds with `CURL_CA_FALLBACK`, which use OpenSSL's default hashed directory without CApath, were not tested.\n\n## Steps to reproduce\n\n1. Build curl 8.23.0 against OpenSSL 3.\n2. Run the attached script: `CURL=/absolute/path/to/curl sh c4repro.sh`\n\nThe script creates a private PKI with a hashed CApath directory (root and intermediate), forged leaves that name the intermediate as issuer but are signed with an unrelated key, and `openssl s_server` instances on 127.0.0.1 that send only their leaf. The two attacker cases, shortened:\n\n```sh\n# [2] forged leaves only, provider on both transfers\ncurl --parallel --parallel-max 1 --engine default --capath capath \\\n  https://127.0.0.1:8444/ https://localhost:8444/\n\n# [4] provider on the first transfer only; the second leaf carries an\n#     unknown extension (OID 1.2.3.4) with 327 bytes of 0x41\ncurl --parallel --parallel-max 1 --engine default --capath capath https://localhost:8444/ \\\n  --next --capath capath https://127.0.0.1:8445/\n```\n\nTested builds, all x86-64 with glibc: the 8.23.0 release tarball against Ubuntu 24.04's OpenSSL 3.0.13 (3.0.13-0ubuntu3.16) and against OpenSSL 3.5.5 built from the upstream `openssl-3.5.5` tag; the `curl-8_23_0` tag (commit `3163ec0656`) against Ubuntu's OpenSSL 3.0.13 and 3.5.5 packages.\n\n| Case | OpenSSL 3.0.13 | OpenSSL 3.5.5 |\n|---|---|---|\n| control: no provider, legitimate server | 200, 200 | 200, 200 |\n| [1] provider on both, legitimate server | SIGSEGV | 200, 200 |\n| [2] provider on both, forged leaves | SIGSEGV | 60, 60 |\n| [3] no provider, forged leaves | 60, 60 | 60, 60 |\n| [4] provider on the first only, padded forged leaf | SIGSEGV or 60, 60 depending on heap layout | SIGSEGV, 5 of 5 runs |\n| [5] like [2], forged leaf without authority key identifier | SIGSEGV | 60, 60 |\n\nWhether a run crashes natively depends on what occupies the freed block when it is read. Under valgrind every case with a provider reports the invalid read, on both OpenSSL versions. Case [5] shows that the forged leaf needs only the CA's subject as its issuer name.\n\nvalgrind, release tarball with OpenSSL 3.5.5, case [1] (excerpt):\n\n```\nInvalid read of size 8\n   at ossl_lib_ctx_get_data (context.c:581)\n   by ossl_namemap_stored (core_namemap.c:485)\n   by evp_is_a (evp_fetch.c:665)\n   by EVP_KEYMGMT_is_a (keymgmt_meth.c:338)\n   by check_sig_alg_match (v3_purp.c:419)\n   by check_issued (x509_vfy.c:473)\n   by X509_STORE_CTX_get1_issuer (x509_vfy.c:448)\n   ...\n   by ossl_connect_step2 (openssl.c:4166)\n Address 0x53407f8 is 184 bytes inside a block of size 328 free'd\n   by ossl_provider_cleanup (openssl.c:1747)\n   by Curl_close (url.c:244)\n   by curl_easy_cleanup (easy.c:891)\n Block was alloc'd at\n   by OSSL_LIB_CTX_new (context.c:446)\n   by ossl_set_provider (openssl.c:1786)\n   by curl_easy_setopt (setopt.c:2943)\n```\n\nIn case [4] on OpenSSL 3.5.5, the 327-byte extension, which `ASN1_STRING_set()` stores in a 328-byte allocation, takes over the freed context, and offset 184 holds its name-map pointer. gdb at the crash:\n\n```\nrdi            0x4141414141414141\n=> <ossl_namemap_empty+14>:  mov    0x20(%rdi),%eax\n#0  ossl_namemap_empty (namemap=0x4141414141414141) at crypto/core_namemap.c:97\n#1  ossl_namemap_stored (libctx=<optimized out>) at crypto/core_namemap.c:491\n#2  evp_is_a (..., name=\"rsaEncryption\") at crypto/evp/evp_fetch.c:665\n```\n\nWith `0x42` bytes in the extension the same run faults with `namemap=0x4242424242424242`. The attached `c4test.c` runs the same sequence through the libcurl multi API (`two` mode; a final `-` argument disables the provider for the second handle).\n\n## Suggested fix\n\nBypass the shared X509 store cache, both lookup and insertion, while a transfer uses a private provider library context. Removing the cache entry when the context is freed is not enough, because connections that already attached the store keep referencing its certificates, and comparing provider names or context addresses does not guarantee the lifetime either. See attached patch-files for master and 8.23.0.\n\n## AI\nAI tools were used for this report. An LLM-based code review pointed at the code, and Claude and Codex helped with the analysis, the reproducers and the wording. All results above come from local runs of the attached reproducers; no curl infrastructure was contacted.\n\n## Impact\n\nAny server the application connects to, or anyone who can intercept one of its TLS connections, can trigger the use-after-free under the conditions above; the table shows the resulting crashes. The forged certificate needs no trusted signature and no authority key identifier, only the subject name of a CA in the victim's CApath, which appears as the issuer name in every certificate that CA has issued. On OpenSSL 3.5.5 the server also picks the address that libcrypto reads from during verification. Disclosure of the read value, a write or code execution are not demonstrated. The extension size that reclaims the freed block depends on the OpenSSL version and the allocator.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7014275,
+      "file_name": "c4repro.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/wp4pv5qz2qxylmuh1iskz6stmdew?response-content-disposition=attachment%3B%20filename%3D%22c4repro.sh%22%3B%20filename%2A%3DUTF-8%27%27c4repro.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4XJSQ4GL%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144618Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJIMEYCIQCgQVSGDBaH2BFnT8MJnW2yjda2Mu4FeVI0vn0%2Bdb2YhwIhALd1avK2J4Er3Lz45B0yCqRU6TZO4izTgDJU%2FIgLY3TTKrsFCNf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwUHICf5RmnFoBWrUMqjwUGJDymXuUBvCaMqDM7v3Ua%2B7qCtgxPHhIyoKL9Q1vfNlu1c1CjFdKQqGpkfRRkwF0%2Blnd4KgTt5H%2FMSpsLtetxU%2B1jDg%2BHlSGfQ1twPSdFeyMAGTAynKSGcykqUqHUbhja3OXeTWaoXQjv%2FaqRqEDRO5aFvwzh%2Fwuy5YLPSuyRkjB5JSgTY9uNij0p9C25Y6%2BdzofEtEAO681vegt4XOLRKAGsW5t7aQOvLZB67uMKmd1hFCaIx5XcgUYKnwgltphQgYwl%2FrfZD1DVSNhtn7ZXunBRUvAHSFXc3np7PuQQzy%2BrtTl6bodlss%2FN8gDy8O%2BmyJrNJvL8Zo9b85ZXXdLv%2FtpA1THhB3%2FjwQp3e8VCK3NzDS7clD1u%2FhU3wBHAoHfy%2FLeAk1e4Fmshfo33Fi7c%2BrFYaTZGYAVZ11XiynkADDrhnelptc8ReU17ATjqdYtRQiREjb0kaCKWticttr5NLN6oFj9xPVcJa%2BixL1c%2Bz%2FzA362vwMqNW0G4Twi4CR1NCh8UkaeRnGED2OaOtgyn%2F%2B7OCRFoEaAMPplmLGFBKvzS%2B4Kdt%2BqQjEOwKFaR79bdP7K4c%2FH92oWl8yF7c4Rp8qw7%2Be%2BCXSj%2BxHpl73YLY8IldZiaCLJoyz7i5BUe4vMUlK0eRbc1BG3MC14M3CQajWCBTNkbARhtratx67cliXJWVsmVNCUDztucH%2FES4Zj0cw7Fw6AC9hL8YIOW2VW3jUcjMV9qhXXxF6B4icR4mh0O4zNcilEVUa%2BwQa%2F1sG%2FLqBs7lUuheKm0yOyQB5tBV0NDZYRBHCZUPrkoKzS%2FrosFabNtR82aWyEWSFK%2B5umtggfeJ2jB5c7lIdHNdEraOXjdqMTiVhjR9bnCM88bMM6z%2FdYGOrABvbiBrOvnQnkGhTVutN9DOzWnk4eNTmNh9bV23uuFI%2BM9hRhYhRvm0aSCG%2BOD5WOlxXsm5fJ36iTZgLhryaAP%2BFWQoq0RUgz3RfhCjAAMYEqjkzsVtg5GD4sftMpHDBeUVmYfNReefK4vUwK92xCWeg0e0Yqk%2FGY2%2FkPRwZCniwRmvPka3R6gt%2B5%2BwH9eSL1ExyaeSRyR0uE%2BJbsWrXc74h%2FiQwt08a%2B%2FjfX%2FM0lHHao%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=9d87362b5027e8373a33b823722782efaedf2f56d923e76771375aad3c65a339",
+      "file_size": 5738,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 7014276,
+      "file_name": "c4test.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/znsxregz1tuxqr1zd84jo43xg1b8?response-content-disposition=attachment%3B%20filename%3D%22c4test.c%22%3B%20filename%2A%3DUTF-8%27%27c4test.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4XJSQ4GL%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144618Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJIMEYCIQCgQVSGDBaH2BFnT8MJnW2yjda2Mu4FeVI0vn0%2Bdb2YhwIhALd1avK2J4Er3Lz45B0yCqRU6TZO4izTgDJU%2FIgLY3TTKrsFCNf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwUHICf5RmnFoBWrUMqjwUGJDymXuUBvCaMqDM7v3Ua%2B7qCtgxPHhIyoKL9Q1vfNlu1c1CjFdKQqGpkfRRkwF0%2Blnd4KgTt5H%2FMSpsLtetxU%2B1jDg%2BHlSGfQ1twPSdFeyMAGTAynKSGcykqUqHUbhja3OXeTWaoXQjv%2FaqRqEDRO5aFvwzh%2Fwuy5YLPSuyRkjB5JSgTY9uNij0p9C25Y6%2BdzofEtEAO681vegt4XOLRKAGsW5t7aQOvLZB67uMKmd1hFCaIx5XcgUYKnwgltphQgYwl%2FrfZD1DVSNhtn7ZXunBRUvAHSFXc3np7PuQQzy%2BrtTl6bodlss%2FN8gDy8O%2BmyJrNJvL8Zo9b85ZXXdLv%2FtpA1THhB3%2FjwQp3e8VCK3NzDS7clD1u%2FhU3wBHAoHfy%2FLeAk1e4Fmshfo33Fi7c%2BrFYaTZGYAVZ11XiynkADDrhnelptc8ReU17ATjqdYtRQiREjb0kaCKWticttr5NLN6oFj9xPVcJa%2BixL1c%2Bz%2FzA362vwMqNW0G4Twi4CR1NCh8UkaeRnGED2OaOtgyn%2F%2B7OCRFoEaAMPplmLGFBKvzS%2B4Kdt%2BqQjEOwKFaR79bdP7K4c%2FH92oWl8yF7c4Rp8qw7%2Be%2BCXSj%2BxHpl73YLY8IldZiaCLJoyz7i5BUe4vMUlK0eRbc1BG3MC14M3CQajWCBTNkbARhtratx67cliXJWVsmVNCUDztucH%2FES4Zj0cw7Fw6AC9hL8YIOW2VW3jUcjMV9qhXXxF6B4icR4mh0O4zNcilEVUa%2BwQa%2F1sG%2FLqBs7lUuheKm0yOyQB5tBV0NDZYRBHCZUPrkoKzS%2FrosFabNtR82aWyEWSFK%2B5umtggfeJ2jB5c7lIdHNdEraOXjdqMTiVhjR9bnCM88bMM6z%2FdYGOrABvbiBrOvnQnkGhTVutN9DOzWnk4eNTmNh9bV23uuFI%2BM9hRhYhRvm0aSCG%2BOD5WOlxXsm5fJ36iTZgLhryaAP%2BFWQoq0RUgz3RfhCjAAMYEqjkzsVtg5GD4sftMpHDBeUVmYfNReefK4vUwK92xCWeg0e0Yqk%2FGY2%2FkPRwZCniwRmvPka3R6gt%2B5%2BwH9eSL1ExyaeSRyR0uE%2BJbsWrXc74h%2FiQwt08a%2B%2FjfX%2FM0lHHao%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=47ce5e3b8a185aaff33891dc08e8154b6a855aabf06c63a27b4e8a8b172c3269",
+      "file_size": 3581,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 7014388,
+      "file_name": "c4-x509-store-provider-cache-fix-8.23.0.patch",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ft9i9v93gppza705xr0uyyftf1i0?response-content-disposition=attachment%3B%20filename%3D%22c4-x509-store-provider-cache-fix-8.23.0.patch%22%3B%20filename%2A%3DUTF-8%27%27c4-x509-store-provider-cache-fix-8.23.0.patch&response-content-type=text%2Fx-diff&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4XJSQ4GL%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144618Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJIMEYCIQCgQVSGDBaH2BFnT8MJnW2yjda2Mu4FeVI0vn0%2Bdb2YhwIhALd1avK2J4Er3Lz45B0yCqRU6TZO4izTgDJU%2FIgLY3TTKrsFCNf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwUHICf5RmnFoBWrUMqjwUGJDymXuUBvCaMqDM7v3Ua%2B7qCtgxPHhIyoKL9Q1vfNlu1c1CjFdKQqGpkfRRkwF0%2Blnd4KgTt5H%2FMSpsLtetxU%2B1jDg%2BHlSGfQ1twPSdFeyMAGTAynKSGcykqUqHUbhja3OXeTWaoXQjv%2FaqRqEDRO5aFvwzh%2Fwuy5YLPSuyRkjB5JSgTY9uNij0p9C25Y6%2BdzofEtEAO681vegt4XOLRKAGsW5t7aQOvLZB67uMKmd1hFCaIx5XcgUYKnwgltphQgYwl%2FrfZD1DVSNhtn7ZXunBRUvAHSFXc3np7PuQQzy%2BrtTl6bodlss%2FN8gDy8O%2BmyJrNJvL8Zo9b85ZXXdLv%2FtpA1THhB3%2FjwQp3e8VCK3NzDS7clD1u%2FhU3wBHAoHfy%2FLeAk1e4Fmshfo33Fi7c%2BrFYaTZGYAVZ11XiynkADDrhnelptc8ReU17ATjqdYtRQiREjb0kaCKWticttr5NLN6oFj9xPVcJa%2BixL1c%2Bz%2FzA362vwMqNW0G4Twi4CR1NCh8UkaeRnGED2OaOtgyn%2F%2B7OCRFoEaAMPplmLGFBKvzS%2B4Kdt%2BqQjEOwKFaR79bdP7K4c%2FH92oWl8yF7c4Rp8qw7%2Be%2BCXSj%2BxHpl73YLY8IldZiaCLJoyz7i5BUe4vMUlK0eRbc1BG3MC14M3CQajWCBTNkbARhtratx67cliXJWVsmVNCUDztucH%2FES4Zj0cw7Fw6AC9hL8YIOW2VW3jUcjMV9qhXXxF6B4icR4mh0O4zNcilEVUa%2BwQa%2F1sG%2FLqBs7lUuheKm0yOyQB5tBV0NDZYRBHCZUPrkoKzS%2FrosFabNtR82aWyEWSFK%2B5umtggfeJ2jB5c7lIdHNdEraOXjdqMTiVhjR9bnCM88bMM6z%2FdYGOrABvbiBrOvnQnkGhTVutN9DOzWnk4eNTmNh9bV23uuFI%2BM9hRhYhRvm0aSCG%2BOD5WOlxXsm5fJ36iTZgLhryaAP%2BFWQoq0RUgz3RfhCjAAMYEqjkzsVtg5GD4sftMpHDBeUVmYfNReefK4vUwK92xCWeg0e0Yqk%2FGY2%2FkPRwZCniwRmvPka3R6gt%2B5%2BwH9eSL1ExyaeSRyR0uE%2BJbsWrXc74h%2FiQwt08a%2B%2FjfX%2FM0lHHao%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b494104d9d92d860b36560ef8a033ad752120733e12d13c7972bd23d6d60071f",
+      "file_size": 579,
+      "type": "text/x-diff",
+      "moderated": null
+    },
+    {
+      "id": 7014389,
+      "file_name": "c4-x509-store-provider-cache-fix-master.patch",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9fy5pdzr8f13exhhrc0w8yapbj3y?response-content-disposition=attachment%3B%20filename%3D%22c4-x509-store-provider-cache-fix-master.patch%22%3B%20filename%2A%3DUTF-8%27%27c4-x509-store-provider-cache-fix-master.patch&response-content-type=text%2Fx-diff&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4XJSQ4GL%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144618Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJIMEYCIQCgQVSGDBaH2BFnT8MJnW2yjda2Mu4FeVI0vn0%2Bdb2YhwIhALd1avK2J4Er3Lz45B0yCqRU6TZO4izTgDJU%2FIgLY3TTKrsFCNf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgwUHICf5RmnFoBWrUMqjwUGJDymXuUBvCaMqDM7v3Ua%2B7qCtgxPHhIyoKL9Q1vfNlu1c1CjFdKQqGpkfRRkwF0%2Blnd4KgTt5H%2FMSpsLtetxU%2B1jDg%2BHlSGfQ1twPSdFeyMAGTAynKSGcykqUqHUbhja3OXeTWaoXQjv%2FaqRqEDRO5aFvwzh%2Fwuy5YLPSuyRkjB5JSgTY9uNij0p9C25Y6%2BdzofEtEAO681vegt4XOLRKAGsW5t7aQOvLZB67uMKmd1hFCaIx5XcgUYKnwgltphQgYwl%2FrfZD1DVSNhtn7ZXunBRUvAHSFXc3np7PuQQzy%2BrtTl6bodlss%2FN8gDy8O%2BmyJrNJvL8Zo9b85ZXXdLv%2FtpA1THhB3%2FjwQp3e8VCK3NzDS7clD1u%2FhU3wBHAoHfy%2FLeAk1e4Fmshfo33Fi7c%2BrFYaTZGYAVZ11XiynkADDrhnelptc8ReU17ATjqdYtRQiREjb0kaCKWticttr5NLN6oFj9xPVcJa%2BixL1c%2Bz%2FzA362vwMqNW0G4Twi4CR1NCh8UkaeRnGED2OaOtgyn%2F%2B7OCRFoEaAMPplmLGFBKvzS%2B4Kdt%2BqQjEOwKFaR79bdP7K4c%2FH92oWl8yF7c4Rp8qw7%2Be%2BCXSj%2BxHpl73YLY8IldZiaCLJoyz7i5BUe4vMUlK0eRbc1BG3MC14M3CQajWCBTNkbARhtratx67cliXJWVsmVNCUDztucH%2FES4Zj0cw7Fw6AC9hL8YIOW2VW3jUcjMV9qhXXxF6B4icR4mh0O4zNcilEVUa%2BwQa%2F1sG%2FLqBs7lUuheKm0yOyQB5tBV0NDZYRBHCZUPrkoKzS%2FrosFabNtR82aWyEWSFK%2B5umtggfeJ2jB5c7lIdHNdEraOXjdqMTiVhjR9bnCM88bMM6z%2FdYGOrABvbiBrOvnQnkGhTVutN9DOzWnk4eNTmNh9bV23uuFI%2BM9hRhYhRvm0aSCG%2BOD5WOlxXsm5fJ36iTZgLhryaAP%2BFWQoq0RUgz3RfhCjAAMYEqjkzsVtg5GD4sftMpHDBeUVmYfNReefK4vUwK92xCWeg0e0Yqk%2FGY2%2FkPRwZCniwRmvPka3R6gt%2B5%2BwH9eSL1ExyaeSRyR0uE%2BJbsWrXc74h%2FiQwt08a%2B%2FjfX%2FM0lHHao%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=b13e95b21465e089df61be034712d1bd42a9b288fa4eb71cc3125723c876d226",
+      "file_size": 575,
+      "type": "text/x-diff",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

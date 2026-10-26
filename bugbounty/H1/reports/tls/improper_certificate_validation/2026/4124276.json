@@ -1,0 +1,123 @@
+{
+  "id": 4124276,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI0Mjc2",
+  "url": "https://hackerone.com/reports/4124276",
+  "title": "GnuTLS + Apple SecTrust discards authenticated OCSP failure",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "medium",
+  "readable_substate": "N/A",
+  "created_at": "2026-10-18T06:33:58.280Z",
+  "submitted_at": "2026-10-18T06:33:58.491Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "stze",
+    "url": "/stze",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2024-8096",
+    "CVE-2026-7009"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-26T12:50:21.399Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-26T07:57:15.253Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\ncurl 8.23.0 and current master can accept a TLS certificate despite an explicit\n`CURLOPT_SSL_VERIFYSTATUS=1` / `--cert-status` requirement when curl uses the\nGnuTLS backend together with Apple SecTrust.\n\nGnuTLS correctly marks an invalid or revoked stapled OCSP response as invalid.\nBecause a certificate trusted only by the Apple keychain is not trusted by\nGnuTLS's file store, curl then invokes SecTrust. The GnuTLS caller passes no\nOCSP response to SecTrust and does not require OCSP:\n\n```c\nCurl_vtls_apple_verify(cf, data, peer, chain->num_certs,\n                       gtls_chain_get_der, chain, NULL, 0, FALSE);\n```\n\nIf SecTrust accepts the certificate chain, curl clears GnuTLS's entire\nverification result, including `GNUTLS_CERT_INVALID_OCSP_STATUS`.\n\n- Released curl 8.23.0 subsequently checks only that a staple exists and\n  therefore accepts an authentic `REVOKED` response.\n- Current master parses the declared status but does not authenticate the OCSP\n  responder or signature. It therefore accepts a matching `GOOD` response\n  signed by an unrelated, self-signed certificate.\n\nPeer and hostname verification remain enabled. `--insecure` is not used.\n\n## Affected versions and configuration\n\nConfirmed affected:\n\n- curl 8.23.0 (`3163ec065643ba20709f190111f42c3e1fe95273`)\n- master at `59d2537b40f9929fde00399be0f274001ad36aea`\n\nRequired configuration:\n\n- an Apple operating system;\n- curl built with GnuTLS and Apple SecTrust; and\n- `CURLOPT_SSL_VERIFYSTATUS=1` / `--cert-status` while native CA verification\n  is active.\n\nApple SecTrust support began in 8.17.0. The bypass described here begins with\n`5e727ca855429a684614a24646cb06fd965a1f7d`, which removed curl's independent\nGnuTLS OCSP signature verification. That commit is in 8.23.0 but not 8.22.0.\nEarlier affected configurations fail closed instead of accepting the bad\nstaple.\n\n## Reproduction\n\nThe attached bundle contains a Linux harness so reviewers can deterministically\nexercise curl's exact `USE_APPLE_SECTRUST` GnuTLS branch without changing a\nmacOS trust store. It replaces only `Curl_vtls_apple_verify()` with a narrow\nstub that:\n\n1. returns success, modeling SecTrust accepting a locally trusted chain; and\n2. fails if the GnuTLS caller passes any OCSP bytes or asks SecTrust to require\n   OCSP.\n\n`lib/vtls/gtls.c`, the TLS handshake, GnuTLS verification, OCSP parser, HTTP\nrequest, and response are unmodified. Thus this harness tests both the exact\nfallback branch and its exact SecTrust arguments; it does not bypass or replace\nthe vulnerable OCSP decision.\n\nPrerequisites are CMake, a C compiler, GnuTLS development headers, OpenSSL's\nCLI, and `patch`.\n\nFor current master:\n\n```sh\n./reproduce-linux.sh /path/to/curl-current current\n```\n\nObserved:\n\n```text\ncurrent unrelated-signer GOOD: exit=0\n* SecTrust harness accepted the certificate-only check\n* SSL certificate verified via Apple SecTrust.\n< HTTP/1.0 200 ok\n\ncurrent signed REVOKED control: exit=91\n* SecTrust harness accepted the certificate-only check\n* SSL certificate verified via Apple SecTrust.\n* peer certificate is revoked\n```\n\nFor the 8.23.0 source tree:\n\n```sh\n./reproduce-linux.sh /path/to/curl-8.23.0 8.23.0\n```\n\nObserved:\n\n```text\n8.23.0 authentic REVOKED: exit=0\n* SecTrust harness accepted the certificate-only check\n* SSL certificate verified via Apple SecTrust.\n< HTTP/1.0 200 ok\n```\n\nA control build without the SecTrust-success fallback rejects the same forged\n`GOOD` staple with curl exit 60:\n\n```text\nSSL certificate verification failed: attached OCSP status response is invalid\n```\n\nAll runs used ASan and UBSan and produced no sanitizer diagnostic. This is a\nlogical verification bypass, not a memory-safety issue.\n\n### Direct macOS confirmation\n\n1. Run `./generate-fixtures.sh`.\n2. Build the target curl revision on macOS with GnuTLS and\n   `USE_APPLE_SECTRUST=ON`.\n3. Add `evidence/root.pem` as a trusted root in a disposable user keychain\n   that SecTrust searches. Do not pass this root through `--cacert`; GnuTLS\n   must lack the anchor so that the documented SecTrust fallback is exercised.\n4. Serve the fixture leaf and staple:\n\n```sh\nopenssl s_server -accept 24443 -www -tls1_2 \\\n  -cert evidence/leaf.pem -key evidence/leaf.key \\\n  -status_file evidence/forged-good.der\n```\n\n5. In another terminal, run:\n\n```sh\ncurl --resolve tls.test:24443:127.0.0.1 \\\n  --cert-status https://tls.test:24443/\n```\n\nCurrent master returns 0 for `forged-good.der`. Curl 8.23.0 returns 0 even\nwhen the server uses `signed-revoked.der`. A build given the root with\n`--cacert evidence/root.pem` rejects the forged response because GnuTLS then\nretains authority over its complete verification result.\n\nThe generated leaf deliberately has no AIA or CRL endpoint. SecTrust therefore\nhas no independent online revocation source; because the GnuTLS caller passes\n`require_ocsp=false`, its best-effort revocation policy can accept the trusted\nchain without authenticating the server's staple.\n\n## Root cause\n\n`gnutls_certificate_verify_peers2()` produces an invalid status containing\n`GNUTLS_CERT_INVALID_OCSP_STATUS`. `gtls_verify_cert()` then treats successful\nSecTrust chain validation as replacing that complete result:\n\n```c\nverified = !result;\nif(verified) {\n  *certverifyresult = 0;\n}\n```\n\nHowever, the preceding SecTrust call received `NULL, 0, FALSE`, so SecTrust\nnever authenticated the stapled response.\n\nCurrent `gtls_verify_ocsp_status()` imports the response, matches its\ncertificate ID, and reads its declared `GOOD`/`REVOKED` value. It never calls\n`gnutls_ocsp_resp_verify()` or another signature-verification function. Its\ncomment assumes that GnuTLS's result is still authoritative, but that result\nwas just discarded by the SecTrust fallback.\n\n## Why the recent fixes do not cover this\n\n- PR #23420 / commit `287df0b324` added GnuTLS response parsing. It does not\n  authenticate a response after the SecTrust fallback replaces GnuTLS's\n  invalid result.\n- PR #23430 / commit `cd89b5178b` passes the raw staple and\n  `require_ocsp=true` from the OpenSSL caller. The GnuTLS caller explicitly\n  passes `NULL, 0, FALSE` because the response is assumed to have been\n  validated separately. That assumption fails precisely when SecTrust is the\n  component that makes the chain acceptable.\n\n## Suggested fix\n\nWhen GnuTLS verification falls back to SecTrust and `verifystatus` is enabled:\n\n1. retrieve the raw staple with `gnutls_ocsp_status_request_get()`;\n2. pass those bytes to `Curl_vtls_apple_verify()` with `require_ocsp=true`;\n3. retain the existing parser to require a `GOOD` entry matching the peer\n   certificate.\n\nMerely preserving `GNUTLS_CERT_INVALID_OCSP_STATUS` would make valid\nnative-only chains fail closed: GnuTLS cannot validate an OCSP signer whose\ntrust anchor exists only in Apple's store. The verifier that supplies the\nmissing trust anchor must authenticate the same stapled response.\n\n`proposed-fix.patch` implements this plumbing against the tested master\ncommit. It compiles cleanly in the exact-branch harness; the harness then\nrejects the forged response at the SecTrust boundary because OCSP bytes and\n`require_ocsp=true` now reach it.\n\n## Impact\n\nAn attacker who possesses the private key for a revoked but otherwise trusted\nserver certificate can defeat a caller's explicit OCSP-stapling requirement\nand complete a TLS connection. This is an improper certificate-validation\nissue (CWE-295).\n\nThe closest curl precedents were both rated **Medium**:\n\n- CVE-2024-8096, \"OCSP stapling bypass with GnuTLS\"\n- CVE-2026-7009, \"OCSP stapling bypass with Apple SecTrust\"\n\nThe latter advisory explicitly limits itself to OpenSSL-compatible backends.\nThis report concerns GnuTLS and code introduced after that advisory's fixed\nrange.",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7021587,
+      "file_name": "gnutls-apple-sectrust-ocsp-bypass.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/akl05cuztavlvobb20rny2jys4bj?response-content-disposition=attachment%3B%20filename%3D%22gnutls-apple-sectrust-ocsp-bypass.zip%22%3B%20filename%2A%3DUTF-8%27%27gnutls-apple-sectrust-ocsp-bypass.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR3F3UPBQ%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144601Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJHMEUCIQCmoRml9jXuaf9%2FXBk%2FiZrSN7UMenoPvH%2F%2F5N6DG8jYcAIgNqRNDlZvZViT708nACkczlu%2FwjnOFyCSTSSCGxlPVlQqugUI1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDBnz1%2BZrUUC5QBhhQyqOBeg36EzjQD%2BatrWWCoCGsbCdvoX2DxFbSnNVQtq7wtoImlWv0DhxlggXpTPEI8Su6ILianQxrpc2R3qYRsCIaBTw1%2FGOw9FIymtTSHZ6fuv17VsYBKv1wV7z58n%2BA6WtAay0lJS8aTL7qz%2BSUzUYS2EyxEY1af1f9yiLym3mGYE7bjDhSyk7iX%2Fttqx91yOYCfQR0pKfsSkIEJYDh8aZhRPUNQq9gRVbXmuI8%2B8jdSp%2FNbNIi4yzXjhyqH4NO8Tu5yVrKKzxa%2FeWPKt41d9VuwqGrhc42ahIIKhbjKixJ12GgZ3%2BvvfUWH4p%2BWz2hC1gwMQD1HowJeQe7KKsMiE999PFjHgA%2FzwJi8V%2FSUB6cuQODz1cp17tBNDGGBU238wnrL6kNpllv3bD95wQeWYaEUCX0SCrol1kVZRVdyZad8TPu4ciN7e9x8AmDdtHVNMMtfo63C3%2B8WiQVbVKgOt25rj49GadbSRsEcd6kFp7Q9FNz33JhdadzJDNUYscwaUUO3zF1y8xVHzRpPy7lOzjJUcOblFJUd1lJGA03FhdVnZIkIQYxyzX186adp88lXDUB5lKEGQc%2FIjIId8VBiHv2LelU5MAFNx68hJKIZmIzt09Ig4fnVQVT1aT84VnklYnE7kqJgXpnNPQcr0pJnoWPbykyggGfMKVOKLbq8DLdchbLp%2FNORe0SMgJEcM9jgkThrzz6idBapYj8%2FPG4jShyreifgh%2Bs8aQNbvFW8zkU198k1qWHopGTLTBc8RCJ1PlZ%2FwZdlBx51teTcDgin9maI%2BGzXGLx%2FBpR0seJYHCT0mphcVTPfrH13Qu4bS%2F1bmiDa%2BVrWGFESgHjQg1oc2ggsQcOXFRTumJxUrNQdTYOzDMt%2F3WBjqxAdPHQ8kL1PSBu9AWPXeIc7ERx1kC5owiSHsIQzqX5tiDCCmZmFBeFzfb6kl%2Bj92YZ1X3y0S2f4neyMveQ0s2yZM1JyIFBgkTSUG3y1Zgi2lae9MoOmeaQo%2B9ZnaR30xbtBRuGdOOQU3hO0LgYLo74I1OsutHVOV5%2BWOuz61dptJ0ZEAT0eBCQuQ%2FayA8SDxHdOYTCyYgCJBq9jOTVEjsLs%2FXjneNejsv6FkZF%2BoNepRP8A%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6d25fc629b165715523ee1c8daa7b395d32301a0830f3d2406fd357c8f0d22d9",
+      "file_size": 31976,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

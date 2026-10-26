@@ -1,0 +1,116 @@
+{
+  "id": 4116076,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTE2MDc2",
+  "url": "https://hackerone.com/reports/4116076",
+  "title": "CVE-2026-111483: GnuTLS accepts non-successful OCSP staples",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-15T09:48:42.257Z",
+  "submitted_at": "2026-10-15T09:48:42.818Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "matty69v",
+    "url": "/matty69v",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d9drin7bro3d44gr64nbpghu6pik/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-111483",
+    "CVE-2024-8096"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-26T07:21:03.311Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-26T07:21:03.178Z",
+  "team_member_agreed_on_going_public_at": "2026-10-26T07:20:02.039Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "**Summary**\n\nIn curl 8.23.0 built with GnuTLS, `--cert-status` (CURLOPT_SSL_VERIFYSTATUS) only checks that *some* stapled OCSP response was received. It no longer checks the response status or the certificate status inside it. A server presenting a revoked certificate can staple a bogus, unsigned 5-byte OCSP response and curl completes the transfer. This brings back CVE-2024-8096, which was fixed in 2024.\n\nNote: this report was prepared with AI assistance for the testing and code review. The writing and the findings are mine.\n\n**What the docs promise**\n\ndocs/cmdline-opts/cert-status.md:\n\n> If this option is enabled and the server sends an invalid (e.g. expired) response, if the response suggests that the server certificate has been revoked, or no response at all is received, the verification fails.\n\ndocs/libcurl/opts/CURLOPT_SSL_VERIFYSTATUS.md says the same. So a revoked status, or an unusable response, must fail the transfer. It does not.\n\n**Root cause**\n\nlib/vtls/gtls.c, `gtls_verify_ocsp_status()` (line 1430 in curl-8_23_0). The whole check is now:\n\n```c\nrc = gnutls_ocsp_status_request_get(session, &status_request);\nif(rc == GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE) {\n  failf(data, \"No OCSP response received\");\n  return CURLE_SSL_INVALIDCERTSTATUS;\n}\nelse if(rc < 0) {\n  failf(data, \"Invalid OCSP response received\");\n  return CURLE_SSL_INVALIDCERTSTATUS;\n}\nreturn CURLE_OK;\n```\n\nIt returns CURLE_OK as soon as a staple is present, whatever it contains. The response is never imported or inspected.\n\nThis was introduced by commit 5e727ca855 (\"GnuTLS: remove our own OCSP signature verification\", PR #23312), which shipped in 8.23.0. That commit removed the status and certStatus checks added by aeb1a281ca (the CVE-2024-8096 fix). The comment in the code assumes `gnutls_certificate_verify_peers2()` already accounts for the stapled response, but as the PoC shows it does not reject a revoked certificate when the staple is a non-successful or unknown response.\n\n**Proof of concept**\n\nLocal only. One server on 127.0.0.1, serving a certificate that is signed by the test CA but marked revoked (keyCompromise), stapling a bogus unsigned OCSPResponse whose responseStatus is tryLater:\n\n```\nprintf '\\x30\\x03\\x0a\\x01\\x03' > trylater.der\n\nopenssl s_server -quiet -naccept 20 -accept 127.0.0.1:30350 -tls1_2 \\\n  -cert rev.pem -key rev.key -status_file trylater.der -www &\n\ncurl --cacert ca.pem --cert-status \\\n  --resolve localhost:30350:127.0.0.1 https://localhost:30350/\n```\n\nResult on 8.23.0 GnuTLS:\n\n```\nRESULT: exit=0 http=200\n```\n\nThe transfer succeeds against a revoked certificate.\n\nControls, same build and setup:\n\n```\ngood certificate + good staple      exit=0    (correct)\nrevoked certificate + no staple      exit=91   No OCSP response received\nrevoked certificate + signed revoked exit=60   certificate error\n```\n\nOpenSSL backend, same bogus staple, refuses correctly:\n\n```\ncurl: (91) Invalid OCSP response status: trylater (3)\n```\n\nA CA-signed response with certStatus=unknown is also accepted (exit=0) where it must fail.\n\n**Affected**\n\ncurl 8.22.0 and 8.23.0 with GnuTLS, and current master (gtls.c is unchanged on master). curl 8.21.0 and earlier reject the bogus staple (exit 91). Reproduces on TLS 1.2 and TLS 1.3, with the curl tool and the libcurl API.\n\n**Proposed fix**\n\nImport the stapled response and require a successful response with certStatus good, restoring the check that 5e727ca855 removed:\n\n```diff\n   if(rc == GNUTLS_E_REQUESTED_DATA_NOT_AVAILABLE) {\n     failf(data, \"No OCSP response received\");\n     return CURLE_SSL_INVALIDCERTSTATUS;\n   }\n   else if(rc < 0) {\n     failf(data, \"Invalid OCSP response received\");\n     return CURLE_SSL_INVALIDCERTSTATUS;\n   }\n+  else {\n+    gnutls_ocsp_resp_t resp;\n+    gnutls_ocsp_cert_status_t status = GNUTLS_OCSP_CERT_UNKNOWN;\n+\n+    if(gnutls_ocsp_resp_init(&resp) < 0) {\n+      failf(data, \"Invalid OCSP response received\");\n+      return CURLE_SSL_INVALIDCERTSTATUS;\n+    }\n+    if(gnutls_ocsp_resp_import(resp, &status_request) < 0 ||\n+       gnutls_ocsp_resp_get_single(resp, 0, NULL, NULL, NULL, NULL,\n+                                   &status, NULL, NULL, NULL, NULL) < 0) {\n+      gnutls_ocsp_resp_deinit(resp);\n+      failf(data, \"Invalid OCSP response received\");\n+      return CURLE_SSL_INVALIDCERTSTATUS;\n+    }\n+    gnutls_ocsp_resp_deinit(resp);\n+    if(status != GNUTLS_OCSP_CERT_GOOD) {\n+      failf(data, \"Server certificate OCSP status not good (%d)\", (int)status);\n+      return CURLE_SSL_INVALIDCERTSTATUS;\n+    }\n+  }\n\n   return CURLE_OK;\n }\n```\n\nWith this patch the good staple still gives exit 0, and the bogus tryLater, unauthorized and unknown staples all give exit 91, matching the OpenSSL backend. A full fix may also want to reject responses whose thisUpdate/nextUpdate window is invalid, as the pre-regression code did.\n\n## Impact\n\nA network attacker holding a revoked (but still CA-signed) certificate for the target host can defeat --cert-status / CURLOPT_SSL_VERIFYSTATUS on GnuTLS builds by stapling a bogus OCSP response, so curl accepts the revoked certificate and proceeds with the transfer, exactly the revocation check the option exists to enforce.",
+  "weakness": {
+    "id": 557,
+    "name": "Improper Check for Certificate Revocation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "matty69v"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

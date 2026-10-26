@@ -1,0 +1,123 @@
+{
+  "id": 4112912,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTEyOTEy",
+  "url": "https://hackerone.com/reports/4112912",
+  "title": "CVE-2026-111481: server-set cookie still aborts cookie jar",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-14T05:47:51.433Z",
+  "submitted_at": "2026-10-14T06:19:53.202Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "samueloph",
+    "url": "/samueloph",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ymkrjcxo460kk652v3stj2bdm0s0/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-111481",
+    "CVE-2026-92386"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-26T07:53:26.157Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-26T07:20:27.736Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Suggested CWE: CWE-1284: Improper Validation of Specified Quantity in Input (H1 didn't let me chose this)\n\n## AI Disclaimer:\nI've written this report with the help of AI, please feel free to let me know if I made a mistake, I've read the final revision of this report a few times to ensure it was solid but my understanding of the inner workings of curl is where I can fall short.\n\n## Summary:\nThe fix for CVE-2026-92386 (445aa87e13) lets the cookie file parser accept lines up to MAX_COOKIE_LINE + 48 bytes, so a line of 5047 or more characters still fails to load. A saved cookie line also holds the domain and the path, and neither counts toward the Set-Cookie length limit when the server leaves them out of the header. A server can set a cookie with a 4000-byte value and no Path, at a URL with a 1500-byte path, and curl saves a 5539-character line. Since 3f0629ca4 (8.18.0), a cookie file load error fails the transfer: the next curl run that loads the jar fails at once with \"(100) A value or data field grew larger than allowed\" and sends no request. If the same file is also passed to `-c`, that failed run rewrites the jar with no cookies at all. That is harsher than the advisory's \"silently abort parsing\", and released 8.22.0 behaves the same with these steps.\n\nI would have liked to report this sooner, before 8.23.0 was out, but I've only managed to finish this now and I still have a lot of other curl CVEs to fix for the Debian package.\n\n## Affected version\nReproduced the same way with three builds on Debian forky/sid x86_64:\n\n- curl master 9a6d4ffc1 (2026-10-13), debug build;\n- the curl-8_22_0 tag, built from git;\n- Debian's curl 8.23.0~rc3-1 package, built from 8.23.0-rc3.\n\nThe master build's `curl -V`:\n\n```\ncurl 8.23.0-DEV (x86_64-pc-linux-gnu) libcurl/8.23.0-DEV OpenSSL/3.6.5 zlib/1.3.2 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 libssh2/1.11.1 nghttp2/1.70.0 OpenLDAP/2.6.14\nRelease-Date: [unreleased]\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns ldap ldaps mqtt mqtts pop3 pop3s rtsp scp sftp smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS brotli Debug HSTS HTTP2 HTTPS-proxy IDN IPv6 Largefile libz SSL threadsafe UnixSockets zstd\n```\n\n## Steps To Reproduce:\nThe attached `hdrsrv.py` is a small HTTP server. It answers any path containing `/set` with the header given on its command line, and any other path with a plain 200.\n\n```\npython3 hdrsrv.py 8080 srv.log Set-Cookie \\\n  \"big=$(python3 -c 'print(\"v\"*4000)'); Max-Age=86400\" &\nprintf '127.0.0.1\\tFALSE\\t/\\tFALSE\\t2000000000\\tone\\t1\\n' > jar\nprintf '127.0.0.1\\tFALSE\\t/\\tFALSE\\t2000000000\\ttwo\\t2\\n' >> jar\n\ncurl -b jar -c jar \"http://127.0.0.1:8080/$(python3 -c 'print(\"a\"*1500)')/set\"\n# exit code 0; after the header comments, the first cookie line is now\n# the 5539-character \"big\" cookie (cookie_output() writes newest first)\n\ncurl -b jar http://127.0.0.1:8080/check\n# exit code 100, no request reaches the server; the same on every later run\n\ncurl -b jar -c jar http://127.0.0.1:8080/check\n# exit code 100 again, and the jar is rewritten with no cookies\n```\n\n## Impact\n\n## Summary:\nAny server the user visits can make every later curl run that reads the cookie file fail, until the user removes the line by hand. With the common `-b jar -c jar` setup, the next run also erases every stored cookie, for all sites. A new cookie is written first, so the server does control where its line lands. That contradicts the advisory's note that it cannot; a cookie that replaces an existing one keeps its old position. This is the CVE-2026-92386 impact, still reachable after the fix, and in 8.18.0 and later the result is a failed transfer and an emptied jar rather than skipped cookies.",
+  "weakness": {
+    "id": 107,
+    "name": "Improper Input Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6984259,
+      "file_name": "hdrsrv.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/5ep3az726mc1b71bd8ds50dexwf0?response-content-disposition=attachment%3B%20filename%3D%22hdrsrv.py%22%3B%20filename%2A%3DUTF-8%27%27hdrsrv.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7BFI5F6H%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144617Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJGMEQCIFwfwjotTi%2FcOLdW9aAT5gmmatZ9rY%2FfJ58ip4FLef0oAiBHs1e8ZCUfV3borrmOusJj9zzOP49T%2Fnnt45tNoXWyFyq6BQjX%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMFrs6swBu6yt1wLBoKo4F3jnN%2B1r44fnJxPjHXOLRqZJLgLNcoqZ20WM42HIQa9AZUijltNG60pfTaA7SSH%2FPqUJar72wKTrLxnS84avD0%2FWN%2FGwVbh9jjjN1LfhRWdm1I5YYjfCv3H%2BTcm11oL6rLGTDn3rLq6U05EzCRWU5hoWrneTn%2Fe39lU2H7fmwkKpKZHQxvo7DnAG7Ry1PO8qtU%2Fu62k7DvnHv%2BSFjTftu%2FKzYd%2FxfTI3Hn4itxLhVezHTmDFVSmOPUhOR2Y7gQ9b5Tn3fcT3BnEhoel08U0%2BtEIoqaq6Y5Rfsdp1wj6m6wkKdYnbRGctGrbtqE5Uf23GG4mb1yRbjosSOJ8u23LDox8WeRy2HuglzC0KXfoh%2FwPueB3KE0dmrHDUuMp3tAJa%2B127THUwjmJW6SCfBho4439sok2HOdcMQZXoMfS%2FtFp5lc3rx1p4QtEWAHGVxWixHVFK9E4EN5kni94ZTHzUWXfHtcok1hFxTnF9EiIv3ibKeNknJwzo0SJSwb0cWxVLYFCg%2Fr%2BB3KBcTTQTY5MgaYVlaHta4gizLNgfy1%2Bply5krf3Ql6UVecbA92oztBlNFIVUpGNONvCLvmD4fW%2Bq6tFK9juOvmu412Ig5wMEcDeJdUhtRbp1XwIn8bUWhvsVBVBz2aI2R64GVXvh6rh2iQNw1IH2O7IN3KY9qwMr4c8KohU32UkOPJ7JajGj1cBC1wgECoDPd%2BZkCvZDVmHUez9quohapDvsBYfLDBUwwTm0G%2BBEUC5DBItcPbAMhBDT3%2BsKZwt5wKxrYUmauJqw2pUjFsH1%2FeW9C5fQptmqa6b%2BdYF0678Y9lftxI9F7UHZEUmn2mFdgCeabSP0mss1N3msr%2Bma3fuv7S4zHTYywMIu6%2FdYGOrIBACGZ9R%2FtB%2B0i%2B167cTZJqMY0lEMrllUZJVPQaCbUpBYkhCKKpgYzLInuegKfm27dU3nldNB6P57TbhL9uMDR%2FYhOebGjiPlySQf9kMY8zhTScqfD6QS2lifZ8HsneMBLCuvaTQgx4N74%2BTgW4bVlsYJQFBQk26U2oWbpHErGKww%2F2GLq2%2F77lIhblmFc%2FFF6kVI7T8lmd9hUGY6DD1VjmTNeeYap5qllF4GvqhHLaINFAg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=71ab854e64454d7ac42dad8e909494eb7255820c23860eac01348d1b20ea49a2",
+      "file_size": 803,
+      "type": "text/x-python",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

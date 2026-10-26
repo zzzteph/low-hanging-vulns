@@ -1,0 +1,136 @@
+{
+  "id": 4127231,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI3MjMx",
+  "url": "https://hackerone.com/reports/4127231",
+  "title": "Derived cookie Path aborts cookie jar loading in curl 8.23.0",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "low",
+  "readable_substate": "N/A",
+  "created_at": "2026-10-19T09:47:08.620Z",
+  "submitted_at": "2026-10-19T09:47:09.143Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "threalwinky",
+    "url": "/threalwinky",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/o8y6z0zitoi8xdpxsr34701chwoo/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-26T08:02:00.083Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-26T08:01:59.942Z",
+  "team_member_agreed_on_going_public_at": "2026-10-26T07:57:45.992Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Hello curl security team,\n\nI am reporting a related cookie-jar failure that I reproduced on the official curl 8.23.0 release.\n\n## Summary\n\nA server redirects curl to a path approximately 5 KB long and responds there with a short cookie that has no `Path` attribute. curl derives the cookie path from the request URL and writes it to the Netscape cookie jar. The resulting record is 5,047 bytes, excluding the newline. A later curl invocation using that jar exits with error 100 (`CURLE_TOO_LARGE`) before sending its request.\n\n## Vulnerable code\n\nIn `lib/cookie.c`, `storecookie()` derives a default path from the request path when a cookie omits the `Path` attribute:\n\n```cpp\nelse if(path) {\n  /* No path was given in the header line, set the default */\n  const char *endslash = strrchr(path, '/');\n  if(endslash)\n    plen = endslash - path + 1; /* include end slash */\n  else\n    plen = strlen(path);\n}\n\nif(path) {\n  co->path = sanitize_cookie_path(path, plen);\n```\n\n`get_netscape_format()` serializes `co->path` into the Netscape cookie-jar row. The serializer does not enforce the maximum line length used by the reader:\n\n```cpp\nreturn curl_maprintf(\n  \"%s%s\\t\"           /* domain */\n  \"%s\\t\"             /* tailmatch */\n  \"%s\\t\"             /* path */\n  \"%s\\t\"             /* secure */\n  \"%\" FMT_OFF_T \"\\t\" /* expires */\n  \"%s\\t\"             /* name */\n  \"%s\",              /* value */\n  ...\n  co->path ? co->path : \"/\",\n  ...);\n```\n\nOn reload, `cookie_load()` initializes its line buffer to `MAX_COOKIE_LINE + 48`, or 5,048 bytes:\n\n```cpp\ncurlx_dyn_init(&buf, MAX_COOKIE_LINE + 48);\n```\n\n`Curl_get_line()` appends the newline to the line buffer. The dynamic buffer also reserves space for a terminating NUL; if the required size exceeds the configured limit, it returns `CURLE_TOO_LARGE`:\n\n```cpp\nsize_t fit = len + idx + 1; /* new string + old string + zero byte */\nif(fit > s->toobig) {\n  curlx_dyn_free(s);\n  return CURLE_TOO_LARGE;\n}\n```\n\nThis creates a mismatch between serialization and parsing: a cookie path can make the serialized row longer than the reader's buffer can \naccept. When the reader exceeds that limit, it returns `CURLE_TOO_LARGE` and the cookie-jar load fails.\n\n## POC\n\nStep 1: Create a simple server and run:\n\n```python\nfrom flask import Flask, abort, make_response, redirect\n\napp = Flask(__name__)\nlong_path = \"/\" + \"p\" * 5015 + \"/abc\"\n\n@app.get(\"/redir\")\ndef redir():\n    return redirect(long_path)\n\n@app.get(\"/<path:path>\")\ndef set_cookies(path):\n    if \"/\" + path != long_path:\n        abort(404)\n    response = make_response()\n    response.set_cookie(\"root\", \"available\", path=\"/\")\n    response.set_cookie(\"long\", \"v\", path=None)\n    return response\n\nif __name__ == \"__main__\":\n    app.run(host=\"127.0.0.1\", port=8000, debug=False, threaded=True)\n```\n\n{F7031492}\n\nStep 2: Use latest 8.23.0 curl to send request to get cookie. This also creates a jar file contains a 5,047-byte row for `long=v` and a 40-byte row for `root=available`\n\n```bash\n./curl -L -b \"\" -c cookies.txt http://127.0.0.1:8000/redir\n```\n\n{F7031728}\n\nStep 3: curl exits with error 100 (`CURLE_TOO_LARGE`) while loading the jar\n\n```bash\n./curl -b cookies.txt http://127.0.0.1:8000               \n```\n\n{F7031739}\n\n## Impact\n\nThe demonstrated impact is denial of service for later curl transfers that load the affected jar. Cookie loading fails before the new HTTP request is sent. Applications that share a persistent jar may see otherwise unrelated transfers fail until the oversized row is removed or the jar is replaced.",
+  "weakness": {
+    "id": 107,
+    "name": "Improper Input Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7031492,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/3phcyxlihmf1ijqjyh4r701z346q?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZKPJX6G4%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144607Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJHMEUCIQCnbD%2B8y3Zablr7rsMG%2FEQ75FwvWWa3MQz7Wpx9tLhwTwIgRiXGwhRZjLVTNk1c9Gbzb41RENleBmpQudjFBWiNFIgquwUI1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDKwtqcY5oQS42bvi6yqPBXfIGeWa6MN7fnH4bC907XjjsGn4vIIHskBKZ4nitrcEMlk7Ast0OFv%2BjKExdk%2F3rlHaSgzN1GBD9hZPQL%2Bq5IzoKHvUWLKdR%2B%2B%2F2rz6TBaT71m7RUW9ABuroLnjseaPjjNgwshOErTxoppwwYUA3KPCuiC5fWyjXdbPyPfo08cyGXLToMAbeID%2B93pNGo9SUiwzemg1lc21zpxnEenKhWupa9ijjzMRS%2BcLug0lATlk8Afuk%2B2JIdVtW834RBqtQS3UxGXMsMMwMkeTR0hwSg9Xp4tAXNMc%2FAmhKDOS1OpuQxFHCY41BKecT2pCbeJ7wum%2F83QYglQWN2mlI4HBxqQyXQts%2BMy1KFW0eLvHDNLEQrJ7zTFhntjWdAt1XDDdZXXgiYvFV%2BU8zcT9iGktiRt%2FRt3ldYOAaqa%2BqVJVQoTLkZnghMPDJOM9yT6N8Xq0AGV1yNUepyYy3aO%2BeNw6THv0nghOz1tQIkhe46xOA0CvjmLMRaYwe7ICmPW0aNhyUK83L7rTt1F36qD%2BGCQv9mISF5yEIMbKZSFZgdLcULysieTNjf8NiNsmDNpRh5H8wLn4xZ1kbcdNMQ9JXS1UVDXun3fRZb8lqvqOmv7xvcf%2BxTS0glDViV%2BHeDn3dtUh9Ql1ci2pbkOyoI%2F9v9IFj6gNq2pHUc48tDSwRcrMI3Y7I6vW0f0CuWRS56PhQi9vKBu7DGCs1Abg09nARS98r%2Fb5xltp7QNXKSKn%2F7kfg1h9kiDjhrhUZ07k7vrcXMA5vxPrk0mygZEcYxggh4METhYiPPqjbyiUsjFGnRJ4JJ%2BK3HbQThwqPX0uYBOF%2Bchk4F4ioczo4RX0KDdqrbWW3x2LmGJChzwCoTjJj6dRtdUwp6%2F91gY6sQH0hL502uY6TDk1BHkMNRIeryXW0fIEVByPk%2FByYLJTv6iHQtI4w3teUE9cNAni3a8ZAlPo2Kgo9LLh9lDszr4lckk9QyU6v%2Fe80CbRFoWEole%2Fx845vcy3MUDcglIye00E%2FHWOR0fQW4g77l4Qd6rmMWazBrS4TeeYJgmvoFjmyojP36dFEC83r04cBWoW%2B%2BK0bbybQ4I%2FRP1KPiFdV9P2wcwtiTgn%2FxVL6wiDCdi4YK4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c624317ec01f5bac14bea8a1216e21c9d6aa0c0288a29d62207e9876ee743e12",
+      "file_size": 38805,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 7031728,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/qldlqhkp4piu1oa50g79gg74wapg?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZKPJX6G4%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144607Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJHMEUCIQCnbD%2B8y3Zablr7rsMG%2FEQ75FwvWWa3MQz7Wpx9tLhwTwIgRiXGwhRZjLVTNk1c9Gbzb41RENleBmpQudjFBWiNFIgquwUI1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDKwtqcY5oQS42bvi6yqPBXfIGeWa6MN7fnH4bC907XjjsGn4vIIHskBKZ4nitrcEMlk7Ast0OFv%2BjKExdk%2F3rlHaSgzN1GBD9hZPQL%2Bq5IzoKHvUWLKdR%2B%2B%2F2rz6TBaT71m7RUW9ABuroLnjseaPjjNgwshOErTxoppwwYUA3KPCuiC5fWyjXdbPyPfo08cyGXLToMAbeID%2B93pNGo9SUiwzemg1lc21zpxnEenKhWupa9ijjzMRS%2BcLug0lATlk8Afuk%2B2JIdVtW834RBqtQS3UxGXMsMMwMkeTR0hwSg9Xp4tAXNMc%2FAmhKDOS1OpuQxFHCY41BKecT2pCbeJ7wum%2F83QYglQWN2mlI4HBxqQyXQts%2BMy1KFW0eLvHDNLEQrJ7zTFhntjWdAt1XDDdZXXgiYvFV%2BU8zcT9iGktiRt%2FRt3ldYOAaqa%2BqVJVQoTLkZnghMPDJOM9yT6N8Xq0AGV1yNUepyYy3aO%2BeNw6THv0nghOz1tQIkhe46xOA0CvjmLMRaYwe7ICmPW0aNhyUK83L7rTt1F36qD%2BGCQv9mISF5yEIMbKZSFZgdLcULysieTNjf8NiNsmDNpRh5H8wLn4xZ1kbcdNMQ9JXS1UVDXun3fRZb8lqvqOmv7xvcf%2BxTS0glDViV%2BHeDn3dtUh9Ql1ci2pbkOyoI%2F9v9IFj6gNq2pHUc48tDSwRcrMI3Y7I6vW0f0CuWRS56PhQi9vKBu7DGCs1Abg09nARS98r%2Fb5xltp7QNXKSKn%2F7kfg1h9kiDjhrhUZ07k7vrcXMA5vxPrk0mygZEcYxggh4METhYiPPqjbyiUsjFGnRJ4JJ%2BK3HbQThwqPX0uYBOF%2Bchk4F4ioczo4RX0KDdqrbWW3x2LmGJChzwCoTjJj6dRtdUwp6%2F91gY6sQH0hL502uY6TDk1BHkMNRIeryXW0fIEVByPk%2FByYLJTv6iHQtI4w3teUE9cNAni3a8ZAlPo2Kgo9LLh9lDszr4lckk9QyU6v%2Fe80CbRFoWEole%2Fx845vcy3MUDcglIye00E%2FHWOR0fQW4g77l4Qd6rmMWazBrS4TeeYJgmvoFjmyojP36dFEC83r04cBWoW%2B%2BK0bbybQ4I%2FRP1KPiFdV9P2wcwtiTgn%2FxVL6wiDCdi4YK4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ec7d59241e0a4396d09f25587cdf9af66d286387ebc686f079deccba3400278c",
+      "file_size": 101626,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 7031739,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fwddua7z5hfynmgxcmsqi32cxf1t?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQZKPJX6G4%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144607Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJHMEUCIQCnbD%2B8y3Zablr7rsMG%2FEQ75FwvWWa3MQz7Wpx9tLhwTwIgRiXGwhRZjLVTNk1c9Gbzb41RENleBmpQudjFBWiNFIgquwUI1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDKwtqcY5oQS42bvi6yqPBXfIGeWa6MN7fnH4bC907XjjsGn4vIIHskBKZ4nitrcEMlk7Ast0OFv%2BjKExdk%2F3rlHaSgzN1GBD9hZPQL%2Bq5IzoKHvUWLKdR%2B%2B%2F2rz6TBaT71m7RUW9ABuroLnjseaPjjNgwshOErTxoppwwYUA3KPCuiC5fWyjXdbPyPfo08cyGXLToMAbeID%2B93pNGo9SUiwzemg1lc21zpxnEenKhWupa9ijjzMRS%2BcLug0lATlk8Afuk%2B2JIdVtW834RBqtQS3UxGXMsMMwMkeTR0hwSg9Xp4tAXNMc%2FAmhKDOS1OpuQxFHCY41BKecT2pCbeJ7wum%2F83QYglQWN2mlI4HBxqQyXQts%2BMy1KFW0eLvHDNLEQrJ7zTFhntjWdAt1XDDdZXXgiYvFV%2BU8zcT9iGktiRt%2FRt3ldYOAaqa%2BqVJVQoTLkZnghMPDJOM9yT6N8Xq0AGV1yNUepyYy3aO%2BeNw6THv0nghOz1tQIkhe46xOA0CvjmLMRaYwe7ICmPW0aNhyUK83L7rTt1F36qD%2BGCQv9mISF5yEIMbKZSFZgdLcULysieTNjf8NiNsmDNpRh5H8wLn4xZ1kbcdNMQ9JXS1UVDXun3fRZb8lqvqOmv7xvcf%2BxTS0glDViV%2BHeDn3dtUh9Ql1ci2pbkOyoI%2F9v9IFj6gNq2pHUc48tDSwRcrMI3Y7I6vW0f0CuWRS56PhQi9vKBu7DGCs1Abg09nARS98r%2Fb5xltp7QNXKSKn%2F7kfg1h9kiDjhrhUZ07k7vrcXMA5vxPrk0mygZEcYxggh4METhYiPPqjbyiUsjFGnRJ4JJ%2BK3HbQThwqPX0uYBOF%2Bchk4F4ioczo4RX0KDdqrbWW3x2LmGJChzwCoTjJj6dRtdUwp6%2F91gY6sQH0hL502uY6TDk1BHkMNRIeryXW0fIEVByPk%2FByYLJTv6iHQtI4w3teUE9cNAni3a8ZAlPo2Kgo9LLh9lDszr4lckk9QyU6v%2Fe80CbRFoWEole%2Fx845vcy3MUDcglIye00E%2FHWOR0fQW4g77l4Qd6rmMWazBrS4TeeYJgmvoFjmyojP36dFEC83r04cBWoW%2B%2BK0bbybQ4I%2FRP1KPiFdV9P2wcwtiTgn%2FxVL6wiDCdi4YK4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=0b058ba012b6b843536c118d9faff39d8af294dff70e7f1db282c5a8447c726f",
+      "file_size": 27899,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

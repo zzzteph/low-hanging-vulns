@@ -1,0 +1,135 @@
+{
+  "id": 3971551,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTcxNTUx",
+  "url": "https://hackerone.com/reports/3971551",
+  "title": "20: HTAB before `Secure` attribute silently drops the Secure cookie flag",
+  "state": "Closed",
+  "substate": "duplicate",
+  "readable_substate": "Duplicate",
+  "created_at": "2026-08-26T15:55:40.955Z",
+  "submitted_at": "2026-08-26T15:55:41.292Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "giant_anteater",
+    "url": "/giant_anteater",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/r9sgcvqgyzx7oyd4vqjv580xuk4y/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-26T09:10:06.323Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-26T07:58:48.094Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nA `Set-Cookie` header using HTAB (horizontal tab) instead of SPACE before the `Secure` attribute — e.g. `Set-Cookie: sid=SECRET;\\tSecure` — causes curl to store the cookie without its Secure flag. The cookie is then sent over plaintext HTTP on subsequent requests to the same host.\n\nThe space-separated form `Set-Cookie: sid=SECRET; Secure` works correctly.\n\n## Affected versions\n\ncurl 8.13.0 through at least 8.21.0 (all versions containing commit `1aea05a6c26`, \"cookie: convert to using strparse\", 2025-02-18).\n\n## Root cause\n\nIn `lib/cookie.c`, `parse_cookie_header()` uses a do/while loop that parses each cookie attribute:\n\n```c\ndo {\n    if(!curlx_str_cspn(&ptr, &name, \";\\t\\r\\n=\")) {\n        // parse attribute\n    }\n} while(!curlx_str_single(&ptr, ';'));\n```\n\nAfter consuming the `;` separator, `ptr` points at the HTAB. Since `\\t` is in the reject set of `curlx_str_cspn`, the function sees it as the first character, returns an empty match (failure), and the `if` block is skipped. Then `curlx_str_single(&ptr, ';')` fails because the current byte is `\\t`, not `;`, so the loop exits. The `Secure` attribute is never parsed, but the cookie is still stored.\n\nThe previous parser (before `1aea05a6c26`) had `while(ISBLANK(*ptr)) ptr++;` before parsing each attribute, which correctly skipped HTAB. This blank-skipping was lost in the strparse conversion. The helper `curlx_str_passblanks()` exists in the codebase but is not called here.\n\n## Reproduction\n\n### Expected vs actual output\n\n**Expected:** Neither cookie is sent over HTTP (both have `Secure`).\n\n**Actual:**\n\n```\nHTAB  HTTP follow-up: sid=HTAB_SECRET      <-- leaked over HTTP\nSPACE HTTP follow-up: <none>               <-- correctly withheld\nHTAB  jar secure flag: FALSE               <-- wrong\nSPACE jar secure flag: TRUE                <-- correct\n```\n\n## Impact\n\nThe `Secure` flag is a confidentiality boundary that prevents cookies from being sent over unencrypted connections. Silently dropping it means a session cookie intended to be HTTPS-only is exposed on any subsequent HTTP request to the same host. A network attacker observing that HTTP traffic can capture the cookie. All attributes at or after the HTAB position are similarly skipped (e.g. `HttpOnly`).\n\nHTAB is valid optional whitespace per both RFC 6265 section 5.2 and the HTTP grammar (OWS). The old parser handled it correctly.",
+  "original_report_id": 3972395,
+  "original_report_url": "https://hackerone.com/reports/3972395",
+  "attachments": [
+    {
+      "id": 6558130,
+      "file_name": "Dockerfile",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/dkfds3jugi0jehtr08jzgc0s3osi?response-content-disposition=attachment%3B%20filename%3D%22Dockerfile%22%3B%20filename%2A%3DUTF-8%27%27Dockerfile&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ34R4Q75A%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144606Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJHMEUCIQDqR%2BHz60AvDdaWufrKg8ipPc7sdAzTY%2BfGcJG4E1oJIAIgEw7xJ2nfbzgx%2FStw4yGsgBHoQG7oEamldBhHS1IbL2oqugUI1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDF%2BNNRLEnavZssFYhiqOBfQHykmC57QE0bBeklvkvTWsPrQxUsjdXRMl0zy81tcO%2BJGc9wgHAOERUbFCyU8SzGtydAGwr6RD4jEO3ycTdCW%2BRZrSnsjfcOHo9dAugm%2BY%2FRYJ5VspKrPFjs%2BdaMXbsnd6IrpJJnzOK%2BJIJ5WxY2WoGoUzhdP0lfiN2D7bhloZ3I1R3S3ckTFWq21JlnABvhKa5FTTCXbVz6ZWZMp%2F%2FzgBdUVfNNJx5tjB5F5xHiqHBsOkVAQIoXwXNWlYLVhDBz%2Bcwl3u5P4jVwlGiV2nKYsrYizWZ64gEXwCsTZfvxZPXyCP0QTC7F1%2FJ%2FXyvpQ9khzFXCYKs3AVusKndVJ1xNCef8PWz%2BPBgc29SxHudiWbRe3dspQJYvGWpA%2FcrWuMAjxd9sxKli%2FO8SfqsirqfXLxOc6b3Dp7o%2FGKQ4XZnCnlleUUCp%2B57NcYKGmTvP6o3encPfNRiBoPsmweZYqcIQkvL4nEWA90ASsw04iecac0sH32IDzUsKL6EtBMDgcKr%2FRvTTRFyeokC7Z0XgwVrdrAqyNu6z5s8eOdzBi2i%2BK4ywWPk8SU7ycvCuLQxskLn%2FJy955dLnW6kuykGnJw9nI7mC2E%2BeipugOcJcKuwDQnKM5uO5kj%2FxWhlD%2B%2F7adh5h%2FXCXVw%2Br%2BIpOW3VdMJbjrDVqGjf8WqrMTss%2F5eJSjhTBXuxYT7Zryj7XDNXjoxw12VL9JCDvwI97cG5bC%2FD88GBVJ6lE2JxMfcC7EwQXhWpP2Gu%2BJs81HIb%2FoPFFjpKg6r0mZxw9WCwNaN2Tq1B6u2OUoREDYoof8GDmsP6RNiDuhXOpp7wLdSTAnL4u1nC%2Bow0v2yZciUnfZ5ZUQ84U8sRjfAthCnEymUv3lZQDDNtv3WBjqxAROdDDtoiH5lxCGGn2rNNDjbZYs%2BCoKswvwFEP9quTes%2B4QqhV%2BjtPcKEdS5y%2FKkld01%2BA1wU4wMjQKdtgu3At1Y4hrlQRRrCTalRXdYoQwHuWgQTPGHJTIeata%2FvexnYI8Ih%2BVSY39v50kqlksYaMvvS6K9LRJE40SVDmPWWB4biYAlSzq3ygp%2FwHzxCgAbW%2FDSU57QrfO67mJI4XSqircUbDQ6XtLxThABMoouxdl4jw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=bb2d3690b17fbc042b9963cc4dfe1bb6191f4acab784810b4145038999f7f985",
+      "file_size": 364,
+      "type": "application/octet-stream",
+      "moderated": null
+    },
+    {
+      "id": 6558131,
+      "file_name": "reproduce.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/pmh61dgtfchut4n7r4bgmraezpbm?response-content-disposition=attachment%3B%20filename%3D%22reproduce.sh%22%3B%20filename%2A%3DUTF-8%27%27reproduce.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ34R4Q75A%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144606Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJHMEUCIQDqR%2BHz60AvDdaWufrKg8ipPc7sdAzTY%2BfGcJG4E1oJIAIgEw7xJ2nfbzgx%2FStw4yGsgBHoQG7oEamldBhHS1IbL2oqugUI1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDF%2BNNRLEnavZssFYhiqOBfQHykmC57QE0bBeklvkvTWsPrQxUsjdXRMl0zy81tcO%2BJGc9wgHAOERUbFCyU8SzGtydAGwr6RD4jEO3ycTdCW%2BRZrSnsjfcOHo9dAugm%2BY%2FRYJ5VspKrPFjs%2BdaMXbsnd6IrpJJnzOK%2BJIJ5WxY2WoGoUzhdP0lfiN2D7bhloZ3I1R3S3ckTFWq21JlnABvhKa5FTTCXbVz6ZWZMp%2F%2FzgBdUVfNNJx5tjB5F5xHiqHBsOkVAQIoXwXNWlYLVhDBz%2Bcwl3u5P4jVwlGiV2nKYsrYizWZ64gEXwCsTZfvxZPXyCP0QTC7F1%2FJ%2FXyvpQ9khzFXCYKs3AVusKndVJ1xNCef8PWz%2BPBgc29SxHudiWbRe3dspQJYvGWpA%2FcrWuMAjxd9sxKli%2FO8SfqsirqfXLxOc6b3Dp7o%2FGKQ4XZnCnlleUUCp%2B57NcYKGmTvP6o3encPfNRiBoPsmweZYqcIQkvL4nEWA90ASsw04iecac0sH32IDzUsKL6EtBMDgcKr%2FRvTTRFyeokC7Z0XgwVrdrAqyNu6z5s8eOdzBi2i%2BK4ywWPk8SU7ycvCuLQxskLn%2FJy955dLnW6kuykGnJw9nI7mC2E%2BeipugOcJcKuwDQnKM5uO5kj%2FxWhlD%2B%2F7adh5h%2FXCXVw%2Br%2BIpOW3VdMJbjrDVqGjf8WqrMTss%2F5eJSjhTBXuxYT7Zryj7XDNXjoxw12VL9JCDvwI97cG5bC%2FD88GBVJ6lE2JxMfcC7EwQXhWpP2Gu%2BJs81HIb%2FoPFFjpKg6r0mZxw9WCwNaN2Tq1B6u2OUoREDYoof8GDmsP6RNiDuhXOpp7wLdSTAnL4u1nC%2Bow0v2yZciUnfZ5ZUQ84U8sRjfAthCnEymUv3lZQDDNtv3WBjqxAROdDDtoiH5lxCGGn2rNNDjbZYs%2BCoKswvwFEP9quTes%2B4QqhV%2BjtPcKEdS5y%2FKkld01%2BA1wU4wMjQKdtgu3At1Y4hrlQRRrCTalRXdYoQwHuWgQTPGHJTIeata%2FvexnYI8Ih%2BVSY39v50kqlksYaMvvS6K9LRJE40SVDmPWWB4biYAlSzq3ygp%2FwHzxCgAbW%2FDSU57QrfO67mJI4XSqircUbDQ6XtLxThABMoouxdl4jw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=fd971e9cab6a9cef9805b7510f320664584d5e26736df1430b9d54d1402c21f8",
+      "file_size": 277,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6558132,
+      "file_name": "run.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/u2ik7kzwllcrbsgip84hhkcdzsoq?response-content-disposition=attachment%3B%20filename%3D%22run.sh%22%3B%20filename%2A%3DUTF-8%27%27run.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ34R4Q75A%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144606Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJHMEUCIQDqR%2BHz60AvDdaWufrKg8ipPc7sdAzTY%2BfGcJG4E1oJIAIgEw7xJ2nfbzgx%2FStw4yGsgBHoQG7oEamldBhHS1IbL2oqugUI1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDF%2BNNRLEnavZssFYhiqOBfQHykmC57QE0bBeklvkvTWsPrQxUsjdXRMl0zy81tcO%2BJGc9wgHAOERUbFCyU8SzGtydAGwr6RD4jEO3ycTdCW%2BRZrSnsjfcOHo9dAugm%2BY%2FRYJ5VspKrPFjs%2BdaMXbsnd6IrpJJnzOK%2BJIJ5WxY2WoGoUzhdP0lfiN2D7bhloZ3I1R3S3ckTFWq21JlnABvhKa5FTTCXbVz6ZWZMp%2F%2FzgBdUVfNNJx5tjB5F5xHiqHBsOkVAQIoXwXNWlYLVhDBz%2Bcwl3u5P4jVwlGiV2nKYsrYizWZ64gEXwCsTZfvxZPXyCP0QTC7F1%2FJ%2FXyvpQ9khzFXCYKs3AVusKndVJ1xNCef8PWz%2BPBgc29SxHudiWbRe3dspQJYvGWpA%2FcrWuMAjxd9sxKli%2FO8SfqsirqfXLxOc6b3Dp7o%2FGKQ4XZnCnlleUUCp%2B57NcYKGmTvP6o3encPfNRiBoPsmweZYqcIQkvL4nEWA90ASsw04iecac0sH32IDzUsKL6EtBMDgcKr%2FRvTTRFyeokC7Z0XgwVrdrAqyNu6z5s8eOdzBi2i%2BK4ywWPk8SU7ycvCuLQxskLn%2FJy955dLnW6kuykGnJw9nI7mC2E%2BeipugOcJcKuwDQnKM5uO5kj%2FxWhlD%2B%2F7adh5h%2FXCXVw%2Br%2BIpOW3VdMJbjrDVqGjf8WqrMTss%2F5eJSjhTBXuxYT7Zryj7XDNXjoxw12VL9JCDvwI97cG5bC%2FD88GBVJ6lE2JxMfcC7EwQXhWpP2Gu%2BJs81HIb%2FoPFFjpKg6r0mZxw9WCwNaN2Tq1B6u2OUoREDYoof8GDmsP6RNiDuhXOpp7wLdSTAnL4u1nC%2Bow0v2yZciUnfZ5ZUQ84U8sRjfAthCnEymUv3lZQDDNtv3WBjqxAROdDDtoiH5lxCGGn2rNNDjbZYs%2BCoKswvwFEP9quTes%2B4QqhV%2BjtPcKEdS5y%2FKkld01%2BA1wU4wMjQKdtgu3At1Y4hrlQRRrCTalRXdYoQwHuWgQTPGHJTIeata%2FvexnYI8Ih%2BVSY39v50kqlksYaMvvS6K9LRJE40SVDmPWWB4biYAlSzq3ygp%2FwHzxCgAbW%2FDSU57QrfO67mJI4XSqircUbDQ6XtLxThABMoouxdl4jw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ae42afdfbe24c25794ed52d8979a9d5b9302a2865a4aa6e3d80e103109bf49bd",
+      "file_size": 1631,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6558134,
+      "file_name": "server.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/a4fjhzn1e6iky9jf37qg8ii5rcdo?response-content-disposition=attachment%3B%20filename%3D%22server.py%22%3B%20filename%2A%3DUTF-8%27%27server.py&response-content-type=text%2Fx-python-script&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ34R4Q75A%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144606Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJHMEUCIQDqR%2BHz60AvDdaWufrKg8ipPc7sdAzTY%2BfGcJG4E1oJIAIgEw7xJ2nfbzgx%2FStw4yGsgBHoQG7oEamldBhHS1IbL2oqugUI1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDF%2BNNRLEnavZssFYhiqOBfQHykmC57QE0bBeklvkvTWsPrQxUsjdXRMl0zy81tcO%2BJGc9wgHAOERUbFCyU8SzGtydAGwr6RD4jEO3ycTdCW%2BRZrSnsjfcOHo9dAugm%2BY%2FRYJ5VspKrPFjs%2BdaMXbsnd6IrpJJnzOK%2BJIJ5WxY2WoGoUzhdP0lfiN2D7bhloZ3I1R3S3ckTFWq21JlnABvhKa5FTTCXbVz6ZWZMp%2F%2FzgBdUVfNNJx5tjB5F5xHiqHBsOkVAQIoXwXNWlYLVhDBz%2Bcwl3u5P4jVwlGiV2nKYsrYizWZ64gEXwCsTZfvxZPXyCP0QTC7F1%2FJ%2FXyvpQ9khzFXCYKs3AVusKndVJ1xNCef8PWz%2BPBgc29SxHudiWbRe3dspQJYvGWpA%2FcrWuMAjxd9sxKli%2FO8SfqsirqfXLxOc6b3Dp7o%2FGKQ4XZnCnlleUUCp%2B57NcYKGmTvP6o3encPfNRiBoPsmweZYqcIQkvL4nEWA90ASsw04iecac0sH32IDzUsKL6EtBMDgcKr%2FRvTTRFyeokC7Z0XgwVrdrAqyNu6z5s8eOdzBi2i%2BK4ywWPk8SU7ycvCuLQxskLn%2FJy955dLnW6kuykGnJw9nI7mC2E%2BeipugOcJcKuwDQnKM5uO5kj%2FxWhlD%2B%2F7adh5h%2FXCXVw%2Br%2BIpOW3VdMJbjrDVqGjf8WqrMTss%2F5eJSjhTBXuxYT7Zryj7XDNXjoxw12VL9JCDvwI97cG5bC%2FD88GBVJ6lE2JxMfcC7EwQXhWpP2Gu%2BJs81HIb%2FoPFFjpKg6r0mZxw9WCwNaN2Tq1B6u2OUoREDYoof8GDmsP6RNiDuhXOpp7wLdSTAnL4u1nC%2Bow0v2yZciUnfZ5ZUQ84U8sRjfAthCnEymUv3lZQDDNtv3WBjqxAROdDDtoiH5lxCGGn2rNNDjbZYs%2BCoKswvwFEP9quTes%2B4QqhV%2BjtPcKEdS5y%2FKkld01%2BA1wU4wMjQKdtgu3At1Y4hrlQRRrCTalRXdYoQwHuWgQTPGHJTIeata%2FvexnYI8Ih%2BVSY39v50kqlksYaMvvS6K9LRJE40SVDmPWWB4biYAlSzq3ygp%2FwHzxCgAbW%2FDSU57QrfO67mJI4XSqircUbDQ6XtLxThABMoouxdl4jw%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=f6da9aeda467066b123c5f66312e9cee04a15e1ad4e32c139a8f286903e9c9a5",
+      "file_size": 1142,
+      "type": "text/x-python-script",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

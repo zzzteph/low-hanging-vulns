@@ -1,0 +1,116 @@
+{
+  "id": 4124849,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTI0ODQ5",
+  "url": "https://hackerone.com/reports/4124849",
+  "title": "CVE-2026-111951: curl -OJ truncate without filename",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-18T11:59:17.526Z",
+  "submitted_at": "2026-10-18T11:59:17.688Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "matty69v",
+    "url": "/matty69v",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d9drin7bro3d44gr64nbpghu6pik/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-111951"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-26T07:22:02.063Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-26T07:22:01.868Z",
+  "team_member_agreed_on_going_public_at": "2026-10-26T07:18:43.786Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nWith `-O -J`, when a response carries a `Content-Disposition` header without a usable `filename=` (for example `inline`) before the one that names an existing file, curl truncates that existing file to 0 bytes and then exits 23 saying it refused to overwrite it. This breaks the promise in docs/cmdline-opts/remote-header-name.md: \"If the server specifies a filename and a file with that name already exists in the destination directory, it is not overwritten and an error occurs\".\n\nThe cause is src/tool_cb_hdr.c lines 405 to 408 in curl-8_23_0: when the header has no `filename=`, the code falls through to `tool_create_output_file()`, which opens the URL-derived name with `fopen(fname, \"wb\")` (src/tool_cb_wrt.c line 87) because `is_cd_filename` is still FALSE. The following `filename=\"victim\"` header is then refused by `set_filename()` since the stream is already open, but the file is already empty. The same happens with `-L` when a `302` carries `Content-Disposition: inline` before `Location:`, with `filename*=` first, and over HTTPS; with `-i` the file gets the response headers written into it.\n\nAI assistance was used for testing and code review; the writing and findings are mine.\n\n## Affected version\ncurl 8.23.0 (also 8.22.0 and master 70f3f855c6), macOS, OpenSSL 3.6.5 build. Only the curl tool.\n\n## Steps To Reproduce:\n1. Run any HTTP server on 127.0.0.1:32700 that answers:\n\n```\nHTTP/1.1 200 OK\nContent-Disposition: inline\nContent-Disposition: attachment; filename=\"victim\"\nContent-Length: 8\n\nPAYLOAD\n```\n\n2. Run:\n\n```\nprintf 'ORIGINAL-CONTENT\\n' > victim\ncurl -sS -OJ http://127.0.0.1:32700/victim; echo \"exit=$?\"; wc -c victim\n```\n\n3. Result:\n\n```\ncurl: (23) client returned ERROR on write of 52 bytes\nexit=23\n0 victim\n```\n\nControl: with only `Content-Disposition: attachment; filename=\"victim\"` curl exits 23 and victim stays 17 bytes.\n\nProposed fix:\n\n```diff\n--- a/src/tool_cb_hdr.c\n+++ b/src/tool_cb_hdr.c\n@@ -405,8 +405,12 @@ static size_t content_disposition(const char *str, const char *end,\n       }\n       break;\n     }\n-    if(!outs->stream && !tool_create_output_file(outs, per->config))\n-      return CURL_WRITEFUNC_ERROR;\n+    if(!outs->stream) {\n+      if(hdrcbdata->config->show_headers)\n+        return buffer_header(hdrcbdata, str, cb);\n+      return cb;\n+    }\n     if(tool_write_headers(&per->hdrcbdata, outs->stream))\n       return CURL_WRITEFUNC_ERROR;\n```\n\n`buffer_header()` needs a forward declaration above `content_disposition()`. With this patch every case above leaves the file intact, and a `Content-Disposition` with no filename at all still falls back to the URL name.\n\n## Impact\n\n## Summary:\nA user running `curl -OJ https://host/report.pdf` (or with `-L`) in a directory that already holds report.pdf gets that file truncated to 0 bytes by a malicious or compromised server, while curl reports that it refused to overwrite it.",
+  "weakness": {
+    "id": 887,
+    "name": "External Control of File Name or Path"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 2,
+  "voters": [
+    "matty69v",
+    "euraika-labs"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

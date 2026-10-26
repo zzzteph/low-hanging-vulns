@@ -1,0 +1,139 @@
+{
+  "id": 4112709,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTEyNzA5",
+  "url": "https://hackerone.com/reports/4112709",
+  "title": "CVE-2026-111482: libssh2 knownhosts prefix match",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-14T02:53:17.499Z",
+  "submitted_at": "2026-10-14T06:19:58.496Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "samueloph",
+    "url": "/samueloph",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ymkrjcxo460kk652v3stj2bdm0s0/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-111482",
+    "CVE-2026-87865"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-26T07:53:37.731Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-26T07:20:13.866Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## AI Disclaimer:\n\nI've written this report with the help of AI, please feel free to let me know if I made a mistake, I've read the final revision of this report a few times to ensure it was solid but my understanding of the inner workings of curl and libssh is where I can fall short.\n\n## Summary:\nssh_force_knownhost_key_type() in lib/vssh/libssh2.c compares a `[name]:port` known_hosts entry, the form ssh writes for non-default ports, with `strncmp(store->name + 1, conn->origin->hostname, kh_name_size)`. kh_name_size is the length of the name in the entry, so this is a prefix match: `[10.0.0.1]:2222` also matches 10.0.0.12, and `[git.example.co]:2222` also matches git.example.com. If such an entry for another host comes before the host's own entry with a different key type, curl forces that other key type for the connection. An attacker's server simply offers that type. The later check in ssh_knownhost() then finds no entry of that type for the host: with libssh2 1.11.1, libssh2_knownhost_checkp() only reports MISMATCH for a key of the same type. CURLOPT_SSH_KEYFUNCTION is therefore told CURLKHMATCH_MISSING instead of CURLKHMATCH_MISMATCH, which is the outcome of CVE-2026-87865, reached through plain entries instead of hashed ones; the code comes from 272282a054 (curl 7.69.0).\n\nI would have liked to report this sooner, before 8.23.0 was out, but I've only managed to finish this now and I still have a lot of other curl CVEs to fix for the Debian package.\n\n## Affected version\nCurrent master, 9a6d4ffc1 (2026-10-13), debug build on Debian forky/sid x86_64, with libssh2 1.11.1. The same code has been there since 7.69.0.\n\n```\ncurl 8.23.0-DEV (x86_64-pc-linux-gnu) libcurl/8.23.0-DEV OpenSSL/3.6.5 zlib/1.3.2 brotli/1.2.0 zstd/1.5.7 libidn2/2.3.8 libssh2/1.11.1 nghttp2/1.70.0 OpenLDAP/2.6.14\nRelease-Date: [unreleased]\nProtocols: dict file ftp ftps gopher gophers http https imap imaps ipfs ipns ldap ldaps mqtt mqtts pop3 pop3s rtsp scp sftp smtp smtps telnet tftp ws wss\nFeatures: alt-svc AsynchDNS brotli Debug HSTS HTTP2 HTTPS-proxy IDN IPv6 Largefile libz SSL threadsafe UnixSockets zstd\n```\n\n## Steps To Reproduce:\nCopy the attached `test3990.pl` to tests/libtest/, and `test3990` and `test3991` to tests/data/. test3990 runs against the test suite's SFTP server, which has an RSA host key by default, with this known_hosts file:\n\n```\n[127.0.0]:PORT ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAqmXRY8k+W9GtpWxYru6ELAXYHdXqjf33ziITGTiJUN\n[127.0.0.1]:PORT ssh-rsa <the server's real key>\n```\n\n```\ncd tests && ./runtests.pl 3990 3991\n```\n\ntest3990 fails, and its trace shows curl taking the `[127.0.0]` entry for 127.0.0.1:\n\n```\nSSH: found host '127.0.0.1' in 'log/known3990'\nSSH: set 'ssh-ed25519' as hostkey type\nFailure establishing ssh session: -5, Unable to exchange encryption keys\n```\n\nThe handshake fails only because the test server has no ed25519 key; a man-in-the-middle server would offer one. test3991 is the control. Its first entry is for `[127.0.0.1.2]:PORT`, which is not a prefix of the host, so curl forces ssh-rsa and the transfer works.\n\n## Impact\n\n## Summary:\nAn attacker who can intercept connections can target a host whose name extends an earlier `[name]:port` entry with the same port, which is most likely with IP addresses such as 10.0.0.1 and 10.0.0.12. An application whose CURLOPT_SSH_KEYFUNCTION callback trusts new hosts would then accept the attacker's key instead of rejecting a mismatch, and authenticate to the attacker. The conditions are otherwise those of CVE-2026-87865: the libssh2 backend and an application-provided key callback. Without an attacker it is also a functional bug. A legitimate connection to such a host fails, either at key exchange or because its key is reported as missing, as in the test above.\n",
+  "weakness": {
+    "id": 475,
+    "name": "Partial String Comparison"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6983635,
+      "file_name": "test3990",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/hkbms4iabzgw0e2dpp39cydzuew2?response-content-disposition=attachment%3B%20filename%3D%22test3990%22%3B%20filename%2A%3DUTF-8%27%27test3990&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ27IN7YAJ%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144612Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA8aCXVzLXdlc3QtMiJHMEUCIQDQ5uHjFP5COX%2F8ukJ9deY1Vj%2FzCYzBMXSp8LB8eeSG7AIgLqaxT2DWAk3sXg6eymD0AFk8ZEC8ztDn2U6aJ1ZL81QquwUI1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDN2ZHwf3Wk7DVeFYeiqPBeVb8hhOQM54N85t3bZZLqAyweUjXrfloJQHkD4cFKh4Rbm6ISoSfokF9Z%2Blwxk2ih3hK7iKTSfAcUvU4HdvYS%2FKN7rWhGIP%2FfaiQx3FBvnjLI8CAYeYC4FwqVSzfRNCHOPqWbT67D3z5fawk4JqWWn%2B4Ol2fZunsm0pHjRJluk60m0mXg%2FQOQEAiEDuXddFS98IEQkY9IA4sq6iRzidmr%2FWAHSVbsXNgEOZRIHctcLMpmm12QSl26attFogNAEZa2bT9%2Fj%2F4tfjVsgkLEE8MronG8lDKzHaJt9yPVOYs%2F%2B6vQ278lj7yEvLnyX4OpL5c2s65D02Bi006HfSQxZyrH6zyausSjksLtMEVn8YHwU2VGy83QRLfG3dl7pMp%2BpHy1HdSLAtCbCw8liNmr0Y0ka%2FuDOS1h%2Fc%2F9md1nsGSZkY0127DmgLZhTsfawcUPcSwbhDBDzz8Cs%2F88o1%2B8jTiz6L7YilU4cw7LajyQbChNUx05iMTyH1ARdoUj%2ByPVUZ4ScE0znMcRk6GoNMfsPtPmk%2Fb86gMnaV31RbhQ5FmoxSLWuQAk2VsWYUb6Bjd7KxmVN2ZuzrsFc2MQv7i7RYDV0GaW9U5K1FWwCrl4%2BvIKb54TCg4drFU7XHV3xnCnlkAocfrZACjC6DUh1Oj7snslSET%2FpXqYtc1r%2FGHtGwOBHo4sS7aaYQXl6TS3ti59uJOmgGsXRxpBSONvRcIdHIEzHF4JSJpr5wgt0yMzLVIcco8TsFq31OC5YEZWp2gDhW6tkHlkcLEE5D3C79IzHD1TPd9aIXk37JXmTkrsIXYry9NK1Cdyki4s8r%2BX6OJsFQtINBheDS6AhbjBFCPt0bGf9tXNC9iSq9BHcUUF9H1twwr8X91gY6sQGB%2BtqLIXOp0Ke5Obk93WWafbeclnZStfAbp3FmRKD4VWZX2Ht2TZyWk%2Fy6uFmSIdRTgLRna8XvNMxvqrf8XTWH83nuHyOZs8cxtO66CleINe%2FV2PtjjcBGfv4Uvsg556KJeCawLay8QnyYd6DJlofJx4Keu5c2U8IKjF15yXQDO7HbLBIfU7jJCHQI0YY0ZGdQT%2FI%2FrHY6v9ukcJFpfx%2FI8j9P%2BJaUsswmRC%2B6YgfEIas%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2d1f3c335368e540e387af52309737ab4cca5fa33cff18fce4f48a4a11799ce5",
+      "file_size": 778,
+      "type": "application/xml",
+      "moderated": null
+    },
+    {
+      "id": 6983636,
+      "file_name": "test3990.pl",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ozkaxk3rrcnashu9emvfjfksvym5?response-content-disposition=attachment%3B%20filename%3D%22test3990.pl%22%3B%20filename%2A%3DUTF-8%27%27test3990.pl&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ27IN7YAJ%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144612Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA8aCXVzLXdlc3QtMiJHMEUCIQDQ5uHjFP5COX%2F8ukJ9deY1Vj%2FzCYzBMXSp8LB8eeSG7AIgLqaxT2DWAk3sXg6eymD0AFk8ZEC8ztDn2U6aJ1ZL81QquwUI1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDN2ZHwf3Wk7DVeFYeiqPBeVb8hhOQM54N85t3bZZLqAyweUjXrfloJQHkD4cFKh4Rbm6ISoSfokF9Z%2Blwxk2ih3hK7iKTSfAcUvU4HdvYS%2FKN7rWhGIP%2FfaiQx3FBvnjLI8CAYeYC4FwqVSzfRNCHOPqWbT67D3z5fawk4JqWWn%2B4Ol2fZunsm0pHjRJluk60m0mXg%2FQOQEAiEDuXddFS98IEQkY9IA4sq6iRzidmr%2FWAHSVbsXNgEOZRIHctcLMpmm12QSl26attFogNAEZa2bT9%2Fj%2F4tfjVsgkLEE8MronG8lDKzHaJt9yPVOYs%2F%2B6vQ278lj7yEvLnyX4OpL5c2s65D02Bi006HfSQxZyrH6zyausSjksLtMEVn8YHwU2VGy83QRLfG3dl7pMp%2BpHy1HdSLAtCbCw8liNmr0Y0ka%2FuDOS1h%2Fc%2F9md1nsGSZkY0127DmgLZhTsfawcUPcSwbhDBDzz8Cs%2F88o1%2B8jTiz6L7YilU4cw7LajyQbChNUx05iMTyH1ARdoUj%2ByPVUZ4ScE0znMcRk6GoNMfsPtPmk%2Fb86gMnaV31RbhQ5FmoxSLWuQAk2VsWYUb6Bjd7KxmVN2ZuzrsFc2MQv7i7RYDV0GaW9U5K1FWwCrl4%2BvIKb54TCg4drFU7XHV3xnCnlkAocfrZACjC6DUh1Oj7snslSET%2FpXqYtc1r%2FGHtGwOBHo4sS7aaYQXl6TS3ti59uJOmgGsXRxpBSONvRcIdHIEzHF4JSJpr5wgt0yMzLVIcco8TsFq31OC5YEZWp2gDhW6tkHlkcLEE5D3C79IzHD1TPd9aIXk37JXmTkrsIXYry9NK1Cdyki4s8r%2BX6OJsFQtINBheDS6AhbjBFCPt0bGf9tXNC9iSq9BHcUUF9H1twwr8X91gY6sQGB%2BtqLIXOp0Ke5Obk93WWafbeclnZStfAbp3FmRKD4VWZX2Ht2TZyWk%2Fy6uFmSIdRTgLRna8XvNMxvqrf8XTWH83nuHyOZs8cxtO66CleINe%2FV2PtjjcBGfv4Uvsg556KJeCawLay8QnyYd6DJlofJx4Keu5c2U8IKjF15yXQDO7HbLBIfU7jJCHQI0YY0ZGdQT%2FI%2FrHY6v9ukcJFpfx%2FI8j9P%2BJaUsswmRC%2B6YgfEIas%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3185c517b9e1a3c19e4128e89dc2789213a27c7ed5b345508836a725edb35db3",
+      "file_size": 1039,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6983637,
+      "file_name": "test3991",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/q0fspqvpf24tm274mmnox8h0p6fs?response-content-disposition=attachment%3B%20filename%3D%22test3991%22%3B%20filename%2A%3DUTF-8%27%27test3991&response-content-type=application%2Foctet-stream&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ27IN7YAJ%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144612Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA8aCXVzLXdlc3QtMiJHMEUCIQDQ5uHjFP5COX%2F8ukJ9deY1Vj%2FzCYzBMXSp8LB8eeSG7AIgLqaxT2DWAk3sXg6eymD0AFk8ZEC8ztDn2U6aJ1ZL81QquwUI1%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDN2ZHwf3Wk7DVeFYeiqPBeVb8hhOQM54N85t3bZZLqAyweUjXrfloJQHkD4cFKh4Rbm6ISoSfokF9Z%2Blwxk2ih3hK7iKTSfAcUvU4HdvYS%2FKN7rWhGIP%2FfaiQx3FBvnjLI8CAYeYC4FwqVSzfRNCHOPqWbT67D3z5fawk4JqWWn%2B4Ol2fZunsm0pHjRJluk60m0mXg%2FQOQEAiEDuXddFS98IEQkY9IA4sq6iRzidmr%2FWAHSVbsXNgEOZRIHctcLMpmm12QSl26attFogNAEZa2bT9%2Fj%2F4tfjVsgkLEE8MronG8lDKzHaJt9yPVOYs%2F%2B6vQ278lj7yEvLnyX4OpL5c2s65D02Bi006HfSQxZyrH6zyausSjksLtMEVn8YHwU2VGy83QRLfG3dl7pMp%2BpHy1HdSLAtCbCw8liNmr0Y0ka%2FuDOS1h%2Fc%2F9md1nsGSZkY0127DmgLZhTsfawcUPcSwbhDBDzz8Cs%2F88o1%2B8jTiz6L7YilU4cw7LajyQbChNUx05iMTyH1ARdoUj%2ByPVUZ4ScE0znMcRk6GoNMfsPtPmk%2Fb86gMnaV31RbhQ5FmoxSLWuQAk2VsWYUb6Bjd7KxmVN2ZuzrsFc2MQv7i7RYDV0GaW9U5K1FWwCrl4%2BvIKb54TCg4drFU7XHV3xnCnlkAocfrZACjC6DUh1Oj7snslSET%2FpXqYtc1r%2FGHtGwOBHo4sS7aaYQXl6TS3ti59uJOmgGsXRxpBSONvRcIdHIEzHF4JSJpr5wgt0yMzLVIcco8TsFq31OC5YEZWp2gDhW6tkHlkcLEE5D3C79IzHD1TPd9aIXk37JXmTkrsIXYry9NK1Cdyki4s8r%2BX6OJsFQtINBheDS6AhbjBFCPt0bGf9tXNC9iSq9BHcUUF9H1twwr8X91gY6sQGB%2BtqLIXOp0Ke5Obk93WWafbeclnZStfAbp3FmRKD4VWZX2Ht2TZyWk%2Fy6uFmSIdRTgLRna8XvNMxvqrf8XTWH83nuHyOZs8cxtO66CleINe%2FV2PtjjcBGfv4Uvsg556KJeCawLay8QnyYd6DJlofJx4Keu5c2U8IKjF15yXQDO7HbLBIfU7jJCHQI0YY0ZGdQT%2FI%2FrHY6v9ukcJFpfx%2FI8j9P%2BJaUsswmRC%2B6YgfEIas%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ea9b783fb5d1181bb5fc2b8a073afea78ce05342ff60371aadaf41dd16a64645",
+      "file_size": 772,
+      "type": "application/xml",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

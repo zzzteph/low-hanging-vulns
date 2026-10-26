@@ -1,0 +1,122 @@
+{
+  "id": 4122175,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTIyMTc1",
+  "url": "https://hackerone.com/reports/4122175",
+  "title": "CVE-2026-111950: TLS session cache diff scheme reuse",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-17T10:46:41.364Z",
+  "submitted_at": "2026-10-17T10:46:41.691Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "stze",
+    "url": "/stze",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-111950"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-10-26T07:54:25.383Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-26T07:19:19.521Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\ncurl 8.12.0 through 8.23.0 can reuse a TLS session created for an FTPS\nconnection when opening an HTTPS connection to the same hostname and port.\nThe TLS session-cache key contains the hostname, port, transport, TLS backend,\nand TLS configuration, but it does not contain the URL scheme or application\nprotocol family.\n\nThis restores the condition described as **CRL-01-011 FTPS TLS session reuse**\nin curl's 2016 Cure53 audit. That finding was rated Low, and curl fixed it in\ncommit `1671d84b38ac61f0852e8ff2915fef3346dc53f7` by requiring the cached\nsession's scheme to match. The scheme check was lost when the TLS session\ncache was rewritten in commit\n`fa0ccd9f1fbbbd77bf50b26e3ba231ea6c729474`.\n\nUnder the same limited attacker model as the earlier finding, an active\nnetwork attacker can redirect an HTTPS connection to an FTPS data port. curl\nthen presents the FTPS control session while believing it is opening HTTPS.\nAn FTPS server that requires control/data TLS-session reuse accepts the\nconnection and emits an attacker-controlled file. If that file contains a\nvalid HTTP response, curl accepts its body as the verified HTTPS response.\n\nI suggest **Low** severity because exploitation requires several uncommon\npreconditions and timing, but the result is a concrete HTTPS integrity bypass.\n\n## Affected versions\n\n- First affected release tested: curl 8.12.0\n- Latest affected release tested: curl 8.23.0\n- Current `master` at `eaa9103225` is also affected\n- curl 8.11.1 is not affected\n\nThe regression was introduced by the TLS session-cache rewrite in\n`fa0ccd9f1fbbbd77bf50b26e3ba231ea6c729474`, first released in 8.12.0.\n\nI reproduced the issue from the official `curl-8_23_0` tag with shared Release\nbuilds using OpenSSL and GnuTLS. The peer key is backend-independent, so other\nbackends that support cached session resumption should be reviewed, but I have\nnot included them in the confirmed scope.\n\n## Test environment\n\n- Ubuntu 24.04.3 LTS, GCC 13.3.0\n- OpenSSL 3.0.13 and GnuTLS 3.8.3\n- `curl-8_23_0`: `3163ec065643ba20709f190111f42c3e1fe95273`\n- `curl-8_12_0`: `34cf9d54a46598c44938aa7598820484d7af7133`\n- `curl-8_11_1`: `75a2079d5c28debb2eaa848ca9430f1fe0d7844c`\n\n## Root cause\n\n`ssl_peer_key_build()` in `lib/vtls/vtls_scache.c` starts the cache key with:\n\n```c\nresult = curlx_dyn_addf(&buf, \"%s:%d:KEY-V2\",\n                        peer->origin->hostname, peer->origin->port);\n```\n\nIt then adds transport, verification settings, TLS versions/options,\ntrust-store inputs, pins, client-auth fields, and the TLS implementation. It\nnever adds `peer->origin->scheme` or `peer->origin->scheme->family`.\n\nConsequently, verified FTPS and HTTPS filters with the same host, port, and\nTLS configuration construct the same key. `Curl_ssl_scache_take()` returns the\nFTPS session to the HTTPS filter. OpenSSL applies it without an application\nprotocol check. GnuTLS also applies it when the cached ALPN is null, which is\nthe normal FTPS case.\n\nALPN does not contain this case. FTPS does not negotiate ALPN, so the cached\nsession has no ALPN. On resumption, the FTPS endpoint ignores the HTTP ALPN\noffer, and curl falls back to HTTP/1.x. The reproducer confirms this behavior\nwith both OpenSSL and GnuTLS clients.\n\nBefore the rewrite, `Curl_ssl_getsessionid()` contained this comparison:\n\n```c\nstrcasecompare(cf->conn->handler->scheme, check->scheme)\n```\n\nThe rewrite removed `Curl_ssl_session.scheme` and did not put the scheme into\nthe replacement `ssl_peer_key`.\n\nRelevant history:\n\n- Prior Low finding: https://curl.se/docs/audit/cure53-curl-report-2016.pdf\n- Prior fix: https://github.com/curl/curl/commit/1671d84b38ac61f0852e8ff2915fef3346dc53f7\n- Regression commit: https://github.com/curl/curl/commit/fa0ccd9f1fbbbd77bf50b26e3ba231ea6c729474\n- Pre-rewrite design discussion listing `scheme` as a cache discriminator:\n  https://github.com/curl/curl/discussions/15684\n\n## Attack sequence represented by the reproducer\n\n1. curl starts `ftps://host:P/evil-file` and establishes FTPS control session\n   `S` with full certificate verification.\n2. The FTPS server advertises a passive data port. The MitM redirects curl's\n   first connection to that port back to an FTPS control endpoint and holds it\n   open. curl correctly resumes `S` there.\n3. curl concurrently starts `https://host:P/good-file` using the same shared\n   TLS session cache.\n4. The MitM redirects that connection to the real FTPS data port.\n5. Because the cache key does not distinguish FTPS from HTTPS, curl presents\n   `S`. The data endpoint's session-association check succeeds.\n6. The endpoint emits `evil-file`, whose raw bytes form an HTTP/1.1 response.\n   curl reports successful HTTPS verification and returns the attacker's body.\n\nThe test server compares the TLS 1.2 session IDs. It releases\n`ATTACKER-CONTROLLED-CONTENT` only when the HTTPS session ID exactly matches\nthe FTPS control session ID. It sends the raw HTTP-shaped file immediately\nafter that check, without interpreting the HTTP request; it only drains the\nalready-sent request afterward to make socket shutdown deterministic. A\ngeneric malicious HTTPS server cannot satisfy the session-ID condition.\n\n## Minimal reproducer\n\nAttach the `cross-scheme-tls-session` directory and run:\n\n```console\npython3 run.py \\\n  --build /path/to/curl-8.23.0-build \\\n  --source /path/to/curl-8.23.0\n```\n\nRequirements are Python 3, a C compiler, pthreads, the OpenSSL CLI and\ndevelopment libraries, and a CMake-style shared curl build. `run.py` compiles\n`server.c` and `repro.c` in a temporary directory, generates a localhost\ncertificate, starts the server, and runs the client. It links the absolute\n`libcurl.so` path from `--build` and fails if that library is absent.\n\nThe certificate is explicitly trusted with `CURLOPT_CAINFO`; neither\n`CURLOPT_SSL_VERIFYPEER` nor `CURLOPT_SSL_VERIFYHOST` is disabled. The client\nuses the documented `CURL_LOCK_DATA_SSL_SESSION` share option and documented\nlock callbacks.\n\nExpected vulnerable output (abridged):\n\n```text\nftps_result=0 (No error)\nhttps_result=0 (No error)\nhttps_verify_result=0\nhttps_body=ATTACKER-CONTROLLED-CONTENT\nattack_content_accepted=1\nFTPS_FAKE_DATA_REUSED=1\nFTPS_FAKE_DATA_MATCHES_CONTROL=1\nHTTPS_CROSS_SCHEME_REUSED=1\nHTTPS_SESSION_MATCHES_FTPS_CONTROL=1\nATTACK_RELEASED=1\nclient_exit=0\nserver_exit=0\n```\n\nI obtained this result in 10/10 consecutive runs against the `curl-8_23_0`\ntag built in Release mode with OpenSSL.\n\nThis is a state-separation flaw rather than memory corruption, so an ASan\ntrace is not applicable. The equivalent direct evidence is the server-side\ncomparison of the TLS session IDs, together with the version and patch\ncontrols below.\n\n## Controls\n\n### Pre-regression control\n\nRunning the same harness against curl 8.11.1 with `--expect-blocked` produces:\n\n```text\nftps_result=0 (No error)\nhttps_result=52 (Server returned nothing (no headers, no data))\nattack_content_accepted=0\nFTPS_FAKE_DATA_MATCHES_CONTROL=1\nHTTPS_CROSS_SCHEME_REUSED=0\nHTTPS_SESSION_MATCHES_FTPS_CONTROL=0\nATTACK_RELEASED=0\n```\n\n### Patched control\n\n`fix.patch` adds the origin scheme to the peer key and a unit test. After\napplying it and rebuilding:\n\n```console\npython3 run.py --expect-blocked \\\n  --build /path/to/patched-build \\\n  --source /path/to/patched-source\n```\n\nThe patched current tree produces the same blocked outcome as 8.11.1. The\nexisting FTPS control-to-data reuse continues to work:\n\n```text\nFTPS_FAKE_DATA_REUSED=1\nFTPS_FAKE_DATA_MATCHES_CONTROL=1\n```\n\nThe proposed unit test (`unit3304`) also passes.\n\n## Suggested fix\n\nRestore scheme separation in `ssl_peer_key_build()`, for example:\n\n```c\nresult = cf_ssl_peer_key_add_string(&buf, \"SCHEME\",\n                                    peer->origin->scheme->name);\nif(result)\n  goto out;\n```\n\nThe attached `fix.patch` contains this change and a regression test. If curl\nwants to preserve session reuse between secure and STARTTLS variants of the\nsame application protocol, keying by `peer->origin->scheme->family` instead\nwould also stop the demonstrated FTP-to-HTTP crossing. Exact scheme matching\nrestores the invariant enforced from 2016 through 8.11.1.\n\n## Suggested classification\n\n- Severity: Low\n- Impact: HTTPS response integrity violation under a constrained active-MitM\n  scenario\n- Possible CWE: CWE-345 (Insufficient Verification of Data Authenticity) or\n  CWE-488 (Exposure of Data Element to Wrong Session)\n\n## Impact\n\n## Impact and attack prerequisites\n\nThe impact is substitution of attacker-chosen bytes for an HTTPS response\nwithout disabling certificate or hostname verification.\n\nThe demonstrated attack requires all of the following:\n\n1. The application lets the attacker cause an FTPS transfer and an HTTPS\n   transfer to the same hostname and numeric port.\n2. The two easy handles share a TLS session cache. This is a documented\n   libcurl configuration; easy handles in one multi handle also share this\n   cache by default.\n3. The attacker has an active MitM position and can redirect TCP connections,\n   but cannot forge certificates or decrypt TLS.\n4. An FTPS service for that hostname uses TLS session reuse to associate its\n   control and data connections.\n5. The attacker can select or supply the downloaded FTP file. Its bytes begin\n   with a syntactically valid HTTP response, which is necessary because modern\n   curl rejects HTTP/0.9 by default.\n6. The demonstrated path uses TLS 1.2 and requires concurrent transfers.\n\nThese constraints make Low appropriate. They do not eliminate the security\nboundary: without the cross-scheme session reuse, the FTPS data endpoint\nrejects the redirected HTTPS connection and releases no file.",
+  "weakness": {
+    "id": 118,
+    "name": "Incorrect Comparison"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7014228,
+      "file_name": "curl-cross-scheme-tls-session-hackerone.tar.gz",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/sgsbiysucckludecycibk2q0gsep?response-content-disposition=attachment%3B%20filename%3D%22curl-cross-scheme-tls-session-hackerone.tar.gz%22%3B%20filename%2A%3DUTF-8%27%27curl-cross-scheme-tls-session-hackerone.tar.gz&response-content-type=application%2Fgzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSNTXB7TH%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T144610Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEA4aCXVzLXdlc3QtMiJIMEYCIQD2uaeun99%2BQVtkaIv%2FVOUfa8%2BgJr0EhO50wu8XZhl%2F2wIhAJGC38JWH8nDFZXELoyYDDsl2CJxFAuIdSio8ZTxzu1pKrsFCNf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5Igwv0GxrlCN9avqqBrAqjwUMkbwYWGgxMd7aapEipn%2FyuXdR4gvFOeghIzwWMmcj4XFw%2B3TwvneT%2FSwDfTwtg%2FMvvR7OyWjIUr%2BAhAsDBIJyCkG14jzjARe0jB%2BozHdx3i0iXBJpf%2BUiqSy0zwf4dtee%2FzYzOjowHZAx2esePRpNfJpTsb1Se2r2%2FizvruZxxGLPfw4fYVnzV4oqL2QM6hxfoB93ob9e%2BNMTxEuRXAqh0vKz4XpQHnyey3mmcY2wpP%2BTmWFBmYGZn%2F5TnhdtQR7MRwrVb7q9I8UGO3aJyPGWvkbBzO1fsy2AXV24Fpr4tEyTa47QE6gbwsj2rtOZ3Pm%2BwC4R2jy42ROIVQhjrHcbZKTiO1vYUcYvKRxPTMyOhEQDZgDAwDaWiw%2FhZkRbK5nMDwPST5WquK29x2VkuECnXSBKOEv7eWw3tdiZKWPUlDl8bxkABHtLdJvwFaNm6ZJDat9ATZf5d6pO0p4Rpcx%2Bwr00Siwu%2F7qEcpSQ2Bghgce19cJxCt20eKiuwtZuqEStzzyYMfXxTMazQyqOlWgVITZbmO3OiJGiIMg6cGwk6hTW34LntEgqGY5Mk0cwaSYRw4AJVgczCUH2tFEZzmij6Aq4GaYHhkcpsOklffQornmwTPpcCrNTeCx%2FvX1tQrZnTtzqkWKtbd7QOPPCI6mCaVanme0qUKxdTUchRvHpD0ZpxrrKk24h5FereCdi%2BwJmKGCNEKnpr3BfvG4bYOfZQbyhSkH9Ffj62wxOisG%2BaP1bXWr2CmxjzewJpiBBTQIiEsPdlzpk%2BNzkF8amlgmKmHckJ3ctOiaSuzr6SnJ7HjmntPoMi2DXdcESYGnkjGU5tRAFzLRKA3XnYvBxkFVSq%2B16kylBHZzyPQvpEfj8MKSv%2FdYGOrABbCxrzi7I7uS5YwEbRfmgli4rszYX2opGeKEShvcmSFzkIm38n4%2BxSUlUX0dKfqruVw0BRApxyY14U0i%2B7qNHT589CKboEWQ%2F%2FRyLy9Mna%2BatKu0HoEFMmij%2Fz%2B9rUsXNdZne0V0KLZOeRTS5elFYjuklllIBHkFvgKBaW%2FLmTupyHoMGaf2tX0nAJVHs7IXjH2hAaM4ruFYV35ve5qL2JXcnYh62vTo7Pq2CENTfZpg%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c62de87b6a0ea216cd728a3364c99a337ea4f6f45ca2bb6794f014a2b74edc58",
+      "file_size": 11466,
+      "type": "application/gzip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
