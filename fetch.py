@@ -6,64 +6,44 @@ import time
 
 from categories import get_category
 
-GRAPHQL_URL = "https://hackerone.com/graphql"
+# Public Hacker API (no auth needed). hackerone.com/graphql is behind a
+# Cloudflare WAF rule that blocks scripted requests since late Oct 2026.
+HACKTIVITY_URL = "https://api.hackerone.com/v1/hackers/hacktivity"
 INDEX_FILE  = "bugbounty/H1/reports.json"
 REPORTS_DIR = "bugbounty/H1/reports"
 
-PAGE_SIZE = 25
-MAX_OFFSET = 10000
+PAGE_SIZE = 50    # API maximum; larger values are silently capped
+MAX_PAGES = 200   # safety cap (10 000 entries)
 HEADERS = {
     "Content-Type": "application/json",
     "User-Agent": "Mozilla/5.0",
 }
 
-QUERY = """
-query HacktivitySearchQuery($queryString: String!, $from: Int, $size: Int, $sort: SortInput!) {
-  search(
-    index: CompleteHacktivityReportIndex
-    query_string: $queryString
-    from: $from
-    size: $size
-    sort: $sort
-  ) {
-    total_count
-    nodes {
-      ... on HacktivityDocument {
-        report {
-          title
-          url
-          disclosed_at
-        }
-        severity_rating
-        cwe
-        cve_ids
-        team {
-          handle
-          name
-        }
-      }
-    }
-  }
-}
-"""
-
 
 # ── Step 1: fetch the index ───────────────────────────────────────────────────
 
-def fetch_index_page(from_offset: int, size: int = PAGE_SIZE) -> dict:
-    payload = {
-        "operationName": "HacktivitySearchQuery",
-        "variables": {
-            "queryString": "disclosed:true",
-            "size": size,
-            "from": from_offset,
-            "sort": {"field": "disclosed_at", "direction": "DESC"},
-        },
-        "query": QUERY,
+def fetch_index_page(page: int, size: int = PAGE_SIZE) -> list[dict]:
+    """One page of disclosed hacktivity, newest-first. `links.next` is not
+    reliably present, so callers page until an empty `data` list."""
+    params = {
+        "queryString": "disclosed:true",
+        "page[number]": page,
+        "page[size]": size,
     }
-    resp = requests.post(GRAPHQL_URL, headers=HEADERS, json=payload, timeout=30)
+    resp = requests.get(HACKTIVITY_URL, headers=HEADERS, params=params, timeout=30)
+    _raise_for_status_verbose(resp)
+    return resp.json()["data"]
+
+
+def _raise_for_status_verbose(resp: requests.Response) -> None:
+    """raise_for_status, but first log enough of the response to tell a
+    Cloudflare block (cf-mitigated header / challenge page) from an API error."""
+    if resp.ok:
+        return
+    hdrs = {k: resp.headers[k] for k in ("server", "cf-ray", "cf-mitigated") if k in resp.headers}
+    print(f"  HTTP {resp.status_code} from {resp.url} {hdrs}")
+    print(f"  body: {resp.text[:500]!r}")
     resp.raise_for_status()
-    return resp.json()
 
 
 def build_index() -> tuple[list[dict], int]:
@@ -71,9 +51,8 @@ def build_index() -> tuple[list[dict], int]:
     Load existing index, fetch only new stubs (newest-first), save and return
     (all_entries, new_count).
 
-    HackerOne's Elasticsearch backend caps pagination at 10 000 results.
-    We stop at MAX_OFFSET to avoid hitting that wall — older reports beyond
-    that point are simply inaccessible via this API.
+    We stop after MAX_PAGES so a missing/stale index can't turn into an
+    unbounded crawl of the whole hacktivity feed.
     """
     existing: list[dict] = []
     if os.path.exists(INDEX_FILE):
@@ -82,25 +61,24 @@ def build_index() -> tuple[list[dict], int]:
 
     known_urls = {e["url"] for e in existing}
     new_entries: list[dict] = []
-    offset = 0
+    page = 1
 
     while True:
-        data = fetch_index_page(offset)
-        nodes = data["data"]["search"]["nodes"]
-        if not nodes:
+        items = fetch_index_page(page)
+        if not items:
             break
         hit_existing = False
-        for node in nodes:
-            entry = _node_to_entry(node)
+        for item in items:
+            entry = _item_to_entry(item)
             if entry["url"] in known_urls:
                 hit_existing = True
                 break
             new_entries.append(entry)
         if hit_existing:
             break
-        offset += PAGE_SIZE
-        if offset > MAX_OFFSET:
-            print(f"  NOTE: reached Elasticsearch offset limit ({MAX_OFFSET}); older reports not accessible via API.")
+        page += 1
+        if page > MAX_PAGES:
+            print(f"  NOTE: reached page limit ({MAX_PAGES}); stopping index walk.")
             break
         time.sleep(0.5)
 
@@ -114,17 +92,19 @@ def build_index() -> tuple[list[dict], int]:
     return all_entries, len(new_entries)
 
 
-def _node_to_entry(node: dict) -> dict:
-    report = node.get("report") or {}
+def _item_to_entry(item: dict) -> dict:
+    attrs = item.get("attributes") or {}
+    program = ((item.get("relationships") or {}).get("program") or {}).get("data") or {}
+    team = program.get("attributes") or {}
     return {
-        "title": report.get("title"),
-        "url": report.get("url"),
-        "disclosed_at": report.get("disclosed_at"),
-        "severity": node.get("severity_rating"),
-        "cwe": node.get("cwe"),
-        "cve_ids": node.get("cve_ids"),
-        "team_handle": (node.get("team") or {}).get("handle"),
-        "team_name": (node.get("team") or {}).get("name"),
+        "title": attrs.get("title"),
+        "url": attrs.get("url"),
+        "disclosed_at": attrs.get("disclosed_at"),
+        "severity": attrs.get("severity_rating"),
+        "cwe": attrs.get("cwe"),
+        "cve_ids": attrs.get("cve_ids"),
+        "team_handle": team.get("handle"),
+        "team_name": team.get("name"),
     }
 
 
