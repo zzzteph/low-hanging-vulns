@@ -1,0 +1,133 @@
+{
+  "id": 4040149,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDQwMTQ5",
+  "url": "https://hackerone.com/reports/4040149",
+  "title": "wlc: Project-wide download fails part-way and leaves stale archives on disk; filesystem errors surface as raw Python tracebacks.",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-18T15:00:18.005Z",
+  "submitted_at": "2026-09-18T15:00:18.416Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "sumit-sabhaya",
+    "url": "/sumit-sabhaya",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/3qa7ji47fvzz8y3kgjp4jx63yeet/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19468,
+    "url": "https://hackerone.com/weblate",
+    "handle": "weblate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Weblate",
+      "twitter_handle": "WeblateOrg",
+      "website": "https://weblate.org/",
+      "about": "Weblate is a libre software web-based continuous localization system"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-30T05:07:36.183Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-30T05:07:34.613Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`wlc` (the Weblate command-line client, https://github.com/WeblateOrg/wlc) does not handle filesystem errors anywhere in the CLI. This causes two related problems:\n\n1. **Partial download state (CWE-755).** `wlc download <project>` writes one archive per component in a loop. If a component fails after earlier ones succeeded, the already-written archives stay on disk, the command exits 1, and the CLI never reports which archives were written and which failed. Automation that consumes the output directory (CI/CD publish pipelines) cannot distinguish a complete result from a partial one and will pick up stale archives.\n2. **Raw tracebacks on stderr (CWE-209).** Any filesystem error (unwritable output directory, output path colliding with an existing file, missing upload input) propagates out of `main()` as an uncaught `OSError` and prints a full Python traceback instead of the single-line `Error: <message>` pattern used by every other failure mode. The traceback exposes the operator's local absolute paths and username (e.g. `/home/<user>/...`) and internal package frames.\n\nVerified against the latest release **2.2.0** (PyPI) and the current **main** branch (commit `1b865157`), running as a non-root user against a minimal local stub of the Weblate API. `<url>`/`<key>` below are the API endpoint and token; `<project>/<component>/<lang>` are existing objects on the instance.\n\n## Steps To Reproduce\n\n### Step 1 — Project download fails part-way: stale archives left on disk\n\nSetup: `<project>` has two components; the second one fails (its `/file/` endpoint returns HTTP 500).\n\n1. Start with an empty output directory:\n\n```bash\nmkdir -p /tmp/dl && rm -f /tmp/dl/*\n```\n\n2. Run the project download:\n\n```bash\nwlc --url <url> --key <key> download -o /tmp/dl <project>\n```\n\n3. Observed (with component 2 failing):\n\n```\n$ wlc --url http://127.0.0.1:18080/api --key TESTKEY --allow-insecure-http download -o /tmp/dl proj\ndownloaded translations for component: proj/comp1\nError: HTTP error 500: Internal Server Error {'detail': 'boom'}\n$ echo $?\n1\n$ ls -la /tmp/dl/\n-rw-rw-r--  1 user user  217 Sep 18 09:28 proj-comp1.zip\n```\n\nExpected: either a complete/validated set of archives, or a clear report of which components succeeded and which failed. **Actual:** component 1's archive remains on disk, no write summary is printed, exit code is 1. Downstream steps driven by `&&` stop, but any step that ignores/tees the exit code or re-runs the pipeline continues with the stale `proj-comp1.zip`.\n\n### Step 2 — Unwritable output directory: raw `PermissionError` traceback\n\n1. Create an unwritable directory:\n\n```bash\nmkdir /tmp/wlc_ro && chmod 555 /tmp/wlc_ro\n```\n\n2. Run a component download writing into it:\n\n```bash\nwlc --url <url> --key <key> download -o /tmp/wlc_ro/out <project>/<component>\n```\n\n3. Expected: `Error: [Errno 13] Permission denied: '/tmp/wlc_ro/out'` on stderr, exit 1.\n\n**Actual:**\n\n```\nTraceback (most recent call last):\n  File \"/home/<user>/.local/bin/wlc\", line 7, in <module>\n    sys.exit(main())\n  File \"/home/<user>/.local/lib/python3.13/site-packages/wlc/main.py\", line 1121, in main\n    command.run()\n  File \"/home/<user>/.local/lib/python3.13/site-packages/wlc/main.py\", line 219, in _write_download_file\n    path.parent.mkdir(exist_ok=True, parents=True)\n  File \"/usr/lib/python3.13/pathlib/_local.py\", line 724, in mkdir\n    os.mkdir(self, mode)\nPermissionError: [Errno 13] Permission denied: '/tmp/wlc_ro/out'\n```\n\nFull traceback (multiple absolute paths including the username), then exit code 1.\n\n### Step 3 — Output path collides with an existing file: raw `FileExistsError` traceback\n\n1. Create a regular file named as the intended output directory:\n\n```bash\ntouch out.zip\n```\n\n2. Run a component download with `-o out.zip` (for project/component downloads `-o` is treated as a directory, without pre-validation):\n\n```bash\nwlc --url <url> --key <key> download -o out.zip <project>/<component>\n```\n\n3. Expected: a clear `Error: ...` and exit 1.\n\n**Actual:**\n\n```\nFile \".../wlc/main.py\", line 219, in _write_download_file\n    path.parent.mkdir(exist_ok=True, parents=True)\nFile \"/usr/lib/python3.13/pathlib/_local.py\", line 724, in mkdir\n    os.mkdir(self, mode)\nFileExistsError: [Errno 17] File exists: 'out.zip'\n```\n\n### Step 4 — Upload with missing input file: raw `FileNotFoundError` traceback\n\n1. Run an upload referencing a non-existent file:\n\n```bash\nwlc --url <url> --key <key> upload -i /tmp/does_not_exist.po <project>/<component>/<lang>\n```\n\n2. Expected: `Error: ...` and exit 1.\n\n**Actual:**\n\n```\nFile \".../wlc/main.py\", line 1004, in run\n    with open(self.args.input, \"rb\") as handle:\nFileNotFoundError: [Errno 2] No such file or directory: '/tmp/does_not_exist.po'\n```\n\n## Vulnerability Details\n\n- **Affected code (wlc/main.py):**\n  - `main()` — exception handlers catch `WLCConfigurationError`, `WeblateDeniedError`, `RequestException`, `(CommandError, WeblateException)`, but **not `OSError`**.\n  - `Download.download_component()` / `_write_download_file()` (~line 211/219) — `path.parent.mkdir()` and `os.open()` raise uncaught `PermissionError` / `FileExistsError`.\n  - `Upload.run()` (~line 996/1004) — `open(self.args.input, \"rb\")` raises uncaught `FileNotFoundError`.\n- Present in release 2.2.0 and in main branch `1b865157` (same code, line numbers shifted to 216/996).\n- The translation-download `-o <existing-dir>` case is **not** affected: since 2.2.0 `_write_download_file()` raises `CommandError(\"Refusing to write downloaded file to non-regular path: ...\")`, so that path is already handled.\n\n## Weakness\n\n- CWE-755: Improper Handling of Exceptional Conditions (primary)\n- CWE-209: Generation of Error Message Containing Sensitive Information (secondary)\n\n## Remediation\n\n1. Add an `OSError` handler in `main()` next to the existing ones:\n\n```python\nexcept OSError as error:\n    print_stderr(f\"Error: {error}\")\n    return 1\n```\n\nNote: the `RequestException` handler uses exit code 10; this handler should use 1, consistent with `CommandError`.\n\n2. In `download_component()`, validate the output path **before** calling `_write_download_file()`: if `--output` exists and is not a directory, raise a concise `CommandError`. The existing non-regular-path guard inside `_write_download_file()` runs after `mkdir` and does not cover the file-as-parent case (Step 3).\n\n3. For project-wide downloads, print a summary of written files (or stage writes and rename on success) so automation can distinguish complete from partial results (Step 1).\n\n## References\n\n- Source: https://github.com/WeblateOrg/wlc\n- Affected file: https://github.com/WeblateOrg/wlc/blob/main/wlc/main.py\n- Verified against: release 2.2.0 (tag `2.2.0`) and main commit `1b865157`\n- wlc-evidence.zip = demostrated each proof of file\n\n## Impact\n\n- **CWE-755 (primary):** failed project downloads leave a mixture of fresh and stale archives with no written-files report. In CI/CD pipelines that publish the output directory, incomplete translation bundles can reach production without detection, or a build fails on one component while another component's archive quietly persists and gets reused on the next run. Integrity/availability problem for the automation layer.\n- **CWE-209 (secondary):** raw tracebacks expose the operator's local absolute paths and username into stderr. In environments where stderr is captured and persisted (CI logs, journald, monitoring), that data lands where it does not belong.",
+  "weakness": {
+    "id": 82,
+    "name": "Information Exposure Through an Error Message"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6757168,
+      "file_name": "wlc-evidence.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/aj7etp8hno43twtd2ddp098l025i?response-content-disposition=attachment%3B%20filename%3D%22wlc-evidence.zip%22%3B%20filename%2A%3DUTF-8%27%27wlc-evidence.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQ7AM4Z5A%2F20261101%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261101T132548Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJFMEMCID5adq6pO%2Bg8nZsfMCqjLZ4Rdg8Yj9BYXFLk6%2BthksyyAh8M5NEtiIRn3Pmz3xdBzZhn9n%2Bs0eOIv%2BVmT0IkIIqMKrIFCGUQAxoMMDEzNjE5Mjc0ODQ5IgzTXK2ekc12FpFBLisqjwXtjfaPn1AO%2BBfSWqYPwGpNPuyMb%2BSBYzIflI%2BxIDZzbmRMkxmRmRfve7Og572rZum0JbAAWtj92NlEwSptPpxyYGmS8x%2Fjxy8sGEdpFI%2BDN5WZiNMJV3U3gel68Dedd8iVV4bnWbu0eMwrStnPhBCK28trjgD%2FHvNY%2BMj3wgBI1ftoFHnhhkmsEFPaNlI8sfTZ3w4FBsjy2%2FUtkzhIg6INpu3Ewvz5d5B8iKCNr%2BigQkk%2F2WjddGv4QvnW76t6h8djrdAwEFSN2kwKM2SeJVyWigPwrNc4dDC0hYPRKxkNuUw3XGj6VnlN1gHdJFTp5%2BSDVFdL45LdaKDgPZ93Y4NjCUYOMDvPKNqpcMKVMmsL%2FFfKj5WD%2FzgxxE1PJ6skaAiuU9ch0XbPZUs6g5FD8ExrqZojB94YOxfEWugtdOp9E54Ft%2Bv4g0VgjxesoCpX2DUft29q5OZUB%2BCdsgCAmFSC4pLHIroeUKOfyAa3mg6Qi%2Fq1TjX%2BbprR4c4g%2BbReYiDaFUJuBNCmEh70aIzvUxKDdmLx7DgqdP2YHpNXbd075HpsbCkKQqTE7GidJ5xpn2yHHqQ473HfdjvohSRFPkeWRBWiewcRYSQig%2BkZUoWXEjjlFDflxO5v0zYAEVlaZaDSSruB36e1M6X0xHDHqtg1OkJ6aMjOmko43EGW2PDObpGRAnad7OWoBBR6BEpHZs%2BWNTjHI31kA%2F8QBICuM2Y%2BZeMLbCiXrmXDdojwghcwPnMCjPwVzp3Eh%2BIa6hzdBqV2DkPwkzFtsVPRhUREzh5gJuktyF8dE5MZoZb9nAm03Teejg99GJ3x8c1WYgNCXpeZKr6dkB1DC2982nGs70t6rB%2BpkYzqvZwviA8DTklqMPLqnNcGOrMBpWzfTteTsZ5SPHT1OC4E1tG0E7nPvj2ZP5e4wkiEP%2BSTu645kMHFrN1qh1e97c9HCYsem8a%2Bl7CqBtlUEC%2F7BrKCxyVeZIQsN12OlGLQgEFFk%2BM2awzVi3pZN157e8SzKD6PMGKi%2FPbVY1HtSBB0X0GncZ%2Fe6Dw3XUSoucZUdIQlCxTDDB8C6lYTamc9Sb6azS4TfY9Npg1YX%2Bhck6zGmC33WifWgqZFmNM%2BuheU76hjQSc%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=9ba79a1b32c4eb383c72cc2da09b44041063b5b87423a6bfcb7a338352e86e4e",
+      "file_size": 6118,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-30T05:07:35.008Z",
+  "allow_singular_disclosure_after": -202693.417547754,
+  "singular_disclosure_allowed": true,
+  "vote_count": 9,
+  "voters": [
+    "xlsize0bruh",
+    "sumit-sabhaya",
+    "shadow043",
+    "hope_no_dupe",
+    "junebuggy",
+    "robin-sabhaya",
+    "deaaath",
+    "cdrom95",
+    "novaeuropa33"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 174,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/WeblateOrg/wlc",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

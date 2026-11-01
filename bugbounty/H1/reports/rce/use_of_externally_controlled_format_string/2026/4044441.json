@@ -1,0 +1,122 @@
+{
+  "id": 4044441,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDQ0NDQx",
+  "url": "https://hackerone.com/reports/4044441",
+  "title": "Translation discovery crashes on crafted filenames (regex substitution injection)",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-20T06:58:59.482Z",
+  "submitted_at": "2026-09-20T06:58:59.761Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "sumit-sabhaya",
+    "url": "/sumit-sabhaya",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/3qa7ji47fvzz8y3kgjp4jx63yeet/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19468,
+    "url": "https://hackerone.com/weblate",
+    "handle": "weblate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Weblate",
+      "twitter_handle": "WeblateOrg",
+      "website": "https://weblate.org/",
+      "about": "Weblate is a libre software web-based continuous localization system"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-30T05:07:32.370Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-30T05:07:14.044Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe `translation-finder` package (used by Weblate for translation file discovery) raises an uncaught `re.error` and aborts discovery for the whole repository when a scanned repository contains a translation file whose name embeds backslash-escaped language tokens, e.g. `x\\g<99>-en.po` or `x\\X-en.po`. An attacker with commit access to a scanned repository can keep the discovery job permanently broken (denial of service) by pushing a single crafted filename.\n\nWeakness: CWE-1336 (Improper Neutralization of Special Elements Used in a Template Engine) / CWE-625; effect is CWE-248 (uncaught exception).\n\n## Affected Asset\n\n- Repository: https://github.com/WeblateOrg/translation-finder\n- Affected code: `translation_finder/discovery/base.py`, `BaseDiscovery.get_masks()` (lines ~388-395)\n- Version: 3.5.0 (current HEAD at time of testing; the vulnerable `re.sub` replacement logic predates this release)\n\n## Description\n\nIn `BaseDiscovery.get_masks()`:\n\n```python\nwildcard = self.get_wildcard(part)\nif wildcard:\n    mask_parts = parts.copy()\n    match = re.compile(f\"(^|[._-]){re.escape(part)}($|[._-])\")\n    for i, current in enumerate(mask_parts):\n        if match.findall(current):\n            skip.add(i)\n            mask_parts[i] = match.sub(\n                f\"\\\\g<1>{wildcard}\\\\g<2>\", current\n            )\n```\n\n`get_wildcard()` derives a language wildcard from the filename path part. This wildcard is then interpolated into the replacement string of `re.sub`. The `re` module parses replacement strings for backreferences (`\\g<...>`) and escape sequences, so any backslash remaining in the filename token is interpreted as substitution syntax instead of being treated as a literal.\n\nA filename such as `x\\g<99>-en.po` produces the wildcard `\\g<99>-*`. When `re.sub` parses that replacement string, it raises:\n\n```\nre.error: invalid group reference 99 at position 9\n```\n\nA filename such as `x\\X-en.po` raises:\n\n```\nre.error: bad escape \\X at position 6\n```\n\nThe exception is not caught anywhere in the discovery pipeline. It propagates through `discover()` and terminates discovery for the entire repository.\n\n## Steps to Reproduce\n\n1. Create a repository containing a translation file with a crafted name:\n\n```bash\nmkdir -p poc/locales\nprintf 'msgid \"x\"\\nmsgstr \"y\"\\n' > 'poc/locales/x\\g<99>-en.po'\n```\n\n2. Run discovery:\n\n```bash\nweblate-discover poc\n```\n\n3. Observed result - the command exits with code 1 and a traceback:\n\n```\nTraceback (most recent call last):\n  File \"/.../translation_finder/discovery/base.py\", line 392, in get_masks\n    mask_parts[i] = match.sub(\nre.error: invalid group reference 99 at position 9\n```\n\nConfirmed trigger set (each crashes discovery when the file exists in the scanned tree):\n\n| Filename | Error |\n|---|---|\n| `x\\g<99>-en.po` | invalid group reference 99 |\n| `x\\g<9>-en.po` | invalid group reference 9 |\n| `x\\X-en.po` | bad escape \\X |\n| `x\\g<99>.en.po` / `x\\g<99>_en.po` / `x\\g<99>-pt_BR.po` | invalid group reference 99 |\n| `x\\g<99>.en.json` / `x\\g<99>-en.ts` / `x\\g<99>-en.yaml` | invalid group reference 99 (other backends) |\n\nControl cases that do not crash: `x-en.po`, `x\\g<0>-en.po` (group 0 exists), `x\\n-en.po` (valid escape).\n\nThe crash is triggered purely by the filename while the file is being listed; file contents are never read, so content-based filtering does not help.\n\n## Suggested Fix\n\nPass the wildcard as a literal replacement via a callback instead of interpolating it into the replacement string:\n\n```python\nmask_parts[i] = match.sub(\n    lambda m: f\"{m.group(1)}{wildcard}{m.group(2)}\",\n    current,\n)\n```\n\nVerified against a patched copy: every trigger above completes without error, and normal output (e.g. `x-en.po` -> `locales/x-*.po`) is unchanged.\n\nDefense in depth:\n\n- Wrap the substitution in `try/except re.error` and skip the offending name, and/or\n- Reject translation filenames containing backslashes or other non-printable characters during traversal.\n\n## References\n\n- Affected project: https://github.com/WeblateOrg/translation-finder\n- No CVE assigned and no upstream advisory found for this issue as of 2026-09-20.\n\n## Impact\n\n- Denial of service of translation discovery for any repository containing a crafted filename.\n- An attacker with commit access to a repo scanned by Weblate (the standard trust boundary for component import) can permanently break the discovery job; it only recovers after the offending file is removed.\n- A single-byte filename difference is sufficient; no file content manipulation needed.\n- No code execution, no file disclosure. Availability impact only.",
+  "weakness": {
+    "id": 81,
+    "name": "Use of Externally-Controlled Format String"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-30T05:07:14.288Z",
+  "allow_singular_disclosure_after": -202714.745232426,
+  "singular_disclosure_allowed": true,
+  "vote_count": 7,
+  "voters": [
+    "xlsize0bruh",
+    "sumit-sabhaya",
+    "2026",
+    "shadow043",
+    "robin-sabhaya",
+    "unravel11",
+    "deaaath"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 31977,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/WeblateOrg/translation-finder",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

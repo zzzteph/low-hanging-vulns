@@ -1,0 +1,173 @@
+{
+  "id": 4043537,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDQzNTM3",
+  "url": "https://hackerone.com/reports/4043537",
+  "title": "CampTix [camptix_private]: the view token is derived from the requester's own IP, so naming any attendee's e-mail unlocks the gated content",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-19T19:57:07.644Z",
+  "submitted_at": "2026-09-19T19:57:08.249Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jakubk",
+    "url": "/jakubk",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/stj402qv8vdsgjxvp8f1b7y5nimu/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/e68529859b080f77ebfd9e0a1acafdf062bd4c43f1db58e7e55c81e6ceae2d0d"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-10-30T21:41:28.599Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-09-30T21:41:18.225Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Description:\n\n`[camptix_private]` hides page content behind a check that the visitor holds a ticket. The check is a\n\"view token\" that the plugin both **issues** and **verifies** from data the requester controls:\n\n```php\n// plugins/camptix/addons/shortcodes.php:691\npublic function generate_view_token_for_attendee( $attendee_id ) {\n    $email = get_post_meta( $attendee_id, 'tix_email', true );\n    $ip    = isset( $_SERVER['REMOTE_ADDR'] ) ? $_SERVER['REMOTE_ADDR'] : '';\n\n    $view_token = md5( 'tix-view-token-' . strtolower( $email . $ip ) );\n    return $view_token;\n}\n```\n\nThe POST handler runs on `template_redirect` with no nonce (the file disables the sniff at line 441)\nand sends nothing to the address it is given — no confirmation mail, no magic link:\n\n```php\n// shortcodes.php:454\nif ( isset( $_POST['tix_private_shortcode_submit'] ) ) {\n    $email = isset( $_POST['tix_email'] ) ? trim( stripslashes( $_POST['tix_email'] ) ) : '';\n    ...\n    $attendees = get_posts( array( 'post_type' => 'tix_attendee', 'post_status' => 'publish',\n        'meta_query' => array( array( 'key' => 'tix_email', 'value' => $email ) ) ) );\n\n    if ( $attendees ) {\n        $attendee   = $attendees[0];\n        $view_token = $this->generate_view_token_for_attendee( $attendee->ID );   // uses the REQUESTER's IP\n        setcookie( 'tix_view_token', $view_token, ... );\n        $_COOKIE['tix_view_token'] = $view_token;                                  // forced into this same request\n        foreach ( $attendees as $attendee ) {\n            update_post_meta( $attendee->ID, 'tix_view_token', $view_token );      // overwrites the real holder's token\n            ...\n```\n\nThe gate then re-derives the expected token the same way and compares:\n\n```php\n// shortcodes.php:568\n$expected_view_token = $this->generate_view_token_for_attendee( $attendee->ID );\nif ( $expected_view_token !== $view_token ) {\n    $camptix->error( __( 'Looks like you logged in from a different computer. Please log in again.' ) );\n```\n\nBoth sides of that comparison are computed from **the same request**, by **the same IP** — the\nattacker's. The IP was meant to bind the token to the ticket holder's device; it binds it to whoever\nis asking. The only thing the check actually requires is knowing an attendee's e-mail address.\n\nThat address is not a secret. It is on sponsor and speaker pages, in public mailing lists, in a forwarded\nconfirmation mail, or simply guessable for a corporate address format.\n\n## Steps To Reproduce:\n\nCampTix 2.0.0 on WordPress 7.1.1. `evidence/03-poc.sh` produced `evidence/01-transcript.txt`.\n(`evidence/04-wordcamp-platform-stubs.php` only stubs `get_wordcamp_post()` so CampTix loads off the\nwordcamp.org platform; it touches nothing in the code path under test.)\n\n1. A page contains `[camptix_private]...gated content...[/camptix_private]`, and an attendee record\n   exists for `victim@lab.invalid`.\n\n2. **Control A** — anonymous GET, no POST:\n\n   ```\n   occurrences of the gated marker: 0\n   ```\n   The gate works.\n\n3. **Control B** — POST naming an address with no attendee record:\n\n   ```\n   POST tix_private_shortcode_submit=1&tix_email=nobody@lab.invalid\n   occurrences of the gated marker: 0\n   ```\n   A real attendee address is genuinely required. This is what makes step 4 an authentication\n   failure rather than a blanket bypass.\n\n4. **Attack** — same client, no cookie, no nonce, no account, naming the victim's address:\n\n   ```\n   POST tix_private_shortcode_submit=1&tix_email=victim@lab.invalid\n   occurrences of the gated marker: 1\n   CTPRIVATE8B3F attendees-only content\n   ```\n\n5. **Side effect on the legitimate holder.** The same request rewrote the attendee's stored token:\n\n   ```\n   tix_view_token was : ORIGINAL-TOKEN-OF-THE-REAL-ATTENDEE\n   tix_view_token now : cbe2030c3295c959657716b654db0674\n   ```\n   The real ticket holder's cookie no longer matches, so on their next visit they are told\n   \"Looks like you logged in from a different computer. Please log in again.\"\n\n## Recommendations\n\nThe token must be unguessable by the person requesting it, and requesting it must prove control of\nthe inbox:\n\n1. Generate the token from `wp_generate_password( 32, false )` (or `wp_generate_uuid4()`) and store\n   it; never derive it from data the requester supplies.\n2. Mail the resulting link to the address instead of unlocking the content in the same response. The\n   confirmation mail is the ownership proof that is missing today.\n3. Add a nonce to the form and rate-limit submissions per IP, so the handler cannot be driven as an\n   oracle for which addresses hold tickets.\n4. Do not overwrite `tix_view_token` for every attendee sharing the address on each submission —\n   issue per-session tokens, so one request cannot evict an existing holder.\n\nPoint 2 alone closes the disclosure. Point 4 is what stops the denial of access to the real holder.\n\nDISCLOSURE\n\nI will refrain from sharing information about this issue for 120 calendar days after your\nacknowledgement of receipt, per your vulnerability disclosure policy.\n\n## Impact\n\nAnyone who knows an attendee's e-mail address reads content a WordCamp organiser restricted to ticket\nholders — attendee-only schedules, venue or access details, private video links, sponsor material,\nafter-party or accommodation information. No account, no ticket, no cookie, no nonce: one POST.\n\nThe e-mail address is the only thing the check really asks for, and it is routinely obtainable. It\nappears on speaker and sponsor pages, in public mailing lists and in forwarded confirmation mails, and\nfor most organisations it follows a predictable format. The handler also answers differently for an\naddress that has a ticket and one that does not, so it doubles as an oracle for \"did this person\nattend\", which is itself information the attendee did not publish.\n\nThe same request takes access away from the person who paid for it. It overwrites `tix_view_token`\non every attendee record sharing that address, so the legitimate holder's cookie stops matching and\nthey are told they \"logged in from a different computer\". An attacker who repeats the request keeps\nthem locked out indefinitely, and the plugin records only the attacker's IP against the attendee.\n\nLimits, stated plainly:\n\n* **The camp must use `[camptix_private]`.** The shortcode is an optional CampTix addon that an\n  organiser places on a page. Sites that never use it are unaffected, and I did not survey how many\n  WordCamp sites do — this is why I have scored `AT:P`.\n* **The attacker must know or guess a real attendee address.** Control B in the transcript shows an\n  address with no attendee record discloses nothing.\n* **Only the gated block is disclosed.** Ticket records, payment data and the attendee list itself\n  are not returned by this path.\n* **Verified on a local install of CampTix 2.0.0**, not against a production WordCamp site. I did not\n  test this against anyone's real event, because doing so would mean reading content gated for real\n  attendees using a real person's address.\n\n`CVSS:4.0/AV:N/AC:L/AT:P/PR:N/UI:N/VC:L/VI:L/VA:N/SC:N/SI:N/SA:N` = **6.3 Medium**.\n`AT:P` because the vulnerable path exists only where the shortcode is deployed. `VI:L` for the token\noverwrite that evicts the legitimate holder. Scored without the shortcode precondition (`AT:N`) it\nwould be 6.9; I have taken the lower reading.",
+  "weakness": {
+    "id": 27,
+    "name": "Improper Authentication - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6767703,
+      "file_name": "01-transcript.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fovfl1ecacnwq2z4q557npldkd7i?response-content-disposition=attachment%3B%20filename%3D%2201-transcript.txt%22%3B%20filename%2A%3DUTF-8%27%2701-transcript.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQ7AM4Z5A%2F20261101%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261101T132544Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJFMEMCID5adq6pO%2Bg8nZsfMCqjLZ4Rdg8Yj9BYXFLk6%2BthksyyAh8M5NEtiIRn3Pmz3xdBzZhn9n%2Bs0eOIv%2BVmT0IkIIqMKrIFCGUQAxoMMDEzNjE5Mjc0ODQ5IgzTXK2ekc12FpFBLisqjwXtjfaPn1AO%2BBfSWqYPwGpNPuyMb%2BSBYzIflI%2BxIDZzbmRMkxmRmRfve7Og572rZum0JbAAWtj92NlEwSptPpxyYGmS8x%2Fjxy8sGEdpFI%2BDN5WZiNMJV3U3gel68Dedd8iVV4bnWbu0eMwrStnPhBCK28trjgD%2FHvNY%2BMj3wgBI1ftoFHnhhkmsEFPaNlI8sfTZ3w4FBsjy2%2FUtkzhIg6INpu3Ewvz5d5B8iKCNr%2BigQkk%2F2WjddGv4QvnW76t6h8djrdAwEFSN2kwKM2SeJVyWigPwrNc4dDC0hYPRKxkNuUw3XGj6VnlN1gHdJFTp5%2BSDVFdL45LdaKDgPZ93Y4NjCUYOMDvPKNqpcMKVMmsL%2FFfKj5WD%2FzgxxE1PJ6skaAiuU9ch0XbPZUs6g5FD8ExrqZojB94YOxfEWugtdOp9E54Ft%2Bv4g0VgjxesoCpX2DUft29q5OZUB%2BCdsgCAmFSC4pLHIroeUKOfyAa3mg6Qi%2Fq1TjX%2BbprR4c4g%2BbReYiDaFUJuBNCmEh70aIzvUxKDdmLx7DgqdP2YHpNXbd075HpsbCkKQqTE7GidJ5xpn2yHHqQ473HfdjvohSRFPkeWRBWiewcRYSQig%2BkZUoWXEjjlFDflxO5v0zYAEVlaZaDSSruB36e1M6X0xHDHqtg1OkJ6aMjOmko43EGW2PDObpGRAnad7OWoBBR6BEpHZs%2BWNTjHI31kA%2F8QBICuM2Y%2BZeMLbCiXrmXDdojwghcwPnMCjPwVzp3Eh%2BIa6hzdBqV2DkPwkzFtsVPRhUREzh5gJuktyF8dE5MZoZb9nAm03Teejg99GJ3x8c1WYgNCXpeZKr6dkB1DC2982nGs70t6rB%2BpkYzqvZwviA8DTklqMPLqnNcGOrMBpWzfTteTsZ5SPHT1OC4E1tG0E7nPvj2ZP5e4wkiEP%2BSTu645kMHFrN1qh1e97c9HCYsem8a%2Bl7CqBtlUEC%2F7BrKCxyVeZIQsN12OlGLQgEFFk%2BM2awzVi3pZN157e8SzKD6PMGKi%2FPbVY1HtSBB0X0GncZ%2Fe6Dw3XUSoucZUdIQlCxTDDB8C6lYTamc9Sb6azS4TfY9Npg1YX%2Bhck6zGmC33WifWgqZFmNM%2BuheU76hjQSc%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=cc1749a5439ecf2209e8bbc3ac21ba86bb0820a3553b63c6d65e5844dca95dd7",
+      "file_size": 1625,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 6767704,
+      "file_name": "02-fixtures.php",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/jlmueec6r25bx6nxx9wyy4zfexm6?response-content-disposition=attachment%3B%20filename%3D%2202-fixtures.php%22%3B%20filename%2A%3DUTF-8%27%2702-fixtures.php&response-content-type=text%2Fx-php&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQ7AM4Z5A%2F20261101%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261101T132544Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJFMEMCID5adq6pO%2Bg8nZsfMCqjLZ4Rdg8Yj9BYXFLk6%2BthksyyAh8M5NEtiIRn3Pmz3xdBzZhn9n%2Bs0eOIv%2BVmT0IkIIqMKrIFCGUQAxoMMDEzNjE5Mjc0ODQ5IgzTXK2ekc12FpFBLisqjwXtjfaPn1AO%2BBfSWqYPwGpNPuyMb%2BSBYzIflI%2BxIDZzbmRMkxmRmRfve7Og572rZum0JbAAWtj92NlEwSptPpxyYGmS8x%2Fjxy8sGEdpFI%2BDN5WZiNMJV3U3gel68Dedd8iVV4bnWbu0eMwrStnPhBCK28trjgD%2FHvNY%2BMj3wgBI1ftoFHnhhkmsEFPaNlI8sfTZ3w4FBsjy2%2FUtkzhIg6INpu3Ewvz5d5B8iKCNr%2BigQkk%2F2WjddGv4QvnW76t6h8djrdAwEFSN2kwKM2SeJVyWigPwrNc4dDC0hYPRKxkNuUw3XGj6VnlN1gHdJFTp5%2BSDVFdL45LdaKDgPZ93Y4NjCUYOMDvPKNqpcMKVMmsL%2FFfKj5WD%2FzgxxE1PJ6skaAiuU9ch0XbPZUs6g5FD8ExrqZojB94YOxfEWugtdOp9E54Ft%2Bv4g0VgjxesoCpX2DUft29q5OZUB%2BCdsgCAmFSC4pLHIroeUKOfyAa3mg6Qi%2Fq1TjX%2BbprR4c4g%2BbReYiDaFUJuBNCmEh70aIzvUxKDdmLx7DgqdP2YHpNXbd075HpsbCkKQqTE7GidJ5xpn2yHHqQ473HfdjvohSRFPkeWRBWiewcRYSQig%2BkZUoWXEjjlFDflxO5v0zYAEVlaZaDSSruB36e1M6X0xHDHqtg1OkJ6aMjOmko43EGW2PDObpGRAnad7OWoBBR6BEpHZs%2BWNTjHI31kA%2F8QBICuM2Y%2BZeMLbCiXrmXDdojwghcwPnMCjPwVzp3Eh%2BIa6hzdBqV2DkPwkzFtsVPRhUREzh5gJuktyF8dE5MZoZb9nAm03Teejg99GJ3x8c1WYgNCXpeZKr6dkB1DC2982nGs70t6rB%2BpkYzqvZwviA8DTklqMPLqnNcGOrMBpWzfTteTsZ5SPHT1OC4E1tG0E7nPvj2ZP5e4wkiEP%2BSTu645kMHFrN1qh1e97c9HCYsem8a%2Bl7CqBtlUEC%2F7BrKCxyVeZIQsN12OlGLQgEFFk%2BM2awzVi3pZN157e8SzKD6PMGKi%2FPbVY1HtSBB0X0GncZ%2Fe6Dw3XUSoucZUdIQlCxTDDB8C6lYTamc9Sb6azS4TfY9Npg1YX%2Bhck6zGmC33WifWgqZFmNM%2BuheU76hjQSc%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=10330f1e0b75a20a718cc297156e25357381c87e63de78a3682f6151cb7174fc",
+      "file_size": 1818,
+      "type": "text/x-php",
+      "moderated": null
+    },
+    {
+      "id": 6767705,
+      "file_name": "04-wordcamp-platform-stubs.php",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9r5cu4qhhhr0jvcza169q4iqpn8c?response-content-disposition=attachment%3B%20filename%3D%2204-wordcamp-platform-stubs.php%22%3B%20filename%2A%3DUTF-8%27%2704-wordcamp-platform-stubs.php&response-content-type=text%2Fx-php&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQ7AM4Z5A%2F20261101%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261101T132544Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJFMEMCID5adq6pO%2Bg8nZsfMCqjLZ4Rdg8Yj9BYXFLk6%2BthksyyAh8M5NEtiIRn3Pmz3xdBzZhn9n%2Bs0eOIv%2BVmT0IkIIqMKrIFCGUQAxoMMDEzNjE5Mjc0ODQ5IgzTXK2ekc12FpFBLisqjwXtjfaPn1AO%2BBfSWqYPwGpNPuyMb%2BSBYzIflI%2BxIDZzbmRMkxmRmRfve7Og572rZum0JbAAWtj92NlEwSptPpxyYGmS8x%2Fjxy8sGEdpFI%2BDN5WZiNMJV3U3gel68Dedd8iVV4bnWbu0eMwrStnPhBCK28trjgD%2FHvNY%2BMj3wgBI1ftoFHnhhkmsEFPaNlI8sfTZ3w4FBsjy2%2FUtkzhIg6INpu3Ewvz5d5B8iKCNr%2BigQkk%2F2WjddGv4QvnW76t6h8djrdAwEFSN2kwKM2SeJVyWigPwrNc4dDC0hYPRKxkNuUw3XGj6VnlN1gHdJFTp5%2BSDVFdL45LdaKDgPZ93Y4NjCUYOMDvPKNqpcMKVMmsL%2FFfKj5WD%2FzgxxE1PJ6skaAiuU9ch0XbPZUs6g5FD8ExrqZojB94YOxfEWugtdOp9E54Ft%2Bv4g0VgjxesoCpX2DUft29q5OZUB%2BCdsgCAmFSC4pLHIroeUKOfyAa3mg6Qi%2Fq1TjX%2BbprR4c4g%2BbReYiDaFUJuBNCmEh70aIzvUxKDdmLx7DgqdP2YHpNXbd075HpsbCkKQqTE7GidJ5xpn2yHHqQ473HfdjvohSRFPkeWRBWiewcRYSQig%2BkZUoWXEjjlFDflxO5v0zYAEVlaZaDSSruB36e1M6X0xHDHqtg1OkJ6aMjOmko43EGW2PDObpGRAnad7OWoBBR6BEpHZs%2BWNTjHI31kA%2F8QBICuM2Y%2BZeMLbCiXrmXDdojwghcwPnMCjPwVzp3Eh%2BIa6hzdBqV2DkPwkzFtsVPRhUREzh5gJuktyF8dE5MZoZb9nAm03Teejg99GJ3x8c1WYgNCXpeZKr6dkB1DC2982nGs70t6rB%2BpkYzqvZwviA8DTklqMPLqnNcGOrMBpWzfTteTsZ5SPHT1OC4E1tG0E7nPvj2ZP5e4wkiEP%2BSTu645kMHFrN1qh1e97c9HCYsem8a%2Bl7CqBtlUEC%2F7BrKCxyVeZIQsN12OlGLQgEFFk%2BM2awzVi3pZN157e8SzKD6PMGKi%2FPbVY1HtSBB0X0GncZ%2Fe6Dw3XUSoucZUdIQlCxTDDB8C6lYTamc9Sb6azS4TfY9Npg1YX%2Bhck6zGmC33WifWgqZFmNM%2BuheU76hjQSc%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ef515afad4bb7e0aa2934232a8cfa08be579c9844f8abd4eb1d87b0915a2fc96",
+      "file_size": 575,
+      "type": "text/x-php",
+      "moderated": null
+    },
+    {
+      "id": 6767706,
+      "file_name": "03-poc.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/s5hylj19qlj0cfy8h386pmdjjpck?response-content-disposition=attachment%3B%20filename%3D%2203-poc.sh%22%3B%20filename%2A%3DUTF-8%27%2703-poc.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQQ7AM4Z5A%2F20261101%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261101T132544Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEJ3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJFMEMCID5adq6pO%2Bg8nZsfMCqjLZ4Rdg8Yj9BYXFLk6%2BthksyyAh8M5NEtiIRn3Pmz3xdBzZhn9n%2Bs0eOIv%2BVmT0IkIIqMKrIFCGUQAxoMMDEzNjE5Mjc0ODQ5IgzTXK2ekc12FpFBLisqjwXtjfaPn1AO%2BBfSWqYPwGpNPuyMb%2BSBYzIflI%2BxIDZzbmRMkxmRmRfve7Og572rZum0JbAAWtj92NlEwSptPpxyYGmS8x%2Fjxy8sGEdpFI%2BDN5WZiNMJV3U3gel68Dedd8iVV4bnWbu0eMwrStnPhBCK28trjgD%2FHvNY%2BMj3wgBI1ftoFHnhhkmsEFPaNlI8sfTZ3w4FBsjy2%2FUtkzhIg6INpu3Ewvz5d5B8iKCNr%2BigQkk%2F2WjddGv4QvnW76t6h8djrdAwEFSN2kwKM2SeJVyWigPwrNc4dDC0hYPRKxkNuUw3XGj6VnlN1gHdJFTp5%2BSDVFdL45LdaKDgPZ93Y4NjCUYOMDvPKNqpcMKVMmsL%2FFfKj5WD%2FzgxxE1PJ6skaAiuU9ch0XbPZUs6g5FD8ExrqZojB94YOxfEWugtdOp9E54Ft%2Bv4g0VgjxesoCpX2DUft29q5OZUB%2BCdsgCAmFSC4pLHIroeUKOfyAa3mg6Qi%2Fq1TjX%2BbprR4c4g%2BbReYiDaFUJuBNCmEh70aIzvUxKDdmLx7DgqdP2YHpNXbd075HpsbCkKQqTE7GidJ5xpn2yHHqQ473HfdjvohSRFPkeWRBWiewcRYSQig%2BkZUoWXEjjlFDflxO5v0zYAEVlaZaDSSruB36e1M6X0xHDHqtg1OkJ6aMjOmko43EGW2PDObpGRAnad7OWoBBR6BEpHZs%2BWNTjHI31kA%2F8QBICuM2Y%2BZeMLbCiXrmXDdojwghcwPnMCjPwVzp3Eh%2BIa6hzdBqV2DkPwkzFtsVPRhUREzh5gJuktyF8dE5MZoZb9nAm03Teejg99GJ3x8c1WYgNCXpeZKr6dkB1DC2982nGs70t6rB%2BpkYzqvZwviA8DTklqMPLqnNcGOrMBpWzfTteTsZ5SPHT1OC4E1tG0E7nPvj2ZP5e4wkiEP%2BSTu645kMHFrN1qh1e97c9HCYsem8a%2Bl7CqBtlUEC%2F7BrKCxyVeZIQsN12OlGLQgEFFk%2BM2awzVi3pZN157e8SzKD6PMGKi%2FPbVY1HtSBB0X0GncZ%2Fe6Dw3XUSoucZUdIQlCxTDDB8C6lYTamc9Sb6azS4TfY9Npg1YX%2Bhck6zGmC33WifWgqZFmNM%2BuheU76hjQSc%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=ac0e22dea0a163a583319e7084d380b0004b5d277d32c20b694eb9d58171a52f",
+      "file_size": 2683,
+      "type": "application/x-sh",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-10-30T21:41:18.364Z",
+  "allow_singular_disclosure_after": -143066.48751747,
+  "singular_disclosure_allowed": true,
+  "vote_count": 17,
+  "voters": [
+    "zy9ard3",
+    "jakubk",
+    "2026",
+    "flashmyname",
+    "harixx",
+    "th3kr1m0",
+    "ph03n1xsp",
+    "khattabsec444",
+    "logicbypasser",
+    "ghostranhunter",
+    "and 7 more..."
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.3,
+    "author_type": "User",
+    "cvss_4_point_0_metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "attack_requirements": "present",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "vulnerable_confidentiality": "low",
+      "vulnerable_integrity": "low",
+      "vulnerable_availability": "none",
+      "subsequent_confidentiality": "none",
+      "subsequent_integrity": "none",
+      "subsequent_availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 2756,
+    "asset_type": "WILDCARD",
+    "asset_identifier": "*.wordcamp.org",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
