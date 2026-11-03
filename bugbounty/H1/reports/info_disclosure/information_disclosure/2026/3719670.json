@@ -1,0 +1,127 @@
+{
+  "id": 3719670,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNzE5Njcw",
+  "url": "https://hackerone.com/reports/3719670",
+  "title": "`monero-wallet-rpc::rescan_spent` accepts daemon-supplied spent-status from an untrusted daemon, enabling ring-intersection attack on transactions",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-05-07T20:50:33.909Z",
+  "submitted_at": "2026-05-07T20:50:34.215Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "offsetmd",
+    "url": "/offsetmd",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/zlfvcv20d4aijd6wsfzfhluqr0n7/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 7731,
+    "url": "https://hackerone.com/monero",
+    "handle": "monero",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/007/731/55634f7fcd917725c7a5771cc6e7c9b4d5fe0c22_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Monero",
+      "twitter_handle": "monero",
+      "website": "https://getmonero.org",
+      "about": " Monero: the secure, private, untraceable cryptocurrency"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-02T18:43:38.813Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-03T18:43:34.715Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## summary\n\n`monero-wallet-rpc`'s JSON-RPC handler `wallet_rpc_server::on_rescan_spent` (`src/wallet/wallet_rpc_server.cpp:3493`) invokes `wallet2::rescan_spent()` **without** checking `is_trusted_daemon()`. Every other caller of that same wallet method — `simplewallet`'s interactive `rescan_spent` command, the post-import-multisig hooks in both `simplewallet` and `wallet_rpc_server`, and the sibling RPC handler `on_import_key_images` — gates the call by `is_trusted_daemon()`. The dedicated `rescan_spent` JSON-RPC endpoint is the single place that omits the gate.\n\n`rescan_spent()` calls the daemon's `/is_key_image_spent` endpoint and overwrites the wallet's local `m_spent` flag with the daemon's reply. When the daemon is untrusted (the default state for users running `monero-wallet-rpc --daemon-address <remote-node>` without an explicit `--trusted-daemon` flag) and is in fact malicious, it can return `UNSPENT` for an output the wallet itself has already spent. The wallet flips `td.m_spent = false`, the input selector then treats that output as available, and the next spend the user initiates ends up constructing a brand-new ring around the same real input. The wallet broadcasts the resulting transaction to the same daemon, which now possesses two ring signatures over the identical key image. Intersection of the two rings reveals the real spend.\n\n## details\n\n### the missing check\n\n`src/wallet/wallet_rpc_server.cpp:3493-3514`:\n\n```cpp\nbool wallet_rpc_server::on_rescan_spent(const wallet_rpc::COMMAND_RPC_RESCAN_SPENT::request& req,\n                                        wallet_rpc::COMMAND_RPC_RESCAN_SPENT::response& res,\n                                        epee::json_rpc::error& er,\n                                        const connection_context *ctx)\n{\n    if (!m_wallet) return not_open(er);\n    if (m_restricted)                                         // wallet-RPC admin flag, not daemon trust\n    {\n      er.code = WALLET_RPC_ERROR_CODE_DENIED;\n      er.message = \"Command unavailable in restricted mode.\";\n      return false;\n    }\n    CHECK_IF_BACKGROUND_SYNCING();\n    try\n    {\n      m_wallet->rescan_spent();                               // ← no trust check before this\n      return true;\n    }\n    ...\n}\n```\n\nCompare with the sibling handler `on_import_key_images` (`src/wallet/wallet_rpc_server.cpp:3154-3195`), which IS gated:\n\n```cpp\nbool wallet_rpc_server::on_import_key_images(...)\n{\n    if (!m_wallet) return not_open(er);\n    if (m_restricted) { ... }\n    if (!m_wallet->is_trusted_daemon())                      // ← present here\n    {\n      er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR;\n      er.message = \"This command requires a trusted daemon.\";\n      return false;\n    }\n    ...\n    m_wallet->import_key_images(ski, req.offset, spent, unspent);\n}\n```\n\nAnd the simplewallet CLI command (`src/simplewallet/simplewallet.cpp:6386-6391`) also gates:\n\n```cpp\nbool simple_wallet::rescan_spent(const std::vector<std::string> &args)\n{\n    CHECK_IF_BACKGROUND_SYNCING(\"cannot rescan spent\");\n    if (!m_wallet->is_trusted_daemon())\n    {\n      fail_msg_writer() << tr(\"this command requires a trusted daemon. Enable with --trusted-daemon\");\n      return true;\n    }\n    ...\n    m_wallet->rescan_spent();\n}\n```\n\nThe author of this code understood that `rescan_spent` requires daemon trust. Three call sites enforce it. The JSON-RPC handler skips it.\n\n### what `rescan_spent` actually does\n\n`src/wallet/wallet2.cpp:7198-7252`:\n\n```cpp\nvoid wallet2::rescan_spent()\n{\n  ...\n  for (size_t start_offset = 0; start_offset < m_transfers.size(); start_offset += chunk_size)\n  {\n    ...\n    bool r = epee::net_utils::invoke_http_json(\"/is_key_image_spent\", req, daemon_resp, *m_http_client, rpc_timeout);\n    ...\n    std::copy(daemon_resp.spent_status.begin(), daemon_resp.spent_status.end(), std::back_inserter(spent_status));\n  }\n\n  // update spent status\n  for (size_t i = 0; i < m_transfers.size(); ++i)\n  {\n    transfer_details& td = m_transfers[i];\n    if (!td.m_key_image_known || td.m_key_image_partial)\n      continue;\n    if (td.m_spent != (spent_status[i] != COMMAND_RPC_IS_KEY_IMAGE_SPENT::UNSPENT))\n    {\n      if (td.m_spent)\n      {\n        LOG_PRINT_L0(\"Marking output \" << i << \"(\" << td.m_key_image << \") as unspent, it was marked as spent\");\n        set_unspent(i);                                            // ← daemon-driven flip\n        td.m_spent_height = 0;\n      }\n      else\n      {\n        LOG_PRINT_L0(\"Marking output \" << i << \"(\" << td.m_key_image << \") as spent, it was marked as unspent\");\n        set_spent(i, td.m_spent_height);\n      }\n    }\n  }\n}\n```\n\nBoth directions are taken on disagreement. The \"marked spent → unmark unspent\" path is the one a malicious daemon abuses.\n\n### the input selector trusts `m_spent`\n\nEvery input-selection site in `wallet2.cpp` filters candidates by `is_spent(td, false)`, which reads `td.m_spent`. A non-exhaustive list:\n\n- `pick_preferred_rct_inputs` — line 10390\n- `select_outputs` (RCT path) — line 10410, 10426\n- `select_available_outputs` — line 11206\n- `get_unlocked_balance` / `get_balance` callers — line 7018, 7073, 12235, 13250\n- `pick_specific_output` — line 11799, 11847\n\nOnce `td.m_spent` is `false`, all of these will treat the output as a viable input candidate. There is no parallel \"I just broadcast a tx using this\" pending-set that overrides the flag for already-broadcast spends.\n\n### attack chain\n\nPre-conditions:\n\n1. User runs `monero-wallet-rpc --daemon-address <remote_node>` without `--trusted-daemon` (default).\n2. The wallet RPC server is reachable by some caller (RPC user, wallet UI, automation).\n3. The daemon at `<remote_node>` is operated by, or has been compromised by, the attacker.\n\nSteps:\n\n1. User sends transaction `tx1` spending output `O`. The wallet broadcasts `tx1` and calls `set_spent(idx)` — `td.m_spent = true`.\n2. The wallet RPC client (UI / script) calls `rescan_spent` over JSON-RPC. (Many wallet front-ends do this as a routine state-sync action; the user can also invoke it explicitly.)\n3. `wallet_rpc_server::on_rescan_spent` does not check trust; calls `wallet2::rescan_spent()`.\n4. `rescan_spent()` POSTs `key_images=[…O.key_image…]` to the daemon's `/is_key_image_spent`.\n5. The malicious daemon returns `UNSPENT` for `O.key_image`, even though `tx1` is in its mempool or already mined.\n6. `rescan_spent()` detects the disagreement (line 7236), executes the `td.m_spent → set_unspent(i)` branch (line 7240–7242).\n7. User initiates a second send `tx2` (any destination, any amount). The input selector picks `O` because `is_spent(td, false)` now returns false.\n8. Wallet builds `tx2` with a new ring around `O`: same key image, fresh randomly-selected decoys.\n9. Wallet broadcasts `tx2` to the same daemon via `/sendrawtransaction`.\n10. The daemon **parses** `tx2` — including its full ring — to detect the double-spend, then either rejects locally or accepts-and-relays. Either way, the daemon now possesses both ring blobs.\n11. The attacker has `(ring1, key_image)` and `(ring2, key_image)`. The ring decoys are independent random samples; the only deterministic common element is the real spend `O`. Intersection identifies `O` as the real input in both transactions, breaking the ring's anonymity for that input.\n\n### why the malicious daemon is realistic\n\n- `is_trusted_daemon()` defaults to `false` unless the user passes `--trusted-daemon` (`src/wallet/wallet2.cpp:248-449`).\n- Users connecting wallets to public remote nodes (`node.community.rino.io`, `xmr-node.cakewallet.com`, etc.) are exactly in this state.\n- Bootstrap-daemon proxy mode (`--bootstrap-daemon-address`) places the wallet's monerod in the same trust posture toward its bootstrap.\n- Compromised remote-node operators or MITM against an unauthenticated `monerod`-RPC endpoint suffices.\n- Past Monero advisories already accept this threat model: HackerOne #304770 (\"Corrupt RPC responses from remote node\", 2018) and the explicit comment at `wallet2.cpp:1920-1924` show the project treats untrusted daemons as a real adversary.\n\n### why the existing `untrusted` flag does not save us\n\n`COMMAND_RPC_IS_KEY_IMAGE_SPENT::response` carries an `untrusted` bit set by the bootstrap-proxy path on the daemon side. `wallet2::rescan_spent` does **not** consult it. Even if it did, the `untrusted` bit would not protect the direct `monero-wallet-rpc → remote node` configuration: there's no proxy in that flow, just a TCP connection to whatever `--daemon-address` points at, and the response carries no signal that distinguishes a benign reply from a malicious one.\n\nThe legitimate trust signal in this code base is `m_trusted_daemon` / `is_trusted_daemon()`, which is a wallet-side configuration, not a server-side flag. Every call path that consults it is correct. The one path that doesn't (`on_rescan_spent`) is the bug.\n\n## PoC\n\nA complete dynamic PoC requires a multi-component setup (wallet + chain state + a controllable daemon impersonator that answers `/is_key_image_spent` adversarially). The bug itself is provable from source by inspection of the asymmetry above. A minimal verification that the unsafe write actually fires can be staged with:\n\n1. Build a test daemon shim that proxies all `monero-wallet-rpc` calls to a real monerod EXCEPT `/is_key_image_spent`, which it answers with all-`UNSPENT`.\n2. Run a local regtest monerod, fund a wallet, send one transaction (so a known output's `td.m_spent` becomes true).\n3. Point `monero-wallet-rpc` at the shim daemon (no `--trusted-daemon`).\n4. From a second client, call JSON-RPC `rescan_spent` against `monero-wallet-rpc`.\n5. Inspect `monero-wallet-rpc` logs — look for `LOG_PRINT_L0(\"Marking output X as unspent, it was marked as spent\")` (`wallet2.cpp:7240`).\n\nThe log line confirms `td.m_spent` was flipped under attacker control. The downstream ring construction in `transfer_selected_rct` follows from standard wallet behavior; reproducing it against the same regtest setup confirms the second transaction reuses the spent output as a ring's real input.\n\nThe `simplewallet` CLI cannot reproduce this: its `rescan_spent` handler at `simplewallet.cpp:6388-6391` rejects the operation when `!is_trusted_daemon()`. The PoC must go through `monero-wallet-rpc`'s JSON-RPC interface.\n\n## impact\n\n- **Ring-signature unlinkability is broken for the spent input** of `tx2`. Since the malicious daemon already saw `tx1`'s ring, intersection of the two rings (each containing the same key image) reveals the real spend with high probability. This violates Monero's central privacy property for that input.\n- The attack can be repeated: each call to `rescan_spent` is a fresh opportunity. Wallet UIs / automation that call this method routinely give the malicious daemon many shots.\n- Monetary loss is not direct (the second tx is a double-spend and the network rejects it; the user's funds remain in their first tx). Privacy loss is the impact.\n- For users running `monero-wallet-rpc` against community public nodes — a very large population — the threat surface is the operator of that public node plus anyone with MITM on the connection.\n\n## suggested fix\n\nMirror the check that `on_import_key_images` already performs. One line added to `src/wallet/wallet_rpc_server.cpp::on_rescan_spent`:\n\n```diff\n bool wallet_rpc_server::on_rescan_spent(const wallet_rpc::COMMAND_RPC_RESCAN_SPENT::request& req,\n                                         wallet_rpc::COMMAND_RPC_RESCAN_SPENT::response& res,\n                                         epee::json_rpc::error& er,\n                                         const connection_context *ctx)\n {\n     if (!m_wallet) return not_open(er);\n     if (m_restricted)\n     {\n       er.code = WALLET_RPC_ERROR_CODE_DENIED;\n       er.message = \"Command unavailable in restricted mode.\";\n       return false;\n     }\n+    if (!m_wallet->is_trusted_daemon())\n+    {\n+      er.code = WALLET_RPC_ERROR_CODE_UNKNOWN_ERROR;\n+      er.message = \"This command requires a trusted daemon.\";\n+      return false;\n+    }\n     CHECK_IF_BACKGROUND_SYNCING();\n     try\n     {\n       m_wallet->rescan_spent();\n       return true;\n     }\n     ...\n }\n```\n\nXMR wallet: 868yhxwhtbY8mUM47YygWNJ8BSYi9dhZHNsGQHvFcNku5oHoq5622ouAKXtAuz6d9C3KhrGwC5YyK3jAVtHPcvquJGSRxxL\n\n## Impact\n\n`monero-wallet-rpc`'s JSON-RPC handler `wallet_rpc_server::on_rescan_spent` (`src/wallet/wallet_rpc_server.cpp:3493`) invokes `wallet2::rescan_spent()` **without** checking `is_trusted_daemon()`. Every other caller of that same wallet method — `simplewallet`'s interactive `rescan_spent` command, the post-import-multisig hooks in both `simplewallet` and `wallet_rpc_server`, and the sibling RPC handler `on_import_key_images` — gates the call by `is_trusted_daemon()`. The dedicated `rescan_spent` JSON-RPC endpoint is the single place that omits the gate.\n\n`rescan_spent()` calls the daemon's `/is_key_image_spent` endpoint and overwrites the wallet's local `m_spent` flag with the daemon's reply. When the daemon is untrusted (the default state for users running `monero-wallet-rpc --daemon-address <remote-node>` without an explicit `--trusted-daemon` flag) and is in fact malicious, it can return `UNSPENT` for an output the wallet itself has already spent. The wallet flips `td.m_spent = false`, the input selector then treats that output as available, and the next spend the user initiates ends up constructing a brand-new ring around the same real input. The wallet broadcasts the resulting transaction to the same daemon, which now possesses two ring signatures over the identical key image. Intersection of the two rings reveals the real spend.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-11-02T18:43:34.914Z",
+  "allow_singular_disclosure_after": -20153.608020184,
+  "singular_disclosure_allowed": true,
+  "vote_count": 6,
+  "voters": [
+    "2026",
+    "hexa34",
+    "talal916",
+    "diaralman",
+    "dakuno",
+    "sokiki"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.3,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "required",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
