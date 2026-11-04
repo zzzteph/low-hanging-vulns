@@ -1,0 +1,109 @@
+{
+  "id": 3896684,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODk2Njg0",
+  "url": "https://hackerone.com/reports/3896684",
+  "title": "Connector/C Out-of-bounds read from unterminated GSSAPI SPN in `parse_server_packet()`",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-28T15:47:36.815Z",
+  "submitted_at": "2026-07-28T15:47:37.002Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "mschorm",
+    "url": "/mschorm",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-04T17:31:34.562Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-04T17:31:34.388Z",
+  "team_member_agreed_on_going_public_at": "2026-11-04T12:14:14.915Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\n`parse_server_packet()` in `plugins/auth/auth_gssapi_client.c` uses `strncpy()` to copy the server-supplied Service Principal Name (SPN) into a fixed-size stack buffer without explicit NUL termination. When the server sends an SPN of 256+ bytes with no NUL byte, `strncpy(spn, packet, 256)` fills the buffer without terminating it. The subsequent `strlen(principal_name)` in `gssapi_client.c:auth_client()` then reads past the stack buffer — an out-of-bounds read.\n\nA second parsing flaw exists: when the packet contains no NUL byte at all, `strnlen()` returns `packet_len` and the mechanism-copy path reads from `packet + packet_len + 1`, past the packet boundary.\n\n**Originally reported by:** Aisle Research\n\n### Environment\n\n- **Component:** MariaDB Connector/C (`mariadb-connector-c`)\n- **Affected versions:** All versions through current `3.4` branch (verified on commit `a4a04c52`, 82 commits after v3.4.9 tag). The v3.4.9 release is affected.\n- **Platform:** Linux builds with GSSAPI authentication support enabled. Windows builds use a separate SSPI code path with the same `parse_server_packet()` entry point.\n- **Precondition:** The GSSAPI client authentication plugin must be built and used by the connecting application.\n\n### Vulnerability Details\n\nThe vulnerable parser:\n\n```c\nstatic void parse_server_packet(char *packet, size_t packet_len, char *spn, char *mech)\n{\n  size_t spn_len;\n  spn_len = strnlen(packet, packet_len);\n  strncpy(spn, packet, PRINCIPAL_NAME_MAX);   // PRINCIPAL_NAME_MAX = 256\n  if (spn_len == packet_len - 1)\n  {\n    *mech = 0;\n  }\n  else\n  {\n    strncpy(mech, packet + spn_len + 1, MECH_NAME_MAX);\n  }\n}\n```\n\n**Flaw 1 — unterminated SPN buffer:** `strncpy(spn, packet, PRINCIPAL_NAME_MAX)` does not write a NUL terminator when the source fills the destination. The caller allocates `char spn[PRINCIPAL_NAME_MAX + 1]`, but the +1 byte is never written. When `strlen(principal_name)` is later called in `auth_client()`:\n\n```c\ngss_buffer_desc principal_name_buf;\nprincipal_name_buf.length= strlen(principal_name);  // OOB read\n```\n\nit reads past the 256-byte buffer until it finds a zero byte on the stack.\n\n**Flaw 2 — mechanism-copy past packet end:** When the packet contains no NUL byte, `strnlen(packet, packet_len)` returns `packet_len`. The condition `spn_len == packet_len - 1` is false (it's `packet_len == packet_len - 1`), so the else branch executes `strncpy(mech, packet + spn_len + 1, MECH_NAME_MAX)`, reading from one byte past the packet boundary.\n\nWhile other auth plugins treat packets as single opaque blobs, bounded `memcpy()` + explicit NUL termination is the standard pattern throughout the codebase for parsing variable-length strings from network data (e.g., `parsec.c` lines 189/226, `caching_sha2_pw.c` line 383, `ed25519.c` line 147).\n\n### Steps to Reproduce\n\n1. Build Connector/C with AddressSanitizer and GSSAPI support enabled:\n   ```\n   cmake -DCMAKE_C_FLAGS=\"-O1 -g -fsanitize=address -fno-omit-frame-pointer\" -DWITH_GSSAPI=ON ..\n   make\n   ```\n\n2. Set up a protocol shim or test server that responds to client authentication with a GSSAPI challenge packet where:\n   - `packet_len >= 256`\n   - No NUL byte appears in the first 256 bytes of the SPN field\n   - (For flaw 2: no NUL byte anywhere in the packet)\n\n3. Connect a client configured for GSSAPI authentication.\n\n4. Observe ASan reporting a stack-buffer-overflow read in `auth_client()` at the `strlen(principal_name)` call.\n\n### Suggested Fix\n\nReplace `strncpy()` with bounded `memcpy()` + explicit NUL termination, and fix the mechanism-parsing boundary check:\n\n```diff\ndiff --git a/plugins/auth/auth_gssapi_client.c b/plugins/auth/auth_gssapi_client.c\nindex 9c60f8d4..a2acbd51 100644\n--- a/plugins/auth/auth_gssapi_client.c\n+++ b/plugins/auth/auth_gssapi_client.c\n@@ -46,19 +46,28 @@ extern int auth_client(char *principal_name,\n                        MYSQL *mysql,\n                        MYSQL_PLUGIN_VIO *vio);\n \n-static void parse_server_packet(char *packet, size_t packet_len, char *spn, char *mech)\n+static void parse_server_packet(const char *packet, size_t packet_len, char *spn, char *mech)\n {\n-  size_t spn_len;\n+  size_t spn_len, copy_len;\n+\n   spn_len = strnlen(packet, packet_len);\n-  strncpy(spn, packet, PRINCIPAL_NAME_MAX);\n-  if (spn_len == packet_len - 1)\n+  copy_len = spn_len < PRINCIPAL_NAME_MAX ? spn_len : PRINCIPAL_NAME_MAX;\n+  memcpy(spn, packet, copy_len);\n+  spn[copy_len] = '\\0';\n+\n+  if (spn_len + 1 >= packet_len)\n   {\n-    /* Mechanism not included into packet */\n-    *mech = 0;\n+    *mech = '\\0';\n   }\n   else\n   {\n-    strncpy(mech, packet + spn_len + 1, MECH_NAME_MAX);\n+    const char *mech_src = packet + spn_len + 1;\n+    size_t mech_avail = packet_len - spn_len - 1;\n+    size_t mech_len = strnlen(mech_src, mech_avail);\n+    if (mech_len > MECH_NAME_MAX)\n+      mech_len = MECH_NAME_MAX;\n+    memcpy(mech, mech_src, mech_len);\n+    mech[mech_len] = '\\0';\n   }\n }\n```\n\n\n**Originally reported by:** Aisle Research to Red Hat via Embargo process.\nAisle research should be attributed for the finding.\nTo my knowledge this report was not shared outside of Aisle Research and Red Hat.\n\n## Impact\n\n### Impact\n\n- Client-side out-of-bounds stack read: potential disclosure of adjacent stack memory (return addresses, other local variables)\n- Client process crash\n- The attack requires a malicious server or MitM position during GSSAPI-authenticated connection setup",
+  "weakness": {
+    "id": 8,
+    "name": "Out-of-bounds Read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-12-04T12:14:15.413Z",
+  "allow_singular_disclosure_after": 2555666.850293855,
+  "singular_disclosure_allowed": false,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 10336,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Data corruption, exfiltration, disclosure",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

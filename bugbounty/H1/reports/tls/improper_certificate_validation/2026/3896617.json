@@ -1,0 +1,111 @@
+{
+  "id": 3896617,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODk2NjE3",
+  "url": "https://hackerone.com/reports/3896617",
+  "title": "Connector/C TLS auth-switch bypass exposes plaintext password on hostname verification failure",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-28T15:19:54.384Z",
+  "submitted_at": "2026-07-28T15:19:54.596Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "mschorm",
+    "url": "/mschorm",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-107819"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-04T17:31:54.631Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-04T17:31:54.499Z",
+  "team_member_agreed_on_going_public_at": "2026-11-04T12:08:03.788Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nA logic flaw in `run_plugin_auth()` allows a man-in-the-middle attacker to capture a client's plaintext database password during TLS-secured authentication. The auth-switch guard in `plugins/auth/my_auth.c` checks only `MARIADB_TLS_VERIFY_TRUST` (bit 0, value 1) before blocking non-hashing auth plugins. A hostname-only verification failure (`MARIADB_TLS_VERIFY_HOST` = 2) bypasses this check because `(2 & 1) == 0`, letting the attacker switch to `mysql_clear_password` and receive the password in cleartext before the post-auth catch-all rejects the connection.\n\n**Originally reported by:** Aisle Research\n\n### Environment\n\n- **Component:** MariaDB Connector/C (`mariadb-connector-c`)\n- **Affected versions:** All versions through current `3.4` branch (verified on commit `a4a04c52`, 82 commits after v3.4.9 tag). The v3.4.9 release is affected.\n- **Platform:** All platforms (Linux, Windows, macOS) — the vulnerable code path is platform-independent.\n- **Build configuration:** Default build with TLS support enabled. `mysql_clear_password` is registered as a default dynamic auth plugin.\n\n### Vulnerability Details\n\nIn `plugins/auth/my_auth.c`, `run_plugin_auth()` handles server auth-switch requests (`0xFE` packet). The TLS verification guard at line 875 is:\n\n```c\nif ((mysql->net.tls_verify_status & MARIADB_TLS_VERIFY_TRUST) &&\n    !password_and_hashing(mysql, auth_plugin))\n```\n\nThe `tls_verify_status` flags are defined as:\n- `MARIADB_TLS_VERIFY_TRUST` = 1 (CA trust chain failure)\n- `MARIADB_TLS_VERIFY_HOST`  = 2 (hostname mismatch)\n- `MARIADB_TLS_VERIFY_AUTO`  = 3 (both)\n\nWhen only hostname verification fails, `tls_verify_status = 2`. The bitwise AND `(2 & 1)` evaluates to 0, bypassing the guard entirely. This allows a non-hashing plugin like `mysql_clear_password` to execute and send the password in plaintext before the later catch-all check at line 894 (`if (!mysql->net.tls_verify_status) return 0; ... return 1;`) terminates the connection.\n\nThe initial-auth check at line 484 uses a different comparison: `tls_verify_status > MARIADB_TLS_VERIFY_AUTO` (i.e. `> 3`). This is intentionally more permissive — it allows hashing plugins through on first auth even without full CA verification. The auth-switch path needs to be stricter: once a server requests a non-hashing plugin mid-authentication, ANY verification failure should block it.\n\n### Steps to Reproduce\n\n1. Set up a MariaDB/MySQL-compatible test server with a TLS certificate from a trusted CA, but issued for a different hostname (e.g., server is at `db.example.com` but the cert is issued for `other.example.com`).\n\n2. Configure a client using Connector/C with hostname verification enabled (`MYSQL_OPT_SSL_VERIFY_SERVER_CERT=1`).\n\n3. Connect. The TLS handshake completes because the CA is trusted, but `ma_verification_callback()` in `openssl.c` sets `tls_verify_status = MARIADB_TLS_VERIFY_HOST` (value 2).\n\n4. Initial auth check at line 484: `2 > 3` is false — falls through. `password_and_hashing()` returns true for the default plugin (e.g., `caching_sha2_password`) — the initial hashed auth exchange proceeds.\n\n5. The attacker-controlled server responds with `0xFE` AuthSwitchRequest selecting `mysql_clear_password`.\n\n6. Auth-switch guard at line 875: `(2 & 1) == 0` — **bypassed**.\n\n7. `clear_password_auth_client()` in `mariadb_cleartext.c` sends the full password in cleartext via `vio->write_packet()`.\n\n8. The attacker captures the plaintext password on the wire.\n\n9. Only after the plugin completes does the catch-all at line 894 reject the connection — too late, the password is already disclosed.\n\n**Network trace expectation:** The attacker observes the password bytes in the auth-switch response packet, before the connection error is returned to the client application.\n\n### Suggested Fix\n\nReplace the bitmask check with a nonzero check, so that ANY `tls_verify_status` (trust failure, hostname failure, or both) blocks non-hashing plugins on auth-switch:\n\n```diff\ndiff --git a/plugins/auth/my_auth.c b/plugins/auth/my_auth.c\nindex 8ee14b66..17007b8b 100644\n--- a/plugins/auth/my_auth.c\n+++ b/plugins/auth/my_auth.c\n@@ -872,12 +872,12 @@ retry:\n       auth_plugin= &dummy_fallback_client_plugin;\n \n     /* can we use this plugin with this tls server cert ? */\n-    if ((mysql->net.tls_verify_status & MARIADB_TLS_VERIFY_TRUST) &&\n+    if (mysql->net.tls_verify_status &&\n         !password_and_hashing(mysql, auth_plugin))\n     {\n       my_set_error(mysql, CR_SSL_CONNECTION_ERROR, SQLSTATE_UNKNOWN,\n                    ER(CR_SSL_CONNECTION_ERROR),\n-                   \"Certificate verification failure: The certificate is NOT trusted.\");\n+                   \"Certificate verification failure: peer certificate verification failed.\");\n       return 1;\n     }\n     goto retry;\n```\n\nThis does not change the initial-auth check at line 484 (`tls_verify_status > MARIADB_TLS_VERIFY_AUTO`), which is intentionally more permissive for hashing plugins on first auth. The auth-switch path is the only one affected.\n\n\n**Originally reported by:** Aisle Research to Red Hat via Embargo process.\nAisle research should be attributed for the finding.\nTo my knowledge this report was not shared outside of Aisle Research and Red Hat.\n\n## Impact\n\n### Impact\n\nA man-in-the-middle attacker who can present a valid certificate from any trusted CA (but for the wrong hostname) can capture the client's database password in plaintext. The captured credentials can then be used to authenticate to the legitimate database server, achieving full unauthorized access. This is a credential disclosure that enables subsequent access control bypass.\n\nThe attack requires:\n- A MitM position between client and server\n- A valid TLS certificate from a trusted CA (wrong hostname is sufficient)\n- `mysql_clear_password` available in the client build (default)",
+  "weakness": {
+    "id": 28,
+    "name": "Improper Certificate Validation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-12-04T12:08:03.967Z",
+  "allow_singular_disclosure_after": 2555296.152926028,
+  "singular_disclosure_allowed": false,
+  "vote_count": 0,
+  "voters": [],
+  "structured_scope": {
+    "databaseId": 10335,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Access control bypass",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
