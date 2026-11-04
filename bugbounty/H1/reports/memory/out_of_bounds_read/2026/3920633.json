@@ -1,0 +1,136 @@
+{
+  "id": 3920633,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTIwNjMz",
+  "url": "https://hackerone.com/reports/3920633",
+  "title": "Connector/ODBC: SqlwcsOctetLen sizes UTF-16 with a byte-oriented helper, reading past the caller's buffer and sending client memory to the server",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-06T09:45:21.774Z",
+  "submitted_at": "2026-08-06T09:45:22.228Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fg0x0",
+    "url": "/fg0x0",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/we9mo7ui49vl91bznzyid2bvt1lf/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-04T12:36:07.961Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-04T12:36:07.844Z",
+  "team_member_agreed_on_going_public_at": "2026-11-04T12:19:33.930Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "`SqlwcsOctetLen` (`driver/ma_platform_posix.cpp:121`) sizes a UTF-16 string by calling Connector/C's `mb_charlen`. That helper is byte-oriented: its `UTF16_HIGH_HEAD(x)` macro casts the argument to `uchar`, so it inspects only the low byte. `SqlwcsOctetLen` hands it a whole `SQLWCHAR`, so every character whose low byte falls in `0xD8..0xDB` is mistaken for a UTF-16 surrogate lead and the cursor advances two code units while the character counter drops by one. The scan runs past the end of the caller's buffer and returns an inflated octet count, which `MADB_ConvertFromWChar` passes straight to `iconv`, so memory the application never supplied is converted and sent to the server as SQL text.\n\nThat set is 4 of every 256 code points and it includes very ordinary characters: `U+8FD9` (one of the most frequent Chinese characters), `U+4ED8`, `U+52D9`, and `U+00D8`, `U+00D9`, `U+00DA`, `U+00DB`.\n\nScope limits stated up front: this is the POSIX build only, since the Windows platform file has a separate `MADB_ConvertFromWChar` that does not use this function; the memory goes to the database server rather than directly to an attacker; and the volume transmitted per statement is capped by the conversion output buffer, measured at 12 to 16 bytes, though the out-of-bounds read itself grows without bound. Reproduced on the driver as shipped in `odbc-mariadb 3.2.6-1.1`, with no custom build and no sanitizer required.\n\n### Root cause\n\n`driver/ma_platform_posix.cpp:121`:\n\n```c\n/* CharLen < 0 - treat as NTS */\nSQLINTEGER SqlwcsOctetLen(const SQLWCHAR *str, SQLINTEGER *CharLen)\n{\n  SQLINTEGER result= 0, inChars= *CharLen;\n\n  if (str)\n  {\n    while (inChars > 0 || (inChars < 0 && *str))\n    {\n      result+= DmUnicodeCs->mb_charlen(*str);\n      --inChars;\n      str+= DmUnicodeCs->mb_charlen(*str)/sizeof(SQLWCHAR);\n    }\n  }\n```\n\n`DmUnicodeCs` is set at `driver/ma_environment.cpp:140` to `utf16le` or `utf16` when `sizeof(SQLWCHAR) == 2`, which is the case on Linux with unixODBC. Both entries in Connector/C's charset table use `mysql_mbcharlen_utf16`:\n\n```c\n#define UTF16_HIGH_HEAD(x)  ((((uchar) (x)) & 0xFC) == 0xD8)\n\nstatic uint mysql_mbcharlen_utf16(unsigned int utf16)\n{\n  return UTF16_HIGH_HEAD(utf16) ? 4 : 2;\n}\n```\n\nThe cast to `uchar` truncates to the low 8 bits. That is correct for the byte-wise scanner the macro was written for, `check_mb_utf16` at `ma_charset.c:465`, which passes `*start` from a `char*`. It is wrong here because `SqlwcsOctetLen` passes a whole code unit. For `*str == 0x00D8` the cast yields `0xD8`, `0xD8 & 0xFC == 0xD8`, and the helper reports 4 octets, so the cursor advances `4/sizeof(SQLWCHAR) == 2` units for one counted character. The test is also inverted for genuine surrogates: `U+D83D`, a real high surrogate, has low byte `0x3D` and is treated as a 2-octet BMP character.\n\nAny code point of the form `0xNND8`, `0xNND9`, `0xNNDA` or `0xNNDB` triggers it. Everyday examples: `U+8FD9` (Chinese \"this\", among the most common characters in the language), `U+4ED8` (\"pay\", as in payment text), `U+52D9` (Japanese \"service\", as in business terminology), and `U+00D8`, `U+00D9`, `U+00DA`, `U+00DB` in Nordic and Romance names and in any upper-cased text field.\n\nWith an explicit count of `N` characters the loop iterates `N` times and the cursor reaches index `2N-8` for a string of 8 ASCII characters plus `N-8` triggers, so a buffer holding exactly `N` code units is read well past its end. The inflated return value is used directly as the `iconv` input length:\n\n```c\n    /* PtrLength is in characters. MADB_ConvertString(iconv) needs bytes */\n    PtrOctetLen= SqlwcsOctetLen(Ptr, &PtrLength);\n    AscLen= (PtrLength + (mustBeNullTerminated ? 1 : 0))*cc->cs_info->char_maxlen;\n  }\n\n  if (!(AscStr = (char *)MADB_CALLOC(AscLen)))\n    return NULL;\n\n  AscLen= MADB_ConvertString((char*)Ptr, &PtrOctetLen, DmUnicodeCs, AscStr, &AscLen, cc->cs_info, Error);\n```\n\nThe output buffer `AscLen` is sized from the honest character count while the input length `PtrOctetLen` is the inflated one, which is why the amount transmitted per call is bounded even though the read is not.\n\nUnder `SQL_NTS` the same defect has an extra consequence. A trigger character sitting immediately before the terminator makes the cursor step from the trigger to the unit after the NUL, so the loop condition `*str` never sees the terminator and the scan continues into whatever follows. This is demonstrated below, not merely inferred.\n\n`MADB_ConvertFromWChar` is the conversion used by every wide entry point, so this reaches the server through `SQLPrepareW`, `SQLExecDirectW` (`driver/ma_api_internal.cpp:2057` and siblings), `SQLDriverConnectW` and the wide catalog functions.\n\nThe intended shape is visible elsewhere in the same driver: `SqlwcsCharLen` (`driver/ma_string.cpp:571`) walks a wide string with an explicit `end` pointer and breaks when it passes it. `SqlwcsOctetLen` has no end pointer at all.\n\n### Steps to reproduce\n\n1. Install the driver as shipped, `odbc-mariadb 3.2.6-1.1`, or build from `4e175d9`. No sanitizer and no special build flags are needed.\n2. Compile the attached reproducer: `gcc -O0 -g -o poc_h1_repro poc_h1_repro.c -lodbc`.\n3. Run it against any MariaDB instance: `./poc_h1_repro \"DRIVER=/usr/lib/x86_64-linux-gnu/odbc/libmaodbc.so;SERVER=127.0.0.1;PORT=3306;UID=user;PWD=pass;DATABASE=db;\"`\n4. Case B is the clearest. The application builds a NUL-terminated wide string of 10 characters, `SELECT 'x` followed by `U+00D8`, and calls `SQLExecDirectW` with `SQL_NTS`. It writes the marker `LEAKED_PAST_NUL` into memory after the terminator, which it never asks the driver to send.\n5. Observe the row the server returns, which is 19 bytes: `x\\xC3\\x98\\0LEAKED_PAST_NUL`. The embedded NUL is the application's string terminator, and everything after it is client memory that the driver read past the end of the string, converted, and sent to the server, which then returned it.\n6. Case A does the same with an explicit length of 32 characters and ordinary Chinese text. The server's own error quotes back the marker, showing it crossed the wire. Confirm independently in the server's general query log: `SET GLOBAL general_log=1;` then read the logged statement, which contains bytes the application never supplied.\n7. For the memory-safety view, build with `-fsanitize=address` and run the attached `poc/poc_wcs_octetlen.c`, which allocates exactly 32 `SQLWCHAR` and calls `SQLPrepareW(stmt, buf, 32)`. AddressSanitizer reports `heap-buffer-overflow READ of size 2` in `SqlwcsOctetLen` at `driver/ma_platform_posix.cpp:129`, located 0 bytes after the 64-byte allocation. The identical call with ASCII content reports nothing.\n8. Fixed control: replace the `mb_charlen` calls with a direct test of the code unit, `unit >= 0xD800 && unit <= 0xDBFF ? 4 : 2`. Rebuild and rerun. The AddressSanitizer report disappears and the server receives only the characters the application declared. `poc/run_poc.sh` performs the whole sequence including this step.\n\n### Affected versions and suggested fix\n\n`mariadb-connector-odbc` POSIX build, master `4e175d9` (VERSION 03.02.0010) and released 3.2.x including `odbc-mariadb 3.2.6-1.1`. `SqlwcsOctetLen` is defined and used only in `driver/ma_platform_posix.cpp`; `driver/ma_platform_win32.cpp` implements its own `MADB_ConvertFromWChar` and does not call it, so Windows is not affected by this particular defect.\n\nIn `SqlwcsOctetLen`, test the code unit for a high surrogate directly rather than delegating to the byte-oriented `mb_charlen`, and give the loop an `end` pointer as `SqlwcsCharLen` already has.\n\nThis is a client library with no MariaDB-operated instance, so no production confirmation is possible and none is claimed.\n\nAll `poc/...` paths above are inside the attached `mariadb_connector_odbc_wcs_overread_poc_by_fg0x0.zip`.\n\n## Impact\n\nAn application's process memory is read out of bounds and the contents are transmitted to the database server inside the SQL statement.\n\nConfidentiality is rated Low because each statement discloses a bounded amount, 12 to 16 bytes in the measured configuration, but the leak repeats on every statement containing a trigger character, so an application handling Chinese, Japanese or Nordic text discloses a continuous trickle of adjacent heap for as long as it runs. In a database client that memory commonly holds other statement text, previously fetched row data, or credentials held for reconnection.\n\nIntegrity is rated Low because the statement the server executes is provably not the statement the application composed: in Case B the application asked for a 10-character query and the server returned a 19-byte value.\n\nAvailability is rated None because no crash was demonstrated against the released build, though the unbounded out-of-bounds read makes one plausible on an unlucky heap layout.\n\nNo hostile server, no elevated privilege and no unusual configuration is required. The trigger is ordinary user content. `U+8FD9` alone appears in a large share of Chinese-language text, so an application storing Chinese user input through the wide ODBC API leaks on routine traffic rather than on a crafted payload. An attacker who can place any of the 1024 affected code points into a string the application sends, for example through a name, address, comment or search field, both decides that the over-read happens and controls how far the cursor runs, since the distance grows by one code unit per trigger character.\n\nWhere the database is operated by a party other than the application owner, such as a hosted or multi-tenant service, this crosses a trust boundary directly. The disclosed bytes are also written to the server's general query log and appear in server error messages, which applications frequently record or surface to users.",
+  "weakness": {
+    "id": 8,
+    "name": "Out-of-bounds Read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6407845,
+      "file_name": "mariadb_connector_odbc_wcs_overread_poc_by_fg0x0.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/3bz3ckrwlmu07e84ey7zoavtqep2?response-content-disposition=attachment%3B%20filename%3D%22mariadb_connector_odbc_wcs_overread_poc_by_fg0x0.zip%22%3B%20filename%2A%3DUTF-8%27%27mariadb_connector_odbc_wcs_overread_poc_by_fg0x0.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ2S2NOKER%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164457Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDdQFduB9PL%2BPQLq1SV3rtWwlcGa3twWyViXsZ%2F%2BwVD6wIhAKMcYwOh6bExsxmK49ZaScf2dKcB3ev9ZixTTZ1%2FuBSXKroFCK3%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5Igx5XrDvC2%2BTKYOYqZkqjgXDFDhtAN6m2P13oVQ1W3EmdZpyGWJopVNNe6ybPRgfqH9TxuONpNKF5bDCNch%2B%2FFzTCXtqUjBrYEzWCqjIjksB8pPhrFEHpnKM3UkR3sbgsyC0Ny1FOKGSLp7wNrqbP2GS2Ri00Wg%2FIeut7%2BMJxFNnl2VhQ1CpylLmKZ4AKB%2BfiuvqLHkIkBAuh%2BgK5y8KQWu1tjo34TaWZ2AjkcOuYrA0rKkj4wuI31aTiJj4dFw%2Fa%2Fc9NqH10wxqZL2TSENGKHB5E7XPdgsRhzoa8Zui6OB7xIKSAAXz3Yoj4H6WpEmRv%2BwEQm2icAgL2u9f8A%2FOQ4H6MkG%2BYK%2BDZpygLqck8oeuXPsAVxhalp%2FjQ6oevXfUTjcBFanwZ%2Bax%2Bit6xdueiNVQnFeZZVfO1cjsvkcCPzfwglWFjb7XeC%2FgGF2tGd73kY99IxxbZn29dP%2FHXuBgbgdJ%2FZ%2FwkKBxUR6Rgy3fNQkv0bSjVpKJGxpdlfGJ%2BIj2pKKf7%2Bo1RIzTrAPdh75o4rZjF4VLfs%2BbTXnH8uvIwWFY8Ds1xLF%2Fb2bzVoHBwtMvcCaeIZt4vTRJYwmhUcDq4YQIJESKTMG%2B8OJ8MKS9o4vErkamPb710JcrcV5ZTzV39F6Tt3pgHD8%2FBv5iuaeT96CsudrfWtXBzCUw0mKxtoxzL61ZqaXqcWd74%2Fpt5RqLrspdV0LeptexCqQ0VQREPQRe4whN7iyjVLWpcdDPvb%2FtslGpG8hqOpmPRKPcprDiFMAVPaWKMD8B215XlJT%2FM5NR3UAmYnEQ9akNGHj3X6V6W2aSIBzzmqM8I88UgGkdU0FN9GlPCp81tCg%2B7sinemjIITcIzJ0vKvhnzebjx%2BK9pvf6O0K3hs1FNwuaf7Mwq8Ks1wY6sAEB%2B3QqMpv74PMOJKT5NzMrggmVyNU9DThW2JGylMydMAFGzgFEobMwqemyBw3V9%2F5fbPwlyHSPiEa9IpTlbDs76t0askUJorvEOJgnOxxBlP%2B%2FUiwxaj6yYhsccQ76qk3D2bGFrBK%2BcFIXtHSndpRSeAjGdgUlsZ5WKBtHCC18CIrm9pnFT6MW1h84r9SksNLjTBa1r7BwzinaKnvpQ1DFZlIzOUf5fwVKQFEB%2FCIM3g%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=7a444d56ece772cb91bd63ead3e3f46f0868c7cdb0db7474c26674be499364f9",
+      "file_size": 13503,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-12-04T12:19:34.181Z",
+  "allow_singular_disclosure_after": 2576076.460100702,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "fg0x0"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.3,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10336,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Data corruption, exfiltration, disclosure",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

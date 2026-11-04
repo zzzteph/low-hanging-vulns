@@ -1,0 +1,152 @@
+{
+  "id": 3891779,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODkxNzc5",
+  "url": "https://hackerone.com/reports/3891779",
+  "title": "Connector/ODBC injects unquoted column names into positioned DELETE and UPDATE via MADB_DynStrGetWhere",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-26T19:08:35.013Z",
+  "submitted_at": "2026-07-26T19:08:35.607Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fg0x0",
+    "url": "/fg0x0",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/we9mo7ui49vl91bznzyid2bvt1lf/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-04T12:35:31.047Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-04T12:35:30.870Z",
+  "team_member_agreed_on_going_public_at": "2026-11-04T11:51:51.676Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "`MADB_DynStrGetWhere()` in MariaDB Connector/ODBC appends a column name into the WHERE clause of the DELETE and UPDATE statements it generates for positioned operations, with no quoting of any kind. The column value on the same line is correctly escaped; the column name is not. An application that asks the driver to delete one row through `SQLSetPos(SQL_DELETE)` can be made to delete every row in the table instead, and more generally to execute SQL chosen by whoever controls the identifier, on the application's connection and with the application's privileges.\n\nReproduced on the released `odbc-mariadb 3.2.6-1.1` package as shipped by Debian and Ubuntu, and on current `master` HEAD `4e175d9` (3.2.10).\n\n## Details\n\nThe relevant code is `driver/ma_string.cpp:345` in `MADB_DynStrGetWhere()`:\n\n```c\n      DynString.append(\" AND \").append(field->org_name);\n\n      if (ParameterMarkers)\n      {\n        DynString.append(\"=?\");\n      }\n      else\n      {\n        ...\n          Escaped= static_cast<char*>(MADB_CALLOC(2 * StrLength + 1));\n          EscapedLength= mysql_real_escape_string(Stmt->Connection->mariadb, Escaped, Column, (unsigned long)StrLength);\n\n          DynString.append(\"= '\").append(Escaped).append(\"'\");\n```\n\nThe value goes through `mysql_real_escape_string`. The name is appended raw. This is the only identifier builder in the driver that applies no quoting at all. The others at least wrap the name in backticks:\n\n- `MADB_DynStrAppendQuoted`, `driver/ma_string.cpp:105`, emits `` `name` ``\n- `MADB_DynStrUpdateSet`, `driver/ma_string.cpp:142`, emits `` `name`=? ``\n- `MADB_DaeStmt`, `driver/ma_helper.cpp:1159`, `:1167`, `:1176`, emits `` `catalog`.`table` ``\n\nNone of those double an embedded backtick either, so they are injectable too, but they at least require a backtick in the payload. Line 345 requires nothing.\n\n`MADB_StmtSetPos(SQL_DELETE)` at `driver/ma_statement.cpp:3853` assembles the final statement and sends it:\n\n```c\n      SQLString     DynamicStmt(\"DELETE FROM \");\n      ...\n      DynamicStmt.append(TableName);\n      ...\n        if (MADB_DynStrGetWhere(Stmt, DynamicStmt, TableName, false))\n        ...\n          Stmt->Connection->guard->safeRealQuery(DynamicStmt);\n```\n\nwhich produces `DELETE FROM <table> WHERE 1 AND <org_name>= '<escaped value>' LIMIT 1`. Note that `TableName`, which is `MYSQL_FIELD.org_table`, is also appended unquoted on the same path.\n\nA column named `1 OR 1=1#` therefore yields:\n\n```sql\nDELETE FROM victim WHERE 1 AND 1 OR 1=1#= '3' LIMIT 1\n```\n\nThe `#` opens a comment, so both the value comparison and the `LIMIT 1` are discarded and the server executes `DELETE FROM victim WHERE 1 AND 1 OR 1=1`. The application requested a single row.\n\nMariaDB permits any byte except NUL inside a quoted identifier and only forbids a trailing space, so the full 64-character identifier length is available as payload. The table is created with ordinary syntax:\n\n```sql\nCREATE TABLE victim (`1 OR 1=1#` INT PRIMARY KEY, data VARCHAR(64)) ENGINE=InnoDB;\n```\n\n`org_name` and `org_table` are the underlying column and table names as the server reports them in the result-set metadata, so there are two ways an attacker reaches this. The first is anyone able to create or rename a column in a schema the application later performs a positioned update or delete on. That capability is ordinary in applications with user-defined custom fields, form builders, low-code schema generation, or CSV import that derives column names from headers. The second is a malicious or MITM server, which can put any value in `org_name` regardless of the real schema; the driver does not require TLS on a default DSN, enabling it only when an SSL option is explicitly set at `driver/ma_connection.cpp:778`.\n\n## PoC\n\nTwo tables, identical except for the name of the primary key column, both with four rows, and an application that asks to delete exactly one row from each:\n\n```bash\n--- table 'odbc_f6_control' ---     (column named  id)\n    rows before : 4\n    cursor is on row key=3 (row-three)\n    calling SQLSetPos(1, SQL_DELETE) - delete THIS ONE ROW\n    SQLSetPos returned 0, SQLRowCount reports 1 row(s) affected\n    rows after  : 3\n\n--- table 'odbc_f6_victim' ---      (column named  1 OR 1=1#)\n    rows before : 4\n    cursor is on row key=3 (row-three)\n    calling SQLSetPos(1, SQL_DELETE) - delete THIS ONE ROW\n    SQLSetPos returned 0, SQLRowCount reports 4 row(s) affected\n    rows after  : 0\n```\n\nThe server's own general log shows exactly what the driver sent:\n\n```bash\nDELETE FROM control WHERE 1 AND id= '3' LIMIT 1\nDELETE FROM victim WHERE 1 AND 1 OR 1=1#= '3' LIMIT 1\n```\n\n`SQLSetPos` returns `SQL_SUCCESS` in both cases. The application has no indication that anything other than the requested row was touched, beyond the row count.\n\n`repro_f6_identifier_sqli.c` in the attachment is a single self-contained file. It creates both tables itself, so one command reproduces the whole thing. No custom driver build is needed; the distribution package reproduces it:\n\n1. Install the packaged driver: `apt install odbc-mariadb unixodbc unixodbc-dev`\n2. Build: `gcc -O0 -g -o repro_f6 repro_f6_identifier_sqli.c -lodbc`\n3. Optionally enable general log: `SET GLOBAL general_log_file='/tmp/gen.log'; SET GLOBAL general_log=1;`\n4. Run: `./repro_f6 \"DRIVER=/usr/lib/x86_64-linux-gnu/odbc/libmaodbc.so;SERVER=127.0.0.1;PORT=3306;UID=user;PWD=pass;DATABASE=test;SSLVERIFY=0;\"`\n5. Control table loses 1 row, victim table loses all 4. Program prints `VULNERABLE`.\n\n## Impact\n\nArbitrary SQL executed on the application's connection with the application's privileges, chosen by whoever controls a column or table name in a schema the application performs positioned updates or deletes on.\n\nThe demonstrated case is destructive: an application that asks to delete one row deletes the entire table, and receives `SQL_SUCCESS`. The same injection point reaches anything expressible in a WHERE clause, so subqueries and boolean conditions are available for reading data the application never asked for, and the same unquoted-identifier pattern is present on the UPDATE path through `MADB_DynStrUpdateSet` and on the table name itself.\n\nThe privilege boundary this crosses is the interesting part. In a multi-tenant or user-extensible schema, the party who names a column is typically far less privileged than the reporting, ETL or administrative application that later reads and modifies those rows over ODBC. The injected statement runs as the latter.\n\nSuggested fix: wrap the identifier in backticks and double any embedded backtick, the same treatment the value already receives.",
+  "weakness": {
+    "id": 67,
+    "name": "SQL Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6328090,
+      "file_name": "repro_identifier_sqli.c",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/s02usugcfkl9uq1t9z77aria78ak?response-content-disposition=attachment%3B%20filename%3D%22repro_identifier_sqli.c%22%3B%20filename%2A%3DUTF-8%27%27repro_identifier_sqli.c&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ67PQMAYD%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164459Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCvjN3E9W1VqI3ab4xmYf3V0DwrrI1SNhzslMn%2BSxTYJwIgHqFYbZEDgraMfvwTN5i6PlljUz9xlaAQzUlfynNg9EUqugUIrf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDL8Iu9JTTeOYopddNiqOBSgMW7wpcTTkj7M1yYBAyBBVJy8g5h%2B6UvkGaYOlN0MrqXmbRqyZEM39c5qHKLYhnrmmy%2BvuT3xvUcpZKQE4Nc%2FP9QlSuLMsJmBmH515yxq7UDIuWkfB7wKhp5j0GZA6cRWY4Iz2zl7PDE49ALJk%2F6LJV%2FNS5X9RYFY31tJh3vXcxelC2j4yIKdcT4g7MCzPE3AVu3kFofBpX7qi8Pf2zDbKCykXVYwu7on1DTtwHCV2KSl3j%2FyhYlqRGorVC9Y8EheQfbx8%2B93PGT0fNwxrvNCddeMM%2BEz8fdbsutBYe881dzji04F22%2F2SSzHMnNaYXtEVDM81mp%2B7AsRw988VGsBgYXM%2Fq75OldGuPNfmimQPVvi9PWJ%2FZsuEIhtO0TfrFvrSL1PeU%2F0k1GkHfS2xlHC0wG39FyxXGsaEEZxtzsyF2f7UppQTBzKgZXo8wlF3x8Gl7128eUfWFR6eMRJbs8dhB%2F6lAzzbvkWdft7sMZPAfEuRvjeWOLVNVZmpg2ZOfgHtz%2BX66wNaRe5CLOdq4xSbtxVfr0SzmKTmbV365b5EkpnOe1T0i%2FGUP87uUK7kvpvx32pllHMIGqi2wwkxveVUeWTWGzxkSvNM746HFQp4kUWlzh%2F8v191DPrjgWKuvzFkYXicX1k%2BKT86LDBReQIGJetW3Ee%2Bge8LzE4wKPyryoRFKURvIOtVELIaumRwLKBJCjK1yjnKwqxt1lXFEUUvFW5g9JKtuvDw2mGKyAmSPie%2BDx%2F8BC%2F%2Fcaf%2FbWrpE10L4F1GY%2B%2Fdj1KUcbEgqqXtFPkFRrhSk2a25ZZjfu1nOtGpLB4IQnbNkuViJ3%2F1icCckIxhqfBS16JeEIMBd2YYwRiAXNcJdf%2Fj36DxHDCEwazXBjqxATsuBGeeniHs0VLf9iVEm4mgMCKSMLOyamXps8SiSwSK70GJRdVZy6OGoUhBgGOq7zSNfrwJFLziqug1B0BlsDFjmfSt8NaJIPzWRWA8D9a3sdwI%2FCkefR7Kcih2qF%2Fe4ZULLS9itPdkUEBN80TxLfP%2FaIv1OT%2BM6EU%2BNq%2BPssbMLN2b383aKGeQdEDNS1%2BD2QV9DVAvRMcCDIMF%2B6qZbb0PK3iAniCQ%2BDGyRaoN0LJzTA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=359446b6fcf3e359b4f1cef0533bf2b65f15ce960a1f00a4c70f606f9868c480",
+      "file_size": 5978,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6328093,
+      "file_name": "run_poc.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/t601spvknaoz0yl92xuy2caqatvm?response-content-disposition=attachment%3B%20filename%3D%22run_poc.sh%22%3B%20filename%2A%3DUTF-8%27%27run_poc.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ67PQMAYD%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164459Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCvjN3E9W1VqI3ab4xmYf3V0DwrrI1SNhzslMn%2BSxTYJwIgHqFYbZEDgraMfvwTN5i6PlljUz9xlaAQzUlfynNg9EUqugUIrf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDL8Iu9JTTeOYopddNiqOBSgMW7wpcTTkj7M1yYBAyBBVJy8g5h%2B6UvkGaYOlN0MrqXmbRqyZEM39c5qHKLYhnrmmy%2BvuT3xvUcpZKQE4Nc%2FP9QlSuLMsJmBmH515yxq7UDIuWkfB7wKhp5j0GZA6cRWY4Iz2zl7PDE49ALJk%2F6LJV%2FNS5X9RYFY31tJh3vXcxelC2j4yIKdcT4g7MCzPE3AVu3kFofBpX7qi8Pf2zDbKCykXVYwu7on1DTtwHCV2KSl3j%2FyhYlqRGorVC9Y8EheQfbx8%2B93PGT0fNwxrvNCddeMM%2BEz8fdbsutBYe881dzji04F22%2F2SSzHMnNaYXtEVDM81mp%2B7AsRw988VGsBgYXM%2Fq75OldGuPNfmimQPVvi9PWJ%2FZsuEIhtO0TfrFvrSL1PeU%2F0k1GkHfS2xlHC0wG39FyxXGsaEEZxtzsyF2f7UppQTBzKgZXo8wlF3x8Gl7128eUfWFR6eMRJbs8dhB%2F6lAzzbvkWdft7sMZPAfEuRvjeWOLVNVZmpg2ZOfgHtz%2BX66wNaRe5CLOdq4xSbtxVfr0SzmKTmbV365b5EkpnOe1T0i%2FGUP87uUK7kvpvx32pllHMIGqi2wwkxveVUeWTWGzxkSvNM746HFQp4kUWlzh%2F8v191DPrjgWKuvzFkYXicX1k%2BKT86LDBReQIGJetW3Ee%2Bge8LzE4wKPyryoRFKURvIOtVELIaumRwLKBJCjK1yjnKwqxt1lXFEUUvFW5g9JKtuvDw2mGKyAmSPie%2BDx%2F8BC%2F%2Fcaf%2FbWrpE10L4F1GY%2B%2Fdj1KUcbEgqqXtFPkFRrhSk2a25ZZjfu1nOtGpLB4IQnbNkuViJ3%2F1icCckIxhqfBS16JeEIMBd2YYwRiAXNcJdf%2Fj36DxHDCEwazXBjqxATsuBGeeniHs0VLf9iVEm4mgMCKSMLOyamXps8SiSwSK70GJRdVZy6OGoUhBgGOq7zSNfrwJFLziqug1B0BlsDFjmfSt8NaJIPzWRWA8D9a3sdwI%2FCkefR7Kcih2qF%2Fe4ZULLS9itPdkUEBN80TxLfP%2FaIv1OT%2BM6EU%2BNq%2BPssbMLN2b383aKGeQdEDNS1%2BD2QV9DVAvRMcCDIMF%2B6qZbb0PK3iAniCQ%2BDGyRaoN0LJzTA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=809dba07c21b1596ac17d82872f6ecaa58b4d49e7ca77406684a0f25580e055b",
+      "file_size": 10548,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6328094,
+      "file_name": "poc_evidence.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/q0iff659y8508k86n8axrt4ezmcz?response-content-disposition=attachment%3B%20filename%3D%22poc_evidence.txt%22%3B%20filename%2A%3DUTF-8%27%27poc_evidence.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ67PQMAYD%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164459Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOT%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQCvjN3E9W1VqI3ab4xmYf3V0DwrrI1SNhzslMn%2BSxTYJwIgHqFYbZEDgraMfvwTN5i6PlljUz9xlaAQzUlfynNg9EUqugUIrf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDL8Iu9JTTeOYopddNiqOBSgMW7wpcTTkj7M1yYBAyBBVJy8g5h%2B6UvkGaYOlN0MrqXmbRqyZEM39c5qHKLYhnrmmy%2BvuT3xvUcpZKQE4Nc%2FP9QlSuLMsJmBmH515yxq7UDIuWkfB7wKhp5j0GZA6cRWY4Iz2zl7PDE49ALJk%2F6LJV%2FNS5X9RYFY31tJh3vXcxelC2j4yIKdcT4g7MCzPE3AVu3kFofBpX7qi8Pf2zDbKCykXVYwu7on1DTtwHCV2KSl3j%2FyhYlqRGorVC9Y8EheQfbx8%2B93PGT0fNwxrvNCddeMM%2BEz8fdbsutBYe881dzji04F22%2F2SSzHMnNaYXtEVDM81mp%2B7AsRw988VGsBgYXM%2Fq75OldGuPNfmimQPVvi9PWJ%2FZsuEIhtO0TfrFvrSL1PeU%2F0k1GkHfS2xlHC0wG39FyxXGsaEEZxtzsyF2f7UppQTBzKgZXo8wlF3x8Gl7128eUfWFR6eMRJbs8dhB%2F6lAzzbvkWdft7sMZPAfEuRvjeWOLVNVZmpg2ZOfgHtz%2BX66wNaRe5CLOdq4xSbtxVfr0SzmKTmbV365b5EkpnOe1T0i%2FGUP87uUK7kvpvx32pllHMIGqi2wwkxveVUeWTWGzxkSvNM746HFQp4kUWlzh%2F8v191DPrjgWKuvzFkYXicX1k%2BKT86LDBReQIGJetW3Ee%2Bge8LzE4wKPyryoRFKURvIOtVELIaumRwLKBJCjK1yjnKwqxt1lXFEUUvFW5g9JKtuvDw2mGKyAmSPie%2BDx%2F8BC%2F%2Fcaf%2FbWrpE10L4F1GY%2B%2Fdj1KUcbEgqqXtFPkFRrhSk2a25ZZjfu1nOtGpLB4IQnbNkuViJ3%2F1icCckIxhqfBS16JeEIMBd2YYwRiAXNcJdf%2Fj36DxHDCEwazXBjqxATsuBGeeniHs0VLf9iVEm4mgMCKSMLOyamXps8SiSwSK70GJRdVZy6OGoUhBgGOq7zSNfrwJFLziqug1B0BlsDFjmfSt8NaJIPzWRWA8D9a3sdwI%2FCkefR7Kcih2qF%2Fe4ZULLS9itPdkUEBN80TxLfP%2FaIv1OT%2BM6EU%2BNq%2BPssbMLN2b383aKGeQdEDNS1%2BD2QV9DVAvRMcCDIMF%2B6qZbb0PK3iAniCQ%2BDGyRaoN0LJzTA%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6a29d2278c9a0adb8a35011199b66a30690b9e776e06ee4f0c09decdbe5cf833",
+      "file_size": 13831,
+      "type": "text/plain",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-12-04T11:51:51.904Z",
+  "allow_singular_disclosure_after": 2574412.68842573,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "fg0x0"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10336,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Data corruption, exfiltration, disclosure",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

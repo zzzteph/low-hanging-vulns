@@ -1,0 +1,139 @@
+{
+  "id": 3920629,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTIwNjI5",
+  "url": "https://hackerone.com/reports/3920629",
+  "title": "r2dbc-mariadb: server message accepted with no command in flight desynchronises the connection and serves one user's rows to another",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-06T09:42:35.944Z",
+  "submitted_at": "2026-08-06T09:42:36.212Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fg0x0",
+    "url": "/fg0x0",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/we9mo7ui49vl91bznzyid2bvt1lf/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-55859",
+    "CVE-2026-55860"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-04T12:35:53.044Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-04T12:35:52.902Z",
+  "team_member_agreed_on_going_public_at": "2026-11-04T12:18:34.637Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "r2dbc-mariadb accepts a server packet that arrives while the client has no command outstanding, buffers it, and hands it to the next unrelated statement. Nothing correlates a response with the request it is delivered to, and the driver reads the protocol's sequence id without ever validating it. One injected packet permanently desynchronises the connection: every subsequent statement receives the previous statement's response. On a pooled connection that means one application user is served another user's rows, and a write that matched no rows is reported as having matched one.\n\nThe precondition, stated plainly up front: the attacker must be able to inject bytes into the client/server TCP stream. That means an on-path attacker, a malicious or compromised server, or a compromised proxy such as MaxScale or ProxySQL. The driver's default `sslMode` is `DISABLE`, so no TLS has to be defeated in the default configuration.\n\nConfirmed against the unmodified Maven Central artifact `org.mariadb:r2dbc-mariadb:1.4.1` (sha256 `a2733d2496ea9bc7aa85498306b175fcae2c423cf15bb7aad1d64d201e104732`) and a stock `mariadb:11.4` image, with all driver options at their defaults. 9 of 10 consecutive requests received another user's secret. A negative control and two fix controls are included.\n\n### Root cause\n\nIn the MariaDB and MySQL client/server protocol the server never speaks unprompted. Every packet it sends belongs to a command the client issued. `ServerMessageSubscriber` in `src/main/java/org/mariadb/r2dbc/client/SimpleClient.java` is the component responsible for matching an inbound message to the command that asked for it, and it never enforces that rule.\n\n`onNext` (SimpleClient.java:783) looks up the pending command, and when there is none it falls through into the buffering branch:\n\n```java\n      this.receiverDemands.decrementAndGet();\n      Exchange exchange = this.exchangeQueue.peek();\n\n      // nothing buffered => directly emit message\n      ReferenceCountUtil.retain(message);\n      if (this.receiverQueue.isEmpty()\n          && exchange != null\n          && (exchange.hasDemand() || exchange.isCancelled())) {\n        if (exchange.emit(message)) this.exchangeQueue.poll();\n        ...\n        return;\n      }\n\n      // queue message\n      if (!this.receiverQueue.offer(message)) {\n```\n\n`exchange == null` means the exchange queue is empty, that is, the client has no command in flight at all. That is not a backpressure condition, it is a protocol violation. The `exchange != null` test only steers the message away from the fast path and into `receiverQueue` at line 805, where it waits.\n\n`tryDrainQueue` (SimpleClient.java:829) then pairs the head of the message queue with the head of the exchange queue positionally:\n\n```java\n          while (!this.receiverQueue.isEmpty()) {\n            if ((exchange = this.exchangeQueue.peek()) == null\n                || (!exchange.hasDemand() && !exchange.isCancelled())) return;\n            if ((srvMsg = this.receiverQueue.poll()) == null) return;\n            if (exchange.emit(srvMsg)) this.exchangeQueue.poll();\n          }\n```\n\nThere is no correlation of any kind. When the application issues its next statement, `onRequest` (SimpleClient.java:816) calls `tryDrainQueue` and the stale packet is emitted to the new `Exchange`. The injected OK packet reports `ending()`, so that statement completes having consumed a packet the server sent before the statement existed. Its real response then arrives with the exchange queue empty again, is parked in turn, and is served to the following statement. The shift is self-sustaining and lasts for the life of the connection.\n\n`MariadbFrameDecoder.java:112-114` makes the same positional assumption one layer down, selecting the decode state from `exchangeQueue.peek()` and defaulting to `QUERY_RESPONSE` when the queue is empty, which is why the unsolicited packet is parsed as an ordinary query response instead of being rejected.\n\n### Why this is a driver defect, not \"the protocol assumes a well-behaved server\"\n\nThe MariaDB protocol carries a sequence id in every packet header specifically so that each side can detect lost, reordered or injected packets. The driver reads that byte and throws it away. `MariadbFrameDecoder.decode` (MariadbFrameDecoder.java:110-111) constructs a fresh sequencer from whatever the server sent:\n\n```java\n  private ServerMessage decode(ByteBuf packet) {\n    Sequencer sequencer = new Sequencer(packet.readByte());\n```\n\nand `Sequencer` (`src/main/java/org/mariadb/r2dbc/message/server/Sequencer.java`) has no validation at all:\n\n```java\npublic class Sequencer implements MessageSequence {\n  private byte sequenceId;\n\n  public Sequencer(byte sequenceId) {\n    this.sequenceId = sequenceId;\n  }\n\n  public void reset() {\n    sequenceId = (byte) 0xff;\n  }\n\n  public byte next() {\n    return ++sequenceId;\n  }\n}\n```\n\n`next()` exists only to number outgoing packets. Nothing ever compares a received sequence id against an expected value, which is why the injected packet is accepted with an arbitrary sequence byte. The protocol's own anti-desynchronisation mechanism is present on the wire and unused by this driver.\n\n### Steps to reproduce\n\n1. Start a stock server, no configuration changes:\n\n```bash\ndocker run -d --name r2dbc_track_default -e MARIADB_ROOT_PASSWORD=Pw123456 -p 3308:3306 mariadb:11.4\n```\n\n2. Seed ten tenants (`poc/seed.sql`):\n\n```sql\nCREATE DATABASE IF NOT EXISTS db_a;\nUSE db_a;\nCREATE TABLE tenants(owner VARCHAR(16), secret VARCHAR(32));\nINSERT INTO tenants VALUES\n('user1','USER1_SECRET'),('user2','USER2_SECRET'),('user3','USER3_SECRET'),('user4','USER4_SECRET'),\n('user5','USER5_SECRET'),('user6','USER6_SECRET'),('user7','USER7_SECRET'),('user8','USER8_SECRET'),\n('user9','USER9_SECRET'),('user10','USER10_SECRET');\n```\n\n3. Start the on-path attacker (`poc/inject_proxy2.py`). It forwards every byte untouched. It is not told when to fire and does not inspect the traffic for any marker: it waits until the link has been idle for 300 ms, which means no command can be in flight, and then sends one 11-byte packet.\n\n```bash\npython3 poc/inject_proxy2.py 3309 3308 inject 300 3\n```\n\nThe injected packet is a minimal OK packet:\n\n```bash\n07 00 00 01 00 00 00 02 00 00 00\nlength=7 | seq=1 | OK header 00 | affected_rows 0 | last_insert_id 0 | status 0x0002 | warnings 0\n```\n\n4. Run the application (`poc/SubmissionPoc.java`) against the proxy using the unmodified released driver. It opens one connection, does three warmup queries, pauses, then serves ten end users in turn, each asking only for its own row, and finally issues an UPDATE that matches no rows.\n\n```bash\njava -cp r2dbc-mariadb-1.4.1.jar:<deps>:. -Dport=3309 SubmissionPoc\n```\n\n5. Observed with the attacker active:\n\n```bash\n  request  1  app asked for user1  expected USER1_SECRET   got <NO ROWS>      EMPTY\n  request  2  app asked for user2  expected USER2_SECRET   got USER1_SECRET   *** WRONG USER'S DATA ***\n  request  3  app asked for user3  expected USER3_SECRET   got USER2_SECRET   *** WRONG USER'S DATA ***\n  request  4  app asked for user4  expected USER4_SECRET   got USER3_SECRET   *** WRONG USER'S DATA ***\n  request  5  app asked for user5  expected USER5_SECRET   got USER4_SECRET   *** WRONG USER'S DATA ***\n  request  6  app asked for user6  expected USER6_SECRET   got USER5_SECRET   *** WRONG USER'S DATA ***\n  request  7  app asked for user7  expected USER7_SECRET   got USER6_SECRET   *** WRONG USER'S DATA ***\n  request  8  app asked for user8  expected USER8_SECRET   got USER7_SECRET   *** WRONG USER'S DATA ***\n  request  9  app asked for user9  expected USER9_SECRET   got USER8_SECRET   *** WRONG USER'S DATA ***\n  request 10  app asked for user10 expected USER10_SECRET  got USER9_SECRET   *** WRONG USER'S DATA ***\n  UPDATE matching 0 rows reported rowsUpdated = 1   *** WRITE RESULT MIS-REPORTED ***\n\n  queries that received another user's data : 9\n  queries that received no rows             : 1\n\n[attacker] link idle 326ms after 5 client packets -> injected 1 OK packet\n```\n\nNine of ten consecutive requests received a different user's secret, and every request completed without any error surfacing through the R2DBC API.\n\n6. Negative control. Rerun steps 3 and 4 with the proxy in `noinject` mode, so the identical proxy is still in the path but sends nothing of its own:\n\n```bash\n  request  1  app asked for user1  expected USER1_SECRET   got USER1_SECRET   ok\n  ...\n  request 10  app asked for user10 expected USER10_SECRET  got USER10_SECRET  ok\n  UPDATE matching 0 rows reported rowsUpdated = 0   ok\nRESULT: no impact - every request received its own row\n```\n\n7. Fix control. Treat a message arriving with no command outstanding as a protocol error, at the top of `onNext`:\n\n```java\n      Exchange exchange = this.exchangeQueue.peek();\n\n      if (exchange == null) {\n        onError(\n            new R2dbcNonTransientResourceException(\n                \"unexpected: server message received while no command was in flight\", \"08000\"));\n        return;\n      }\n```\n\nRecompile that single class from the 1.4.1 source tree, prepend it to the classpath, and repeat. With the attack the connection now fails closed and the application receives an error instead of another user's data:\n\n```bash\n--- FIX CONTROL A     patched driver, SAME attack attempted\nio.r2dbc.spi.R2dbcNonTransientResourceException: The connection is closed. Unable to send anything\n[attacker] link idle 301ms after 5 client packets -> injected 1 OK packet\n\n--- FIX CONTROL B     patched driver, no injection (normal operation intact)\n  request  1  app asked for user1  expected USER1_SECRET   got USER1_SECRET   ok\n  ...\n  UPDATE matching 0 rows reported rowsUpdated = 0   ok\nRESULT: no impact - every request received its own row\n```\n\nThe full transcript of all four scenarios is in `poc/poc_evidence.txt`.\n\n### Affected versions and suggested fix\n\n`org.mariadb:r2dbc-mariadb` through 1.4.1. The dispatch code is byte-identical on master (`a82d265`) and on the current unreleased develop head (`234419d`), so the pending work for the next release does not address it.\n\nReject in `onNext` when `exchangeQueue.peek()` is null, as in the fix control above. Validating the received sequence id against the expected value would close the class more thoroughly, since it would also catch reordering and truncation rather than only the empty-queue case.\n\nThis is a client library with no MariaDB-operated instance, so no production confirmation is possible and none is claimed. All testing was local, against Docker on loopback and a local TCP proxy. No MariaDB-operated system was contacted. All poc/... paths above are inside the attached mariadb_r2dbc_response_confusion_poc_by_fg0x0.zip. The patched class used for the fix controls is at poc/fixsrc/org/mariadb/r2dbc/client/SimpleClient.java.\n\n## Impact\n\nA single injected packet permanently desynchronises request and response on the connection. Because applications use this driver through a connection pool, consecutive statements on one connection belong to different end users and different requests, so the driver hands user B the rows it fetched for user A. The application cannot detect this: every query completes normally and the R2DBC API reports no error. Any result used for an ownership check, a tenant scope or an authorization decision therefore becomes attacker-influenced without a single byte of SQL being modified.\n\nIntegrity is affected as well as confidentiality. In the run above an UPDATE that genuinely matched zero rows reported one row updated, because it consumed a different statement's response. The same negative control reports zero. An application that branches on an affected-row count, which is the normal way to implement optimistic concurrency or \"did this write land\", is given a false answer.\n\nThe condition is not self-correcting. It persists for the life of the connection, so an application-level retry on the same pooled connection reads shifted results too. Recovery requires closing the connection, and nothing tells the application it needs to.\n\nHonest scoping of the attacker position. Injecting into the stream generally also means being able to read it, so on a plaintext link the attacker is not learning something they could not already see. The harm being reported is what the driver then causes the application to do: deliver one user's data to another user, and mis-report writes, persistently and undetectably. That is a cross-tenant disclosure inside the application, caused by the attacker, and it is not prevented by anything the application can reasonably do. Setting `sslMode` to `VERIFY_FULL` defeats the pure on-path variant, but not a malicious or compromised server, and not a proxy that terminates TLS. No authentication, no user interaction and no non-default driver option is required.\n\nThis is the same client-versus-hostile-server trust boundary as the two issues already fixed in 1.4.1 on this connector, CVE-2026-55859 and CVE-2026-55860.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6407824,
+      "file_name": "mariadb_r2dbc_response_confusion_poc_by_fg0x0.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/669b4yctflz2sdcm742wphluwr2k?response-content-disposition=attachment%3B%20filename%3D%22mariadb_r2dbc_response_confusion_poc_by_fg0x0.zip%22%3B%20filename%2A%3DUTF-8%27%27mariadb_r2dbc_response_confusion_poc_by_fg0x0.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3JJUD3AU%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164458Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOX%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDerOyiLWMO6F94e%2FBWFejmdJtr7q7jEylSsAfuZLctLwIhAI61F9JIKwq%2BONo5xqYlJStksaxykljdfjz1cds7Eg%2BBKrsFCK7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxGktBS4Q8uk0cEPAQqjwWoFn43IhUGDDY6RlvrFz7reJjbvszKepl4xzGiXfHDUR9J%2B3T3aYiwk6f83cOyGTpT%2F9u3PrjjoPCrwPuFqySAzHigqIOV%2BeN%2FVX7mevq5Yzb3K4u%2Bdz1bLmYB1wFzXatt0ALLzWx7%2BJNsZRP6LUtas%2BAW0H5Ckcxk%2FPV5AwlJ5qyAhUKnp2NbrMhUxc%2FEU0XROjEP81RFnkzfxpoPUvlMMd4IsWtMx4xTTSE%2BJO8jHcHH24ruTimxv0FohGUqgKZglHKqzrDwj9WJeF04UlkqkTfnctg1F%2Fh8BYivJR6VkKbcFblj8NW3%2Be0c%2FOixSKoUMeAlg49mmUfdBxT3gEAwalfVZM07QOj%2FAiSMIrvJS8cxy3ILOwHMP%2FsCawg8lWcABU5UV3SnLPm0zyE2N9NKDeWm%2BWfwg9UvDyRIDbzWhpZ3FsFqJVTkQu8wPg17LzBJkuR3ZDZvWrySz9OsrqNz74y5H7YKaaUpPfAXGbZm0YDc%2Bini4v4JtVu%2FsBssiIHD4o5qjXDIzRRBqKA%2FxwzhEKHJ%2Bw5i2DJkpywlbsXo3blwgXEZhihkyYXZjMF1bDqwrUDJqAE5QzKI4PeVqH%2BONmo0kNslmASQb3vw7lOgjgqLj5vEqzJQ%2BzEfdJuEPVOcz2Ap6HEGesGrik%2Bv5Qg87PTfpi3FEsspW7mlZStAYI7udn7ptiCn43OeCDDLRlLuv%2BJrMxBgd8SI407bFo604j9WD0oShFBJCM9oUEMW4e07dhLTyXMQ59JENPHk10yh%2Bt4S3nzgugUUCEVjqjTFaDVYorrv01NbfKgteUABVjx8KWb%2BEvpPqPjo3RRNee71LTa2TEC40gjOjNwXxt6Krsn2jzoI%2FqzdtpP4c3VLMIHRrNcGOrABJ%2F6mC%2BPao%2BmnQoMDA2HQamKGUQkUtENwiZDIIrxz4129L1GMWZQhCv8yfF1LWPRfiL0KAI8RU0qg5O8YMDihfxi3ylcQpya8WkPcMFqfNBfDSdno3QStvO1zbDF9miSOoBfHH15D20Cvt4pYa68R6069Z%2Bu82L8Ck1UWX%2F53zQyxovzzbki3qKXeaQ5YUor4PDK9ePlrP12rSLtJXsE%2F5Lbm3eK%2Fw0ZoHb0Vj%2B1QPJ4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=3a2af696bf355935989b2c14037e8e0f5e8cce996df0792b860279e191b68483",
+      "file_size": 14528,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-12-04T12:18:34.813Z",
+  "allow_singular_disclosure_after": 2576016.499651329,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "fg0x0"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10336,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Data corruption, exfiltration, disclosure",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

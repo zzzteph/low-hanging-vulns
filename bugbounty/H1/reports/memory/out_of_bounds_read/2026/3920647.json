@@ -1,0 +1,136 @@
+{
+  "id": 3920647,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTIwNjQ3",
+  "url": "https://hackerone.com/reports/3920647",
+  "title": "Connector/ODBC: MADB_Stmt::ArrayOffset is not reset when an exception unwinds out of MADB_StmtExecute, so the next paramset reads out of bounds",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-06T09:50:58.784Z",
+  "submitted_at": "2026-08-06T09:50:59.205Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fg0x0",
+    "url": "/fg0x0",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/we9mo7ui49vl91bznzyid2bvt1lf/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-04T12:36:47.062Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-04T12:36:46.905Z",
+  "team_member_agreed_on_going_public_at": "2026-11-04T12:20:26.345Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "An aborted parameter-array execute leaves `MADB_Stmt::ArrayOffset` stale, and the next paramset operation on the same statement handle indexes the application's arrays from that offset. When a server-reported error interrupts a parameter array, `MADB_DoExecute` throws a C++ exception that unwinds out of `MADB_StmtExecute`, skipping `Stmt->AfterExecute()`, the only place `ArrayOffset` is reset. `MA_SQLExecute` catches the exception and returns `SQL_ERROR`, so the application sees an ordinary error and a handle that looks reusable. The next array execute reads out of bounds.\n\nDemonstrated as an out-of-bounds read. No out-of-bounds write was found, and `MADB_SetStatusArray` was checked and indexes from zero.\n\n### Root cause\n\n`driver/ma_statement.cpp:1281` executes one row of the paramset and `:1283` advances the offset:\n\n```c\n      ret= MADB_DoExecute(Stmt);\n\n      ++Stmt->ArrayOffset;\n```\n\n`MADB_DoExecute` reaches `Protocol::executePreparedQuery`, which calls `throwStmtError` on any server error. The exception unwinds past `Stmt->AfterExecute()` at `:1313`:\n\n```c\nvoid MADB_Stmt::AfterExecute()\n{\n  /* All rows processed, so we can unset ArrayOffset */\n  ArrayOffset= 0;\n```\n\nand is caught in `driver/ma_api_internal.cpp:1145`:\n\n```c\n  try\n  {\n    return Stmt->Methods->Execute(Stmt, false);\n  }\n  catch (SQLException &e)\n  {\n    return MADB_FromException(Stmt->Error, e);\n  }\n```\n\nNothing on that path restores `ArrayOffset`. The same reset is also skipped by every `goto end` in `MADB_StmtExecute`, since the `end:` label at `:1315` sits after the `AfterExecute()` call at `:1313`.\n\nThe stale value is consumed by `driver/ma_codec.cpp:37`:\n\n```c\n  IndicatorMapper::IndicatorMapper(MADB_Stmt *Stmt) :\n    statusArr(Stmt->Apd->Header.ArrayStatusPtr + Stmt->ArrayOffset),\n```\n\nand dereferenced at `:52`:\n\n```c\n  bool IndicatorMapper::operator()(void *data, MYSQL_BIND *bind, uint32_t col_nr, uint32_t row_nr) {\n    if (statusArr && statusArr[row_nr] == SQL_PARAM_IGNORE) {\n```\n\nThe pointer arithmetic is unconditional, so it has a second effect: when the application has not set `SQL_ATTR_PARAM_OPERATION_PTR`, `ArrayStatusPtr` is NULL and a stale offset turns it into a small non-NULL value, defeating the `statusArr &&` guard on the next line and producing a wild read.\n\n`Stmt->Apd->Header.ArrayStatusPtr` is the application's `SQL_ATTR_PARAM_OPERATION_PTR` array, which the ODBC specification sizes at `SQL_ATTR_PARAMSET_SIZE` entries, so any non-zero offset reads past it.\n\n### Steps to reproduce\n\n`poc/poc_arrayoffset_bulk.c`, driven by `poc/run_poc.sh`. Batch 1 binds row-wise, which makes `MADB_BulkInsertPossible` false so the row loop runs; its last row duplicates a primary key. Batch 2 rebinds column-wise so the bulk path runs. The two runs differ only in whether batch 1's last row collides.\n\nNegative control, every id in batch 1 unique:\n\n```bash\n[*] batch #1 (row-wise, 8 rows, last row unique -> succeeds)\n    SQLExecute rc=0 (ok)\n[*] batch #2 (column-wise -> bulk path, 8 rows)\n    SQLExecute rc=0\n[*] finished without a memory error\n```\n\nPositive, batch 1's last row violates the primary key:\n\n```bash\n[*] batch #1 (row-wise, 8 rows, last row DUPLICATE PK -> errors)\n    SQLExecute rc=-1 (error, as intended)\n    [batch1] 23000: Duplicate entry '9999' for key 'PRIMARY'\n[*] batch #2 (column-wise -> bulk path, 8 rows)\n==43102==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x6e0adefe6560\nREAD of size 2 at 0x6e0adefe6560 thread T0\n    #0 mariadb::IndicatorMapper::operator()(...) driver/ma_codec.cpp:52\n    #1 withRowCheckCallback driver/cppmini/class/ServerSidePreparedStatement.cpp:381\n0x6e0adefe6560 is located 0 bytes after 16-byte region [0x6e0adefe6550,0x6e0adefe6560)\n```\n\nThe 16-byte region is the application's 8-entry `SQL_ATTR_PARAM_OPERATION_PTR` array. Without that array set, the same sequence instead faults on a near-NULL address (`SEGV on unknown address 0x0e`, register `rsi = 0x7` showing the leaked offset).\n\n### Affected versions and suggested fix\n\n`mariadb-connector-odbc` master `4e175d9`. HEAD is unchanged since 2026-07-06.\n\nReset `ArrayOffset` on every exit from `MADB_StmtExecute`, not only the successful one. A scope guard in `MADB_StmtExecute`, or moving the reset into the `catch` in `ma_api_internal.cpp:1145` alongside `MADB_FromException`, covers both the unwind and the `goto end` paths. Independently, `IndicatorMapper` should not perform the pointer addition before testing `ArrayStatusPtr` for NULL, since that ordering is what converts a NULL array into a wild pointer.\n\n`ma_codec.cpp` and `ma_bulk.cpp` had not been analysed on prior passes against this repo, and none of the upstream JIRA fixes referenced in the git log (ODBC-489, 490, 493, 494, 495, 496) touch `ArrayOffset` or `ma_codec.cpp`.\n\nThis is a client library with no MariaDB-operated instance, so no production confirmation is possible and none is claimed.\n\nAll `poc/...` paths above are inside the attached `mariadb_connector_odbc_arrayoffset_poc_by_fg0x0.zip`.\n\n## Impact\n\nAn out-of-bounds read at an offset carried over from a previous failed batch, in a client-side library, reached without any hostile server. The application does nothing wrong: it runs a parameter-array insert, one row is rejected by the server, and it runs another batch on the same handle. Batch reinsertion after a constraint violation is a normal recovery pattern, and an attacker who controls one value in a batch, for example a record that collides with an existing unique key, decides whether the condition is armed.\n\nTwo observable outcomes:\n\n- Where the application has not set `SQL_ATTR_PARAM_OPERATION_PTR`, the NULL guard is defeated and the process reliably crashes. For a shared service that is a denial of service triggered by ordinary user data.\n- Where the array is set, the value read out of bounds decides whether a parameter row is treated as `SQL_PARAM_IGNORE`, so rows can be silently dropped from a batch the application believes it inserted. That is silent data loss with no error surfaced to the application.\n\nThe offset also survives into any later paramset operation on that handle, not only the immediately following one, because nothing else resets it.\n\n`PR:L` is used in the vector because reaching the trigger requires the ability to place a value into a batch the application submits, which in practice means an authenticated or otherwise accepted user of the application rather than an anonymous network attacker.",
+  "weakness": {
+    "id": 8,
+    "name": "Out-of-bounds Read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6407883,
+      "file_name": "mariadb_connector_odbc_arrayoffset_poc_by_fg0x0.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/bn00eivfntip0ylvu6wurxuts8t1?response-content-disposition=attachment%3B%20filename%3D%22mariadb_connector_odbc_arrayoffset_poc_by_fg0x0.zip%22%3B%20filename%2A%3DUTF-8%27%27mariadb_connector_odbc_arrayoffset_poc_by_fg0x0.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQSJQ7BEIN%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164457Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOX%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQC3%2FP8QA8qoaJ3O65Y6xBe1%2BoVvlZgPhmp5UEIihTQUegIhAOL2zlqzi0gnk5dk8g9%2FTlw%2B%2FeFPw1ogRkCK1MEVzN%2FpKrsFCK7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxGOsTmTduMlto%2FZTcqjwXFBfYIsBCVCjJv8qzzhVFVm909tLEYpwQihIlM1Rk2J2qVefYBrwuOQ0OUNL5wqcMgYABaW865dNh%2B94OrME70l0%2Fx5wHMc1GNDHkmN6D4xdhwwSQAC9rxoA9LG840wBuP9yi0BAaqNJ9vsSF5xrNSPw%2F5LdXoY1qWw6WsTgUecFJ6vOUEDkqCyizePeTdthBMyYO8pKoo2Z0vGkVyhTr4bbt7rcLn%2B9Bk73sZqnpB%2FBjEtRVr2FPvwiLeP%2F78Tvfmq7H3hPx8tOp2zoVISUFSvqVCLIYcR3bGKMEIIuqIseLnkpND8%2BGi0MaV6HImNqNh0rH3zFeRy%2F8FYWXFMwFp0yUuTaKR2bSmPWabXbwmI4vmQesHyeNe%2Bh6GtGFuTFF%2FyrhWXz13kdX3X6%2BQvTjy7yyYmJ%2FQtTD5DHafsCm3N04ZUIwintspzroyWd98hSSK74OvWO96RNfNEeQJuCCKYgX2blMHjKNUS5woSOZcdw%2BuJCzibN5CO0V7F6R7AvBfGXnw26cQfZ552qPMugY89Js4Gt4ukT0aTu4gQtdJvVQntABKQlu5rbe3%2F0EaiDSVv2jeMNoSei%2FkIk9oYALslC6tkZ7jiRu2YQO9BloyK7GOYN0woRro0hrryxv8NcFXAtucv8weC1ChEPyZbO%2Bloa8Bi%2BCmNOPP6OLfyYkVJkAtjLyevi50jQIkkYreQGZFDgVNItyMUkHe6iqzAS4FXkwthEkiJ8fxRBrW0o9CHRnusiF2RJP%2BIT%2Bnyb1%2FOzuqlkn9OjlDx4z%2F2C51muA0lJNami2uXtQA3oHwu7mHabUjp2Jaq3BNFNCxnFkT2YxhTzb6dHHgbrko2GCBspNDoUIDjhAc2gN71xZgV%2FXEMLbPrNcGOrABe%2F7HrN%2FvK3jj9WolJ4HN30%2FKzMR26KLtcaISci5rVWEK1mzg8ZbO0lnUg7gZS7jcfv2qGH9M9i1eGFUDn%2FWw3344faGFdyekdkqF1KqS3E2LmGzL80uaQ8pYkWaL2PPbCNJ5uQL%2BNOzabllKwhVMKZdnBifGvJTuS4FLNHKaRQpANsaWP8JaXmXjCOub%2BGUip9WCcMheAMUkb7bBhL%2BFiWV5UTz%2FzlF8jAjkhTm%2FVNU%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=bba0f9ce8d94f4c65b8e0cc9a872e5de9b8de0ff84ae982905b66891949f6f65",
+      "file_size": 6604,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-12-04T12:20:26.518Z",
+  "allow_singular_disclosure_after": 2576129.454302479,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "fg0x0"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.0,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10337,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors  - Denial of Service",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

