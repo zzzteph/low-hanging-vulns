@@ -1,0 +1,158 @@
+{
+  "id": 3942522,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTQyNTIy",
+  "url": "https://hackerone.com/reports/3942522",
+  "title": "wordpress.org Rosetta: invite stores unvalidated role — Editor can assign site Administrator despite editable_roles",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-15T16:39:03.189Z",
+  "submitted_at": "2026-08-15T16:39:03.516Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "0xbs0d27",
+    "url": "/0xbs0d27",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/kyeeik6era6azkhiojhcg6gt2gc3/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/e68529859b080f77ebfd9e0a1acafdf062bd4c43f1db58e7e55c81e6ceae2d0d"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-05T14:18:24.953Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-05T13:05:15.983Z",
+  "team_member_agreed_on_going_public_at": "2026-11-05T14:18:24.607Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nOn Rosetta locale sites (e.g. `xx.wordpress.org/team/`), Editors are intentionally allowed to **invite existing network users** (`promote_users`) but are **blocked from assigning the Administrator role** via the official WordPress `editable_roles` filter (`unset( $roles['administrator'] )` for non–super-admins).\n\nThe wordpress.org mu-plugin `wporg-add-existing-users-via-username.php` breaks that boundary: on `admin_action_adduser` it persists the invite option with `role` taken directly from `$_REQUEST['role']` **before** consulting `get_editable_roles()`. Core’s `/newbloguser/{key}/` path then applies the stored role via `add_existing_user_to_blog()` → `set_role()` with **no** `wp_ensure_editable_role()` re-check.\n\nAn Editor can therefore POST `role=administrator` (not offered in the UI dropdown), create a valid invite, and elevate an account to **site Administrator** (`manage_options` on that blog).\n\nThis is **not by design**. Official WordPress documentation states that `get_editable_roles()` / `editable_roles` exist specifically so that delegated user managers (editors/authors) **cannot** make others administrators. Rosetta implements that filter. The invite path ignores it. Since WordPress 6.8, Core also provides `wp_ensure_editable_role()` to enforce the allowlist server-side — but that check is **not** applied before invite persistence in this mu-plugin (and Core’s own invite branch still lacks it before `add_option` in some paths).\n\nThis is **not** the Learn / `workshop_reviewer` case: Learn does **not** remove Administrator from `editable_roles`, so there is no privilege-boundary bypass there. Rosetta **does** remove it.\n\n## Official documentation (intended security model)\n\nFrom WordPress Developer Resources — [`get_editable_roles()`](https://developer.wordpress.org/reference/functions/get_editable_roles/):\n\n> Main purpose is to allow filtering of roles so that plugins can remove inappropriate ones… **Specifically because without filtering anyone with the edit_users capability can edit others to be administrators, even if they are only editors or authors.** This filter allows admins to delegate user management.\n\n[`editable_roles`](https://developer.wordpress.org/reference/hooks/editable_roles/) — list of roles a user **can assign to others**.\n\n[`wp_ensure_editable_role()`](https://developer.wordpress.org/reference/functions/wp_ensure_editable_role/) (since 6.8.0) — **stop execution** if the role cannot be assigned by the current user (`403`).\n\nRosetta relies on that model; the invite mu-plugin does not enforce it.\n\n## Affected Asset / Component\n\n- **Program asset:** WordPress (HackerOne) — wordpress.org custom code / Rosetta\n- **Sites:** Rosetta locale team / main (path `/team/` and locale main customizations)\n- **Mu-plugin:** `wordpress.org/public_html/wp-content/mu-plugins/pub/wporg-add-existing-users-via-username.php`\n- **Rosetta boundary:** `…/plugins/rosetta/inc/site/class-locale-team.php` (also `class-locale-main.php`)\n- **Core apply path:** `wp-includes/ms-functions.php` — `maybe_add_existing_user_to_blog()` / `add_existing_user_to_blog()` / `add_user_to_blog()`\n\n## Vulnerable Code\n\n### 1) Rosetta — intentional boundary (Editors may invite; must NOT assign Administrator)\n\n```php\n// rosetta/inc/site/class-locale-team.php\npublic function extend_editors_capabilities( $allcaps, $caps, $args, $user ) {\n    if ( ! in_array( 'editor', $user->roles ) ) {\n        return $allcaps;\n    }\n    $allcaps['list_users']    = true;\n    $allcaps['promote_users'] = true;\n    $allcaps['remove_users']  = true;\n    return $allcaps;\n}\n\npublic function remove_administrator_from_editable_roles( $roles ) {\n    if ( ! is_super_admin() ) {\n        unset( $roles['administrator'] );\n    }\n    return $roles;\n}\n\n\n2) Mu-plugin — persists unvalidated $_REQUEST['role'] BEFORE editable check\n\n// wporg-add-existing-users-via-username.php (non–super-admin path)\n$new_user_key = substr( md5( $user_id ), 0, 5 );\nadd_option( 'new_user_' . $new_user_key, array(\n    'user_id' => $user_id,\n    'email'   => $user_details->user_email,\n    'role'    => $_REQUEST['role'],   // UNVALIDATED\n) );\n$roles = get_editable_roles();        // too late — only used for email text\n$role  = $roles[ $_REQUEST['role'] ];\n// wp_mail( … translate_user_role( $role['name'] ) … )\n\n\nIf role=administrator is not in get_editable_roles(), email rendering may warn / show empty role name, but add_option already succeeded.\n\n3) Core — applies stored role with no editable re-check\n// wp-includes/ms-functions.php\nfunction add_existing_user_to_blog( $details = false ) {\n    if ( is_array( $details ) ) {\n        $result = add_user_to_blog( get_current_blog_id(), $details['user_id'], $details['role'] );\n        // …\n    }\n}\n// add_user_to_blog() → $user->set_role( $role );  // no wp_ensure_editable_role()\nCorrect pattern (already in Core 6.8 for other paths)\nwp_ensure_editable_role( $_REQUEST['role'] ); // used on some create / noconfirmation paths\nInvite persistence in this mu-plugin never calls it.\n\n\n\n\nLocal validation (source-faithful lab)\nAuthorized source review + local Multisite lab (not production wordpress.org):\n\nWordPress Multisite + production copy of wporg-add-existing-users-via-username.php\nRosetta-equivalent editable_roles filter (unset administrator) + Editor promote_users\nCreated lab_editor (Editor) and lab_victim (not yet on blog)\nStored invite with role=administrator (same order as mu-plugin)\nCalled Core add_existing_user_to_blog()\nDB proof:\n\nlab_victim  wp_capabilities  a:1:{s:13:\"administrator\";b:1;}\nVictim had manage_options = true. Invite key shape matches mu-plugin: substr( md5( user_id ), 0, 5 ).\n\nSuggested fix\nCall wp_ensure_editable_role( $_REQUEST['role'] ) (or equivalent) before add_option.\nPersist only the validated role string from get_editable_roles().\nDefense in depth: re-validate in Core add_existing_user_to_blog() before set_role.\nPrefer non-deterministic invite keys (Core invite already uses longer random keys; mu-plugin uses substr(md5(user_id),0,5)).\n\nResearcher: 0xbs0d27\n\n## Impact\n\nAuthenticated Editor on a Rosetta locale site can escalate another network account (including one they control) to **site Administrator**, bypassing the explicit `editable_roles` removal of Administrator. Impact is full control of that site (`manage_options`), not network super-admin. Severity assessed **High** given Editor prerequisite; Critical may be considered for site takeover on wordpress.org properties.",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-12-05T13:05:16.156Z",
+  "allow_singular_disclosure_after": 2569459.236790494,
+  "singular_disclosure_allowed": false,
+  "vote_count": 5,
+  "voters": [
+    "zy9ard3",
+    "jakubk",
+    "0xbs0d27",
+    "huntersploit",
+    "threalwinky"
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 8.7,
+    "author_type": "User",
+    "cvss_4_point_0_metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "attack_requirements": "none",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "vulnerable_confidentiality": "high",
+      "vulnerable_integrity": "high",
+      "vulnerable_availability": "high",
+      "subsequent_confidentiality": "none",
+      "subsequent_integrity": "none",
+      "subsequent_availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 2753,
+    "asset_type": "WILDCARD",
+    "asset_identifier": "*.wordpress.org",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "id": 934189,
+      "category": "researcher",
+      "content": "On Rosetta locale sites, Editors can invite users but are not supposed to make anyone a site Administrator — WordPress normally blocks that via editable_roles.\nA wordpress.org mu-plugin saved the invited user’s role from the HTTP request without checking that list, so an Editor could force role=administrator and elevate an account when the invite was accepted.",
+      "updated_at": "2026-11-05T05:45:26.401Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 4512157,
+        "username": "0xbs0d27",
+        "name": "0xBS0D27",
+        "bio": "",
+        "cleared": false,
+        "verified": true,
+        "website": null,
+        "location": "",
+        "created_at": "2026-07-08T04:14:19.540Z",
+        "url": "https://hackerone.com/0xbs0d27",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "hacker",
+        "profile_picture_urls": {
+          "small": "https://profile-photos.hackerone-user-content.com/variants/kyeeik6era6azkhiojhcg6gt2gc3/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9",
+          "medium": "https://profile-photos.hackerone-user-content.com/variants/kyeeik6era6azkhiojhcg6gt2gc3/e68529859b080f77ebfd9e0a1acafdf062bd4c43f1db58e7e55c81e6ceae2d0d",
+          "xtralarge": "https://profile-photos.hackerone-user-content.com/variants/kyeeik6era6azkhiojhcg6gt2gc3/8c27778dedc511bdf6bd6368df973bc1d6046ad9829b0b8947661df7da50ac43"
+        }
+      }
+    }
+  ]
+}

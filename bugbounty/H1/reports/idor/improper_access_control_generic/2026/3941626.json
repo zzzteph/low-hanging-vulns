@@ -1,0 +1,157 @@
+{
+  "id": 3941626,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTQxNjI2",
+  "url": "https://hackerone.com/reports/3941626",
+  "title": "Instamojo CampTix: fail-open MAC + webhook Credit without binding payment to order",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-15T04:52:26.826Z",
+  "submitted_at": "2026-08-15T04:52:27.098Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "0xbs0d27",
+    "url": "/0xbs0d27",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/kyeeik6era6azkhiojhcg6gt2gc3/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/e68529859b080f77ebfd9e0a1acafdf062bd4c43f1db58e7e55c81e6ceae2d0d"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-05T14:18:06.415Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-05T13:06:06.289Z",
+  "team_member_agreed_on_going_public_at": "2026-11-05T14:18:06.183Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nBroken payment binding in the CampTix Instamojo addon allows ticket attendees to be marked `pending` or `publish` without proving that an Instamojo payment belongs to that CampTix order.\n\nThere is a single root cause in `CampTix_Payment_Method_Instamojo`: the gateway never verifies and binds the Instamojo payment to the CampTix order (no stored `payment_request_id` / amount). Three paths share that root:\n\n1. `payment_return`: a draft order’s `tix_payment_token` alone triggers `PAYMENT_STATUS_PENDING` with no Instamojo API verification.\n2. `payment_notify` with invalid MAC: fail-open — a bad HMAC still calls `payment_result(…, PENDING)`.\n3. `payment_notify` with valid MAC + Credit: applies `COMPLETED` using `tix_payment_token` from the query string, which is not covered by the MAC (MAC signs POST body only). There is no bind to `payment_request_id` or amount. A legitimate Credit webhook for a cheap payment on the same merchant can complete a different order → `publish`.\n\nThis is not by design. The sibling Razorpay method in the same plugin (~1.9) stores `_razorpay_order_id` / `_razorpay_amount`, verifies with `hash_equals`, and refuses unpaid / mismatched returns without changing status (`wp_die`). SSLCommerz, SurjoPay, and Stripe follow the same bind+amount pattern. Instamojo was left behind.\n\n## Affected Asset / Component\n\n- Program asset: WordCamp.org\n- Component: `campt-indian-payment-gateway` (Instamojo addon)\n- File: `public_html/wp-content/plugins/campt-indian-payment-gateway/inc/instamojo/class-camptix-payment-method-instamojo.php`\n- Functions: `payment_return()`, `payment_notify()`, `payment_checkout()`\n- Sibling (correct): `…/razorpay/class-camptix-payment-method-razorpay.php`\n\n## Vulnerable Code\n\n### Instamojo — return marks PENDING with no payment verify\n\n```php\n// payment_return()\nif ( 'draft' == $attendee->post_status ) {\n    return $this->payment_result( $payment_token, CampTix_Plugin::PAYMENT_STATUS_PENDING, $payment_data );\n}\n\n\n\n\nInstamojo — notify fail-open + Credit without order bind\n\n// payment_notify()\n$mac_calculated = hash_hmac( \"sha1\", implode( \"|\", $data ), $instamojo_salt );\nif ( $mac_provided == $mac_calculated ) {\n    return $this->payment_result(\n        $_REQUEST['tix_payment_token'],\n        CampTix_Plugin::PAYMENT_STATUS_COMPLETED,\n        /* ... */\n    );\n} else {\n    // FAIL-OPEN: invalid MAC still marks PENDING\n    return $this->payment_result( $_REQUEST['tix_payment_token'], CampTix_Plugin::PAYMENT_STATUS_PENDING, $payment_data );\n}\n\n\nInstamojo — checkout puts token in webhook URL, does not persist request id\n\n$notify_url = add_query_arg( array(\n    'tix_action'         => 'payment_notify',\n    'tix_payment_token'  => $payment_token,\n    'tix_payment_method' => 'instamojo',\n), $this->get_tickets_url() );\n// payload includes 'webhook' => $notify_url\n// no update_post_meta( ..., 'payment_request_id', ... )  (unlike Razorpay)\n\nCorrect sibling pattern (Razorpay)\n\n$expected_order_id = (string) get_post_meta( $attendee->ID, '_razorpay_order_id', true );\nif ( $expected_order_id && ! hash_equals( $expected_order_id, $razorpay_order_id ) ) {\n    wp_die( /* refuse — do not change status */ );\n}\nif ( null === $status ) { // unpaid / unverified\n    wp_die( /* refuse — do not mark pending */ );\n}\n\n\n\nSteps To Reproduce\nPreconditions (source review): access to the public WordPress/wordcamp.org repository (e.g. production branch). No live exploitation against production WordCamps is required or requested.\n\nOpen public_html/wp-content/plugins/campt-indian-payment-gateway/inc/instamojo/class-camptix-payment-method-instamojo.php.\n\nIn payment_return(), locate the branch that runs when the attendee post_status is draft. Observe that it calls payment_result( $payment_token, PAYMENT_STATUS_PENDING, … ) without any Instamojo API call that confirms the payment for that token.\n\nIn payment_notify(), locate the HMAC check (hash_hmac / $mac_provided). Observe the else branch: when the MAC does not match, the code still calls payment_result( $_REQUEST['tix_payment_token'], PAYMENT_STATUS_PENDING, … ) — fail-open (invalid auth → pending), not reject.\n\nIn the MAC-valid branch, locate Credit / Completed handling. Observe that COMPLETED is applied using $_REQUEST['tix_payment_token'] (query parameter on the notify URL). Confirm that:\n\nthe MAC is computed over the POST body fields only (after unsetting mac);\ncheckout sets 'webhook' => $notify_url where $notify_url embeds tix_payment_token in the query string;\ncheckout does not update_post_meta a payment_request_id (or amount) onto the attendee.\nControl comparison (proves intent): open the sibling …/razorpay/class-camptix-payment-method-razorpay.php. Confirm it stores _razorpay_order_id / _razorpay_amount at checkout, uses hash_equals on return, and wp_dies without changing status when the order id mismatches or payment is unpaid. Same plugin family; Instamojo lacks that binding.\n\nImpact mapping in CampTix core: in camptix/camptix.php → payment_result(), confirm PAYMENT_STATUS_PENDING → post_status = pending, PAYMENT_STATUS_COMPLETED → post_status = publish, and that get_purchased_tickets_count() / ticket email / access flows treat pending and publish as purchased-capable states.\n\nRecommendations\nMirror the Razorpay sibling in the same plugin:\n\nOn Instamojo checkout, persist payment_request_id and expected amount on the attendee/order (like _razorpay_order_id / _razorpay_amount).\npayment_return: only call payment_result after Instamojo API confirms the request and it matches the stored binding/amount; otherwise refuse without changing status.\npayment_notify: invalid MAC → reject / log / FAILED — never PENDING. Use hash_equals for MAC comparison.\nOn Credit: resolve the CampTix order from the bound payment_request_id (or require the query token to match the stored binding); verify amount vs CampTix order total before COMPLETED.\nAlso recommended:\n\nRegression tests: invalid MAC must not mark pending; Credit webhook must not complete an order that does not own that payment_request_id / amount.\nAudit other CampTix gateways for “query token + unsigned URL” binding gaps (same class of bug).\n\n## Impact\n\nTicket inventory consumption (pending and publish count in get_purchased_tickets_count)\nTicket emails via email_tickets() on status transition from draft\nAttendee access flows that accept pending\nStrongest path: authentic Credit webhook for a cheap payment on the same merchant can complete a different (e.g. expensive) order → publish\nSame bug class WordCamp already hardened against in Razorpay / SSLCommerz / SurjoPay / Stripe; Instamojo remains vulnerable\nLogic error / broken authorization at the payment boundary (not theoretical; sibling code shows intended secure behavior)",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-12-05T13:06:06.425Z",
+  "allow_singular_disclosure_after": 2569508.362003387,
+  "singular_disclosure_allowed": false,
+  "vote_count": 4,
+  "voters": [
+    "zy9ard3",
+    "jakubk",
+    "0xbs0d27",
+    "threalwinky"
+  ],
+  "severity": {
+    "rating": "high",
+    "score": 8.7,
+    "author_type": "User",
+    "cvss_4_point_0_metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "attack_requirements": "none",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "vulnerable_confidentiality": "none",
+      "vulnerable_integrity": "high",
+      "vulnerable_availability": "none",
+      "subsequent_confidentiality": "none",
+      "subsequent_integrity": "low",
+      "subsequent_availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 2756,
+    "asset_type": "WILDCARD",
+    "asset_identifier": "*.wordcamp.org",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "id": 934188,
+      "category": "researcher",
+      "content": "Instamojo payment addon never tied an Instamojo payment to a specific ticket order (unlike Razorpay in the same plugin).\nAn attacker could get tickets marked “pending” or “paid” without a matching payment—e.g. bad webhook signatures still advanced status, or a real payment for one order could complete another.",
+      "updated_at": "2026-11-05T05:44:14.845Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 4512157,
+        "username": "0xbs0d27",
+        "name": "0xBS0D27",
+        "bio": "",
+        "cleared": false,
+        "verified": true,
+        "website": null,
+        "location": "",
+        "created_at": "2026-07-08T04:14:19.540Z",
+        "url": "https://hackerone.com/0xbs0d27",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "hacker",
+        "profile_picture_urls": {
+          "small": "https://profile-photos.hackerone-user-content.com/variants/kyeeik6era6azkhiojhcg6gt2gc3/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9",
+          "medium": "https://profile-photos.hackerone-user-content.com/variants/kyeeik6era6azkhiojhcg6gt2gc3/e68529859b080f77ebfd9e0a1acafdf062bd4c43f1db58e7e55c81e6ceae2d0d",
+          "xtralarge": "https://profile-photos.hackerone-user-content.com/variants/kyeeik6era6azkhiojhcg6gt2gc3/8c27778dedc511bdf6bd6368df973bc1d6046ad9829b0b8947661df7da50ac43"
+        }
+      }
+    }
+  ]
+}
