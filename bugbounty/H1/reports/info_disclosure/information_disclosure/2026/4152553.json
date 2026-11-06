@@ -1,0 +1,131 @@
+{
+  "id": 4152553,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTUyNTUz",
+  "url": "https://hackerone.com/reports/4152553",
+  "title": "Unauthenticated Disclosure of Private, Draft, and Password-Protected Post Content via Core Read-Permission Bypass in SCF Reference Fields",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-28T05:28:00.387Z",
+  "submitted_at": "2026-10-28T05:28:00.681Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "0x200notfound",
+    "url": "/0x200notfound",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/nv459vmr3rf93hqpc4dqnl0j4827/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/e68529859b080f77ebfd9e0a1acafdf062bd4c43f1db58e7e55c81e6ceae2d0d"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-05T19:56:29.233Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-05T17:09:52.031Z",
+  "team_member_agreed_on_going_public_at": "2026-11-05T19:56:28.636Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nSecure Custom Fields reference fields resolve stored post IDs through `acf_get_posts()`, which defaults to `post_status => 'any'` and never checks `read_post`. An unauthenticated caller therefore receives the full `WP_Post` — body, excerpt, author, timestamps, permalink and plaintext `post_password` — for posts that WordPress core answers with 404 or 401. The write step is only delivery: the leak reproduces with no form submission at all (PoC step 7).\n\n## Description\n\n**Core boundary.** For user 0, core drops non-public posts from `WP_Query::$posts` (`wp-includes/class-wp-query.php:3497-3523`) and answers `404`; REST answers `401 rest_forbidden`; a password-protected post renders the password form instead of the body (`wp-includes/post-template.php:882`). PoC step 2 records all four responses, plus `current_user_can( 'read_post', <private> ) === false`.\n\n**The sink.** `acf_get_posts()` (`includes/api/api-helpers.php:1168`) sets `post_status => 'any'` (`:1179`) and calls `get_posts()` (`:1211`) with no `current_user_can( 'read_post' )`, no `is_post_publicly_viewable()` and no `post_password_required()`. In WordPress 7.1.3 `draft`, `pending` and `private` are not `exclude_from_search`, so `'any'` returns them: PoC step 2 shows `WP_Query( post_status='publish' )` = 0 results against `acf_get_posts()` = 1.\n\n**The patch gap.** 6.9.3 added `$enforce_read_permissions` to `acf_get_grouped_posts()` (`api-helpers.php:1286,1307,1443`) and wired it to the three AJAX call sites only (commit `b520d2c`). 6.9.6 added the REST gate, including `post_password_required()` (`includes/rest-api/acf-rest-api-functions.php:501-525`, gate at `:518`). 6.9.7 added `expose_reference_target()` and `strip_post_passwords()` for block bindings (`includes/Blocks/Bindings.php:145,176`). The render path (`class-acf-field-relationship.php:532`), `format_value()` (`:751`; `class-acf-field-post_object.php:564`; `class-acf-field-page_link.php:349,563`) and the JSON-LD formatter (`page_link.php:720,726`) still call the unguarded helper.\n\n**The delivery.** The vulnerability is the read. A reference written by WP-CLI or an editor leaks identically: PoC step 7 writes the meta directly, with no form, and the anonymous page still renders `Private: <title>` and returns the private body through `get_field()`. The signed form grant authorises field keys for saving (`includes/forms/form-front.php:868-890`) and carries no statement about read permission for referenced posts.\n\n## Steps to Reproduce\n\n1. Fresh WordPress 7.1.3 + SCF 6.9.7. Create a private post (ID 809), a draft, and a password-protected post (ID 811, `post_password = hunter2`). Create a public page that renders `acf_form()` with a Relationship field (`field_poc_def_rel`, `post_type: post,page`) bound to a public target page.\n2. As user 0, `GET /?page_id=<form page>` with no cookies. Keep the hidden inputs `_acf_nonce`, `_acf_form`, `_acf_form_meta[]`, `_acf_render_id`, `_acf_post_id`, `_acf_screen`, `_acf_validation`.\n3. `POST` the same URL with `acf[field_poc_def_rel][]=809` and those grant inputs. Response is `302` to the return URL, and the target page's meta now holds `poc_def_rel = [\"809\"]`.\n4. Re-`GET /?page_id=<form page>`. The field renders `<span …>Private: POC-DEF PRIVATE TITLE (private)</span>` (PoC step 5). The same post's permalink returns `404` to the same caller (step 2).\n5. As user 0, `get_field( 'poc_def_rel', <target page> )` returns a `WP_Post` with `post_status = \"private\"`, the full `post_content`, `post_excerpt`, `post_author` and timestamps (step 6). Submit `811` instead and the same call returns `post_password = \"hunter2\"` and the protected body (step 8).\n6. `POST /wp-login.php?action=postpass` with `post_password=hunter2&redirect_to=/?p=811`, keep the returned cookie, then `GET /?p=811` → `200` with the protected body. A wrong password returns no body (step 8).\n7. Submit 50 private IDs in one request (`acf[field_poc_def_rel][]=…` × 50). Re-fetch the page and count 50 rendered titles: `acf_get_posts()` sets `posts_per_page => -1` (`api-helpers.php:1177`), so there is no cap (step 9).\n\n**AI Disclosure:** In accordance with program guidelines, AI tooling was used as an assistant for code analysis and drafting. The vulnerability, the PoC execution, and all manual validations were conducted and verified by me.\n\n## Impact\n\n## Impact\n\nAn unauthenticated attacker can bypass WordPress core's explicit read-permission boundaries to exfiltrate sensitive, non-public data. The impact of this vulnerability is classified as **High (7.5)** due to the following specific consequences:\n\n*   **Confidentiality Breach (C:H):** The attacker receives the full `WP_Post` object, exposing complete body content, excerpts, author IDs, timestamps, slugs, and permalinks. Crucially, this includes the **plaintext `post_password`** for password-protected posts, allowing the attacker to fully bypass the intended password protection.\n*   **WordPress Core Bypass:** The vulnerability strictly violates WordPress core's authorization model. The same anonymous caller is explicitly denied access by core (returning `404` on the front end and `401 rest_forbidden` via the REST API). Secure Custom Fields (SCF) circumvents these exact core boundaries by returning the data through the unguarded `acf_get_posts()` function.\n*   **Mass Enumeration:** The `acf_get_posts()` function sets `posts_per_page => -1` (`api-helpers.php:1177`), meaning there is no pagination cap. An unauthenticated attacker can submit 50+ sequential IDs in a single request to exfiltrate bulk unpublished content at scale.\n\n### Attachments\n\nThe complete Proof of Concept (PoC) script, including the Core Baseline control (proving the `404`/`401` denials) and the No-Form Control (proving the leak occurs without a form submission), along with the full transcript, is attached as **`{F7118016}`**.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7118016,
+      "file_name": "SCF-6.9.7-Private-Post-Disclosure.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/5bb5809k3o3yozp6cbbc0zhzh7g9?response-content-disposition=attachment%3B%20filename%3D%22SCF-6.9.7-Private-Post-Disclosure.zip%22%3B%20filename%2A%3DUTF-8%27%27SCF-6.9.7-Private-Post-Disclosure.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4LG26APQ%2F20261106%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261106T003904Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEAkaCXVzLXdlc3QtMiJHMEUCIHK%2FCWpQyUGuJTc8kxKkjJ0ACg%2BN0nPEdAbJCD85NAU4AiEAzwJ5ShkW995a%2FhwrlwiXHTEH3XwLp%2Bru1Ct3%2B1iZgzoquwUI0f%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDKLRw6k0htVruz5fpyqPBWFpDG3mKGaIwsYrK33hpbJ2i1R70lngFhNJqJFY4ASATNTAprzBPKZ%2B%2FIrwnfrtRRTZEe%2BsoO%2BxIyVpEA5N%2Fa5vfRrXDMnpCauPEoynWfalPrZWv7NB0kGrWqk5rTZtUtG8xgsTaoGpeMW%2FzCc7mYGRBneClpikpaRdfR9I%2B71hlhabTQAxBe8pEdeIbA60EdnwQYC6ia7uqjujrtopZ4Zbxf2IlF3pFkGHyf3ZG0MbJ94iIh89SSNgLQLVNkp5SJfjYhFEeOyQ9UczvGPX4CdtvQm5tIRPnEpSbT%2BVKCYAW7SpGgbEICOHXVpMcG2XqYcwHSoCKe6SaspkvEwb%2BUEgzYRMitgxMrLu%2FlZ%2BADVtN%2FXM%2B1J3hGH8o3huzpvwJD%2FQsj9y%2BjbXWIsrVRr%2FwzT9i5sPmNQwus19CvGyWoz3175CM09RKxo30qxZWh%2FabIwtCufAJvWjsk9TpvPFsXlPzmtS%2Fd9uap%2B2NIdd%2F2VWEX%2Bji6BPl3D%2BzZ3y3SvGMSl%2FN%2B%2FSPugUI9AaZyQnknsrkAj%2B7OLPKfX0UYx%2FunmIcLzLkKLHzZRkhZ7QcAMGcljRiGoLwC3UYk5cchioNUoIShxYGaccAjVv1NlFvW8mJk7azjm9wAEx8vgtR1KM97mJquqkXgPxKcfp%2BXSypt1HPRxb9XnfshYcetSVjYWNtvwPCWqrCunPGNMWF3pvk8WeJTVyh%2Bx%2FqCZWzm%2FYk8tKkuq99wz3ZLNywonL%2B%2B1hVx%2BLnFItBqYLrWU42u4BT9jdqhAlB4yHeay2Bh5xHSNoYlkJSt8nd%2BI8iD8F24HtdS08TxL%2FrPTdS0WagoOenH%2Fm1KBMb4puMEjvi%2F3QBgXsAcUhdjORRGtr6Xmbwb0wwru01wY6sQEZeY0WcLTMlYolctxm%2BeNuBfGUSLWtcsNMlqVrp5ZH3inICHbq5BgrEx6GIcGLWLJfuamGA4pxGx%2Fkjha6Ha3QCV%2BDsrj4nBhvxPoL5P4AGbkTgvKUd5blMhB3%2B51wm6QPqYgNDIeMSwBstuG0ynfOMc4P5gnjOJ4KStbpCxCpjX0xVuRvr3Fsp6%2BybeOqiBF7utbF1uueYz3TzHlFglE5iupSFFrlpDsTsezZDPaiJSk%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c848f3fffe40977fade089f67d6eb31b2e8f17861d49db702516f0af14d5a556",
+      "file_size": 14742,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-12-05T17:09:52.207Z",
+  "allow_singular_disclosure_after": 2565048.129786925,
+  "singular_disclosure_allowed": false,
+  "vote_count": 7,
+  "voters": [
+    "0x200notfound",
+    "2026",
+    "bugmithalchemist",
+    "d6fault",
+    "anom5x",
+    "novaeuropa33",
+    "disc0nect99"
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 1041136,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "Secure Custom Fields",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
