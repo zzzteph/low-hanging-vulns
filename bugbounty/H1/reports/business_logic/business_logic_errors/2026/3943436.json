@@ -1,0 +1,152 @@
+{
+  "id": 3943436,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zOTQzNDM2",
+  "url": "https://hackerone.com/reports/3943436",
+  "title": "Unauthenticated attacker can book appointments at arbitrary times, including outside availability and in the past",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-08-16T04:56:48.543Z",
+  "submitted_at": "2026-08-16T04:56:48.718Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "0xh3llo",
+    "url": "/0xh3llo",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/8nlydoum3sdj49b5hy16v2anwz43/33193aed4df168c753cb4b15e6d5d8d6ba053ba5ee3e8d1478c137162601abe9"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-11T00:50:21.945Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-12T00:50:13.576Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nThe public appointment booking endpoint validates that *some* bookable slot exists inside the attacker-supplied `[start, end]` search window, but then persists the attacker's raw `start` and `end` values instead of the validated slot's values. The confirmation path repeats the same flawed check and writes a `VEVENT` into the organizer's real calendar using the attacker-controlled `start` as `DTSTART`.\n\nAn unauthenticated attacker who has the public booking link can therefore create a confirmed event on the organizer's calendar at a time the organizer never made available — including outside configured working hours and in the past — while bypassing the daily booking maximum and the existing-event conflict check.\n\n---\n\n## Affected endpoints\n\n| Route | Method | Auth | File |\n|---|---|---|---|\n| `/apps/calendar/appointment/{appointmentConfigToken}/book` | POST | `@PublicPage` (none) | `appinfo/routes.php:24` |\n| `/apps/calendar/appointment/confirm/{token}` | POST | `@PublicPage` (none) | `appinfo/routes.php:26` |\n\n---\n\n## Root cause\n\n### 1. The controller performs no bounds validation\n\n`lib/Controller/BookingController.php:153-166`\n\n```php\npublic function bookSlot(string $appointmentConfigToken,\n    int $start,\n    int $end,\n    ...): JsonResponse {\n    if (!$this->mailer->validateMailAddress($email)) { ... }\n\n    if ($start > $end) {                                  // <-- the ONLY check on time\n        return JsonResponse::fail('Invalid time range', Http::STATUS_UNPROCESSABLE_ENTITY);\n    }\n    ...\n    $booking = $this->bookingService->book($config, $start, $end, ...);\n```\n\n`$start` and `$end` are raw request parameters. Nothing constrains them to an offered slot.\n\n### 2. `book()` validates a *window*, then persists the *input*\n\n`lib/Service/Appointments/BookingService.php:134-158`\n\n```php\npublic function book(AppointmentConfig $config, int $start, int $end, ...): Booking {\n    $bookingSlot = current($this->getAvailableSlots($config, $start, $end));   // L135\n\n    if (!$bookingSlot) {                                                       // L137\n        throw new NoSlotFoundException('Could not find slot for booking');\n    }\n    ...\n    $booking->setStart($start);                                                // L154  <-- raw input\n    $booking->setEnd($end);                                                    // L155  <-- raw input\n    ...\n    $this->bookingMapper->insert($booking);                                    // L158\n```\n\n`$bookingSlot` — the only value that was actually validated — is discarded. The check is a bare truthiness test: it asks *\"does at least one bookable slot exist anywhere in this range?\"*, never *\"is the requested time that slot?\"*.\n\n### 3. `getAvailableSlots()` treats `start`/`end` as a search range, not a request\n\n`lib/Service/Appointments/BookingService.php:176-209` → `AvailabilityGenerator::generate()`\n\n`lib/Service/Appointments/AvailabilityGenerator.php:43-113`\n\n```php\n$earliestStart = max($start, $now + $bufferBeforeStart, ($config->getStart() ?? $now) + $bufferBeforeStart);  // L49-53\n$latestEnd     = min($end, $config->getEnd() ?? $end);                                                        // L64-67\n...\n$applicableSlots = $this->filterDates($start, $slots, $timeZone, $config->getIncrement());                    // L94\nforeach ($applicableSlots as $slot) {\n    if ($slot->getEnd() <= $earliestStart || $slot->getStart() >= $latestEnd) { continue; }                   // L100\n    $intervals[] = new Interval(max($earliestStart, $slot->getStart()), min($latestEnd, $slot->getEnd()));    // L103-111\n}\n```\n\nThe returned `Interval[]` are the organizer's *real* availability windows clipped to the requested range. They can be arbitrarily far from `$start`, because `filterDates()` scans a ±24.3 hour period around `$start`:\n\n`lib/Service/Appointments/AvailabilityGenerator.php:148-152`\n\n```php\n$period = new DatePeriod(\n    (new DateTimeImmutable())->setTimezone($tz)->setTimestamp($start - 87600)->setTime(0, 0),\n    new DateInterval('P1D'),\n    (new DateTimeImmutable())->setTimezone($tz)->setTimestamp($start + 87600)->setTime(23, 59)\n);\n```\n\nSo any day with a configured availability rule within ~24 hours of `$start` produces a slot that satisfies the check — regardless of whether `$start` itself falls on an available day or an available hour.\n\n### 4. Confirmation repeats the same flawed check and writes the event\n\n`lib/Service/Appointments/BookingService.php:90-113`\n\n```php\npublic function confirmBooking(Booking $booking, AppointmentConfig $config): Booking {\n    $bookingSlot = current($this->getAvailableSlots($config, $booking->getStart(), $booking->getEnd()));  // L91\n    if (!$bookingSlot) { throw new NoSlotFoundException(...); }                                           // L93\n    ...\n    $calendar = $this->calendarWriter->write($config, $booking);                                          // L111\n    $booking->setConfirmed(true);\n    $this->bookingMapper->update($booking);                                                               // L113\n```\n\nLine 91 re-validates using the already-tainted stored values, so it passes for exactly the same reason. Then:\n\n`lib/Service/Appointments/BookingCalendarWriter.php:112-126`\n\n```php\n$start = (new DateTimeImmutable())->setTimestamp($booking->getStart())->setTimezone(new \\DateTimeZone($timezone));\n$end   = (clone $start)->setTimestamp($start->getTimestamp() + $config->getLength());\n...\n$vEvent->add('DTSTART', $start);          // attacker-controlled\n$vEvent->add('DTEND', $end);\n$vEvent->add('STATUS', 'CONFIRMED');\n```\n\nThe event is written into the organizer's target calendar at the attacker's chosen `DTSTART`.\n\n---\n\n## Reproduction\n\n**Setup (as the victim/organizer, one time):**\n\n1. Calendar → Appointments → create an appointment config.\n2. Set availability to a single window, e.g. **Monday 09:00–17:00** only. Leave all other days empty.\n3. Set slot length 30 min, increment 30 min. Optionally set \"Daily max\" to 1 to demonstrate the limit bypass.\n4. Copy the public booking link, e.g. `https://<host>/apps/calendar/appointment/<configToken>`.\n\n**Attack (unauthenticated, no account on the instance):**\n\n### Step 1 — Enumerate a legitimate slot\n\n```http\nGET /apps/calendar/appointment/<configToken>/slots?dateSelected=2026-08-17&timeZone=UTC HTTP/1.1\nHost: <host>\n```\n\nResponse contains e.g. `{\"start\":1755421200,\"end\":1755423000}` — Monday 2026-08-17 09:00–09:30 UTC. This is the only kind of time the UI will ever let a user submit.\n\n### Step 2 — Book an off-hours time by widening `end`\n\nSend a `start` the organizer never offered (Sunday 03:00 UTC, outside every configured rule) and an `end` stretched forward to sweep in Monday's legitimate slot:\n\n```http\nPOST /apps/calendar/appointment/<configToken>/book HTTP/1.1\nHost: <host>\nContent-Type: application/json\n\n{\n  \"start\": 1755399600,\n  \"end\": 1755423000,\n  \"displayName\": \"Attacker\",\n  \"email\": \"attacker@example.com\",\n  \"description\": \"PoC\",\n  \"timeZone\": \"UTC\"\n}\n```\n\n- `1755399600` = Sun 2026-08-16 03:00 UTC — **not** within any configured availability rule.\n- `1755423000` = Mon 2026-08-17 09:30 UTC — the end of a real slot.\n\n**Response:** `HTTP 200 {\"status\":\"success\"}`.\n\n`NoSlotFoundException` is not thrown because `getAvailableSlots()` finds Monday's 09:00–09:30 slot inside the window. The row inserted into `oc_calendar_appt_bookings` has `start = 1755399600`.\n\n### Step 3 — Confirm\n\nThe confirmation email is delivered to the **attacker's own address**, so no victim interaction is needed.\n\n```http\nPOST /apps/calendar/appointment/confirm/<bookingToken> HTTP/1.1\nHost: <host>\n```\n\n**Response:** `HTTP 200 {\"confirmed\":true}`\n\n### Result\n\nA `STATUS:CONFIRMED` `VEVENT` now exists in the organizer's calendar at **Sunday 03:00 UTC**, a day and time the organizer marked entirely unavailable.\n\n### Variant — booking into the past\n\n`earliestStart = max($start, $now + $buffer, ...)` clamps only the *search*; the *persisted* value is still raw `$start`. Submitting a `start` up to ~24 hours in the past, with `end` covering a slot that is still in the future, produces a confirmed event dated **yesterday**. This demonstrates conclusively that the validated slot and the stored value have no relationship at all.\n\n---\n\n## Expected vs. actual\n\n| | |\n|---|---|\n| **Expected** | The booking is rejected unless `start`/`end` exactly match a slot returned by `getBookableSlots`. |\n| **Actual** | The booking is accepted and a confirmed event is written at the attacker's arbitrary `start`, provided any real slot exists within ~24h of it. |\n\n## Impact\n\nThree server-side controls the organizer explicitly configured are bypassed, because each one only ever evaluates the *candidate slot list* and never the value that is actually persisted and written:\n\n1. **Configured availability windows** (`AvailabilityGenerator`) — events land outside working hours, on days marked unavailable, and up to ~24h in the past.\n2. **Existing-event conflict check** (`EventConflictFilter.php:54-56`) — the query range is built from `$slot->getStartAsObject()` / `getEndAsObject()`, i.e. the *candidate* slot, so the organizer's real events at the attacker's chosen time are never consulted. The attacker can deliberately schedule on top of an existing private appointment.\n3. **Daily booking maximum** (`DailyLimitFilter.php:49-53, 85-89`) — availability is counted per *candidate slot's* day. When the persisted `start` falls on a different day, that day's quota is never checked, so the configured `dailyMax` can be exceeded.\n\nAdditionally, `generatePreAppointment()` / `generatePostAppointment()` (`BookingCalendarWriter.php:201-242`) anchor on the tainted `DTSTART`/`DTEND`, so preparation and follow-up blocks are placed at the wrong time as well.\n\nThe attacker requires only the public booking link, which is intended to be shared widely.\n\n---\n\n## Why this is a security issue, not a UI validation bug\n\nThe appointment feature is designed to let anonymous third parties write into an organizer's calendar — but strictly within limits the organizer configures. Availability windows, the daily maximum, and the conflict check *are* the authorization policy for that write. This report demonstrates that all three are enforced against a value the attacker does not have to use, which makes them advisory only. The same endpoint was previously the subject of GHSA-7x2j-2674-fj95 (\"Calendar app allowed booking appointments without the generated token\"), which establishes that server-side enforcement on this booking path is treated as security-relevant.\n\n---\n\n## Suggested fix\n\nRequire the requested time to be exactly one of the validated slots, rather than testing only that the list is non-empty. In `lib/Service/Appointments/BookingService.php`:\n\n```php\npublic function book(AppointmentConfig $config, int $start, int $end, ...): Booking {\n    $bookingSlot = null;\n    foreach ($this->getAvailableSlots($config, $start, $end) as $slot) {\n        if ($slot->getStart() === $start && $slot->getEnd() === $end) {\n            $bookingSlot = $slot;\n            break;\n        }\n    }\n\n    if ($bookingSlot === null) {\n        throw new NoSlotFoundException('Requested time does not match an available slot');\n    }\n    ...\n    $booking->setStart($bookingSlot->getStart());\n    $booking->setEnd($bookingSlot->getEnd());\n```\n\nApply the identical check in `confirmBooking()` at line 91.\n\nThis is compatible with the existing frontend: `getBookableSlots` returns `Interval` objects and the client posts those exact `start`/`end` values, so legitimate bookings are unaffected.\n\nHardening worth considering alongside the fix: reject `end - start > $config->getLength()` in `BookingController::bookSlot()`, and reject `start` values in the past.\n\n---\n\n## Notes and scope of this report\n\n- Rate limiting on `bookSlot` (`#[AnonRateLimit(limit: 10, period: 1200)]`, `#[UserRateLimit(limit: 10, period: 300)]`, `BookingController.php:151-152`) bounds the *volume* of abuse but does not affect the logic bypass itself.\n- `DTEND` is derived as `start + $config->getLength()`, so the created event has the configured duration. The attacker controls *when* the event occurs, not how long it lasts. The oversized `end` value is persisted on the `Booking` row only.\n- The attacker's `start` must be **earlier** than a real slot and within ~24 hours of it, because of the `$earliestStart` clamp combined with the `filterDates()` ±87600s window. This is a bound on the attack, not a mitigation — off-hours, weekend, overnight, and past-dated placements are all reachable.\n- No confidentiality impact and no privilege escalation are claimed. The impact is integrity of the organizer's calendar, scored `I:L`.\n\n---\n\n## References\n\n- `lib/Controller/BookingController.php:153-166`\n- `lib/Service/Appointments/BookingService.php:90-113`, `134-158`, `176-209`\n- `lib/Service/Appointments/AvailabilityGenerator.php:43-113`, `123-177`\n- `lib/Service/Appointments/BookingCalendarWriter.php:107-126`, `201-242`\n- `lib/Service/Appointments/EventConflictFilter.php:40-79`\n- `lib/Service/Appointments/DailyLimitFilter.php:37-93`\n- `appinfo/routes.php:23-26`\n- Prior advisory on the same endpoint: https://github.com/nextcloud/security-advisories/security/advisories/GHSA-7x2j-2674-fj95",
+  "weakness": {
+    "id": 65,
+    "name": "Business Logic Errors"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-11-11T00:50:13.825Z",
+  "allow_singular_disclosure_after": -5877.855065787,
+  "singular_disclosure_allowed": true,
+  "vote_count": 2,
+  "voters": [
+    "0xh3llo",
+    "badabum"
+  ],
+  "severity": {
+    "rating": "low",
+    "score": 3.7,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 68217,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "nextcloud/calendar",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 933898,
+      "category": "team",
+      "content": "The public appointment booking endpoint of the Calendar app checked that at least one bookable slot existed within the start/end range the requester sent. It then saved  the requested start time instead of the slot it had checked. An unauthenticated attacker with the public booking link could therefore create a confirmed event in the organizer's calendar at a time the organizer had not offered.\n\nThe impact is limited to the integrity of the organizer's calendar. No data is disclosed.\n\nThe booking request is now only accepted if its start and end match an available slot exactly.\n\n Fixed in Calendar 6.5.5 and 6.6.1.",
+      "updated_at": "2026-11-09T13:26:37.215Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 4338232,
+        "username": "danielkb",
+        "name": "Daniel",
+        "bio": "",
+        "cleared": false,
+        "verified": true,
+        "website": "https://nextcloud.com/",
+        "location": "",
+        "created_at": "2026-01-25T14:11:37.045Z",
+        "url": "https://hackerone.com/danielkb",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "medium": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "xtralarge": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
