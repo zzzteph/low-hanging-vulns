@@ -1,0 +1,135 @@
+{
+  "id": 4000535,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDAwNTM1",
+  "url": "https://hackerone.com/reports/4000535",
+  "title": "Burp Community OpenAPI site-map action reads a local schema example through $id rebasing",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-05T06:51:29.687Z",
+  "submitted_at": "2026-09-05T06:51:29.987Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "1rhino2",
+    "url": "/1rhino2",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/h1d00k3qx0lgut84ryy9vextnubi/f4770e29726b679d8210b3bcebb50139392345e8ead50e7d67de79a93076e327"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 15252,
+    "url": "https://hackerone.com/portswigger",
+    "handle": "portswigger",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/015/252/60e8778f4f1fee57ea2b164a7d2ec1e2d2dd7bc8_original./dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/015/252/60e8778f4f1fee57ea2b164a7d2ec1e2d2dd7bc8_original./2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "PortSwigger Web Security",
+      "twitter_handle": "Burp_Suite",
+      "website": "https://portswigger.net",
+      "about": "Burp Suite is the leading software for web security testing"
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-13T10:31:44.748Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-14T10:31:29.157Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\nI found a local-resource restriction bypass in Burp Community's `Save OpenAPI requests to site map` action.\n\nThe validator and click parser select different OpenAPI-shaped objects from the same HTTP response. A nested OpenAPI 3.0 `swaggerDoc` object makes the action available, but the click handler parses the top-level OpenAPI 3.1 object. In the 3.1 schema, a local `file:///` URL in `$id` becomes the base for a fragment-only `$ref`.\n\nBurp rejects the equivalent direct `file:///...#/secret` `$ref` as an external API definition. The `$id` plus fragment-only form passes that check. Burp then opens the local JSON schema and copies its selected `example` value into the generated POST body.\n\nI reproduced this through the normal Community UI in fresh Temporary Projects on:\n\n- 2026.8 build 53343, Early Adopter\n- 2026.7.3 build 52685, Stable\n\nThe two runs used different ports, local filenames, and markers. Both markers appeared in Burp-generated requests. I sent each generated request once through Repeater to a loopback collector and received HTTP 200.\n\nCommunity does not send the generated request automatically. The local read happens after the user selects the site-map action. Disclosure to the definition-selected server requires a later explicit send of that generated request.\n\n### Steps to reproduce\n\nEverything in the attachment binds to `127.0.0.1`.\n\n1. Extract `PZ-BURP-002-h1-attachments.zip` and enter its `repro` directory.\n\n2. Check the supplied response shapes:\n\n```bash\npython3 -B verify_shapes.py\n```\n\nExpected output:\n\n```text\nREPRO_SHAPES=PASS\n```\n\n3. Start the loopback fixture:\n\n```bash\npython3 repro_server.py --mode exploit --schema local-schema.json\n```\n\nIt prints a random `definition_url`. Keep this process running.\n\n4. Start Burp Community in a fresh Temporary Project. Configure a loopback Proxy listener on port 8081, or use the supplied settings:\n\n```bash\njava -jar /absolute/path/to/burpsuite_community.jar --config-file=community-8081-project.json\n```\n\n5. Replace `<PORT>` with the port printed in step 3, then fetch the response through Burp:\n\n```bash\ncurl --noproxy '' --proxy http://127.0.0.1:8081 -H 'X-HackerOne-Research: 1rhino2' http://127.0.0.1:<PORT>/openapi.json\n```\n\n6. Open Target > Site map and select the `GET /openapi.json` response.\n\n7. Open the Response message-actions menu and click `Save OpenAPI requests to site map`.\n\n8. Burp adds `POST /collect` to the site map. Its body contains `PZ_UI_POSITIVE_ONE_91c7e2`.\n\nThe marker is absent from the HTTP definition response. Before Burp processes that response, the fixture supplies it only through `local-schema.json`.\n\n9. Send the generated POST to Repeater and click Send once. The fixture returns HTTP 200 and records:\n\n```text\nREQUEST=POST /collect\nBODY={\"leak\":\"PZ_UI_POSITIVE_ONE_91c7e2\"}\nHTTP_LOG=\"POST /collect HTTP/1.1\" 200 -\n```\n\n10. Repeat with Community 2026.7.3 in another fresh Temporary Project. My second run used a separate local file and produced the marker `PZ_UI_POSITIVE_TWO_4ad93b`.\n\n### Controls\n\nStop the previous fixture with Ctrl-C before changing modes. Each new fixture prints a new random port and truncates `server.log`, so use the newly printed port each time. I used a fresh Temporary Project for every control.\n\nDirect external reference:\n\n```bash\npython3 repro_server.py --mode direct-control --schema local-schema.json\n```\n\nThe action is visible, but Burp rejects the definition with:\n\n```text\nThis definition can't be uploaded as it links to one or more external API definitions. Review the definition and remove the external links.\n```\n\nNo collector request is generated and the fixture receives no POST.\n\n`$id` without the fragment reference:\n\n```bash\npython3 repro_server.py --mode id-only-control --schema local-schema.json\n```\n\nBurp generates only `{\"control\":\"INLINE_ONLY\"}`. After one Repeater send, the collector receives that exact inline value. No `PZ_UI_POSITIVE_` marker appears in the generated request or receipt.\n\nTop-level 3.1 object without the `swaggerDoc` bridge:\n\n```bash\npython3 repro_server.py --mode root-only-control --schema local-schema.json\n```\n\nThe same top-level 3.1 candidate is present, but the response menu does not contain `Save OpenAPI requests to site map`.\n\n### Root cause and evidence\n\nInspection of the packaged classes with `javap -p -c` matches the UI result:\n\n1. `validate()` unwraps `swaggerDoc` and reports a valid 3.0.0 document.\n2. The click path calls `parse()` on the original body. That path selects the top-level 3.1 object.\n3. The external-reference check scans `$ref`. It rejects the direct `file:///...` control, accepts `#/secret`, and does not reject the local base in `$id`.\n4. The bundled 3.1 resolver rebases the fragment against `$id` and reaches its local file reader.\n5. The selected schema `example` is used in the generated POST body.\n\nThe attachment includes the two UI runs, both collector receipts, the three controls, successful `openat` lines for both positive local files, parser-selection output for both builds, and the packaged-bytecode notes.\n\nTested JAR hashes:\n\n- 2026.8 build 53343: `888f0588cf82a3b70d508dcbf07591184a26249e38cda8ea8b5a68f4b5a30789`\n- 2026.7.3 build 52685: `c8262dc5426f38bedc490d66c5d21b6ff77d6dc6d85cefe6a66c882690134069`\n\n### Limits\n\n- The local path must be known or guessed and readable by Burp.\n- The confirmed target is a compatible JSON schema.\n- The selected fragment must be schema-shaped.\n- The proof confirms disclosure of a selected `example` value. It is not an unrestricted raw-file read.\n- Windows, macOS, and Burp Professional were not tested.\n- No integrity or availability impact is claimed.\n\n### References\n\n- PortSwigger HackerOne program: https://hackerone.com/portswigger\n- API scanning FAQ: https://portswigger.net/burp/documentation/scanner/api-scanning-faq\n- API scanning requirements: https://portswigger.net/burp/documentation/scanner/api-scanning-reqs\n- Message editor action: https://portswigger.net/burp/documentation/desktop/tools/message-editor\n- Prior Medium interaction precedent: https://portswigger.net/burp/releases/professional-community-2020-5-1\n\n## Impact\n\nIf the user invokes `Save OpenAPI requests to site map` on the malicious response, Burp reads the selected `example` from the known, readable local schema and places it in a generated request addressed to the server selected by the definition. The server receives the value only if the user later sends that generated request.\n\nLocal OpenAPI and JSON Schema files can contain internal endpoint examples, sample credentials, tokens, tenant identifiers, or other non-public test data in `example` fields. My proof uses only synthetic markers and does not claim access to files without a compatible schema shape.\n\nPortSwigger's current program treats websites accessed through Burp as untrusted and lists local-file retrieval by such a website as a Medium example. The required interaction is unlikely, so I am selecting Medium under the program's reduced-bounty interaction category.",
+  "bounty_amount": "1000.0",
+  "formatted_bounty": "$1,000",
+  "weakness": {
+    "id": 19,
+    "name": "Path Traversal"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6637309,
+      "file_name": "PZ-BURP-002-h1-attachments.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/fm8mzcxi8974g7tpycvegrr9fhj4?response-content-disposition=attachment%3B%20filename%3D%22PZ-BURP-002-h1-attachments.zip%22%3B%20filename%2A%3DUTF-8%27%27PZ-BURP-002-h1-attachments.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQR4SW3ZDT%2F20261113%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261113T124629Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjELz%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIF8mYXU0G0OLVdKpF0HtuAKtHIFcl14xOqKVZE6DjXQjAiBmtnLjpmhAta9SXsfj5dm0eUE9caI5OnxxmOZ3kVXkLiq7BQiF%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMBb2u0usIIBMy9QWMKo8F%2BcbBfStPqp%2FQ9MQQ5d1FSGfLdpMFvQzCfBzjvrGdVMR4otFnk843IyIJJvz7Myvf1%2FuOs0m7vPSy0N2v5Bk6Ev1Xb9l%2F12Lxyh3lmm6HO1YFXBXpbtMOIald3RWH0OMUOPeYy%2BYwd2Gi5e140y1m6Uan4BlCTiNJNtL1r2h%2B7Z0VIILcpjTTaPWnAjYd0wjYsvUGaQQW7oRYs9t%2Bpp1dXCGfLrIa%2FgAqJjYLn5oivPtmF332fp3bKsGzrx%2FV%2BBWIu5X0TpaSRO1d8sljNWX%2FxEa5hmZOjsUdeV4b%2FPqsIO%2BwuT40nW2VHYk2YrkWJXojMj77F%2FB89aJ%2B3%2F5WoI8DnjtTcZ4PLAkxo2AAuiNmuul35mBMeio0yOyUwF%2BThj3J7ubvVOklyP%2FH8D1JnYnc29QZfkLGdBeomQzGONjtuM7JH1pXX9FUFbCdsE71pZag3c3msX9RqrdTJzt4fSZzbbzp4L3rn8i5acsfrF9PT7xjMqgcg34eKzfbvsPIJKOXupIAuW%2FNcXik5CaK5iBWGrYlZtC5OV1EteJh9I6Qea3R8MeHFX2HQcw9dwC9khkBL%2FP%2FVV9s3ubGX4LHLyT%2FmVrm1osYYYfeD2u%2Bg4srx1YFPYb7Lx%2BcvZSh%2BOS4SxputTRcaETpGjBgdoXAu6em2B%2BfzFK1ylIdEHd2dpHjZKpD916xNXTeNaUe1D0OpxlyPiAy%2FLA8M3qG5Gq6zTAArbQj%2BiQpY85eWJMricjFjvBGNnf1Bhxw6pKYzgF22ocnZGYXyV8MFqt3%2BM8xh1JJKmQ3Q27wYkQTcCXX8zos1zuA98bxeMhH4CisTO20RmYYbynXlT1ZFMsWMRDhpzcKA0tGRPxToq0bRv2Hy2%2BI5jDu%2B9vXBjqyAe%2F%2Bv%2FOzv9EC6oFedicp6Iy882uzNN%2FcdgLln7JUBfvH%2B3pd1MloTHNTBqhHkpcvI4uec%2FbuVFWqqJjFrtazsQj2iSE4DXOgMvTGfk9oMZSOLYi%2BJ7S6AxCNIgCIz8vHXIbvINFar8GfgFf1NpzXvn5XBp2CNxCbNgxClxyJD8xA%2BZ2e41ItMA8LTpkKVUZb3i8u3i%2BKIqH9W4NEi2zOofpSQ7bLw2t7NaIRhZO7%2FtBg9pU%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=085623dcabc4063199eec8e818529302bb1529a5016037baf500d3a3b8dbb895",
+      "file_size": 471424,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-11-13T10:31:29.371Z",
+  "allow_singular_disclosure_after": -8099.961277486,
+  "singular_disclosure_allowed": true,
+  "vote_count": 9,
+  "voters": [
+    "n1m0",
+    "zy9ard3",
+    "jmo740",
+    "2026",
+    "audion",
+    "genduk888",
+    "mrfurr",
+    "nirbhayxd",
+    "fearhunt"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 169,
+    "asset_type": "DOWNLOADABLE_EXECUTABLES",
+    "asset_identifier": "Burp Suite Pro/Community",
+    "max_severity": "high"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
