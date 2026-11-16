@@ -1,0 +1,117 @@
+{
+  "id": 4199917,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTk5OTE3",
+  "url": "https://hackerone.com/reports/4199917",
+  "title": "SFTP connection reuse skips the host-key pin of a later transfer",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "low",
+  "readable_substate": "N/A",
+  "created_at": "2026-11-13T15:19:24.302Z",
+  "submitted_at": "2026-11-13T15:24:15.748Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jfrery",
+    "url": "/jfrery",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [
+    "CVE-2023-27538"
+  ],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-11-16T12:44:03.637Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-11-14T21:23:04.687Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nWhen one curl invocation (or one libcurl handle) does two SFTP/SCP transfers to the same host, the second transfer reuses the first SSH connection even when it asks for a different host key with `--hostpubsha256` (`CURLOPT_SSH_HOST_PUBLIC_KEY_SHA256`). The second transfer never checks its pin and succeeds against a key it would reject on a fresh connection.\n\n`ssh_config_matches()` in `lib/url.c` compares only the private and public key file names:\n\n```c\nreturn sshc1 && sshc2 && Curl_safecmp(sshc1->priv_key, sshc2->priv_key) &&\n       Curl_safecmp(sshc1->pub_key, sshc2->pub_key);\n```\n\nThe host-key requirements are not part of the match. From reading the code, the same applies to `--hostpubmd5` and to the known_hosts file (`CURLOPT_SSH_KNOWNHOSTS`); I tested only the SHA256 pin.\n\n## Affected\n\n- curl 8.23.0 and master at a40772f2f9, libssh2 backend (libssh2 1.11.1), Linux.\n- Not tested with the libssh backend.\n\n## Reproduce\n\nAny SSH server with password login. `BAD` is a pin that does not match the server key.\n\n```sh\nBAD=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\nGOOD=<the server's real SHA256 host key, base64>\n\n# wrong pin alone: refused\necho data | curl -s -u t:pw --hostpubsha256 \"$BAD\" -T - sftp://localhost/tmp/alone.txt; echo \"exit $?\"\n\n# good pin, then wrong pin on the same command line\necho data | curl -v -u t:pw --hostpubsha256 \"$GOOD\" sftp://localhost/etc/hostname -o /dev/null \\\n  --next -u t:pw --hostpubsha256 \"$BAD\" -T - sftp://localhost/tmp/reused.txt; echo \"exit $?\"\n```\n\nResult on both versions:\n\n```\nexit 60                                            <- wrong pin alone\n* SSH: SHA256 checksum match                       <- first transfer, good pin\n* Reusing existing sftp: connection with host localhost\nexit 0                                             <- second transfer, wrong pin\n/tmp/reused.txt written, /tmp/alone.txt not written\n```\n\nThe attached `repro-sftp.sh` does the same and reads `GOOD` from curl's own mismatch message.\n\n## Impact\n\nAn application that sets a host-key pin per transfer on a shared handle or connection pool can send data to, or accept data from, a server that the later transfer's pin excludes. Example: a multi-tenant uploader that pins each destination's key, where a tenant controls one key pinned for the same host name and port.\n\nThe attacker must own the server (or its key) for the first, accepted transfer to the same host and port. So I think severity is low to medium.\n\nThis looks like the same class as CVE-2023-27538 (SSH connection reuse ignores config changes). That fix added the key file names, but not the host-key checks.\n\n## Suggested fix\n\nStore the host-key settings (`SHA256` and `MD5` pins, known_hosts file) in the SSH connection meta and compare them in `ssh_config_matches()`, or refuse reuse when any of them differs.\n\nFound with AI-assisted source review; the reproduction above was run by hand.\n\n## Impact\n\nAn application that sets a host-key pin per transfer on a shared handle or connection pool can send data to, or accept data from, a server that the later transfer's pin excludes.",
+  "weakness": {
+    "id": 159,
+    "name": "Missing Critical Step in Authentication"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 2,
+  "voters": [
+    "af-agent",
+    "bear123"
+  ],
+  "severity": {
+    "rating": "low",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
