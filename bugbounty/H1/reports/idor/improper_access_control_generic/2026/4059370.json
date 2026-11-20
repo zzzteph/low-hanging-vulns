@@ -1,0 +1,140 @@
+{
+  "id": 4059370,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDU5Mzcw",
+  "url": "https://hackerone.com/reports/4059370",
+  "title": "Mass assignment in chat.sendMessage allows unprivileged users to forge message state: persistent room DoS, stored HTML injection, and cross-user write",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-25T13:48:57.050Z",
+  "submitted_at": "2026-09-26T09:05:40.487Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "morisson",
+    "url": "/morisson",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/263/947/11f9308e56cced4347da4cc2ed55cfeb168ee318_original.jpg/07cd666fba81a5fa22acb6ca51c9388fb3fc6282d31bb7100e43ac54f865f93e"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19858,
+    "url": "https://hackerone.com/rocket_chat",
+    "handle": "rocket_chat",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/858/ada6c92a338715afad123af214dd6e22fd8dc6ff_original.png/bcd838120b083f3e4634394be4e842b070658eb8ca2ee90ff88b1e7555d99fdf",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/858/ada6c92a338715afad123af214dd6e22fd8dc6ff_original.png/3c93eb467513f5b14156ff4fede2c4636f707fb236b4ad7f308d529c1dd0b660"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Rocket.Chat",
+      "twitter_handle": "RocketChat",
+      "website": "https://rocket.chat",
+      "about": "Rocket.Chat is a company built on open source values and a love for efficiency. The company is driven by our amazing community of contributors."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-20T13:34:39.378Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-11-20T13:34:31.914Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n`POST /api/v1/chat.sendMessage` validates the outer request body but not the\ninner `message` object. The outer object declares `additionalProperties: false`;\nthe inner one declares neither `additionalProperties: false` nor `required`, so\nany `IMessage` field outside its short property list is accepted, persisted, and\nsubsequently trusted by both the server and the client.\n\nAn account holding only the default `user` role, with no per-room roles and no\nelevated permissions, can therefore set fields including `md`, `reactions`,\n`actionLinks`, `urls`, `parseUrls`, `pinned`, `pinnedBy`, `starred`, `editedBy`\nand `editedAt`.\n\nThis is an outlier rather than the general pattern. `chat.postMessage` sets\n`additionalProperties: false`, and the corresponding DDP method applies an\nexact-match `check()` allow-list, the REST endpoint bypasses the latter by\ncalling `executeSendMessage` directly.\n\nSix distinct impacts are demonstrated below, ordered by severity.\n\n## Steps To Reproduce\n\nAll requests use:\n\n```\nPOST /api/v1/chat.sendMessage\nContent-Type: application/json\nX-Auth-Token: <token>\nX-User-Id: <userId>\n```\n\nReproduced throughout with an account holding only the default `user` role.\n\n---\n\n**1. Persistent room-level denial of service**\n\nFive payloads. Each makes a room's message view unusable for every member.\n\n```bash\n# 1a. missing UI Kit elements\ncurl -s -X POST \"$HOST/api/v1/chat.sendMessage\" -H \"X-Auth-Token: $TOK\" \\\n  -H \"X-User-Id: $UID\" -H 'Content-Type: application/json' \\\n  -d '{\"message\":{\"rid\":\"<RID>\",\"blocks\":[{\"type\":\"actions\"}]}}'\n#     also reproducible with \"blocks\":[null], or an actions block with \"elements\":[null]\n\n# 1b. invalid markdown AST  (msg MUST be empty or the server regenerates md)\n  -d '{\"message\":{\"rid\":\"<RID>\",\"msg\":\"\",\"md\":\"x\"}}'\n\n# 1c. malformed reactions   <- this one also fails server-side\n  -d '{\"message\":{\"rid\":\"<RID>\",\"reactions\":{\"x\":{}}}}'\n\n# 1d. malformed action links  <- this one cannot be undone via the API\n  -d '{\"message\":{\"rid\":\"<RID>\",\"actionLinks\":[null]}}'\n\n# 1e. invalid linear scale range\n  -d '{\"message\":{\"rid\":\"<RID>\",\"blocks\":[{\"type\":\"actions\",\"elements\":[\n        {\"type\":\"linear_scale\",\"maxValue\":4294967295}]}]}}'\n```\n\nThen open the channel in the web client. The entire message list fails to\nrender, not only the offending message. The condition persists across page\nrefreshes, and the Reload action on the error screen re-triggers it. Other rooms\nremain usable.\n\n**Payload 1c is not confined to the client.** The same dereference occurs\nserver-side while preparing messages for delivery:\n\n```\nPOST /api/v1/chat.sendMessage   -> HTTP 400, but the message is stored anyway.\n                                   The failure happens after the insert, so the\n                                   sender never receives the message id.\nGET  /api/v1/channels.history   -> HTTP 400\n                                   \"Cannot read properties of undefined (reading 'forEach')\"\nGET  /api/v1/chat.syncMessages  -> HTTP 400, same error\n```\n\nSo the room becomes unreadable through the REST API as well, integrations,\nbots, exports and mobile clients fail alongside the browser. `chat.search` was\nunaffected in testing.\n\n**Recovery differs by payload, and 1d cannot be recovered through the API at\nall.** For 1a, 1b, 1c and 1e, deleting the message by id restores the room; the\ndifficulty is obtaining that id, since the message list will not render and 1c\nreturns an error instead of the id.\n\nFor **1d**, deleting is not sufficient. `actionLinks` is not stripped on\ndeletion, and deletion sets `t:\"rm\"`, making it a system message, and the\nsystem-message renderer is one of the three sites that destructures\n`actionLinks`, so the crash continues from the tombstone. Verified stored\ndocument after deletion:\n\n```json\n{\"t\":\"rm\",\"msg\":\"\",\"actionLinks\":[null]}\n```\n\nAn administrator must prune the message. There seems to be no API path that clears it.\n\n---\n\n**2. Stored HTML / iframe injection in the application origin**\n\n**Precondition:** link previews enabled (`API_Embed`, shown in administration as\n\"Embed Link Previews\"). It ships **enabled**, verified at the `8.7.0` tag and\nin `8.9.0-develop`,  so a default installation is affected. The test instance\nhad it disabled; it was enabled to confirm the rendering half.\n\n```bash\ncurl -s -X POST \"$HOST/api/v1/chat.sendMessage\" -H \"X-Auth-Token: $TOK\" \\\n  -H \"X-User-Id: $UID\" -H 'Content-Type: application/json' -d '{\"message\":{\n    \"rid\":\"<RID>\",\"msg\":\"hi\",\"parseUrls\":false,\n    \"urls\":[{\"url\":\"https://example.com/\",\"ignoreParse\":true,\n      \"meta\":{\"ogType\":\"rich\",\n        \"oembedHtml\":\"<iframe src=\\\"https://attacker.example/\\\" width=\\\"500\\\" height=\\\"300\\\"></iframe>\"}}]}}'\n```\n\n`parseUrls:false` stops the server regenerating `urls`; `ignoreParse:true` makes\nthe afterSave OEmbed pass skip the entry. The `url` value is arbitrary and never\nfetched. The iframe `src` must be a host that does not send `X-Frame-Options`.\n\n**Result:** the message is stored with `oembedHtml` intact and the client renders\nit. An iframe pointing at an arbitrary third-party origin is displayed inside the\nchannel, with `src` and inline styles preserved exactly as submitted.\n\n**Why this is a bypass rather than the feature working:** `oembedHtml` is\nnormally accepted only for URLs belonging to registered oembed providers and is\nstripped for everything else. Verified by control test, the same domain posted\nas an ordinary link renders only a summary card with title and description, and\nis *not* framed, because it is not a registered provider. Link previews embed\nproviders, not arbitrary sites; supplying the `urls` array directly removes that\nrestriction. Two further differences: the framed origin is normally chosen by the\nprovider registry rather than the sender, and provider markup is force-clamped\nto `width:400px; height:225px` on the way in. Neither applies to a forged entry.\n\nThe storage half does not depend on the setting, the forged `oembedHtml` is\naccepted and persisted regardless; only rendering requires `API_Embed`.\n\n**Scope limits, both established by testing and stated for accuracy:**\n\n* Positioning does not escape the message area. An iframe styled\n  `position:fixed` with viewport dimensions is clipped by an ancestor containing\n  block; sidebar, channel header and composer remain visible and usable.\n  Overlaying application chrome, and clickjacking against it, was **not**\n  achievable.\n* This is HTML injection, **not** script execution. Script tags and event\n  handlers are still removed by the sanitiser.\n\n---\n\n**3. Writing into another user's private starred list**\n\n```bash\n  -d '{\"message\":{\"rid\":\"<RID>\",\"msg\":\"...\",\"starred\":[{\"_id\":\"<VICTIM_USER_ID>\"}]}}'\n```\n\nThe message appears in the victim's **Starred Messages** for that room. The\nvictim never starred it and no starring endpoint was called.\n\nVerification must be performed from the victim's account, the response returned\nto the *sender* shows `starred: []`, because the field is filtered to the\nrequesting user. That is expected and is not evidence of stripping.\n\nStarred Messages is private per-user state that no other user can see, so the\nvictim has no way to notice it was written to. **The forged entry survives\ndeletion of the message** and must be removed by hand, so deleting the offending\nmessage is not a remedy.\n\n---\n\n**4. Pinning without permission, with forged attribution**\n\n```bash\n  -d '{\"message\":{\"rid\":\"<RID>\",\"msg\":\"...\",\"pinned\":true,\n        \"pinnedAt\":\"2026-08-28T10:00:00.000Z\",\n        \"pinnedBy\":{\"_id\":\"fake-admin-id\",\"username\":\"administrator\"}}}'\n```\n\nThe message appears in the room's Pinned Messages. The same account, in the same\nroom, minutes earlier, was refused by the supported endpoint:\n\n```\nPOST /api/v1/chat.pinMessage  ->  HTTP 400  \"Not Authorized [not-authorized]\"\n```\n\nThe pinned list attributes the pin to `administrator`,  a username supplied in\nthe request, with an identifier corresponding to no user.\n\nThree controls are bypassed at once: the `pin-message` permission, the audit\nrecord (no `message_pinned` system message is generated, so nothing records who\npinned it), and the integrity of the attribution. The pinned-messages listing is\ndriven by the stored flag alone, so `Message_AllowPinning` is bypassed by the\nsame means; that setting was enabled during testing, so only the permission\nbypass was observed directly.\n\n---\n\n**5. Attributing an edit to another user**\n\n```bash\n  -d '{\"message\":{\"rid\":\"<RID>\",\"msg\":\"...\",\"pinned\":true,\n        \"editedAt\":\"2026-08-28T09:15:00.000Z\",\n        \"editedBy\":{\"_id\":\"totally-made-up-id\",\"username\":\"<ANOTHER_USER>\"}}}'\n```\n\nOpen the Pinned Messages panel and hover the edit indicator. The tooltip states\nthe message was edited by the named user. That user never interacted with it,\nand the supplied identifier corresponds to no account, only the username is\nrendered.\n\n**Reproduction note:** the indicator appears in the contextual panels (Pinned,\nStarred, Mentions, Discussions) and on jump-to-message, but **not** in the main\ntimeline, because `editedAt` arrives as a string and only views that refetch via\n`mapMessageFromApi` revive it to a `Date`. The forged editor must be someone\nother than the person viewing, or the tooltip omits the username.\n\nPartial mitigation, stated for completeness: the indicator renders in a warning\ncolour when author and claimed editor differ, though it carries no label\nexplaining the distinction.\n\n---\n\n**6. Mentioning users invisibly**\n\n```bash\n  -d '{\"message\":{\"rid\":\"<RID>\",\"msg\":\"\",\n        \"md\":[{\"type\":\"PARAGRAPH\",\"value\":[{\"type\":\"PLAIN_TEXT\",\"value\":\"no mention here\"}]},\n              {\"type\":\"HIDDEN_BLOCK\",\"value\":[{\"type\":\"MENTION_USER\",\n                \"value\":{\"value\":\"<VICTIM_USERNAME>\"}}]}]}}'\n```\n\n`msg` must be empty, otherwise the server regenerates `md` and discards the\nsupplied value.\n\nThe response contains a fully resolved mention for the target user and the\ntarget's client registers the mention, while the message displays no mention at\nall. The mention is carried in a block type the message parser cannot produce\nand the interface does not render: the AST extractor recurses into any node with\nan array `value` without validating the node type, while the renderer returns\n`null` for unknown block types.\n\n**Not confirmed:** notification *delivery*. Push was disabled on the test\ninstance and the room exceeded the member limit above which notifications are\nsuppressed. What was observed is mention registration and the unread indicator.\n\n`@all` and `@here` are correctly blocked on this path and are **not** affected.\n\n## Impact\n\nA user with nothing but the ability to post in a channel can:\n\n* **Make that channel unusable for every member**, persistently, with no\n  interaction from victims. One payload also breaks the room server-side, so\n  REST consumers, bots, exports and mobile clients fail alongside the browser.\n  One payload cannot be cleared through the API at all and requires an\n  administrator to prune it.\n* **Render attacker-controlled pages inside a trusted channel** on a default\n  installation, with no link for the viewer to inspect and no navigation away\n  from the application, plus an automatic outbound request from every viewer\n  disclosing IP address and user agent.\n* **Write into another user's private state**, silently and irreversibly by\n  normal means.\n* **Bypass the `pin-message` permission** and forge the attribution so the\n  action appears to have been taken by an administrator, with no audit record.\n* **Attribute edits to other named users** with no history to contradict it.\n* **Mention and notify arbitrary users** from a message showing no mention,\n  defeating moderation or search that looks for `@username` in message text.",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-12-20T13:34:32.232Z",
+  "allow_singular_disclosure_after": 2580502.665392649,
+  "singular_disclosure_allowed": false,
+  "vote_count": 1,
+  "voters": [
+    "0xkenzo"
+  ],
+  "severity": {
+    "rating": "medium",
+    "author_type": "Team"
+  },
+  "structured_scope": {
+    "databaseId": 293351,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/RocketChat/Rocket.Chat",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 926920,
+      "category": "team",
+      "content": "The `POST /api/v1/chat.sendMessage` endpoint in Rocket.Chat fails to enforce a strict schema on the nested `message` object. Although the outer request schema sets `additionalProperties: false`, the inner message schema lacks equivalent restrictions and required-field validation. Unlike other message submission paths, this REST endpoint calls `executeSendMessage` directly, bypassing the DDP method's strict field allow-list.\n\nAs a result, an authenticated user with only the default user role and permission to post messages can inject arbitrary internal message properties that are persisted and subsequently trusted by server-side processing and client-side rendering.\n\nThis single root cause enables six distinct security impacts:\n\n1. **Persistent room-level denial of service:** Malformed message properties can crash the entire room view for all members. Certain payloads also break server-side message retrieval APIs, while another requires administrator-level database intervention to recover.\n2. **Stored HTML/iframe injection:** Forged link-preview metadata allows attacker-controlled iframe content to be rendered within the application's origin when link previews are enabled (the default configuration), bypassing normal oEmbed provider restrictions.\n3. **Unauthorized modification of private user state:** Attackers can silently insert messages into another user's private Starred Messages list without their consent.\n4. **Unauthorized message pinning and attribution spoofing:** Attackers can bypass pinning permissions, forge the identity of the user who pinned a message, and avoid generating the corresponding audit event.\n5. **Message edit attribution spoofing:** Attackers can forge edit metadata to make messages appear to have been edited by arbitrary users.\n6. **Invisible user mentions:** Attackers can register mentions of other users through crafted markdown structures without displaying the mentions in the message content.\n\nAll six issues originate from the same missing validation boundary: client-controlled message metadata is accepted through `chat.sendMessage` without enforcing the expected field restrictions or ensuring that sensitive properties are generated and controlled exclusively by trusted server-side logic.\n\nThe vulnerability compromises availability, message integrity, authorization boundaries, audit reliability, and user trust. A single CVE is proposed for the shared root cause, with the six demonstrated exploitation scenarios documenting its broader security impact.",
+      "updated_at": "2026-10-22T12:43:38.845Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 3263671,
+        "username": "julio_araujo",
+        "name": "Julio Araujo",
+        "bio": "",
+        "cleared": false,
+        "verified": false,
+        "website": null,
+        "location": "",
+        "created_at": "2024-06-13T19:54:10.262Z",
+        "url": "https://hackerone.com/julio_araujo",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "https://profile-photos.hackerone-user-content.com/variants/cg53v3fktla093w2xpx7kafrww48/2115537ecc06666dae3f3c47b8810d596dc1f01bc798a7de7f66d30a33f0d354",
+          "medium": "https://profile-photos.hackerone-user-content.com/variants/cg53v3fktla093w2xpx7kafrww48/d0967adf390d71529ef9fecc3559790d0f41b457a752f7badadfc847204ca2bb",
+          "xtralarge": "https://hackerone.com/rails/active_storage/representations/redirect/eyJfcmFpbHMiOnsiZGF0YSI6NzA5MDcwMiwicHVyIjoiYmxvYl9pZCJ9fQ==--1f992db55d334145303763fb10a61b6e2775d218/eyJfcmFpbHMiOnsiZGF0YSI6eyJmb3JtYXQiOiJqcGVnIiwicmVzaXplIjoiMjYweDI2MFx1MDAzZSJ9LCJwdXIiOiJ2YXJpYXRpb24ifX0=--6d434561f121abc94aa2d69b97bd9481c2e23b10/julio_ghibli_jpeg_1mb.jpeg"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

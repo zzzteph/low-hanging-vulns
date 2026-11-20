@@ -1,0 +1,170 @@
+{
+  "id": 4004074,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MDA0MDc0",
+  "url": "https://hackerone.com/reports/4004074",
+  "title": "Nextcloud subadmin → admin takeover when allowed_admin_ranges is set: SubAdmin::isUserAccessible() classifies the admin target via IP-gated isAdmin()",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-09-06T13:54:00.224Z",
+  "submitted_at": "2026-09-06T13:54:00.443Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jakubk",
+    "url": "/jakubk",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/stj402qv8vdsgjxvp8f1b7y5nimu/07cd666fba81a5fa22acb6ca51c9388fb3fc6282d31bb7100e43ac54f865f93e"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 13291,
+    "url": "https://hackerone.com/nextcloud",
+    "handle": "nextcloud",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/bcd838120b083f3e4634394be4e842b070658eb8ca2ee90ff88b1e7555d99fdf",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/hsgut1vi1cv8housqai9cm9383yx/3c93eb467513f5b14156ff4fede2c4636f707fb236b4ad7f308d529c1dd0b660"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Nextcloud",
+      "twitter_handle": "nextclouders",
+      "website": "https://nextcloud.com",
+      "about": "Access, share and protect your files, calendars, contacts, communication & more at home and in your enterprise."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-20T09:57:22.604Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-21T09:57:20.207Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "### Summary\n\n`lib/private/SubAdmin.php::isUserAccessible()` decides whether a subadmin may act on a target user. It bars admin / delegated-admin targets, then allows access if they share an administered group. The admin-target guard uses `groupManager->isAdmin($user->getUID())` — but `Group\\Manager::isAdmin()` short-circuits to `false` when admin actions are not allowed from the current request IP (`RemoteAddress::allowsAdminActions()`), i.e. when `allowed_admin_ranges` is configured and the requester is outside it. So a subadmin connecting from an IP outside `allowed_admin_ranges` has the admin-target guard skipped — not because the target isn't an admin, but because of the requester's IP — and the group-intersection then grants the subadmin control of an admin account they share a group with. The subadmin can reset the admin's password and log in as that admin (and likewise disable / enable / delete / wipe the admin). Enabling the `allowed_admin_ranges` admin-hardening feature is what introduces the escalation.\n\n### Lab confirmation (Nextcloud 35.0.0 RC3, own instance, 127.0.0.1 — transcript attached)\n\nSetup: `subby` = subadmin of group `gm`; `bigadmin` = member of the `admin` group and of `gm`. All requests from 127.0.0.1.\n\n- Control (`allowed_admin_ranges` unset → `isAdmin(bigadmin)=true`): `subby` `PUT /ocs/v2.php/cloud/users/bigadmin` with `key=password` → failure (ocs 998) — admin protected. ✓\n- Exploit (`allowed_admin_ranges=[10.99.0.0/16]`, request IP 127.0.0.1 is outside → `isAdmin(bigadmin)=false`): same call → HTTP 200 (ocs 200) — the admin's password is overwritten by the subadmin. ✓\n- Verify: `GET /ocs/v2.php/cloud/user` as `bigadmin` with the subadmin-chosen password → HTTP 200, `id=bigadmin` — full admin takeover. ✓\n\nOnly the config (and thus the IP-gate verdict) changes between control and exploit.\n\n### Root cause (file:line, verified in 35.0.0 RC3)\n\n- `lib/private/SubAdmin.php:256` — `if ($this->groupManager->isAdmin($user->getUID())) return false;` (admin-target guard) and `:259` (delegated-admin guard) — both classify the target via the request-context method.\n- `lib/private/Group/Manager.php:324-325` `isAdmin()` → `if (!$this->remoteAddress->allowsAdminActions()) return false;` — IP gate, not membership; `isDelegatedAdmin()` (`:339`) is the same. `RemoteAddress::allowsAdminActions()` returns `false` when `allowed_admin_ranges` is set and the request IP is outside it.\n- The sibling controller paths classify an admin target by IP-independent membership: `apps/provisioning_api/lib/Controller/UsersController.php:1275` (editUser), `:1533` (disable), `:1570` (enable) use `isInGroup($targetUser->getUID(), 'admin')`. `isUserAccessible` is the outlier.\n\n### Steps to reproduce\n\nInstance with subadmin S administering group G, and admin A who is also a member of G.\n\n1. Control (default config): as S, `PUT /ocs/v2.php/cloud/users/A` `key=password&value=<new>` → failure (admin protected).\n2. Exploit: admin sets `'allowed_admin_ranges' => ['10.0.0.0/8']`; S connects from an IP outside that range. Same request → 200, A's password is overwritten. S logs in as A.\n\nThe only variables changed are the config and the source IP, isolating the IP-gated classification as the cause.\n\n### Recommendation\n\nIn `isUserAccessible()`, classify admin / delegated-admin targets by IP-independent membership (`groupManager->isInGroup($user->getUID(), 'admin')` and the delegated-admin membership check), as the sibling controller paths do. The request-IP gate should restrict what the actor may do, never decide what the target is.\n\n### Scope / honest limits\n\n- Conditional: requires the non-default `allowed_admin_ranges` hardening to be configured and the subadmin to be outside the range (a natural situation for a remote subadmin when admin logins are IP-restricted to an office range). Where it is not configured, `allowsAdminActions()` is always `true` and the guard works.\n- Impact when the condition holds is a full subadmin→admin takeover (reset/disable/enable/delete/wipe of admin accounts the subadmin shares a group with).\n- No matching public disclosure found on the Nextcloud security-advisories repo or H1 hacktivity; prior-art check advisable.\n\n### AI tooling disclosure\n\nAI assistance: Yes — substantial (Claude via the Claude Code harness; source review + drafting). Every file:line read in the running 35.0.0 RC3 code and the escalation dynamically confirmed on a self-hosted instance bound to 127.0.0.1 (transcript attached) — nothing tested against any third-party/production host. The reporter reviews and takes responsibility before submission.\n\n## Impact\n\nOn an instance that has enabled the `allowed_admin_ranges` admin-hardening feature, a subadmin connecting from an IP outside the configured range can reset the password of an administrator account they share a group with, and log in as that administrator — a full vertical privilege escalation from subadmin to instance administrator. The same `isUserAccessible` gate governs disable, enable, delete and remote-wipe, so the subadmin can also disable, delete or wipe admin accounts. Lab-confirmed on Nextcloud 35.0.0 RC3: with `allowed_admin_ranges=[10.99.0.0/16]`, subadmin `subby` reset admin `bigadmin`'s password via `PUT /ocs/v2.php/cloud/users/bigadmin` (HTTP 200) and then authenticated as `bigadmin` — while the same request is blocked (ocs 998) when the config is unset. Ironically, enabling the admin-IP hardening is precisely what introduces the escalation. Conditional (non-default config) but high impact when the condition holds.",
+  "weakness": {
+    "id": 75,
+    "name": "Privilege Escalation"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 6647718,
+      "file_name": "01-source-chain-evidence-03.md",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/qh4saw03mbsgdszd9yh26xcea1ka?response-content-disposition=attachment%3B%20filename%3D%2201-source-chain-evidence-03.md%22%3B%20filename%2A%3DUTF-8%27%2701-source-chain-evidence-03.md&response-content-type=text%2Fmarkdown&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ6SREDONS%2F20261120%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261120T164610Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGcaCXVzLXdlc3QtMiJHMEUCIQDi9kGhVaPD%2Fp0pg04d7ONSalJMmUl5iBMSVZpHcj4zwwIgWOzxkRqkgtN2aARJllVEl3UwnwoDglYFsRHvLwy9tusqsgUIMBADGgwwMTM2MTkyNzQ4NDkiDALuOOX%2FHKa0hGTInCqPBdu0x9l7IvokJYwkEAtv%2BCkfbt56yeF5zELO2O9ReW3Lk3I796LabzZquAtPkK1yrZI3PI0K8Bl8uWA7f8FZ7%2BYY523Wj9IwypCakge5xec4rE4F8PYK5IkfGcjUCQqXCQ6Ywb157P89O%2FgPUS%2FO7mw5jeXaoG1blvmdV%2FHLeQb%2FrLpxM0s3NqFgVDF1%2BAe2HdJD7zriF6%2B%2B1CanMLX43vx%2FZnGlWeLy5IVzZxH468acU29WiNxfghIA4gwioFpU8v3eSzrO8uqwTfbLBw%2BqzaBmLicOqYV%2FP3BUfxlyrzo%2FmMLlCl6ThNGMZ51QHqHiO9LwcKinmbRDcWwyIA6%2BDM8qEeltntFreOew%2BDuy6L1IaVsgi%2BvA6r9y07TrC55DpQ1BkEC2kGJF0ew1E3LYgs3GXsrSQqaGncybctZaWHIPnZ%2FHLravR1pHfJ%2BcaYF4yuVvIR%2FB0VWa8kI5sqySlPBkWYhx0HEgyhg8XJLvR0q75083xiuP%2F%2BKpKi7BvBvd3XouYd2sHxBHeAi9IS7VZwvBWExHLntF21NZ7%2BGMxnZdUJHdM3KEVb1kWKubJJe%2FVszbcnY39JhZBsNAgsrGtebcWJL9LgndTOKNd35%2FooV5WD5YG9hFkol5COP7FH0m5dv%2F2jdvWoxQCA4NdBheKTXgSTnyYmtn4%2F25Q2THaciBMpYLhh8S7vemBdz4tZuau8rWyFBuyw54hGN82fqMpZy2HpmmLlSC4%2Fc1H8iQKX2x6hF8tN1imYl2RhFRKfkbgUGEZGq3W%2BA%2FvP4iottzKQ%2BfEFOTYGd3xrb8fMd7u%2FP%2FKJwetcrdJ39%2FPx9Jp70G9rMouC49ZitT7O4ljDTwGUthYU7KP73waIJXK8%2FLd%2FowhLWB2AY6sQFaZSRpR2prvvPuog9fYKH5wPKJgKQ6Nw%2FnkjBWxdwZZR0XHvHcmR6XH39XBn2B3pskRIn8imDR35oD7PxcqyZNNfdpsKVJ6ML2k0A3voA3846Zi%2FQBvtTudd%2FNW1IH0q11nbm%2BarSbPYIDWTfdQF%2BROge7ylRq8XUIF0dXJvTvBRII8OL8dWF8WeseWbzUpUL1Zj70x6IjT9WZutImIZAtfqGvHnIWr83CFukeR1GlpRY%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=9ffafc02d680d2d5850330707e85e75ea67ffae6b679cae84f5a665edf98ae23",
+      "file_size": 3504,
+      "type": "text/markdown",
+      "moderated": null
+    },
+    {
+      "id": 6647719,
+      "file_name": "EVIDENCE-03-subadmin-transcript.txt",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/uj3rieucc5cjx6813b3zrfexbwht?response-content-disposition=attachment%3B%20filename%3D%22EVIDENCE-03-subadmin-transcript.txt%22%3B%20filename%2A%3DUTF-8%27%27EVIDENCE-03-subadmin-transcript.txt&response-content-type=text%2Fplain&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ6SREDONS%2F20261120%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261120T164610Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEGcaCXVzLXdlc3QtMiJHMEUCIQDi9kGhVaPD%2Fp0pg04d7ONSalJMmUl5iBMSVZpHcj4zwwIgWOzxkRqkgtN2aARJllVEl3UwnwoDglYFsRHvLwy9tusqsgUIMBADGgwwMTM2MTkyNzQ4NDkiDALuOOX%2FHKa0hGTInCqPBdu0x9l7IvokJYwkEAtv%2BCkfbt56yeF5zELO2O9ReW3Lk3I796LabzZquAtPkK1yrZI3PI0K8Bl8uWA7f8FZ7%2BYY523Wj9IwypCakge5xec4rE4F8PYK5IkfGcjUCQqXCQ6Ywb157P89O%2FgPUS%2FO7mw5jeXaoG1blvmdV%2FHLeQb%2FrLpxM0s3NqFgVDF1%2BAe2HdJD7zriF6%2B%2B1CanMLX43vx%2FZnGlWeLy5IVzZxH468acU29WiNxfghIA4gwioFpU8v3eSzrO8uqwTfbLBw%2BqzaBmLicOqYV%2FP3BUfxlyrzo%2FmMLlCl6ThNGMZ51QHqHiO9LwcKinmbRDcWwyIA6%2BDM8qEeltntFreOew%2BDuy6L1IaVsgi%2BvA6r9y07TrC55DpQ1BkEC2kGJF0ew1E3LYgs3GXsrSQqaGncybctZaWHIPnZ%2FHLravR1pHfJ%2BcaYF4yuVvIR%2FB0VWa8kI5sqySlPBkWYhx0HEgyhg8XJLvR0q75083xiuP%2F%2BKpKi7BvBvd3XouYd2sHxBHeAi9IS7VZwvBWExHLntF21NZ7%2BGMxnZdUJHdM3KEVb1kWKubJJe%2FVszbcnY39JhZBsNAgsrGtebcWJL9LgndTOKNd35%2FooV5WD5YG9hFkol5COP7FH0m5dv%2F2jdvWoxQCA4NdBheKTXgSTnyYmtn4%2F25Q2THaciBMpYLhh8S7vemBdz4tZuau8rWyFBuyw54hGN82fqMpZy2HpmmLlSC4%2Fc1H8iQKX2x6hF8tN1imYl2RhFRKfkbgUGEZGq3W%2BA%2FvP4iottzKQ%2BfEFOTYGd3xrb8fMd7u%2FP%2FKJwetcrdJ39%2FPx9Jp70G9rMouC49ZitT7O4ljDTwGUthYU7KP73waIJXK8%2FLd%2FowhLWB2AY6sQFaZSRpR2prvvPuog9fYKH5wPKJgKQ6Nw%2FnkjBWxdwZZR0XHvHcmR6XH39XBn2B3pskRIn8imDR35oD7PxcqyZNNfdpsKVJ6ML2k0A3voA3846Zi%2FQBvtTudd%2FNW1IH0q11nbm%2BarSbPYIDWTfdQF%2BROge7ylRq8XUIF0dXJvTvBRII8OL8dWF8WeseWbzUpUL1Zj70x6IjT9WZutImIZAtfqGvHnIWr83CFukeR1GlpRY%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=0767eb19bbcf51cad379d66cbde8545a9cf504a8e85af7f1a266ce9d945f2f84",
+      "file_size": 1205,
+      "type": "text/plain",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-11-20T09:57:20.369Z",
+  "allow_singular_disclosure_after": -24530.000732129,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "jakubk",
+    "fez004",
+    "rjuliant"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 5.0,
+    "author_type": "Team",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "low"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 13,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "nextcloud/server",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "id": 933906,
+      "category": "team",
+      "content": "A subadmin could reset the password of an administrator who was a member of one of their groups and then log in as that administrator. This was only possible on instances that restrict admin actions to certain IP ranges (allowed_admin_ranges), and only when the subadmin connected from outside those ranges.\n\n Fixed in Nextcloud Server 35.0.2, 34.0.5, 33.0.10, 32.0.16, 31.0.14.12, and 30.0.17.15.",
+      "updated_at": "2026-11-04T15:54:31.246Z",
+      "can_view?": true,
+      "can_create?": false,
+      "attachments": [],
+      "user": {
+        "id": 4338232,
+        "username": "danielkb",
+        "name": "Daniel",
+        "bio": "",
+        "cleared": false,
+        "verified": true,
+        "website": "https://nextcloud.com/",
+        "location": "",
+        "created_at": "2026-01-25T14:11:37.045Z",
+        "url": "https://hackerone.com/danielkb",
+        "hackerone_triager": false,
+        "hackerone_employee": false,
+        "user_type": "company",
+        "profile_picture_urls": {
+          "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "medium": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png",
+          "xtralarge": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+        }
+      }
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
