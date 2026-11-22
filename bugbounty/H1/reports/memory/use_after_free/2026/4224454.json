@@ -1,0 +1,112 @@
+{
+  "id": 4224454,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MjI0NDU0",
+  "url": "https://hackerone.com/reports/4224454",
+  "title": "Use-after-free read of the CURLOPT_RESOLVE list after curl_easy_reset()",
+  "state": "Closed",
+  "substate": "not-applicable",
+  "severity_rating": "high",
+  "readable_substate": "N/A",
+  "created_at": "2026-11-21T10:07:36.416Z",
+  "submitted_at": "2026-11-21T10:07:36.724Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "andrewtsui",
+    "url": "/andrewtsui",
+    "profile_picture_urls": {
+      "small": "/assets/avatars/default-14ffa99f59cd01423c64904352cc130ffcb6a802eadfd11777a54485749e60f2.png"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 35663,
+    "url": "https://hackerone.com/curl",
+    "handle": "curl",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/bcd838120b083f3e4634394be4e842b070658eb8ca2ee90ff88b1e7555d99fdf",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/035/663/2faf4c279d437d64bfda6d23d62ce1833813a4d9_original.png/3c93eb467513f5b14156ff4fede2c4636f707fb236b4ad7f308d529c1dd0b660"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "curl",
+      "twitter_handle": "",
+      "website": "https://curl.se",
+      "about": "cURL is an Open Source project providing a library and command-line tool doing internet transfers"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-11-22T15:20:11.814Z",
+  "bug_reporter_agreed_on_going_public_at": null,
+  "team_member_agreed_on_going_public_at": "2026-11-22T14:38:19.136Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary:\nSetting CURLOPT_RESOLVE stores the application's curl_slist pointer in an\ninternal handle field that curl_easy_reset() does not clear, so after the\napplication frees its list, the next curl_easy_perform() on the reset handle\nreads the freed memory while parsing the resolve entries. Freeing the list at\nthat point follows the documentation: CURLOPT_RESOLVE(3) states the list is\nnot copied and must be kept around only until after the transfer has\ncompleted, and curl_easy_reset(3) states all options previously set on the\nhandle are re-initialized to their default values, the state the handle had\nwhen created.\n\n## Affected version\ncurl 8.23.0 built from the upstream curl-8_23_0 source on Linux x86_64:\nclang -O1 + ASan reports the heap-use-after-free below, and a gcc -O2 native\nbuild crashes with SIGSEGV (exit 139) on the same sequence.\n\n## Steps To Reproduce:\nBuild curl 8.23.0 with ASan, compile the PoC against that build and run it;\nno network access is needed because the freed list is parsed during\nCurl_pretransfer, before any connection is attempted.\n```\n    cmake -B b -DCMAKE_BUILD_TYPE=Debug \\\n          -DCMAKE_C_FLAGS=\"-fsanitize=address -g -O1\" && cmake --build b -j\n    gcc -fsanitize=address poc.c -o poc -I<curl-src>/include -Lb/lib -lcurl\n    ./poc\n```\n\npoc.c:\n```\n    /* curl 8.23.0 - curl_easy_reset() does not clear the internal\n     * state.resolve alias of the CURLOPT_RESOLVE list. */\n    #include <curl/curl.h>\n    int main(void)\n    {\n      CURL *h = curl_easy_init();\n      struct curl_slist *resolve =\n        curl_slist_append(NULL, \"host-a.invalid:59998:127.0.0.1\");\n      curl_slist_append(resolve, \"host-b.invalid:59998:127.0.0.1\");\n      curl_slist_append(resolve, \"host-c.invalid:59998:127.0.0.1\");\n      curl_easy_setopt(h, CURLOPT_URL, \"http://host-a.invalid:59998/\");\n      curl_easy_setopt(h, CURLOPT_RESOLVE, resolve);\n      curl_easy_reset(h);            /* doc: handle back to as-created state */\n      curl_slist_free_all(resolve);  /* app frees its own list */\n      curl_easy_setopt(h, CURLOPT_URL, \"http://host-a.invalid:59998/\");\n      curl_easy_perform(h);          /* UAF read during Curl_pretransfer */\n      curl_easy_cleanup(h);\n      return 0;\n    }\n```\nEssential ASan output:\n```\n    ERROR: AddressSanitizer: heap-use-after-free on address 0x502000000010\n    READ of size 8 at 0x502000000010 thread T0\n        #0 Curl_loadhostpairs lib/vdns/dnscache.c:865:31\n        #1 Curl_pretransfer lib/transfer.c:536:14\n        ... frames 2-7: multi/easy internals ...\n        #8 curl_easy_perform lib/easy.c:855:14\n    freed by thread T0 here:\n        #1 curl_slist_free_all lib/slist.c:136:5\n    native gcc -O2 run: SIGSEGV, exit code 139\n```\n\n## Impact\n\n## Summary:\n\nThis is a use-after-free read inside libcurl, reached through documented API\nusage, that reliably crashes the process in a native -O2 build, affecting any\napplication that resets easy handles and frees its CURLOPT_RESOLVE lists.",
+  "weakness": {
+    "id": 50,
+    "name": "Use After Free"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 0,
+  "voters": [],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 18844,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/curl/curl",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
