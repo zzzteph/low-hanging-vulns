@@ -1,0 +1,138 @@
+{
+  "id": 4118627,
+  "global_id": "Z2lkOi8vaGFja2Vyb25lL1JlcG9ydC80MTE4NjI3",
+  "url": "https://hackerone.com/reports/4118627",
+  "title": "weblate.org: a removed customer owner regains ownership with one GET to /fosdem/donate/, even after token rotation, and can lock out the other owners",
+  "state": "Closed",
+  "substate": "resolved",
+  "severity_rating": "medium",
+  "readable_substate": "Resolved",
+  "created_at": "2026-10-16T03:43:29.445Z",
+  "submitted_at": "2026-10-16T03:43:29.627Z",
+  "is_member_of_team?": false,
+  "is_organization_group_member?": false,
+  "is_triager?": false,
+  "reporter": {
+    "disabled": false,
+    "username": "sujitjaunjal",
+    "url": "/sujitjaunjal",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/09ufu95pf862x3u4qjn0xdlc3u45/07cd666fba81a5fa22acb6ca51c9388fb3fc6282d31bb7100e43ac54f865f93e"
+    },
+    "is_me?": false,
+    "cleared": false,
+    "verified": true,
+    "hackerone_triager": false,
+    "hacker_mediation": false
+  },
+  "team": {
+    "id": 19468,
+    "url": "https://hackerone.com/weblate",
+    "handle": "weblate",
+    "profile_picture_urls": {
+      "small": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/bcd838120b083f3e4634394be4e842b070658eb8ca2ee90ff88b1e7555d99fdf",
+      "medium": "https://profile-photos.hackerone-user-content.com/variants/000/019/468/71eb3827ae9f2a388f27bd4b7eefd20bc3ac813c_original.png/3c93eb467513f5b14156ff4fede2c4636f707fb236b4ad7f308d529c1dd0b660"
+    },
+    "permissions": [],
+    "submission_state": "open",
+    "default_currency": "usd",
+    "awards_miles": false,
+    "offers_bounties": false,
+    "state": "public_mode",
+    "only_cleared_hackers": false,
+    "pentest_feature_enabled?": false,
+    "pentest_retesting_ends_at": null,
+    "profile": {
+      "name": "Weblate",
+      "twitter_handle": "WeblateOrg",
+      "website": "https://weblate.org/",
+      "about": "Weblate is a libre software web-based continuous localization system"
+    }
+  },
+  "has_bounty?": false,
+  "can_view_team": true,
+  "can_view_report": true,
+  "is_external_bug": false,
+  "is_published": false,
+  "is_participant": false,
+  "has_collaborators": false,
+  "submitted_by_team_member": false,
+  "submitted_with_assistant": true,
+  "stage": 4,
+  "public": true,
+  "visibility": "full",
+  "cve_ids": [],
+  "singular_disclosure_disabled": false,
+  "disclosed_at": "2026-11-24T11:11:15.319Z",
+  "bug_reporter_agreed_on_going_public_at": "2026-10-25T11:11:13.878Z",
+  "team_member_agreed_on_going_public_at": null,
+  "comments_closed?": false,
+  "facebook_team?": false,
+  "team_private?": false,
+  "vulnerability_information": "Asset: https://github.com/WeblateOrg/website, the code behind the weblate.org customer portal.\n\n## Summary\n\nRemoving an owner from a customer account on weblate.org deletes the row from `Customer.owners`, but it leaves `Customer.user_id`, the id of the user who created the customer, unchanged. `fosdem_donation()` and `get_customer()` look the customer up by that id and add the requester back as an owner:\n\n```python\ncustomer = Customer.objects.get_or_create(\n    origin=PAYMENTS_ORIGIN,\n    user_id=request.user.id,\n    defaults={\"email\": request.user.email},\n)[0]\ncustomer.owners.add(request.user)\n```\n\nSo whoever created a customer account can always get back in. In my test the remaining owner did everything the portal offers to revoke access: they removed the creator and pressed \"Refresh token\" so the old activation token stopped working. The creator then opened `/en/fosdem/donate/?amount=30` once and was an owner again. That request sends no invitation, needs no consent, sends no e-mail and writes no log entry. Back as an owner, the creator saw the new token on `/en/user/` and removed the owner who had removed them.\n\nReproduced on WeblateOrg/website main @ 7d0a3f762 (2026-10-16), on a local instance only.\n\n## Why this is a security boundary and not intended behaviour\n\n- b726a3ffd makes owners explicit peers with full control and adds audited removal. The owners box on the account page says owners control \"billing, services, secrets, and other owners. Only add people you trust.\"\n- 550fe33a0 (\"fix(security): require consent for customer owners\") means a new owner has to accept an invitation first.\n- The project's own test `test_owner_can_remove_original_owner` (tests.py:1688) removes exactly the user this bug lets back in. Its fixture stores `user_id=owner.pk`, which is what production stores.\n\nThe `user_id` path skips both controls.\n\n## The defect\n\n- `views.py` `customer_owner()` L1234-1246: removal calls `owners.remove(owner)` and logs an interaction. `user_id` is not touched.\n- `views.py` `fosdem_donation()` L1673-1693: neither `@login_required` nor POST-only. For any logged-in user it runs the re-add shown above, whatever the user owns at the time.\n- `views.py` `get_customer()` L186-205: when the requester owns no customer, which is the state removal leaves them in, it falls through to the same re-add. It is called from `DonateView`, `subscription_new`, `AddDiscoveryView` and `DiscoveryRegistrationView`, so the normal donate, subscribe and discovery flows re-add the user as well. The regression tests cover the donate form too.\n\nEvery self-service customer is created through `get_customer()` with `user_id` set to the buyer, so this affects every self-service customer.\n\n## Steps to reproduce\n\nTwo weblate.org accounts: alex creates the customer, and bianca is the second owner.\n\n1. alex buys a subscription or makes a donation. The customer is stored with `user_id = alex`.\n2. alex invites bianca on the owners form, and bianca accepts the e-mailed invitation.\n3. bianca removes alex. alex now gets 404 on `/en/customer/<id>/`, and the token is gone from alex's `/en/user/`.\n4. bianca presses \"Refresh token\" on the service. The old token now gets 404 from `/api/support/`.\n5. alex opens `https://weblate.org/en/fosdem/donate/?amount=30`. It redirects to a payment page, and nothing has to be paid.\n6. alex gets 200 on `/en/customer/<id>/` again, and `/en/user/` shows the new token.\n7. alex removes bianca, and bianca now gets 404.\n\nThe run against a local server, from attachment 01:\n\n```\n# 3. bianca removes alex\nbianca POST /en/customer/1/owners/             302 -> /en/user/ owner=1&remove=1\nalex   GET  /en/customer/1/                    404 <- alex no longer has access\n       activation token on alex's /en/user/: none\n# 3b. bianca completes the revocation: rotates the activation token alex had seen\nbianca POST /en/subscription/token/1/          302 -> /en/user/ Refresh token\n       token before pz33sE... after XcGhSA...\nanon   POST /api/support/                      404 with the old token <- revoked\n# 4. alex is re-added by one GET (no CSRF token, no invitation)\nalex   GET  /en/fosdem/donate/?amount=30       302 -> /en/payment/302a6208-.../\nalex   GET  /en/customer/1/                    200 <- owner again\n       activation token on alex's /en/user/: XcGhSA...  <- the rotated token\n       e-mails sent by step 4: 0\n# 5. alex removes bianca\nalex   POST /en/customer/1/owners/             302 -> /en/user/ owner=2&remove=1\nbianca GET  /en/customer/1/                    404 <- bianca locked out\n```\n\nThe customer's interaction log afterwards (attachment 02) has bianca removing alex and then alex removing bianca, with nothing in between. Anyone reading the CRM sees a non-owner removing an owner.\n\nThe same checks as Django tests (attachment 06, results in 03):\n\n| test | main @ 7d0a3f762 | with fix |\n|---|---|---|\n| removed owner opens /fosdem/donate/, must stay removed | FAIL | ok |\n| removed owner submits the donate form, must stay removed | FAIL | ok |\n| removed owner must not be able to remove the remaining owner | FAIL | ok |\n\n## Remediation\n\n1. Minimal fix (attachment 05): when the removed owner's id matches `user_id`, set `user_id` to -1. With this applied the three tests pass and the HTTP run stops at step 5 (attachment 04).\n2. Better: in `get_customer()` and `fosdem_donation()`, find the customer only through `Customer.objects.for_owner(request.user)`, and create a new customer otherwise. Remove the same `user_id` fallback from `can_download_payment_invoice()`.\n3. Customers whose creator was removed before the fix still have a stale `user_id`. A data migration that sets `user_id = -1` wherever that user is no longer an owner fixes them.\n\n## Attachments\n\nEverything is in weblate-website-removed-owner-reattach-evidence.zip:\n\n- 01: the HTTP reproduction on unmodified main\n- 02: the customer's interaction log after 01\n- 03: regression test results on main and with the fix\n- 04: the HTTP reproduction with the fix applied\n- 05: the minimal fix as a diff\n- 06: the regression tests, ready to drop into weblate_web/\n- source/: code excerpts with line numbers, the project's original-owner removal test, and the b726a3ffd commit message\n- poc/: the scripts and lab settings used for 01 and 04. mint_sessions.py stands in for the SAML login.\n\n## Disclosure\n\nI found this with AI-assisted source review. I reproduced it myself on a local instance and wrote this report. Nothing was tested against weblate.org.\n\n## Impact\n\nRemoving someone is how a customer takes away their access. The person this bug brings back is the one most likely to be removed: whoever set up the account. That is usually an employee who bought the subscription and later left, or an agency that bought it for a client and handed it over.\n\nThe obvious objection is that a former owner already saw everything. The reproduction answers that: bianca took every revocation step the portal offers, removal and token rotation, and alex still came back with the new token. Back as an owner, alex can:\n\n- regain full owner rights with one GET. The remaining owners are not told, and the CRM log has no entry for it.\n- get the service activation token even after it has been rotated (shown). They can also rotate it themselves, which disconnects the customer's own Weblate instance from its support subscription: step 3b shows that a rotated-out token gets 404 from `/api/support/`.\n- read and change the customer's billing details (company name, address, VAT ID, billing e-mail) on `/en/customer/<id>/`, turn off recurring payments so subscriptions lapse, and download agreements and invoices.\n- remove every remaining owner (shown). The paying customer then has no access to their own account until Weblate staff restore it.\n\nSeverity: C:H and I:H, because the attacker has full owner rights over billing data, service tokens and the owner list. I scored AC:H instead of AC:L because the attacker has to be the account's creator and has to have been removed. That gives 6.8, Medium.",
+  "weakness": {
+    "id": 26,
+    "name": "Improper Access Control - Generic"
+  },
+  "original_report_id": null,
+  "original_report_url": null,
+  "attachments": [
+    {
+      "id": 7002297,
+      "file_name": "weblate-website-removed-owner-reattach-evidence.zip",
+      "expiring_url": "https://hackerone-us-west-2-production-attachments.s3.us-west-2.amazonaws.com/p5xkfap1xdp8d8vkf2rvbc3wbegl?response-content-disposition=attachment%3B%20filename%3D%22weblate-website-removed-owner-reattach-evidence.zip%22%3B%20filename%2A%3DUTF-8%27%27weblate-website-removed-owner-reattach-evidence.zip&response-content-type=application%2Fzip&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=ASIAQGK6FURQ4XQEFR73%2F20261124%2Fus-west-2%2Fs3%2Faws4_request&X-Amz-Date=20261124T183325Z&X-Amz-Expires=3600&X-Amz-Security-Token=IQoJb3JpZ2luX2VjEMb%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FwEaCXVzLXdlc3QtMiJHMEUCIQD6O1F%2BcUwux87TQWCtviN9fi9I2s0x0PpbyM9JKatCVwIgTHTvHccWBK3nHKFNIuc4pbozVqXgSK0N4T7ZFLkY4QsqugUIj%2F%2F%2F%2F%2F%2F%2F%2F%2F%2F%2FARADGgwwMTM2MTkyNzQ4NDkiDMVBZdYl6YzDbg76sCqOBTHGODTL9SaHpjFA7NdrECRJPjQ8lOlSpCT79f03o4h6Y1GCGAUAH5Cw0Gb5aB6lLQcIN168hDAQcrB7kq1FUnS22KyUbWHEmkq8hBqPiUr5zeXXGTcsfgRjeQu9ZyC14FwTudOoFb%2F%2FimT0zSpfcVcccImByA8LVhXlhUoB%2B%2BA1O0XC%2FaacUop9mqfLCEtEjwTCHnmPU%2FlnNqSwfVKqiYopocPeaWArcegMOOpknNiBH0jGb1%2BkWU9kQs4ghGmkV9jxSpbh4OjsMZvOptMahLU2R3aJBPwLCwah4v9uNrIxRE31APrCVWKCDJUzOIlDDILduBB4da1%2FmYgUVZHvruhGn3SDAGKSUT7P%2F7Ebb2u3oB47N1z5p5DI%2B6CkMCu0rLMzCmhkRjjxjR4TPCTRn23g8%2F4NBgVFOLqs8bSr%2BQqBQYT0GMi%2FdcF4apLdZjIS1cT2MsTey630AjLNkopu2ypk1X5c27PnbthBKoEg5iAUvXD%2BfLQ4pDLlhg%2B02DHykAENR0ioGddxzAGQyFc8Ugkrf5Z%2FU3g1aj4Z%2F1N3vIbUVh0LVBFqkgRBdBp4nu8XW5zk%2FdCeg0USVZwXKqjXqbruIgai1EcItloBny2%2FwVRhV3bbq3coViKYythbakwcdD%2FBm0pk3D211ez7osRONnYD2ELXKVzDPxcSpO8GXLiKBJYDu21fk2yCGplGziqidod73LWJcv62Sy9xwLadayHAH%2FX6%2Brw8680e6q7SEnpb9gyYvOnU8Q9%2FHssiHraLX9BsRLiQdnIzwJW1m%2FeZEz6sridPGIl3v5dAxdUmmKJXkgjrWhccYJ8w7RcmFEYuC5QYWf6EFAEVqJO20d0%2FQ8LTu%2FuOX%2F4YGS%2FMpnFoazCaopbYBjqxAbr261fFZczJ1%2FV6rXpMe7cPTjrQpq1YEb0s2WCVhz7nBJArAYrFyrtrnUDL5IQaJNApzL4k3iZRRxdZSgIz55PIXbLM0H8CjNMd9kC3pJ47P%2FTsnGQqObxnuA6bWecLfc%2BaFSMZFGx%2BmhrV37zHr6d6y6NfblYza8KuL96bKDjkW7LmelSuvGgpDylCkgLyLejokMj3jOIEuNJTr4FuZuuAK4AQdzzJKWbS%2F%2BfQmcnVUg%3D%3D&X-Amz-SignedHeaders=host&X-Amz-Signature=53c454467bfdc44135eb1c2beb0b0e241d3ee616ea28654afc189da9adcb7a94",
+      "file_size": 12292,
+      "type": "application/zip",
+      "moderated": null
+    }
+  ],
+  "allow_singular_disclosure_at": "2026-11-24T11:11:14.127Z",
+  "allow_singular_disclosure_after": -26531.003257841,
+  "singular_disclosure_allowed": true,
+  "vote_count": 3,
+  "voters": [
+    "2026",
+    "scottimi",
+    "kenrectenwald033"
+  ],
+  "severity": {
+    "rating": "medium",
+    "score": 6.8,
+    "author_type": "User",
+    "metrics": {
+      "attack_vector": "network",
+      "attack_complexity": "high",
+      "privileges_required": "low",
+      "user_interaction": "none",
+      "scope": "unchanged",
+      "confidentiality": "high",
+      "integrity": "high",
+      "availability": "none"
+    }
+  },
+  "structured_scope": {
+    "databaseId": 176,
+    "asset_type": "SOURCE_CODE",
+    "asset_identifier": "https://github.com/WeblateOrg/website",
+    "max_severity": "critical"
+  },
+  "abilities": {
+    "assignable_team_members": [],
+    "assignable_team_member_groups": [],
+    "can_view_ave_report?": false
+  },
+  "is_exploit_agent_supported?": false,
+  "is_linear_agent_ui_supported?": false,
+  "summaries": [
+    {
+      "category": "team",
+      "can_view?": true,
+      "can_create?": false
+    },
+    {
+      "category": "researcher",
+      "can_view?": true,
+      "can_create?": false
+    }
+  ]
+}
